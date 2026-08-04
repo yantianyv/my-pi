@@ -42,7 +42,7 @@ const PLAYERS: Record<string, Array<{ cmd: string; args: (file: string) => strin
 /** 标题栏动画间隔 */
 const TITLE_INTERVAL_MS = 500;
 /** 超时自动撤销提醒（用户长时间没回来就不闪了） */
-const AUTO_DISMISS_MS = 60_000;
+const AUTO_DISMISS_MS = 600_000;
 /** 标题栏动画帧 */
 const TITLE_FRAMES = ["✅ 任务完成 — pi", "✨ 任务完成 — pi"];
 
