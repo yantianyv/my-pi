@@ -12,7 +12,8 @@
  *   不知道 hud 的存在；hud 被禁用时提示自然退化为标题栏动画；
  * - 音频跨平台播放：Windows 用 PowerShell SoundPlayer，macOS 用 afplay，
  *   Linux 依次尝试 paplay/aplay，全失败退到终端响铃；任何失败都静默。
- * - 撤销时机：用户开始输入 / 新任务开始 / 超时自动撤 / 会话结束。
+ * - 撤销时机：用户按键（onTerminalInput 原始按键流，无需等到发送）/
+ *   新任务开始 / 超时自动撤 / 会话结束。
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as os from "node:os";
@@ -54,6 +55,9 @@ export default function (pi: ExtensionAPI) {
 	let titleTimer: NodeJS.Timeout | undefined;
 	let dismissTimer: NodeJS.Timeout | undefined;
 	let frame = 0;
+	let alertActive = false;
+	let currentCtx: ExtensionContext | null = null;
+	let inputHookInstalled = false;
 
 	function clearTimers() {
 		if (titleTimer) clearInterval(titleTimer);
@@ -63,6 +67,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function stopAlert(ctx: ExtensionContext) {
+		if (!alertActive) return;
+		alertActive = false;
 		clearTimers();
 		// 通知展示层（hud 等）撤掉提醒
 		pi.events.emit("task-alert:clear", {});
@@ -88,6 +94,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("agent_settled", async (_event, ctx) => {
+		alertActive = true;
 		playSound();
 
 		// 通知展示层（hud 订阅后会在行 1 动态区闪烁）
@@ -106,11 +113,23 @@ export default function (pi: ExtensionAPI) {
 		dismissTimer = setTimeout(() => stopAlert(ctx), AUTO_DISMISS_MS);
 	});
 
-	// 新任务开始 / 用户输入 → 立即撤掉提醒
+	// 新任务开始 / 提交输入 → 立即撤掉提醒
 	pi.on("agent_start", async (_event, ctx) => stopAlert(ctx));
 	pi.on("input", async (_event, ctx) => {
 		stopAlert(ctx);
 		return { action: "continue" };
 	});
+
+	// 按键即撤：onTerminalInput 是原始终端按键流（input 事件要等提交才触发）
+	pi.on("session_start", async (_event, ctx) => {
+		currentCtx = ctx;
+		if (ctx.mode !== "tui" || inputHookInstalled) return;
+		inputHookInstalled = true;
+		ctx.ui.onTerminalInput(() => {
+			if (alertActive && currentCtx) stopAlert(currentCtx);
+			return { consume: false }; // 只观察，不拦截按键
+		});
+	});
+
 	pi.on("session_shutdown", async () => clearTimers());
 }
