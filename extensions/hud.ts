@@ -192,30 +192,6 @@ function msgCostCny(m: AssistantMessage): number {
 	return m.usage.cost.total * EXCHANGE_RATE;
 }
 
-/** 北京时间今天 0 点对应的 epoch ms（与 DeepSeek 峰谷定价同一时区口径）。 */
-function beijingTodayStart(now: number): number {
-	const beijing = now + 8 * 3_600_000;
-	const d = new Date(beijing);
-	d.setUTCHours(0, 0, 0, 0);
-	return d.getTime() - 8 * 3_600_000;
-}
-
-/** 当前会话今天（北京时间 0 点起）的累计消耗（人民币元）。仅统计当前会话分支。 */
-function todaySessionCost(ctx: ExtensionContext, now: number): number {
-	const start = beijingTodayStart(now);
-	let total = 0;
-	for (const e of ctx.sessionManager.getBranch()) {
-		if (e.type === "message" && e.message.role === "assistant") {
-			const m = e.message as AssistantMessage;
-			if (m.timestamp >= start) total += msgCostCny(m);
-		}
-	}
-	return total;
-}
-
-// 按量付费（成本以人民币计、可统计当日消费）的供应商
-const METERED_PROVIDERS = new Set(["deepseek", "moonshotai", "moonshotai-cn"]);
-
 /** 按量付费：¥/min + 累计（成本均为人民币元：DeepSeek 官方定价直算，其余 USD×EXCHANGE_RATE） */
 function meteredRateText(ctx: ExtensionContext, now: number): RateTextPart[] | null {
 	const t = sumSessionUsage(ctx);
@@ -878,12 +854,7 @@ export default function (pi: ExtensionAPI) {
 					const amount = theme.fg(color, amountText);
 					const detail = b.data.detail ? ` ${theme.fg("dim", b.data.detail)}` : "";
 					const prefix = b.data.hideLabel ? "" : `${label} `;
-					// 按量付费供应商：追加今日消费（北京时间 0 点起，仅统计当前会话分支）
-					const today =
-						b.providerId && METERED_PROVIDERS.has(b.providerId)
-							? ` ${theme.fg("dim", `· 今日 ¥${todaySessionCost(ctx, Date.now()).toFixed(2)}`)}`
-							: "";
-					return `${prefix}${amount}${detail}${today}`;
+					return `${prefix}${amount}${detail}`;
 				}
 				return `${label} -`;
 			};
