@@ -983,26 +983,25 @@ export default function (pi: ExtensionAPI) {
 
 					const usage = ctx.getContextUsage();
 					// ctx 段固定总宽：bar 宽度随数字宽度自适应，`[bar] 262k` 恒为 16 格，分割线不偏移
-					const ctxSeg =
-						usage?.percent != null
-							? (() => {
-									const numText =
-										usage.contextWindow != null
-											? fmtNum(usage.contextWindow)
-											: `${Math.round(usage.percent)}%`;
-									const numWidth = visibleWidth(numText);
-									const barWidth = Math.max(3, RIGHT_SEG2 - 3 - numWidth);
-									return `[${progressBar(Math.round(usage.percent), barWidth)}] ${numText}`;
-								})()
-							: "";
+					// 上下文为 0 / 未返回时也不消失，显示空条 + 0，保持布局稳定
+					const ctxSeg = (() => {
+						const numText =
+							usage?.contextWindow != null
+								? fmtNum(usage.contextWindow)
+								: usage?.percent != null
+									? `${Math.round(usage.percent)}%`
+									: "0";
+						const numWidth = visibleWidth(numText);
+						const barWidth = Math.max(3, RIGHT_SEG2 - 3 - numWidth);
+						const pct = usage?.percent != null ? Math.round(usage.percent) : 0;
+						return `[${progressBar(pct, barWidth)}] ${numText}`;
+					})();
 					const statusSeg = [...footerData.getExtensionStatuses().values()]
 						.map((status) => theme.fg("dim", status))
 						.join(" │ ");
-					const right2 = ctxSeg
-						? `${padLeft(tokensSeg, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(ctxSeg, RIGHT_SEG2)}${
-								statusSeg ? `${theme.fg("dim", " │ ")}${statusSeg}` : ""
-							}`
-						: padLeft(tokensSeg, RIGHT_SEG1);
+					const right2 = `${padLeft(tokensSeg, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(ctxSeg, RIGHT_SEG2)}${
+						statusSeg ? `${theme.fg("dim", " │ ")}${statusSeg}` : ""
+					}`;
 
 					// ---- 行 3：账户（余额 / plan）+ 消耗统计 ----
 					const left3 = renderBalanceLine();
