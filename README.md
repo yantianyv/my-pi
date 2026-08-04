@@ -119,8 +119,9 @@ node patches/apply-pi-tui-scroll-freeze.mjs   # 打补丁/升级（幂等），�
 
 1. **流式期间**：冻结视口上方已滚入滚动缓冲区的内容（保留流式中间帧），只重绘视口内可见部分，不再清空滚动缓冲。代价：滚上去看到的旧内容可能是流式中间帧，与最终渲染略有出入。
 2. **内容收缩（任务完成时必现）**：消息定稿时通常会比最后流式帧收窄 1~2 行，逻辑行号位移无法局部差分，仍走整屏重绘——但改用 `fullRender("screen")` 只清可见屏、**保留滚动缓冲**，避免每轮结束时 `\x1b[3J` 清空滚动缓冲导致滚动位置跳顶。同步输出（`\x1b[?2026h`）下整屏重绘无闪烁。
+3. **显式全局重建必须整屏重绘**：Ctrl+T 折叠思考、compaction、设置变更、会话切换、主题切换会重建整段对话。钳制路径只适合「流式增量」，全局重建走钳制会把视口上方旧内容冻结、新内容硬拼接（实测 Ctrl+T 后滚动缓冲里思考块 0 条可见、历史错乱）。因此补丁同时改 `interactive-mode.js` 三处（`rebuildChatFromMessages` / `renderCurrentSessionState` 尾部、`onThemeChange`），强制 `requestRender(true)` 整屏重绘重建滚动缓冲。
 
-脚本支持 V1 → V2 自动升级；若 pi-tui 版本变动导致匹配失败，脚本会拒绝执行并提示人工核对。
+脚本支持 V1 → V2 自动升级；补丁覆盖 `pi-tui/dist/tui.js` + `dist/modes/interactive/interactive-mode.js` 两个文件。若 pi 版本变动导致匹配失败，脚本会拒绝执行并提示人工核对。
 
 注意：补丁打在全局 `node_modules` 的 pi-tui 上，**pi 每次升级会覆盖，需重跑脚本**；若 pi-tui 版本变动导致匹配失败，脚本会拒绝执行并提示人工核对。
 

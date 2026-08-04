@@ -21,6 +21,8 @@
  * 用法：node patches/apply-pi-tui-scroll-freeze.mjs
  * pi 升级会覆盖 node_modules，需重跑本脚本。改完重启 pi 生效。
  * 幂等：已打 V2 补丁时直接跳过；已打 V1 补丁时自动升级 shrink 分支。
+ * 另补 interactive-mode.js 三处：全局重建（Ctrl+T 折叠思考、compaction、设置变更、会话切换、主题切换）
+ * 必须整屏重绘（requestRender(true)），否则 scroll-freeze 钳制路径会把新旧内容硬拼接。
  */
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -128,6 +130,92 @@ function findTuiJs() {
 	return p;
 }
 
+// ---- 块 D：interactive-mode.js 全局重建强制全量渲染 ----
+// scroll-freeze 的钳制路径只适合「流式增量」（变化在底部）。显式全局重建（Ctrl+T 折叠思考、
+// compaction、设置变更、会话恢复/切换、主题切换）会重排整段对话，必须整屏重绘（含重建滚动缓冲），
+// 否则钳制路径冻结视口上方旧内容，新旧内容硬拼接导致页面错乱。
+const IM_PATCHES = [
+	{
+		name: "rebuildChatFromMessages 强制全量渲染",
+		old: `    rebuildChatFromMessages() {
+        this.chatContainer.clear();
+        this.renderSessionEntries(this.sessionManager.buildContextEntries());
+    }`,
+		new: `    rebuildChatFromMessages() {
+        this.chatContainer.clear();
+        this.renderSessionEntries(this.sessionManager.buildContextEntries());
+        // PATCH(scroll-freeze): 全局重建（Ctrl+T 折叠思考、compaction、设置变更、会话恢复等）
+        // 必须整屏重绘（清滚动缓冲重建），否则 scroll-freeze 的钳制路径会把新旧内容硬拼接。
+        this.ui.requestRender(true);
+    }`,
+	},
+	{
+		name: "renderCurrentSessionState 强制全量渲染",
+		old: `        this.pendingTools.clear();
+        this.renderInitialMessages();
+    }`,
+	new: `        this.pendingTools.clear();
+        this.renderInitialMessages();
+        // PATCH(scroll-freeze): session 切换等同理，强制整屏重绘
+        this.ui.requestRender(true);
+    }`,
+	},
+	{
+		name: "onThemeChange 强制全量渲染",
+		old: `        onThemeChange(() => {
+            this.ui.invalidate();
+            this.updateEditorBorderColor();
+            this.ui.requestRender();
+        });`,
+		new: `        onThemeChange(() => {
+            this.ui.invalidate();
+            this.updateEditorBorderColor();
+            this.ui.requestRender(true);
+        });`,
+	},
+];
+
+function findInteractiveModeJs() {
+	const npmRoot = execSync("npm root -g").toString().trim();
+	const p = path.join(
+		npmRoot,
+		"@earendil-works",
+		"pi-coding-agent",
+		"dist",
+		"modes",
+		"interactive",
+		"interactive-mode.js",
+	);
+	if (!fs.existsSync(p)) {
+		throw new Error(`找不到 interactive-mode.js: ${p}`);
+	}
+	return p;
+}
+
+function applyInteractiveModePatches() {
+	const imPath = findInteractiveModeJs();
+	let imSrc = fs.readFileSync(imPath, "utf8");
+	let imChanged = false;
+	for (const p of IM_PATCHES) {
+		if (imSrc.includes(p.new)) {
+			continue; // 已打
+		}
+		if (!imSrc.includes(p.old)) {
+			console.error(`未找到补丁目标「${p.name}」——pi 版本可能已变动，请人工核对。`);
+			continue;
+		}
+		imSrc = imSrc.replace(p.old, p.new);
+		imChanged = true;
+		console.log(`已应用: ${p.name}`);
+	}
+	if (imChanged) {
+		fs.writeFileSync(imPath, imSrc);
+		console.log(`interactive-mode.js 补丁已写入: ${imPath}`);
+	} else {
+		console.log(`interactive-mode.js 已打补丁，跳过: ${imPath}`);
+	}
+}
+
 const tuiPath = findTuiJs();
 let src = fs.readFileSync(tuiPath, "utf8");
 let changed = false;
@@ -186,8 +274,11 @@ if (!hasMarker) {
 
 if (!changed) {
 	console.log(`已打 V2 补丁，跳过: ${tuiPath}`);
-	process.exit(0);
+} else {
+	fs.writeFileSync(tuiPath, src);
+	console.log(`tui.js 补丁已写入: ${tuiPath}`);
 }
 
-fs.writeFileSync(tuiPath, src);
+applyInteractiveModePatches();
+
 console.log("重启 pi 后生效。可用 PI_DEBUG_REDRAW=1 验证 fullRender 是否消失（日志在 ~/.pi/agent/pi-debug.log）。");
