@@ -24,8 +24,11 @@ extensions/         # pi 扩展（安装目标 ~/.pi/agent/extensions/）
   explore-agent.ts  #   explore 工具：只读子代理并行探索代码库（read/ls/grep/find）
   hud.ts            #   3 行 HUD：git 状态 / 模型+token 速率 / 余额+消耗速率
   task-alert.ts     #   任务完成提醒：提示音 + 标题动画 + 事件总线广播
+  web-search.ts     #   联网搜索工具：web_search 自定义工具，agent 可调（kimi-coding 后端）
 themes/matrix.json  # 黑客帝国荧光绿主题
 sounds/task_complete.wav  # 任务完成提示音
+patches/apply-pi-tui-scroll-freeze.mjs  # pi-tui 滚动冻结补丁：修复流式期间滚轮上翻被拽飞（见 README「pi-tui 滚动冻结补丁」节）；pi 升级后需重跑
+tools/kimi-web-search.mjs  # 联网搜索 CLI（不经 install.js）：复用 pi 的 kimi-coding OAuth token + anthropic 兼容端点 web_search 工具；token 过期先用 pi 刷新
 docs/deepseek/      # DeepSeek 官方文档提取（api.md / pricing.md / thinking.md），适配参考
 .pi/                # 空目录（占位）
 ```

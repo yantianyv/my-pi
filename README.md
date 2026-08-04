@@ -98,6 +98,32 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 
 撤销时机：任意按键（`onTerminalInput` 原始终端按键流，无需等到发送）/ 新任务开始立即撤；10 分钟无操作自动撤。
 
+## 联网搜索（extensions/web-search.ts）
+
+注册 `web_search` 自定义工具，agent 需要查实时信息（GitHub issue、文档、新闻、价格）时直接调用，返回中文总结 + 结果标题/URL 列表。
+
+- **后端**：固定走 kimi-coding 订阅（Anthropic 兼容端点 + `web_search_20250305` 服务端工具），与 pi 当前用哪个模型/供应商无关；kimi-coding 登出后工具报错提示重新 `/login`；
+- **无 token 过期问题**：认证走 `ctx.modelRegistry.getProviderAuth("kimi-coding")`——与 pi 其他 OAuth 同一条解析链，快过期时自动刷新；
+- **两段式流程**（实测必要）：kimi 一轮搜索就 `end_turn`，只回结果（正文加密）；扩展把结果塞回历史再要一次总结，agent 才能拿到文字正文；
+- **成本**：一次搜索 = 2 次 API 调用（各约 1 万+ token）+ 按次搜索费，避免频繁调用。
+
+## pi-tui 滚动冻结补丁（patches/）
+
+修「agent 工作时滚轮上翻会被拽飞（滚到顶部）」的问题。根因：流式输出时整条消息每帧从 markdown 源码重渲染，消息开头几行持续变化；一旦滚出视口，pi-tui 判定 `firstChanged < prevViewportTop` 就整屏重绘——发 `\x1b[3J` 清空终端滚动缓冲区再全量重写，实测每秒 2~3 次，Windows Terminal 的滚动位置随之丢失。
+
+```bash
+node patches/apply-pi-tui-scroll-freeze.mjs   # 打补丁/升级（幂等），重启 pi 生效
+```
+
+补丁思路（同 Claude Code / Ink `<Static>`）：
+
+1. **流式期间**：冻结视口上方已滚入滚动缓冲区的内容（保留流式中间帧），只重绘视口内可见部分，不再清空滚动缓冲。代价：滚上去看到的旧内容可能是流式中间帧，与最终渲染略有出入。
+2. **内容收缩（任务完成时必现）**：消息定稿时通常会比最后流式帧收窄 1~2 行，逻辑行号位移无法局部差分，仍走整屏重绘——但改用 `fullRender("screen")` 只清可见屏、**保留滚动缓冲**，避免每轮结束时 `\x1b[3J` 清空滚动缓冲导致滚动位置跳顶。同步输出（`\x1b[?2026h`）下整屏重绘无闪烁。
+
+脚本支持 V1 → V2 自动升级；若 pi-tui 版本变动导致匹配失败，脚本会拒绝执行并提示人工核对。
+
+注意：补丁打在全局 `node_modules` 的 pi-tui 上，**pi 每次升级会覆盖，需重跑脚本**；若 pi-tui 版本变动导致匹配失败，脚本会拒绝执行并提示人工核对。
+
 ## 卸载
 
 ```bash
@@ -115,3 +141,4 @@ rm ~/.pi/agent/sounds/task_complete.wav
 
 - `templates/` 是自定义 provider 的起步模板（OpenAI-compatible 和 OAuth），放在 `.pi/extensions/` 外避免被 pi 自动加载成假 provider；需要时把对应文件复制到 `~/.pi/agent/extensions/` 再改。
 - `docs/deepseek/` 是从官网提取的原始文档文本，供 deepseek 适配开发时查价格、思考模式、API 细节。
+- `tools/kimi-web-search.mjs` 是独立小工具（不经 install.js 安装）：`node tools/kimi-web-search.mjs "问题"` 即可联网搜索；token 过期（约 15 分钟）时先用一下 pi 让它自动刷新。
