@@ -111,9 +111,11 @@ let costEvents: { ts: number; cost: number }[] = [];
 let lastRecordedTotal = 0;
 let startupTime = Date.now();
 
-let outputTokenEvents: { ts: number; output: number; durationMs: number }[] = [];
 let lastRecordedOutputTotal = 0;
 let turnStartTime: number | null = null;
+let smoothedTokenRate: number | null = null;
+
+const TOKEN_RATE_SMOOTH_FACTOR = 0.2; // 新 turn 速率权重，历史速率权重 = 1 - 0.2
 
 const fmtNum = (n: number) => {
 	if (n >= 1_000_000) {
@@ -143,7 +145,7 @@ function computeRate(now: number): number | null {
 	return sum / (windowMs / 60_000);
 }
 
-// 输出 token 速率统计（output tokens / sec，基于最近 3 轮 turn_start ~ turn_end 耗时）
+// 输出 token 速率统计（output tokens / sec，基于 turn_start ~ turn_end 做 EMA 平滑）
 // ---------------------------------------------------------------------------
 
 function sumOutputTokens(ctx: ExtensionContext): number {
@@ -157,17 +159,7 @@ function sumOutputTokens(ctx: ExtensionContext): number {
 }
 
 function computeTokenRate(_now: number): number | null {
-	// 最近 3 轮（不够 3 轮时有几轮算几轮）
-	const recent = outputTokenEvents.slice(-3);
-	if (recent.length === 0) return null;
-	let tokens = 0,
-		durationMs = 0;
-	for (const e of recent) {
-		tokens += e.output;
-		durationMs += e.durationMs;
-	}
-	if (durationMs <= 0) return 0;
-	return tokens / (durationMs / 1000);
+	return smoothedTokenRate;
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,8 +1048,8 @@ export default function (pi: ExtensionAPI) {
 		lastRecordedTotal = sumCost(ctx);
 		lastRecordedOutputTotal = sumOutputTokens(ctx);
 		costEvents = [];
-		outputTokenEvents = [];
 		turnStartTime = null;
+		smoothedTokenRate = null;
 		if (ctx.mode !== "tui") return;
 		installFooter(ctx);
 	});
@@ -1078,14 +1070,17 @@ pi.on("turn_end", async (_event, ctx) => {
 			const cutoff = Date.now() - RATE_WINDOW_MS;
 			costEvents = costEvents.filter((e) => e.ts >= cutoff);
 		}
-		// 记录本 turn 输出 token 与耗时，用于第 2 行的 output tok/s 速率（只保留最近 3 轮）
+		// 记录本 turn 输出 token 与耗时，用 EMA 平滑得到第 2 行 output tok/s 速率
 		const outputTotal = sumOutputTokens(ctx);
 		const outputDelta = outputTotal - lastRecordedOutputTotal;
 		lastRecordedOutputTotal = outputTotal;
 		if (outputDelta > 0 && turnStartTime != null) {
 			const durationMs = Math.max(100, Date.now() - turnStartTime);
-			outputTokenEvents.push({ ts: Date.now(), output: outputDelta, durationMs });
-			outputTokenEvents = outputTokenEvents.slice(-3);
+			const turnRate = outputDelta / (durationMs / 1000);
+			smoothedTokenRate =
+				smoothedTokenRate == null
+					? turnRate
+					: smoothedTokenRate * (1 - TOKEN_RATE_SMOOTH_FACTOR) + turnRate * TOKEN_RATE_SMOOTH_FACTOR;
 		}
 		turnStartTime = null;
 		if (!footerInstalled) return;
