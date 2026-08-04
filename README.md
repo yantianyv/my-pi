@@ -19,6 +19,8 @@ node install.js --dry-run  # 先预览要做什么，不修改
 | `extensions/` | `hud.ts` — 3 行 HUD 状态栏（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn | `~/.pi/agent/extensions/` |
 | `extensions/` | `explore-agent.ts` — `explore` 工具：只读子代理并行探索代码库、返回报告（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `task-alert.ts` — 任务完成提醒：提示音 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
+| `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `docs/deepseek/` | DeepSeek API / 价格 / 思考模式文档提取（适配参考） | — |
 
 ## 3 行 HUD（extensions/hud.ts）
@@ -85,6 +87,16 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 
 - **预算保护**：一次最多 6 个任务、3 并发、单子代理最多 12 轮 / 4 分钟超时、跟随主 agent 的 abort 信号（Ctrl+C 可中断）。
 - **结果**：所有子代理的报告汇总为一个 Markdown 返回给主 agent；单任务失败不影响其他任务。
 
+## 任务完成提醒（extensions/task-alert.ts）
+
+pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时给出三重提醒，便于及时回来发下一步指令：
+
+- **提示音**：播放 `sounds/task_complete.wav`（钢琴音色，移植自 ClaudeCodeInit）。跨平台：Windows 用 PowerShell `Media.SoundPlayer`，macOS 用 `afplay`，Linux 依次尝试 `paplay`/`aplay`，全部不可用时退到终端响铃；任何失败都静默；
+- **状态栏闪烁**：通过 pi 官方 `setStatus` 通道贴一条 `✅ 任务完成` / `✨ 任务完成` 交替闪烁的留言——HUD 行 2 的「扩展状态集锦」会自动显示它（hud.ts 零改动、零耦合）；HUD 被禁用时 pi 默认 footer 也能显示；
+- **标题栏动画**：终端标题同步闪烁，切到其他窗口也能看到。
+
+撤销时机：开始输入 / 新任务开始立即撤；60 秒无操作自动撤。
+
 ## 卸载
 
 ```bash
@@ -92,6 +104,8 @@ rm ~/.pi/agent/themes/matrix.json
 rm ~/.pi/agent/extensions/hud.ts
 rm ~/.pi/agent/extensions/claude-it.ts
 rm ~/.pi/agent/extensions/explore-agent.ts
+rm ~/.pi/agent/extensions/task-alert.ts
+rm ~/.pi/agent/sounds/task_complete.wav
 ```
 
 （`settings.json` 里的 `"theme": "matrix"` 改回其他主题即可。）

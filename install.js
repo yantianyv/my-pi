@@ -2,9 +2,10 @@
 /**
  * pi 一键配置安装脚本
  *
- * 把本项目的 themes/ 和 extensions/ 安装到 pi 全局配置目录：
+ * 把本项目的 themes/、extensions/ 和 sounds/ 安装到 pi 全局配置目录：
  *   ~/.pi/agent/themes/      （主题）
  *   ~/.pi/agent/extensions/  （扩展）
+ *   ~/.pi/agent/sounds/      （提示音）
  * 并把 settings.json 的 theme 设为本项目主题。
  *
  * 用法：
@@ -19,22 +20,24 @@ const ROOT = __dirname;
 const PI_AGENT = path.join(os.homedir(), ".pi", "agent");
 const THEMES_SRC = path.join(ROOT, "themes");
 const EXT_SRC = path.join(ROOT, "extensions");
+const SOUNDS_SRC = path.join(ROOT, "sounds");
 const THEMES_DST = path.join(PI_AGENT, "themes");
 const EXT_DST = path.join(PI_AGENT, "extensions");
+const SOUNDS_DST = path.join(PI_AGENT, "sounds");
 
 const THEME_NAME = "matrix"; // 默认启用的主题（对应 themes/matrix.json）
 
 const dryRun = process.argv.includes("--dry-run") || process.argv.includes("-n");
 const log = (...m) => console.log((dryRun ? "[DRY-RUN] " : "") + m.join(" "));
 
-function copyDir(src, dst) {
+function copyDir(src, dst, exts = [".json", ".ts"]) {
 	if (!fs.existsSync(src)) {
 		log(`跳过（目录不存在）: ${src}`);
 		return;
 	}
 	fs.mkdirSync(dst, { recursive: true });
 	for (const f of fs.readdirSync(src)) {
-		if (!f.endsWith(".json") && !f.endsWith(".ts")) continue;
+		if (!exts.some((e) => f.endsWith(e))) continue;
 		const from = path.join(src, f);
 		const to = path.join(dst, f);
 		log(`复制 ${path.relative(ROOT, from)} -> ${to}`);
@@ -79,6 +82,7 @@ function main() {
 	}
 	copyDir(THEMES_SRC, THEMES_DST);
 	copyDir(EXT_SRC, EXT_DST);
+	copyDir(SOUNDS_SRC, SOUNDS_DST, [".wav"]);
 	applySettings();
 	console.log(dryRun ? "\n试运行完成（未做任何修改），去掉 --dry-run 正式安装。" : "\n安装完成。在 pi 里执行 /reload 或重启后生效。");
 }
