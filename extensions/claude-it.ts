@@ -3,7 +3,7 @@
  *
  * - /exit 命令（/quit 的别名）与直接输入 exit 退出
  * - 对话进行中按 Ctrl+C 取消当前 agent 操作
- * - /init 命令：分析代码库并生成/合并上下文文件（AGENTS.md / CLAUDE.md）
+ * - /init 命令：分析代码库并生成/更新 AGENTS.md（已有 CLAUDE.md 会被归并进来）
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
@@ -13,25 +13,20 @@ import * as path from "node:path";
 // /init：分析代码库，生成上下文文件（对齐 Claude Code 的 /init）
 // ---------------------------------------------------------------------------
 
-/** 支持的目标文件：pi 原生读 AGENTS.md（也兼容 CLAUDE.md），默认 AGENTS.md */
-function resolveInitTarget(args: string): { file: string } | { error: string } {
-	const a = args.trim().toLowerCase();
-	if (!a || a === "agents" || a === "agents.md") return { file: "AGENTS.md" };
-	if (a === "claude" || a === "claude.md") return { file: "CLAUDE.md" };
-	return { error: `不支持的目标「${args.trim()}」，用法：/init [agents|claude]` };
-}
+/** 唯一的上下文文件目标：AGENTS.md（pi 原生读取；CLAUDE.md 只会被归并，不会被生成） */
+const CONTEXT_FILE = "AGENTS.md";
 
-function buildInitPrompt(file: string, mode: "create" | "merge" | "overwrite"): string {
+function buildInitPrompt(mode: "create" | "merge" | "overwrite"): string {
 	const modeInstructions = {
-		create: `当前目录不存在 ${file}，请从头创建它。`,
+		create: `当前目录不存在 ${CONTEXT_FILE}，请从头创建它。`,
 		merge:
-			`当前目录已存在 ${file}。先完整读取它，保留其中仍然准确的内容（尤其是人工编写的约定），` +
+			`当前目录已存在 ${CONTEXT_FILE}。先完整读取它，保留其中仍然准确的内容（尤其是人工编写的约定），` +
 			`只更新过时的部分、补充缺失的部分，不要整篇重写。`,
 		overwrite:
-			`当前目录已存在 ${file}，但用户要求完全重写：通读现有内容了解项目后，从零生成一份全新的 ${file} 覆盖它。`,
+			`当前目录已存在 ${CONTEXT_FILE}，但用户要求完全重写：通读现有内容了解项目后，从零生成一份全新的 ${CONTEXT_FILE} 覆盖它。`,
 	};
 	return [
-		`请分析当前代码库并生成上下文文件 ${file}（对齐 Claude Code /init 的行为）。`,
+		`请分析当前代码库并生成上下文文件 ${CONTEXT_FILE}（对齐 Claude Code /init 的行为）。`,
 		"",
 		modeInstructions[mode],
 		"",
@@ -41,7 +36,7 @@ function buildInitPrompt(file: string, mode: "create" | "merge" | "overwrite"): 
 		"3. 从脚本定义、Makefile、CI 配置中提取真实的构建 / 测试 / lint / 运行命令",
 		"4. 代码库较大时，优先用 explore 工具派子代理并行探索，不要自己逐文件读",
 		"",
-		`${file} 应包含的章节（按需取舍，不需要的章节省略）：`,
+		`${CONTEXT_FILE} 应包含的章节（按需取舍，不需要的章节省略）：`,
 		"- 项目概述：一句话说明这是什么、主要技术栈",
 		"- 常用命令：构建、测试、lint、类型检查、运行/调试（必须真实存在，标注出处，如 package.json scripts）",
 		"- 目录结构：关键目录与各自职责",
@@ -54,7 +49,7 @@ function buildInitPrompt(file: string, mode: "create" | "merge" | "overwrite"): 
 		"- 只写经过验证的信息，命令必须真实存在于项目配置中，禁止编造；不确定的内容标注「待确认」",
 		"- 保持精炼（一般不超过 150 行），用路径引用代替粘贴代码原文",
 		"- 内容使用中文（代码、命令、标识符除外）",
-		`- 最后用 write 工具把结果写入 ${file}，并用一两句话总结写入了什么`,
+		`- 最后用 write 工具把结果写入 ${CONTEXT_FILE}，并用一两句话总结写入了什么`,
 	].join("\n");
 }
 
@@ -74,21 +69,20 @@ function buildClaudeMergePrompt(): string {
 }
 
 export default function (pi: ExtensionAPI) {
-	// /init [agents|claude]：分析代码库并生成/更新上下文文件
+	// /init：分析代码库并生成/更新 AGENTS.md
 	pi.registerCommand("init", {
-		description: "分析代码库，生成 AGENTS.md（/init claude 生成 CLAUDE.md）",
+		description: "分析代码库，生成或更新 AGENTS.md（已有 CLAUDE.md 会被合并进来）",
 		handler: async (args, ctx) => {
-			const target = resolveInitTarget(args ?? "");
-			if ("error" in target) {
-				ctx.ui.notify(target.error, "error");
+			if (args?.trim()) {
+				ctx.ui.notify("/init 不接受参数，固定生成 AGENTS.md", "warning");
 				return;
 			}
 
-			const filePath = path.join(ctx.cwd, target.file);
+			const filePath = path.join(ctx.cwd, CONTEXT_FILE);
 			const claudePath = path.join(ctx.cwd, "CLAUDE.md");
 
-			// 兼容 Claude Code 项目：默认目标 AGENTS.md 时，先处理 CLAUDE.md
-			if (target.file === "AGENTS.md" && fs.existsSync(claudePath)) {
+			// 兼容 Claude Code 项目：先处理 CLAUDE.md
+			if (fs.existsSync(claudePath)) {
 				if (fs.existsSync(filePath)) {
 					// 两者都存在：交给 AI 合并
 					ctx.ui.notify("检测到 AGENTS.md 与 CLAUDE.md 并存，开始 AI 合并 …", "info");
@@ -110,10 +104,10 @@ export default function (pi: ExtensionAPI) {
 
 			if (exists) {
 				if (!ctx.hasUI) {
-					ctx.ui.notify(`${target.file} 已存在，非交互模式下不覆盖。请先删除或改用交互模式。`, "warning");
+					ctx.ui.notify(`${CONTEXT_FILE} 已存在，非交互模式下不覆盖。请先删除或改用交互模式。`, "warning");
 					return;
 				}
-				const choice = await ctx.ui.select(`${target.file} 已存在，如何处理？`, [
+				const choice = await ctx.ui.select(`${CONTEXT_FILE} 已存在，如何处理？`, [
 					"合并更新（保留现有内容，修正过时部分）",
 					"完全重写（从零生成，覆盖现有文件）",
 					"取消",
@@ -123,10 +117,10 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			ctx.ui.notify(
-				`开始分析代码库并${mode === "create" ? "生成" : mode === "merge" ? "更新" : "重写"} ${target.file} …`,
+				`开始分析代码库并${mode === "create" ? "生成" : mode === "merge" ? "更新" : "重写"} ${CONTEXT_FILE} …`,
 				"info",
 			);
-			pi.sendUserMessage(buildInitPrompt(target.file, mode));
+			pi.sendUserMessage(buildInitPrompt(mode));
 		},
 	});
 
