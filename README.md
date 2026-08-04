@@ -17,7 +17,7 @@ node install.js --dry-run  # 先预览要做什么，不修改
 |------|------|----------|
 | `themes/` | `matrix.json` — 黑客帝国风格荧光绿主题 | `~/.pi/agent/themes/` |
 | `extensions/` | `hud.ts` — 3 行 HUD 状态栏（见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `exit-alias.ts` — `/exit` 别名与无斜杠 `exit` 退出 | `~/.pi/agent/extensions/` |
+| `extensions/` | `claude-it.ts` — `/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn | `~/.pi/agent/extensions/` |
 | `templates/` | 自定义 provider / OAuth provider 模板（**不会被自动加载**） | — |
 | `docs/deepseek/` | DeepSeek API / 价格 / 思考模式文档提取（适配参考） | — |
 
@@ -63,12 +63,13 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 
 
 说明：DeepSeek 按量付费，余额过低变色警示；Kimi For Coding 为订阅制 + 加油包（Extra Usage）混合，优先显示加油包余额，没有加油包则显示订阅额度，订阅额度耗尽或余额过低变色警示，右下角显示会话 token 累计；Kimi 开放平台（`moonshotai`/`moonshotai-cn`）为按量付费，显示现金 + 赠金余额；MiMo Token Plan CN（`xiaomi-token-plan-cn`）无公开余量 API，余额行显示控制台链接，右下角显示会话 token 累计。所有供应商都在 HUD 第 2 行统一显示输出 token 速率。
 
-## /exit 别名（extensions/exit-alias.ts）
+## Claude Code 风格增强（extensions/claude-it.ts）
 
-为内置 `/quit` 提供两个便捷退出方式：
+让 pi 的操作习惯更接近 Claude Code：
 
 - `/exit`：与 `/quit` 等效的斜杠命令。
 - `exit`：直接输入 `exit`（不带 `/`）也能立即退出 pi，不会把该文本当作普通消息发送给模型。
+- **Ctrl+C**：当前 turn 正在生成时，按 `Ctrl+C` 会取消该轮输出（Claude Code 风格）；空闲时不拦截，保留默认行为。
 
 > 注意：不带 `/` 的 `exit` 会被无条件解释为退出指令。如果你确实需要把单词 "exit" 作为普通问题发给模型，可临时加空格或换种说法，例如 `"exit" 是什么意思？`。
 
