@@ -18,7 +18,7 @@ node install.js --dry-run  # 先预览要做什么，不修改
 | `themes/` | `matrix.json` — 黑客帝国风格荧光绿主题 | `~/.pi/agent/themes/` |
 | `extensions/` | `hud.ts` — 3 行 HUD 状态栏（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn | `~/.pi/agent/extensions/` |
-| `extensions/` | `explore-agent.ts` — `explore_files` 工具：子模型并行探索文件、返回摘要（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `explore-agent.ts` — `explore` 工具：只读子代理并行探索代码库、返回报告（见下） | `~/.pi/agent/extensions/` |
 | `docs/deepseek/` | DeepSeek API / 价格 / 思考模式文档提取（适配参考） | — |
 
 ## 3 行 HUD（extensions/hud.ts）
@@ -77,12 +77,13 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 
 
 ## 并行探索子代理（extensions/explore-agent.ts）
 
-类似 Claude Code 的 explore agent：注册 `explore_files` 工具，主 agent 给出若干文件路径后，扩展用**廉价/快速的子模型并行阅读每个文件并返回精炼摘要**，不把原始内容塞进主上下文——节省上下文窗口、降低成本、加快速度。
+类似 Claude Code 的 explore agent：注册 `explore` 工具，主 agent 只负责**分配任务**，每个任务派一个子代理自主探索并返回精炼报告——节省主上下文、降低成本（默认用廉价模型）、加快速度。
 
-- **用法**：主 agent 在需要了解陌生项目/模块时自动调用（工具描述里已引导），例如先 `ls`/`glob` 再 `explore_files(paths: [...], instructions: "重点关注导出的 API")`。
-- **子模型选择**：优先 `PREFERRED_MODELS`（默认 `deepseek/deepseek-v4-flash`），不可用时自动从已认证模型中选 `openai-completions` 且价格最低的；`/explore-model` 命令可查看当前选中的子模型。
-- **安全限制**：一次最多 20 个文件、单文件 64KB（超出截断为首尾片段）、>2MB 或二进制文件直接跳过、4 并发、单请求 90s 超时、跟随主 agent 的 abort 信号。
-- **局限**：pi 无子代理会话公开 API，本实现是「并行子模型调用 + 摘要汇总」的功能等价方案；子模型只看单文件，不能跨文件推理；暂只支持 `openai-completions` 类 API。
+- **子代理形态**：跑 pi-agent-core 的官方 `agentLoop`，拥有 pi 官方只读工具集（`read` / `ls` / `grep` / `find`），自主决定探索路径；主 agent 不指定文件，只描述任务（如「搞清 auth 模块的登录流程，给出关键文件与函数」）。
+- **模型调用**：直接走 pi 已登录的通道——认证来自 `ctx.modelRegistry.getApiKeyAndHeaders()`（含 OAuth），请求由 pi-ai 自己的 provider 实现发出，支持任意 API 类型。
+- **子模型选择**：优先 `PREFERRED_MODELS`（默认 `deepseek/deepseek-v4-flash`），不可用时自动选已认证且价格最低的模型；`/explore-model` 命令可查看当前选中的子模型。
+- **预算保护**：一次最多 6 个任务、3 并发、单子代理最多 12 轮 / 4 分钟超时、跟随主 agent 的 abort 信号（Ctrl+C 可中断）。
+- **结果**：所有子代理的报告汇总为一个 Markdown 返回给主 agent；单任务失败不影响其他任务。
 
 ## 卸载
 
