@@ -92,7 +92,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 
 pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时给出三重提醒，便于及时回来发下一步指令：
 
 - **提示音**：播放 `sounds/task_complete.wav`（钢琴音色，移植自 ClaudeCodeInit）。跨平台：Windows 用 PowerShell `Media.SoundPlayer`，macOS 用 `afplay`，Linux 依次尝试 `paplay`/`aplay`，全部不可用时退到终端响铃；任何失败都静默；
-- **状态栏闪烁**：通过 pi 官方 `setStatus` 通道贴一条 `✅ 任务完成` / `✨ 任务完成` 交替闪烁的留言——HUD 行 2 的「扩展状态集锦」会自动显示它（hud.ts 零改动、零耦合）；HUD 被禁用时 pi 默认 footer 也能显示；
+- **状态栏闪烁**：通过 `pi.events` 官方事件总线广播 `task-alert:done`，HUD 订阅后在行 1 动态区闪烁 `✅ 任务完成` / `✨ 任务完成`（替换「会话 Nmin」占位）。两扩展零耦合——task-alert 不知道 hud 的存在；HUD 被禁用时提示自然退化为标题栏动画；
 - **标题栏动画**：终端标题同步闪烁，切到其他窗口也能看到。
 
 撤销时机：开始输入 / 新任务开始立即撤；60 秒无操作自动撤。

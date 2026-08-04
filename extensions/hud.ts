@@ -1096,11 +1096,39 @@ pi.on("turn_end", async (_event, ctx) => {
 
 	pi.on("session_shutdown", async () => {
 		stopThinkingAnimation();
+		stopTaskAlert();
 		if (gitTimer) {
 			clearInterval(gitTimer);
 			gitTimer = undefined;
 		}
 	});
+
+	// ---- 任务完成提醒（订阅 task-alert 扩展的 pi.events 事件，推进行 1 动态区） ----
+	// 两个扩展通过 pi 官方事件总线解耦：task-alert 只负责检测与发声，hud 只负责呈现。
+	let taskAlertTimer: ReturnType<typeof setInterval> | undefined;
+	let taskAlertFrame = 0;
+	const TASK_ALERT_FRAMES = ["✅ 任务完成", "✨ 任务完成"];
+
+	function stopTaskAlert() {
+		if (taskAlertTimer) {
+			clearInterval(taskAlertTimer);
+			taskAlertTimer = undefined;
+		}
+		clearDynamic("task-alert");
+	}
+
+	pi.events.on("task-alert:done", () => {
+		stopTaskAlert(); // 幂等：重复触发先清旧状态
+		taskAlertFrame = 0;
+		// priority 90：低于「⚡ 指令模式」(100)，不影响用户输入时的指令提示
+		setDynamic("task-alert", TASK_ALERT_FRAMES[0], "success", 90);
+		taskAlertTimer = setInterval(() => {
+			taskAlertFrame++;
+			setDynamic("task-alert", TASK_ALERT_FRAMES[taskAlertFrame % TASK_ALERT_FRAMES.length], "success", 90);
+		}, 500);
+	});
+
+	pi.events.on("task-alert:clear", () => stopTaskAlert());
 
 	// ---- 命令 ----
 	pi.registerCommand("balance", {
