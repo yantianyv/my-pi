@@ -111,6 +111,9 @@ let costEvents: { ts: number; cost: number }[] = [];
 let lastRecordedTotal = 0;
 let startupTime = Date.now();
 
+let tokenEvents: { ts: number; tokens: number }[] = [];
+let lastRecordedTokenTotal = 0;
+
 const fmtNum = (n: number) => {
 	if (n >= 1_000_000) {
 		const v = n / 1_000_000;
@@ -124,7 +127,7 @@ const fmtNum = (n: number) => {
 };
 
 /**
- * 平均每分钟消耗（USD）。
+ * 平均每分钟消耗（人民币元）。
  * - 启动不足 1 分钟：返回 null（界面显示“正在计算”）。
  * - 1 分钟后：分母 = 实际经过的分钟数（封顶 10 分钟），即启动以来的平均速率；
  *   10 分钟后自然过渡为最近 10 分钟的滚动平均，无需再等满窗口。
@@ -137,6 +140,30 @@ function computeRate(now: number): number | null {
 	let sum = 0;
 	for (const e of costEvents) if (e.ts >= cutoff) sum += e.cost;
 	return sum / (windowMs / 60_000);
+}
+
+// 订阅制供应商 token 速率统计（tokens / sec）
+// ---------------------------------------------------------------------------
+
+function sumTokens(ctx: ExtensionContext): number {
+	let total = 0;
+	for (const e of ctx.sessionManager.getBranch()) {
+		if (e.type === "message" && e.message.role === "assistant") {
+			const u = (e.message as AssistantMessage).usage;
+			total += u.input + u.output + u.cacheRead;
+		}
+	}
+	return total;
+}
+
+function computeTokenRate(now: number): number | null {
+	const elapsed = now - startupTime;
+	if (elapsed < MIN_WINDOW_MS) return null;
+	const windowMs = Math.min(elapsed, RATE_WINDOW_MS);
+	const cutoff = now - windowMs;
+	let sum = 0;
+	for (const e of tokenEvents) if (e.ts >= cutoff) sum += e.tokens;
+	return sum / (windowMs / 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -357,11 +384,17 @@ function rowLabel(row: KimiUsageRow): string {
 const kimiCodingAdapter: BalanceAdapter = {
 	providerId: "kimi-coding",
 	label: "Kimi For Coding",
-	// 订阅制：不显示 ¥/min，展示会话 token 消耗
+	// 订阅制：不显示 ¥/min，展示会话 token 消耗 + token 速率（tok/s）
 	rateText(ctx, _now) {
 		const t = sumSessionUsage(ctx);
 		if (t.turns === 0) return null;
-		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
+		const totalTokens = t.input + t.output + t.cacheRead;
+		const rate = computeTokenRate(_now) ?? 0;
+		const rateText = rate >= 1000 ? `${fmtNum(rate)} tok/s` : `${rate.toFixed(2)} tok/s`;
+		return [
+			{ text: `${fmtNum(totalTokens)} tokens`, color: "dim" },
+			{ text: rateText, color: "muted" },
+		];
 	},
 	async fetch(ctx) {
 		const auth = await ctx.modelRegistry.getProviderAuth("kimi-coding");
@@ -529,11 +562,17 @@ const moonshotaiCnAdapter = moonshotAdapter("moonshotai-cn", "https://api.moonsh
 const xiaomiTokenPlanCnAdapter: BalanceAdapter = {
 	providerId: "xiaomi-token-plan-cn",
 	label: "MiMo Token Plan",
-	// 订阅制且无等效单价：展示会话 token 消耗
+	// 订阅制且无等效单价：展示会话 token 消耗 + token 速率（tok/s）
 	rateText(ctx, _now) {
 		const t = sumSessionUsage(ctx);
 		if (t.turns === 0) return null;
-		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
+		const totalTokens = t.input + t.output + t.cacheRead;
+		const rate = computeTokenRate(_now) ?? 0;
+		const rateText = rate >= 1000 ? `${fmtNum(rate)} tok/s` : `${rate.toFixed(2)} tok/s`;
+		return [
+			{ text: `${fmtNum(totalTokens)} tokens`, color: "dim" },
+			{ text: rateText, color: "muted" },
+		];
 	},
 	async fetch(_ctx) {
 		return {
@@ -1015,7 +1054,9 @@ export default function (pi: ExtensionAPI) {
 		// 重置速率统计（避免 resume 旧会话时把历史成本当成首轮增量）
 		startupTime = Date.now();
 		lastRecordedTotal = sumCost(ctx);
+		lastRecordedTokenTotal = sumTokens(ctx);
 		costEvents = [];
+		tokenEvents = [];
 		if (ctx.mode !== "tui") return;
 		installFooter(ctx);
 	});
@@ -1034,6 +1075,15 @@ pi.on("turn_end", async (_event, ctx) => {
 			costEvents.push({ ts: Date.now(), cost: delta });
 			const cutoff = Date.now() - RATE_WINDOW_MS;
 			costEvents = costEvents.filter((e) => e.ts >= cutoff);
+		}
+		// 记录本 turn token 增量，用于订阅制供应商的 tokens/sec 速率
+		const tokenTotal = sumTokens(ctx);
+		const tokenDelta = tokenTotal - lastRecordedTokenTotal;
+		lastRecordedTokenTotal = tokenTotal;
+		if (tokenDelta > 0) {
+			tokenEvents.push({ ts: Date.now(), tokens: tokenDelta });
+			const cutoff = Date.now() - RATE_WINDOW_MS;
+			tokenEvents = tokenEvents.filter((e) => e.ts >= cutoff);
 		}
 		if (!footerInstalled) return;
 		if (Date.now() - lastAutoRefresh > TURN_REFRESH_THROTTLE_MS) void refreshBalance(ctx);
