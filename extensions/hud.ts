@@ -384,17 +384,11 @@ function rowLabel(row: KimiUsageRow): string {
 const kimiCodingAdapter: BalanceAdapter = {
 	providerId: "kimi-coding",
 	label: "Kimi For Coding",
-	// 订阅制：不显示 ¥/min，展示会话 token 消耗 + token 速率（tok/s）
+	// 订阅制：不显示 ¥/min，展示会话 token 消耗
 	rateText(ctx, _now) {
 		const t = sumSessionUsage(ctx);
 		if (t.turns === 0) return null;
-		const totalTokens = t.input + t.output + t.cacheRead;
-		const rate = computeTokenRate(_now) ?? 0;
-		const rateText = rate >= 1000 ? `${fmtNum(rate)} tok/s` : `${rate.toFixed(2)} tok/s`;
-		return [
-			{ text: `${fmtNum(totalTokens)} tokens`, color: "dim" },
-			{ text: rateText, color: "muted" },
-		];
+		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
 	},
 	async fetch(ctx) {
 		const auth = await ctx.modelRegistry.getProviderAuth("kimi-coding");
@@ -562,17 +556,11 @@ const moonshotaiCnAdapter = moonshotAdapter("moonshotai-cn", "https://api.moonsh
 const xiaomiTokenPlanCnAdapter: BalanceAdapter = {
 	providerId: "xiaomi-token-plan-cn",
 	label: "MiMo Token Plan",
-	// 订阅制且无等效单价：展示会话 token 消耗 + token 速率（tok/s）
+	// 订阅制且无等效单价：展示会话 token 消耗
 	rateText(ctx, _now) {
 		const t = sumSessionUsage(ctx);
 		if (t.turns === 0) return null;
-		const totalTokens = t.input + t.output + t.cacheRead;
-		const rate = computeTokenRate(_now) ?? 0;
-		const rateText = rate >= 1000 ? `${fmtNum(rate)} tok/s` : `${rate.toFixed(2)} tok/s`;
-		return [
-			{ text: `${fmtNum(totalTokens)} tokens`, color: "dim" },
-			{ text: rateText, color: "muted" },
-		];
+		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
 	},
 	async fetch(_ctx) {
 		return {
@@ -979,7 +967,16 @@ export default function (pi: ExtensionAPI) {
 							cost += msgCostCny(m);
 						}
 					}
-					const tokensSeg = `${theme.fg("muted", `↑${fmtNum(input)}`)} ${theme.fg("muted", `↓${fmtNum(output)}`)}`;
+					const tokensSeg = (() => {
+						const tokenRate = computeTokenRate(Date.now()) ?? 0;
+						const rateStr =
+							tokenRate >= 1000
+								? `${fmtNum(tokenRate)}/s`
+								: tokenRate >= 100
+									? `${tokenRate.toFixed(1)}/s`
+									: `${tokenRate.toFixed(2)}/s`;
+						return `${theme.fg("muted", `↑${fmtNum(input)}`)} ${theme.fg("muted", `↓${fmtNum(output)}`)} ${theme.fg("muted", rateStr)}`;
+					})();
 
 					const usage = ctx.getContextUsage();
 					// ctx 段固定总宽：bar 宽度随数字宽度自适应，`[bar] 262k` 恒为 16 格，分割线不偏移
