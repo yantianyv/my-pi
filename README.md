@@ -58,11 +58,11 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 
 | MiMo Token Plan CN | `xiaomi-token-plan-cn` | 无 API | 显示控制台链接 |
 
 - 余额：官方 `GET /user/balance`（DeepSeek：充值 + 赠送）或 `GET /v1/usages`（Kimi：加油包 + 订阅额度），低余额/额度耗尽变色警示。
-- 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot 等按量付费显示 `¥/min + 累计 + 缓存预估`；Kimi / MiMo 等订阅制显示会话 token 消耗 + 缓存命中率。缓存命中率 = cacheRead/(input+cacheRead)，节省金额按等效输入单价推算。USD→CNY 汇率在 `hud.ts` 顶部 `EXCHANGE_RATE` 调整。
+- 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot 等按量付费显示 `¥/min + 累计`；Kimi / MiMo 等订阅制显示会话 token 消耗。USD→CNY 汇率在 `hud.ts` 顶部 `EXCHANGE_RATE` 调整。
 - 思考折叠：默认折叠（`settings.json` 的 `hideThinkingBlock: true`），折叠标签为动画 `Thinking.` → `Thinking..` → `Thinking...`（随思考过程增长），`Ctrl+T` 切换展开。
 - 命令：`/balance` 手动刷新余额；`/hud` 开关 HUD；`/balance-debug` 调试当前供应商的余额接口（打印认证来源 + 原始 HTTP 响应）。
 
-说明：DeepSeek 按量付费，余额过低变色警示；Kimi For Coding 为订阅制 + 加油包（Extra Usage）混合，优先显示加油包余额，没有加油包则显示订阅额度，订阅额度耗尽或余额过低变色警示，右下角显示会话 token 消耗 + 缓存命中率；Kimi 开放平台（`moonshotai`/`moonshotai-cn`）为按量付费，显示现金 + 赠金余额；MiMo Token Plan CN（`xiaomi-token-plan-cn`）无公开余量 API，余额行显示控制台链接，右下角显示会话 token 消耗 + 缓存命中率。
+说明：DeepSeek 按量付费，余额过低变色警示；Kimi For Coding 为订阅制 + 加油包（Extra Usage）混合，优先显示加油包余额，没有加油包则显示订阅额度，订阅额度耗尽或余额过低变色警示，右下角显示会话 token 消耗；Kimi 开放平台（`moonshotai`/`moonshotai-cn`）为按量付费，显示现金 + 赠金余额；MiMo Token Plan CN（`xiaomi-token-plan-cn`）无公开余量 API，余额行显示控制台链接，右下角显示会话 token 消耗。
 
 ## /exit 别名（extensions/exit-alias.ts）
 

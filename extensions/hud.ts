@@ -60,7 +60,7 @@ export interface BalanceAdapter {
 	/**
 	 * HUD 右下角消耗统计（按 provider 单独适配）。
 	 * 返回片段数组，渲染层拼接显示；返回 null 则不显示。
-	 * 按量付费显示 ¥/min + 累计 + 缓存预估；订阅制可显示 token 消耗。
+	 * 按量付费显示 ¥/min + 累计；订阅制可显示 token 消耗。
 	 */
 	rateText?(ctx: ExtensionContext, now: number): RateTextPart[] | null;
 }
@@ -75,10 +75,7 @@ interface SessionUsageTotals {
 	input: number;
 	output: number;
 	cacheRead: number;
-	cacheWrite: number;
 	costTotalUsd: number;
-	costInputUsd: number;
-	costCacheReadUsd: number;
 	turns: number;
 }
 
@@ -87,10 +84,7 @@ function sumSessionUsage(ctx: ExtensionContext): SessionUsageTotals {
 		input: 0,
 		output: 0,
 		cacheRead: 0,
-		cacheWrite: 0,
 		costTotalUsd: 0,
-		costInputUsd: 0,
-		costCacheReadUsd: 0,
 		turns: 0,
 	};
 	for (const e of ctx.sessionManager.getBranch()) {
@@ -99,32 +93,11 @@ function sumSessionUsage(ctx: ExtensionContext): SessionUsageTotals {
 			t.input += u.input;
 			t.output += u.output;
 			t.cacheRead += u.cacheRead;
-			t.cacheWrite += u.cacheWrite;
 			t.costTotalUsd += u.cost.total;
-			t.costInputUsd += u.cost.input;
-			t.costCacheReadUsd += u.cost.cacheRead;
 			t.turns++;
 		}
 	}
 	return t;
-}
-
-/**
- * 缓存命中预估：命中率 = cacheRead / (input + cacheRead)；
- * 节省金额 = cacheRead×input单价 − cacheRead实际成本（有 input 单价时才有意义）。
- */
-function cacheEstimate(t: SessionUsageTotals): string | null {
-	const totalInput = t.input + t.cacheRead;
-	if (t.cacheRead <= 0 || totalInput <= 0) return null;
-	const hitRate = t.cacheRead / totalInput;
-	let saved = 0;
-	if (t.input > 0 && t.costInputUsd > 0) {
-		const inputPricePerToken = t.costInputUsd / t.input; // USD/token
-		saved = (t.cacheRead * inputPricePerToken - t.costCacheReadUsd) * EXCHANGE_RATE;
-	}
-	const rate = Math.round(hitRate * 100);
-	if (saved > 0.01) return `缓存${rate}%省¥${saved.toFixed(2)}`;
-	return `缓存${rate}%`;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,20 +138,17 @@ function computeRate(now: number): number | null {
 	return sum / (windowMs / 60_000);
 }
 
-/** 按量付费：¥/min + 累计 + 缓存预估 */
+/** 按量付费：¥/min + 累计 */
 function meteredRateText(ctx: ExtensionContext, now: number): RateTextPart[] | null {
 	const t = sumSessionUsage(ctx);
 	if (t.turns === 0) return null;
 	const rate = computeRate(now);
 	const perMin = (rate ?? 0) * EXCHANGE_RATE;
 	const total = t.costTotalUsd * EXCHANGE_RATE;
-	const parts: RateTextPart[] = [
+	return [
 		{ text: `¥${perMin.toFixed(3)}/min`, color: "muted" },
 		{ text: `¥${total.toFixed(2)}`, color: "dim" },
 	];
-	const cache = cacheEstimate(t);
-	if (cache) parts.push({ text: cache, color: "success" });
-	return parts;
 }
 
 /**
@@ -336,16 +306,11 @@ function rowLabel(row: KimiUsageRow): string {
 const kimiCodingAdapter: BalanceAdapter = {
 	providerId: "kimi-coding",
 	label: "Kimi For Coding",
-	// 订阅制：不显示 ¥/min，但展示会话 token 消耗 + 缓存命中率
+	// 订阅制：不显示 ¥/min，展示会话 token 消耗
 	rateText(ctx, _now) {
 		const t = sumSessionUsage(ctx);
 		if (t.turns === 0) return null;
-		const hit = cacheEstimate(t);
-		const parts: RateTextPart[] = [
-			{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" },
-		];
-		if (hit) parts.push({ text: hit, color: "success" });
-		return parts;
+		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
 	},
 	async fetch(ctx) {
 		const auth = await ctx.modelRegistry.getProviderAuth("kimi-coding");
@@ -512,16 +477,11 @@ const moonshotaiCnAdapter = moonshotAdapter("moonshotai-cn", "https://api.moonsh
 const xiaomiTokenPlanCnAdapter: BalanceAdapter = {
 	providerId: "xiaomi-token-plan-cn",
 	label: "MiMo Token Plan",
-	// 订阅制且无等效单价：显示会话 token 消耗 + 缓存命中率
+	// 订阅制且无等效单价：展示会话 token 消耗
 	rateText(ctx, _now) {
 		const t = sumSessionUsage(ctx);
 		if (t.turns === 0) return null;
-		const hit = cacheEstimate(t);
-		const parts: RateTextPart[] = [
-			{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" },
-		];
-		if (hit) parts.push({ text: hit, color: "success" });
-		return parts;
+		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
 	},
 	async fetch(_ctx) {
 		return {
