@@ -8,7 +8,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 
 | 命令 | 作用 | 出处 |
 |---|---|---|
-| `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix（install.js:49） | install.js |
+| `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix（install.js:71） | install.js |
 | `node install.js --dry-run`（或 `-n`） | 试运行，只打印不修改 | install.js:30 |
 | `npx typescript --noEmit --strict --module esnext --moduleResolution bundler --target es2022 --skipLibCheck extensions/<file>.ts` | 扩展语法检查（无 tsconfig；`TS2307`/`TS2591`/`TS7006` 报错是缺 node_modules 所致，可忽略） | 本仓库惯例 |
 
@@ -33,10 +33,10 @@ docs/deepseek/      # DeepSeek 官方文档提取（api.md / pricing.md / thinki
 ## 架构要点
 
 - **安装模型**：仓库即源码，`install.js` 按扩展名（`.ts`/`.json`/`.wav`）复制到 `~/.pi/agent/` 下的 `themes/`、`extensions/`、`sounds/`；改扩展后必须重跑 install.js + pi 内 `/reload`。
-- **扩展间联动**：`task-alert.ts` 不直接操作 HUD，只在 `agent_settled` 时通过 `pi.events` 广播 `task-alert:done`；`hud.ts` 订阅该事件在行 1 动态区闪烁。两扩展零耦合，hud 缺席时提醒退化为标题动画。
+- **扩展间联动**：`task-alert.ts` 不直接操作 HUD，只在 `agent_settled` 时通过 `pi.events` 广播 `task-alert:done`（task-alert.ts:101）；`claude-it.ts` 同理广播 `claude-it:init-progress` 汇报 /init 进度；`hud.ts` 订阅两个事件（hud.ts:1120/1135）在行 1 动态区显示。扩展间零耦合，hud 缺席时各自退化为标题动画/无进度显示。
 - **hud 余额适配**：`BALANCE_ADAPTERS` 注册表（hud.ts:572）按 providerId 逐一适配；DeepSeek 消耗按 `DEEPSEEK_PRICES`（hud.ts:179）人民币定价直算，峰谷开关 `DEEPSEEK_PEAK_PRICING`（hud.ts:186，当前 false）；其余供应商 USD × `EXCHANGE_RATE`。
 - **explore 子代理**：跑 pi-agent-core 官方 `agentLoop`，认证走 `ctx.modelRegistry.getApiKeyAndHeaders()`；子模型优先 `PREFERRED_MODELS`（explore-agent.ts:32），兜底选已认证最低价模型。
-- **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:33-37）。
+- **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；进度经 `pi.events` 广播由 hud 行 1 动态区显示。同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:33-39）。
 
 ## 代码风格与约定
 

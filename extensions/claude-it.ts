@@ -214,7 +214,9 @@ export default function (pi: ExtensionAPI) {
 					pi.events.emit("claude-it:init-progress", { toolCalls });
 				});
 				ctx.ui.notify(
-					result.ok ? `init 完成：${result.summary}` : `init 未完成：${result.summary}`,
+					result.ok
+						? `init 完成：${result.summary}（/reload 后生效）`
+						: `init 未完成：${result.summary}`,
 					result.ok ? "info" : "warning",
 				);
 			} finally {
