@@ -3,18 +3,44 @@
  *
  * - /exit 命令（/quit 的别名）与直接输入 exit 退出
  * - 对话进行中按 Ctrl+C 取消当前 agent 操作
- * - /init 命令：分析代码库并生成/更新 AGENTS.md（已有 CLAUDE.md 会被归并进来）
+ * - /init 命令：后台独立上下文中分析代码库并生成/更新 AGENTS.md
+ *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话）
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	createBashTool,
+	createEditTool,
+	createReadOnlyTools,
+	createWriteTool,
+} from "@earendil-works/pi-coding-agent";
+import {
+	runAgentLoop,
+	type AgentLoopConfig,
+	type AgentMessage,
+	type StreamFn,
+} from "@earendil-works/pi-agent-core";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
+import type { Message, Model } from "@earendil-works/pi-ai";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 // ---------------------------------------------------------------------------
-// /init：分析代码库，生成上下文文件（对齐 Claude Code 的 /init）
+// /init：后台独立上下文分析代码库，生成 AGENTS.md（对齐 Claude Code 的 /init）
 // ---------------------------------------------------------------------------
 
 /** 唯一的上下文文件目标：AGENTS.md（pi 原生读取；CLAUDE.md 只会被归并，不会被生成） */
 const CONTEXT_FILE = "AGENTS.md";
+/** init 子代理最多多少轮（一轮 = 一次 LLM 调用 + 其工具调用） */
+const INIT_MAX_TURNS = 30;
+/** init 子代理超时 */
+const INIT_TIMEOUT_MS = 10 * 60_000;
+/** init 子代理单次输出上限 */
+const INIT_MAX_TOKENS = 8192;
+/** 状态栏进度条目的 key */
+const INIT_STATUS_KEY = "claude-it-init";
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyModel = Model<any>;
 
 function buildInitPrompt(mode: "create" | "merge" | "overwrite"): string {
 	const modeInstructions = {
@@ -26,15 +52,15 @@ function buildInitPrompt(mode: "create" | "merge" | "overwrite"): string {
 			`当前目录已存在 ${CONTEXT_FILE}，但用户要求完全重写：通读现有内容了解项目后，从零生成一份全新的 ${CONTEXT_FILE} 覆盖它。`,
 	};
 	return [
-		`请分析当前代码库并生成上下文文件 ${CONTEXT_FILE}（对齐 Claude Code /init 的行为）。`,
+		`分析当前代码库并生成上下文文件 ${CONTEXT_FILE}（对齐 Claude Code /init 的行为）。`,
 		"",
 		modeInstructions[mode],
 		"",
 		"分析方法：",
-		"1. 先看根目录清单、README、package.json / pyproject.toml / go.mod / Cargo.toml 等清单文件，确定项目用途、技术栈与包管理器",
+		"1. 先看根目录清单（ls）、README、package.json / pyproject.toml / go.mod / Cargo.toml 等清单文件，确定项目用途、技术栈与包管理器",
 		"2. 梳理目录结构，识别入口文件、核心模块、测试目录与配置文件",
 		"3. 从脚本定义、Makefile、CI 配置中提取真实的构建 / 测试 / lint / 运行命令",
-		"4. 代码库较大时，优先用 explore 工具派子代理并行探索，不要自己逐文件读",
+		"4. 大代码库用 grep / find 定位关键文件后精读片段，配合 bash（如 git log 看提交风格）；不要逐文件通读",
 		"",
 		`${CONTEXT_FILE} 应包含的章节（按需取舍，不需要的章节省略）：`,
 		"- 项目概述：一句话说明这是什么、主要技术栈",
@@ -49,29 +75,163 @@ function buildInitPrompt(mode: "create" | "merge" | "overwrite"): string {
 		"- 只写经过验证的信息，命令必须真实存在于项目配置中，禁止编造；不确定的内容标注「待确认」",
 		"- 保持精炼（一般不超过 150 行），用路径引用代替粘贴代码原文",
 		"- 内容使用中文（代码、命令、标识符除外）",
-		`- 最后用 write 工具把结果写入 ${CONTEXT_FILE}，并用一两句话总结写入了什么`,
+		`- 用 write 工具把结果写入 ${CONTEXT_FILE}；最后一条回复用一两句话总结写入了什么（会展示给用户）`,
 	].join("\n");
 }
 
 /** 两者同时存在时：让 AI 合并为一份 AGENTS.md 并删除 CLAUDE.md */
 function buildClaudeMergePrompt(): string {
 	return [
-		"当前目录同时存在 AGENTS.md 和 CLAUDE.md 两份上下文文件，请将它们合并为一份 AGENTS.md（pi 原生读取 AGENTS.md，不再需要 CLAUDE.md）。",
+		"当前目录同时存在 AGENTS.md 和 CLAUDE.md 两份上下文文件，将它们合并为一份 AGENTS.md（pi 原生读取 AGENTS.md，不再需要 CLAUDE.md）。",
 		"",
 		"合并步骤：",
 		"1. 完整读取 AGENTS.md 和 CLAUDE.md",
 		"2. 对比两份内容：保留仍然准确的信息（人工编写的约定优先），冲突处以更准确/更新者为准，去重",
-		"3. 同时按 /init 的标准补全：分析代码库（清单文件、scripts、目录结构、CI 配置），更新过时内容、补充缺失章节（常用命令必须真实存在，禁止编造；大项目优先用 explore 子代理探索）",
+		"3. 同时按 /init 的标准补全：分析代码库（清单文件、scripts、目录结构、CI 配置），更新过时内容、补充缺失章节（常用命令必须真实存在，禁止编造）",
 		"4. 用 write 工具把合并结果写入 AGENTS.md（中文，精炼，一般不超过 150 行）",
 		"5. 用 bash 删除 CLAUDE.md（Windows 环境用 del 或 Remove-Item，按当前 shell 而定）",
-		"6. 用一两句话总结：保留了什么、更新了什么、删除了 CLAUDE.md",
+		"6. 最后一条回复用一两句话总结：保留了什么、更新了什么、删除了 CLAUDE.md（会展示给用户）",
 	].join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// init 子代理（独立上下文，后台运行）
+// ---------------------------------------------------------------------------
+
+/** 标准消息直通转换：子代理会话里只有 user/assistant/toolResult */
+function convertToLlm(messages: AgentMessage[]): Message[] {
+	return messages.filter(
+		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+	) as Message[];
+}
+
+function buildInitSystemPrompt(cwd: string): string {
+	// 固定指令在前、cwd 在后，利于 provider 端 prompt 缓存命中
+	return [
+		"你是 init 代理，负责分析代码库并生成/更新 AGENTS.md 上下文文件。",
+		"你拥有工具：read / ls / grep / find（探索）、write / edit（写文件）、bash（辅助命令，如 git log、删除文件）。",
+		"要求：高效探索（grep/find 定位 + 精读片段，不逐文件通读）；只写经过验证的信息；完成后的一两条总结要精炼。",
+		"",
+		`工作目录：${cwd}`,
+	].join("\n");
+}
+
+interface InitRunResult {
+	ok: boolean;
+	summary: string;
+}
+
+async function runInitAgent(
+	ctx: ExtensionContext,
+	model: AnyModel,
+	prompt: string,
+	signal: AbortSignal,
+	onToolCall: () => void,
+): Promise<InitRunResult> {
+	const tools = [
+		...createReadOnlyTools(ctx.cwd),
+		createWriteTool(ctx.cwd),
+		createEditTool(ctx.cwd),
+		createBashTool(ctx.cwd),
+	];
+
+	// 每次 LLM 调用前从 pi 的模型注册表取最新认证（兼容 OAuth 刷新）
+	const streamFn: StreamFn = async (m, c, options) => {
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
+		if (!auth.ok) throw new Error(`认证失败：${auth.error}`);
+		return streamSimple(m, c, {
+			...options,
+			apiKey: auth.apiKey ?? options?.apiKey,
+			headers: { ...auth.headers, ...options?.headers },
+		});
+	};
+
+	let turns = 0;
+	const config: AgentLoopConfig = {
+		model,
+		maxTokens: INIT_MAX_TOKENS,
+		convertToLlm,
+		shouldStopAfterTurn: () => ++turns >= INIT_MAX_TURNS,
+	};
+
+	try {
+		const userMessage: AgentMessage = { role: "user", content: prompt, timestamp: Date.now() };
+		const newMessages = await runAgentLoop(
+			[userMessage],
+			{ systemPrompt: buildInitSystemPrompt(ctx.cwd), messages: [], tools },
+			config,
+			(event) => {
+				if (event.type === "tool_execution_start") onToolCall();
+			},
+			signal,
+			streamFn,
+		);
+
+		for (let i = newMessages.length - 1; i >= 0; i--) {
+			const m = newMessages[i];
+			if (m.role !== "assistant") continue;
+			const text = m.content
+				.filter((b) => b.type === "text")
+				.map((b) => (b as { type: "text"; text: string }).text)
+				.join("\n")
+				.trim();
+			if (text) return { ok: true, summary: text };
+		}
+		return { ok: false, summary: "init 代理未产出总结（可能预算用尽）" };
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		return { ok: false, summary: msg.includes("abort") ? "已中止（超时或会话结束）" : msg };
+	}
+}
+
 export default function (pi: ExtensionAPI) {
-	// /init：分析代码库并生成/更新 AGENTS.md
+	// 同时只允许一个后台 init；会话关闭时中止
+	let initAbort: AbortController | null = null;
+
+	function launchBackgroundInit(ctx: ExtensionContext, prompt: string, label: string) {
+		if (initAbort) {
+			ctx.ui.notify("已有后台 init 进行中，请等待完成", "warning");
+			return;
+		}
+		const model = ctx.model as AnyModel | undefined;
+		if (!model) {
+			ctx.ui.notify("当前没有可用模型，无法启动后台 init", "error");
+			return;
+		}
+
+		const controller = new AbortController();
+		initAbort = controller;
+		const timer = setTimeout(() => controller.abort(new Error("init 超时")), INIT_TIMEOUT_MS);
+
+		let toolCalls = 0;
+		const modelName = `${model.provider}/${model.id}`;
+		const report = () =>
+			ctx.ui.setStatus(INIT_STATUS_KEY, `init ${label}中（${modelName}，${toolCalls} 次工具调用）`);
+		report();
+
+		void (async () => {
+			try {
+				const result = await runInitAgent(ctx, model, prompt, controller.signal, () => {
+					toolCalls++;
+					report();
+				});
+				ctx.ui.notify(
+					result.ok ? `init 完成：${result.summary}` : `init 未完成：${result.summary}`,
+					result.ok ? "info" : "warning",
+				);
+			} finally {
+				clearTimeout(timer);
+				ctx.ui.setStatus(INIT_STATUS_KEY, undefined);
+				initAbort = null;
+			}
+		})();
+
+		ctx.ui.notify(`已在后台开始 init（${label}），期间可继续对话`, "info");
+	}
+
+	// /init：分析代码库并生成/更新 AGENTS.md（后台独立上下文）
 	pi.registerCommand("init", {
-		description: "分析代码库，生成或更新 AGENTS.md（已有 CLAUDE.md 会被合并进来）",
+		description: "后台分析代码库，生成或更新 AGENTS.md（已有 CLAUDE.md 会被合并进来）",
 		handler: async (args, ctx) => {
 			if (args?.trim()) {
 				ctx.ui.notify("/init 不接受参数，固定生成 AGENTS.md", "warning");
@@ -85,8 +245,7 @@ export default function (pi: ExtensionAPI) {
 			if (fs.existsSync(claudePath)) {
 				if (fs.existsSync(filePath)) {
 					// 两者都存在：交给 AI 合并
-					ctx.ui.notify("检测到 AGENTS.md 与 CLAUDE.md 并存，开始 AI 合并 …", "info");
-					pi.sendUserMessage(buildClaudeMergePrompt());
+					launchBackgroundInit(ctx, buildClaudeMergePrompt(), "合并 AGENTS.md 与 CLAUDE.md");
 					return;
 				}
 				// 只有 CLAUDE.md：直接重命名为 AGENTS.md，再走常规更新流程
@@ -116,11 +275,8 @@ export default function (pi: ExtensionAPI) {
 				mode = choice.startsWith("完全重写") ? "overwrite" : "merge";
 			}
 
-			ctx.ui.notify(
-				`开始分析代码库并${mode === "create" ? "生成" : mode === "merge" ? "更新" : "重写"} ${CONTEXT_FILE} …`,
-				"info",
-			);
-			pi.sendUserMessage(buildInitPrompt(mode));
+			const label = `${mode === "create" ? "生成" : mode === "merge" ? "更新" : "重写"} ${CONTEXT_FILE}`;
+			launchBackgroundInit(ctx, buildInitPrompt(mode), label);
 		},
 	});
 
@@ -160,5 +316,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		currentCtx = null;
+		// 中止后台 init；runInitAgent 会捕获 abort 并走失败收尾，此时 notify 对已关闭的会话是 no-op
+		initAbort?.abort(new Error("会话结束"));
+		initAbort = null;
 	});
 }
