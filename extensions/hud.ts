@@ -11,7 +11,7 @@
  *   无法用通用模板，因此按供应商逐一适配。
  *   适配器统一返回 BalanceData，未适配的供应商显示占位提示。
  *   目前已适配：
- *     - deepseek（GET /user/balance，充值 + 赠送余额）
+ *     - deepseek（GET /user/balance，充值 + 赠送余额；消耗按官方人民币定价直算，见 DEEPSEEK_PRICES）
  *     - kimi-coding（GET /v1/usages，订阅额度 + 加油包余额）
  *     - moonshotai / moonshotai-cn（GET /v1/users/me/balance，按量付费余额）
  *
@@ -75,7 +75,7 @@ interface SessionUsageTotals {
 	input: number;
 	output: number;
 	cacheRead: number;
-	costTotalUsd: number;
+	costTotalCny: number;
 	turns: number;
 }
 
@@ -84,16 +84,17 @@ function sumSessionUsage(ctx: ExtensionContext): SessionUsageTotals {
 		input: 0,
 		output: 0,
 		cacheRead: 0,
-		costTotalUsd: 0,
+		costTotalCny: 0,
 		turns: 0,
 	};
 	for (const e of ctx.sessionManager.getBranch()) {
 		if (e.type === "message" && e.message.role === "assistant") {
-			const u = (e.message as AssistantMessage).usage;
+			const m = e.message as AssistantMessage;
+			const u = m.usage;
 			t.input += u.input;
 			t.output += u.output;
 			t.cacheRead += u.cacheRead;
-			t.costTotalUsd += u.cost.total;
+			t.costTotalCny += msgCostCny(m);
 			t.turns++;
 		}
 	}
@@ -138,13 +139,66 @@ function computeRate(now: number): number | null {
 	return sum / (windowMs / 60_000);
 }
 
-/** 按量付费：¥/min + 累计 */
+// ---------------------------------------------------------------------------
+// DeepSeek 官方人民币定价（元 / 百万 tokens）
+// 来源：https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
+//   deepseek-v4-flash：缓存命中 ¥0.02，缓存未命中 ¥1，输出 ¥2
+//   deepseek-v4-pro ：缓存命中 ¥0.025，缓存未命中 ¥3，输出 ¥6
+// 扣费规则：扣减费用 = token 消耗量 × 模型单价（命中/未命中/输出分别计价）。
+// ---------------------------------------------------------------------------
+
+interface DeepSeekPrice {
+	cacheHit: number; // 缓存命中输入（元/百万 tokens）
+	cacheMiss: number; // 缓存未命中输入
+	output: number; // 输出
+}
+
+const DEEPSEEK_PRICES: Record<string, DeepSeekPrice> = {
+	"deepseek-v4-flash": { cacheHit: 0.02, cacheMiss: 1, output: 2 },
+	"deepseek-v4-pro": { cacheHit: 0.025, cacheMiss: 3, output: 6 },
+};
+
+// 峰谷定价：官方「即将采用」高峰时段价格 = 平时 2 倍（北京时间每日 9:00-12:00 / 14:00-18:00）。
+// 正式生效前保持 false（避免高估），官方通知上线后改为 true。
+const DEEPSEEK_PEAK_PRICING = false;
+const DEEPSEEK_PEAK_HOURS: Array<[number, number]> = [
+	[9, 12],
+	[14, 18],
+];
+
+function isDeepSeekPeakHour(ts: number): boolean {
+	const hour = new Date(ts + 8 * 3_600_000).getUTCHours(); // 北京时间 = UTC+8
+	return DEEPSEEK_PEAK_HOURS.some(([start, end]) => hour >= start && hour < end);
+}
+
+function deepseekModelKey(modelId: string): string {
+	return modelId.toLowerCase().includes("pro") ? "deepseek-v4-pro" : "deepseek-v4-flash";
+}
+
+/**
+ * DeepSeek 消耗成本（人民币元），按官方定价直算。
+ * pi 已将 prompt_cache_miss_tokens → usage.input、prompt_cache_hit_tokens → usage.cacheRead
+ * 映射，因此直接用 token 数 × 官方单价即可，不再走 pi 的 USD 成本 × 近似汇率。
+ */
+function deepseekCostCny(u: AssistantMessage["usage"], modelId: string, ts: number): number {
+	const p = DEEPSEEK_PRICES[deepseekModelKey(modelId)] ?? DEEPSEEK_PRICES["deepseek-v4-flash"];
+	const peak = DEEPSEEK_PEAK_PRICING && isDeepSeekPeakHour(ts) ? 2 : 1;
+	return ((p.cacheMiss * u.input + p.cacheHit * u.cacheRead + p.output * u.output) * peak) / 1_000_000;
+}
+
+/** 单条 assistant 消息的消耗成本（人民币元）。DeepSeek 用官方人民币定价直算；其余供应商用 pi 成本(USD)×汇率。 */
+function msgCostCny(m: AssistantMessage): number {
+	if (m.provider === "deepseek") return deepseekCostCny(m.usage, m.model, m.timestamp);
+	return m.usage.cost.total * EXCHANGE_RATE;
+}
+
+/** 按量付费：¥/min + 累计（成本均为人民币元：DeepSeek 官方定价直算，其余 USD×EXCHANGE_RATE） */
 function meteredRateText(ctx: ExtensionContext, now: number): RateTextPart[] | null {
 	const t = sumSessionUsage(ctx);
 	if (t.turns === 0) return null;
 	const rate = computeRate(now);
-	const perMin = (rate ?? 0) * EXCHANGE_RATE;
-	const total = t.costTotalUsd * EXCHANGE_RATE;
+	const perMin = rate ?? 0; // 人民币元/分钟（costEvents 记录的是人民币成本增量）
+	const total = t.costTotalCny;
 	return [
 		{ text: `¥${perMin.toFixed(3)}/min`, color: "muted" },
 		{ text: `¥${total.toFixed(2)}`, color: "dim" },
@@ -608,12 +662,12 @@ export default function (pi: ExtensionAPI) {
 		return `${Math.floor(h / 24)}d`;
 	};
 
-	/** 当前会话累计成本（USD）。 */
+	/** 当前会话累计成本（人民币元），供速率事件与 /hud 展示使用。 */
 	function sumCost(ctx: ExtensionContext): number {
 		let total = 0;
 		for (const e of ctx.sessionManager.getBranch()) {
 			if (e.type === "message" && e.message.role === "assistant") {
-				total += (e.message as AssistantMessage).usage.cost.total;
+				total += msgCostCny(e.message as AssistantMessage);
 			}
 		}
 		return total;
@@ -884,7 +938,7 @@ export default function (pi: ExtensionAPI) {
 							const m = e.message as AssistantMessage;
 							input += m.usage.input;
 							output += m.usage.output;
-							cost += m.usage.cost.total;
+							cost += msgCostCny(m);
 						}
 					}
 					const tokensSeg = `${theme.fg("muted", `↑${fmtNum(input)}`)} ${theme.fg("muted", `↓${fmtNum(output)}`)}`;

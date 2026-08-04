@@ -58,7 +58,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 
 | MiMo Token Plan CN | `xiaomi-token-plan-cn` | 无 API | 显示控制台链接 |
 
 - 余额：官方 `GET /user/balance`（DeepSeek：充值 + 赠送）或 `GET /v1/usages`（Kimi：加油包 + 订阅额度），低余额/额度耗尽变色警示。
-- 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot 等按量付费显示 `¥/min + 累计`；Kimi / MiMo 等订阅制显示会话 token 消耗。USD→CNY 汇率在 `hud.ts` 顶部 `EXCHANGE_RATE` 调整。
+- 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot 等按量付费显示 `¥/min + 累计`；Kimi / MiMo 等订阅制显示会话 token 消耗。DeepSeek 按官方人民币定价直算（`hud.ts` 的 `DEEPSEEK_PRICES`：缓存命中 ¥0.02/0.025、未命中 ¥1/3、输出 ¥2/6 每百万 tokens），不再经 USD×汇率；峰谷定价（高峰 2 倍）已预留开关 `DEEPSEEK_PEAK_PRICING`，官方生效后改为 true。其余供应商仍用 pi 成本(USD)×`EXCHANGE_RATE` 换算。
 - 思考折叠：默认折叠（`settings.json` 的 `hideThinkingBlock: true`），折叠标签为动画 `Thinking.` → `Thinking..` → `Thinking...`（随思考过程增长），`Ctrl+T` 切换展开。
 - 命令：`/balance` 手动刷新余额；`/hud` 开关 HUD；`/balance-debug` 调试当前供应商的余额接口（打印认证来源 + 原始 HTTP 响应）。
 
