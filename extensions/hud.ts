@@ -111,8 +111,9 @@ let costEvents: { ts: number; cost: number }[] = [];
 let lastRecordedTotal = 0;
 let startupTime = Date.now();
 
-let tokenEvents: { ts: number; tokens: number }[] = [];
-let lastRecordedTokenTotal = 0;
+let outputTokenEvents: { ts: number; output: number; durationMs: number }[] = [];
+let lastRecordedOutputTotal = 0;
+let turnStartTime: number | null = null;
 
 const fmtNum = (n: number) => {
 	if (n >= 1_000_000) {
@@ -142,15 +143,14 @@ function computeRate(now: number): number | null {
 	return sum / (windowMs / 60_000);
 }
 
-// 订阅制供应商 token 速率统计（tokens / sec）
+// 输出 token 速率统计（output tokens / sec，基于 turn_start ~ turn_end 耗时）
 // ---------------------------------------------------------------------------
 
-function sumTokens(ctx: ExtensionContext): number {
+function sumOutputTokens(ctx: ExtensionContext): number {
 	let total = 0;
 	for (const e of ctx.sessionManager.getBranch()) {
 		if (e.type === "message" && e.message.role === "assistant") {
-			const u = (e.message as AssistantMessage).usage;
-			total += u.input + u.output + u.cacheRead;
+			total += (e.message as AssistantMessage).usage.output;
 		}
 	}
 	return total;
@@ -161,9 +161,16 @@ function computeTokenRate(now: number): number | null {
 	if (elapsed < MIN_WINDOW_MS) return null;
 	const windowMs = Math.min(elapsed, RATE_WINDOW_MS);
 	const cutoff = now - windowMs;
-	let sum = 0;
-	for (const e of tokenEvents) if (e.ts >= cutoff) sum += e.tokens;
-	return sum / (windowMs / 1000);
+	let tokens = 0,
+		durationMs = 0;
+	for (const e of outputTokenEvents) {
+		if (e.ts >= cutoff) {
+			tokens += e.output;
+			durationMs += e.durationMs;
+		}
+	}
+	if (durationMs <= 0) return 0;
+	return tokens / (durationMs / 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,14 +1057,16 @@ export default function (pi: ExtensionAPI) {
 		// 重置速率统计（避免 resume 旧会话时把历史成本当成首轮增量）
 		startupTime = Date.now();
 		lastRecordedTotal = sumCost(ctx);
-		lastRecordedTokenTotal = sumTokens(ctx);
+		lastRecordedOutputTotal = sumOutputTokens(ctx);
 		costEvents = [];
-		tokenEvents = [];
+		outputTokenEvents = [];
+		turnStartTime = null;
 		if (ctx.mode !== "tui") return;
 		installFooter(ctx);
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
+		turnStartTime = Date.now();
 		startThinkingAnimation(ctx);
 	});
 
@@ -1072,15 +1081,17 @@ pi.on("turn_end", async (_event, ctx) => {
 			const cutoff = Date.now() - RATE_WINDOW_MS;
 			costEvents = costEvents.filter((e) => e.ts >= cutoff);
 		}
-		// 记录本 turn token 增量，用于订阅制供应商的 tokens/sec 速率
-		const tokenTotal = sumTokens(ctx);
-		const tokenDelta = tokenTotal - lastRecordedTokenTotal;
-		lastRecordedTokenTotal = tokenTotal;
-		if (tokenDelta > 0) {
-			tokenEvents.push({ ts: Date.now(), tokens: tokenDelta });
+		// 记录本 turn 输出 token 与耗时，用于第 2 行的 output tok/s 速率
+		const outputTotal = sumOutputTokens(ctx);
+		const outputDelta = outputTotal - lastRecordedOutputTotal;
+		lastRecordedOutputTotal = outputTotal;
+		if (outputDelta > 0 && turnStartTime != null) {
+			const durationMs = Math.max(100, Date.now() - turnStartTime);
+			outputTokenEvents.push({ ts: Date.now(), output: outputDelta, durationMs });
 			const cutoff = Date.now() - RATE_WINDOW_MS;
-			tokenEvents = tokenEvents.filter((e) => e.ts >= cutoff);
+			outputTokenEvents = outputTokenEvents.filter((e) => e.ts >= cutoff);
 		}
+		turnStartTime = null;
 		if (!footerInstalled) return;
 		if (Date.now() - lastAutoRefresh > TURN_REFRESH_THROTTLE_MS) void refreshBalance(ctx);
 		void refreshGitStats(ctx);
