@@ -1130,6 +1130,15 @@ pi.on("turn_end", async (_event, ctx) => {
 
 	pi.events.on("task-alert:clear", () => stopTaskAlert());
 
+	// ---- init 进度（订阅 claude-it 的 pi.events 事件，显示在行 1 动态区） ----
+	// 同一事件总线解耦模式：claude-it 只负责跑后台 init，hud 只负责呈现。
+	pi.events.on("claude-it:init-progress", (data) => {
+		const n = (data as { toolCalls?: number })?.toolCalls ?? 0;
+		// priority 80：低于任务完成提醒（90）与指令模式提示（100）
+		setDynamic("init", `⚙ init · ${n}`, "warning", 80);
+	});
+	pi.events.on("claude-it:init-clear", () => clearDynamic("init"));
+
 	// ---- 命令 ----
 	pi.registerCommand("balance", {
 		description: "立即刷新账户余额 / plan 余量并通知",

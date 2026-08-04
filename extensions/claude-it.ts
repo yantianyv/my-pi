@@ -4,7 +4,8 @@
  * - /exit 命令（/quit 的别名）与直接输入 exit 退出
  * - 对话进行中按 Ctrl+C 取消当前 agent 操作
  * - /init 命令：后台独立上下文中分析代码库并生成/更新 AGENTS.md
- *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话）
+ *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话；
+ *   进度经 pi.events 广播「claude-it:init-progress」，由 hud 在行 1 动态区显示）
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -36,8 +37,6 @@ const INIT_MAX_TURNS = 30;
 const INIT_TIMEOUT_MS = 10 * 60_000;
 /** init 子代理单次输出上限 */
 const INIT_MAX_TOKENS = 8192;
-/** 状态栏进度条目的 key */
-const INIT_STATUS_KEY = "claude-it-init";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyModel = Model<any>;
@@ -205,15 +204,14 @@ export default function (pi: ExtensionAPI) {
 
 		let toolCalls = 0;
 		const modelName = `${model.provider}/${model.id}`;
-		const report = () =>
-			ctx.ui.setStatus(INIT_STATUS_KEY, `init ${label}中（${modelName}，${toolCalls} 次工具调用）`);
-		report();
+		// 进度经 pi.events 广播，由 hud 等展示层订阅后在行 1 动态区显示（与任务完成提醒同一通道）
+		pi.events.emit("claude-it:init-progress", { toolCalls });
 
 		void (async () => {
 			try {
 				const result = await runInitAgent(ctx, model, prompt, controller.signal, () => {
 					toolCalls++;
-					report();
+					pi.events.emit("claude-it:init-progress", { toolCalls });
 				});
 				ctx.ui.notify(
 					result.ok ? `init 完成：${result.summary}` : `init 未完成：${result.summary}`,
@@ -221,12 +219,12 @@ export default function (pi: ExtensionAPI) {
 				);
 			} finally {
 				clearTimeout(timer);
-				ctx.ui.setStatus(INIT_STATUS_KEY, undefined);
+				pi.events.emit("claude-it:init-clear", {});
 				initAbort = null;
 			}
 		})();
 
-		ctx.ui.notify(`已在后台开始 init（${label}），期间可继续对话`, "info");
+		ctx.ui.notify(`已在后台开始 init（${label}，${modelName}）`, "info");
 	}
 
 	// /init：分析代码库并生成/更新 AGENTS.md（后台独立上下文）

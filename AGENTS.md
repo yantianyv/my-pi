@@ -8,8 +8,8 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 
 | 命令 | 作用 | 出处 |
 |---|---|---|
-| `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix | install.js:78 |
-| `node install.js --dry-run`（或 `-n`） | 试运行，只打印不修改 | install.js:28 |
+| `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix（install.js:49） | install.js |
+| `node install.js --dry-run`（或 `-n`） | 试运行，只打印不修改 | install.js:30 |
 | `npx typescript --noEmit --strict --module esnext --moduleResolution bundler --target es2022 --skipLibCheck extensions/<file>.ts` | 扩展语法检查（无 tsconfig；`TS2307`/`TS2591`/`TS7006` 报错是缺 node_modules 所致，可忽略） | 本仓库惯例 |
 
 无测试、无 lint、无 CI。安装后在 pi 里 `/reload` 热加载扩展生效。
@@ -20,7 +20,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 install.js          # 安装脚本：复制 .ts/.json/.wav 到 ~/.pi/agent/ 对应子目录
 README.md           # 项目说明（含 HUD 图例、各扩展用法、卸载方法）
 extensions/         # pi 扩展（安装目标 ~/.pi/agent/extensions/）
-  claude-it.ts      #   Claude Code 风格：/init 生成 AGENTS.md、/exit 别名、Ctrl+C 取消 turn
+  claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn
   explore-agent.ts  #   explore 工具：只读子代理并行探索代码库（read/ls/grep/find）
   hud.ts            #   3 行 HUD：git 状态 / 模型+token 速率 / 余额+消耗速率
   task-alert.ts     #   任务完成提醒：提示音 + 标题动画 + 事件总线广播
@@ -35,7 +35,8 @@ docs/deepseek/      # DeepSeek 官方文档提取（api.md / pricing.md / thinki
 - **安装模型**：仓库即源码，`install.js` 按扩展名（`.ts`/`.json`/`.wav`）复制到 `~/.pi/agent/` 下的 `themes/`、`extensions/`、`sounds/`；改扩展后必须重跑 install.js + pi 内 `/reload`。
 - **扩展间联动**：`task-alert.ts` 不直接操作 HUD，只在 `agent_settled` 时通过 `pi.events` 广播 `task-alert:done`；`hud.ts` 订阅该事件在行 1 动态区闪烁。两扩展零耦合，hud 缺席时提醒退化为标题动画。
 - **hud 余额适配**：`BALANCE_ADAPTERS` 注册表（hud.ts:572）按 providerId 逐一适配；DeepSeek 消耗按 `DEEPSEEK_PRICES`（hud.ts:179）人民币定价直算，峰谷开关 `DEEPSEEK_PEAK_PRICING`（hud.ts:186，当前 false）；其余供应商 USD × `EXCHANGE_RATE`。
-- **explore 子代理**：跑 pi-agent-core 官方 `agentLoop`，认证走 `ctx.modelRegistry.getApiKeyAndHeaders()`；子模型优先 `PREFERRED_MODELS`，兜底选已认证最低价模型。
+- **explore 子代理**：跑 pi-agent-core 官方 `agentLoop`，认证走 `ctx.modelRegistry.getApiKeyAndHeaders()`；子模型优先 `PREFERRED_MODELS`（explore-agent.ts:32），兜底选已认证最低价模型。
+- **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:33-37）。
 
 ## 代码风格与约定
 
