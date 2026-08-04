@@ -4,7 +4,6 @@
  * 行 1  git：分支 / 暂存(+N) / 工作区(~N) / 未跟踪(?N) / 领先落后 / 项目名
  * 行 2  模型：供应商 / 模型 / 思考级别 + 用量：token / 成本 / 上下文进度条
  * 行 3  账户：余额 / plan 余量 + 消耗速率（固定此行）
- * 行 3  账户：余额 / plan 余量（固定此行）
  *
  * 行 3 计费适配说明：
  *   不同供应商计费方式差异很大（按量充值余额 vs 订阅 plan 余量 vs 订阅+加油包余额），
@@ -14,6 +13,7 @@
  *     - deepseek（GET /user/balance，充值 + 赠送余额；消耗按官方人民币定价直算，见 DEEPSEEK_PRICES）
  *     - kimi-coding（GET /v1/usages，订阅额度 + 加油包余额）
  *     - moonshotai / moonshotai-cn（GET /v1/users/me/balance，按量付费余额）
+ *     - xiaomi-token-plan-cn（无公开余额 API，显示控制台链接）
  *
  * 命令：
  *   /balance  立即刷新余额并通知
