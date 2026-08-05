@@ -23,7 +23,6 @@ const GIT_TAIL_LINES = 10;
 const TSC_MAX_ERRORS = 20;
 const HELP_MAX_LINES = 40;
 const HELP_HEAD_LINES = 35;
-const CMD_SNIPPET_LEN = 40;
 
 function truncate(text: string, maxLines: number, headLines: number, tailLines: number): string {
 	const lines = text.split("\n");
@@ -59,12 +58,7 @@ function saveOriginal(command: string, text: string): string {
 		String(now.getMinutes()).padStart(2, "0"),
 		String(now.getSeconds()).padStart(2, "0"),
 	].join("");
-	const snippet = command
-		.trim()
-		.slice(0, CMD_SNIPPET_LEN)
-		.replace(/[<>:"/\\|?*\n\r]/g, "_")
-		.replace(/\s+/g, " ");
-	const filename = `${ts}__${snippet}.log`;
+	const filename = `${ts}.log`;
 	const filepath = path.join(TMP_DIR, filename);
 	fs.writeFileSync(filepath, text, "utf8");
 	return filepath;
