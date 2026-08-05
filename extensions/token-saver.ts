@@ -9,6 +9,7 @@
  * - 仅当输出真正被修改时才写文件，干净输出零开销
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -58,7 +59,9 @@ function saveOriginal(command: string, text: string): string {
 		String(now.getMinutes()).padStart(2, "0"),
 		String(now.getSeconds()).padStart(2, "0"),
 	].join("");
-	const filename = `${ts}.log`;
+	// 内容哈希：同秒内不同输出互不覆盖，相同输出复用同一文件
+	const hash = crypto.createHash("md5").update(text).digest("hex").slice(0, 8);
+	const filename = `${ts}_${hash}.log`;
 	const filepath = path.join(TMP_DIR, filename);
 	fs.writeFileSync(filepath, text, "utf8");
 	return filepath;
