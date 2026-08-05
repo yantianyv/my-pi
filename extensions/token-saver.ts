@@ -54,11 +54,9 @@ function saveOriginal(command: string, text: string): string {
 		String(now.getFullYear()).slice(-2),
 		String(now.getMonth() + 1).padStart(2, "0"),
 		String(now.getDate()).padStart(2, "0"),
-		String(now.getHours()).padStart(2, "0"),
-		String(now.getMinutes()).padStart(2, "0"),
 	].join("");
 	// 内容哈希：同秒内不同输出互不覆盖，相同输出复用同一文件
-	const hash = crypto.createHash("md5").update(text).digest("hex").slice(0, 8);
+	const hash = crypto.createHash("md5").update(text).digest("hex").slice(0, 12);
 	const filename = `${ts}_${hash}.log`;
 	const filepath = path.join(TMP_DIR, filename);
 	fs.writeFileSync(filepath, text, "utf8");
