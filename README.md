@@ -142,4 +142,4 @@ rm ~/.pi/agent/sounds/task_complete.wav
 
 - `templates/` 是自定义 provider 的起步模板（OpenAI-compatible 和 OAuth），放在 `.pi/extensions/` 外避免被 pi 自动加载成假 provider；需要时把对应文件复制到 `~/.pi/agent/extensions/` 再改。
 - `docs/deepseek/` 是从官网提取的原始文档文本，供 deepseek 适配开发时查价格、思考模式、API 细节。
-- `tools/kimi-web-search.mjs` 是独立小工具（不经 install.js 安装）：`node tools/kimi-web-search.mjs "问题"` 即可联网搜索；token 过期（约 15 分钟）时先用一下 pi 让它自动刷新。
+
