@@ -22,6 +22,7 @@ README.md           # 项目说明（含 HUD 图例、各扩展用法、卸载�
 extensions/         # pi 扩展（安装目标 ~/.pi/agent/extensions/）
   claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn
   explore-agent.ts  #   explore 工具：只读子代理并行探索代码库（read/ls/grep/find）
+  token-saver.ts    #   上下文 token 节省器：自动清洗 bash 工具的冗余输出（git/npm/tsc/pip/docker/--help）
   hud.ts            #   3 行 HUD：git 状态 / 模型+token 速率 / 余额+消耗速率
   task-alert.ts     #   任务完成提醒：提示音 + 标题动画 + 事件总线广播
   web-search.ts     #   联网搜索工具：web_search 自定义工具，agent 可调（kimi-coding 后端）
