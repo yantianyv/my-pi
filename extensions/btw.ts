@@ -99,10 +99,15 @@ type AnyModel = Model<any>;
 
 /** 从消息中提取纯文本（剥离 tool_use / thinking 等非文本块） */
 function extractTextBlocks(m: AgentMessage): string {
-	if (typeof m.content === "string") return m.content.trim();
-	if (Array.isArray(m.content)) {
-		return m.content
-			.filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string")
+	// AgentMessage 联合中部分变体（如 BashExecutionMessage）无 content，类型上断言访问
+	const content = (m as { content?: string | unknown[] }).content;
+	if (typeof content === "string") return content.trim();
+	if (Array.isArray(content)) {
+		return content
+			.filter((b): b is { type: "text"; text: string } => {
+				const block = b as { type?: unknown; text?: unknown };
+				return block.type === "text" && typeof block.text === "string";
+			})
 			.map((b) => b.text)
 			.join("\n")
 			.trim();
@@ -124,7 +129,7 @@ function mergeAdjacent(messages: Message[]): Message[] {
 		if (blocks.length === 0) continue; // 丢弃无文本消息
 		const last = out[out.length - 1];
 		if (last && last.role === msg.role) {
-			const sep = msg.role === "user" ? [{ type: "text", text: "\n\n" }] : [];
+			const sep = msg.role === "user" ? [{ type: "text" as const, text: "\n\n" }] : [];
 			last.content = [...asTextBlocks(last.content), ...sep, ...blocks];
 		} else {
 			out.push({ ...msg, content: blocks });
@@ -158,11 +163,11 @@ function buildContextMessages(sessionMessages: AgentMessage[], ctx: ExtensionCom
 	for (const m of sessionMessages) {
 		if (m.role === "user" || m.role === "assistant") {
 			const text = extractTextBlocks(m);
-			if (text) cleaned.push({ role: m.role, content: [{ type: "text", text }] });
+			if (text) cleaned.push({ role: m.role, content: [{ type: "text", text }], timestamp: m.timestamp } as Message);
 		} else if (m.role === "toolResult") {
 			const text = extractTextBlocks(m).slice(0, BTW_MAX_TOOL_RESULT_CHARS);
 			if (text) {
-				cleaned.push({ role: "user", content: [{ type: "text", text: `[工具 ${m.toolName} 输出]\n${text}` }] });
+				cleaned.push({ role: "user", content: [{ type: "text", text: `[工具 ${m.toolName} 输出]\n${text}` }], timestamp: Date.now() } as Message);
 			}
 		}
 	}
@@ -693,7 +698,10 @@ async function runBtwTurn(
 	const tools = createReadOnlyTools(ctx.cwd);
 
 	// 历史 = 主会话上下文（清洗）+ 面板内历次问答；当前问题作为本次 prompts
-	const sessionMessages = ctx.sessionManager.buildSessionContext().messages;
+	// buildSessionContext 运行时存在（agent-session 内部调用），仅类型未在 ReadonlySessionManager 暴露
+	const sessionMessages = (
+		ctx.sessionManager as unknown as { buildSessionContext(): { messages: AgentMessage[] } }
+	).buildSessionContext().messages;
 	const context = buildContextMessages(sessionMessages, ctx);
 	const history = mergeAdjacent([...context, ...thread]).slice(-BTW_MAX_TOTAL_MESSAGES);
 	const userMessage: AgentMessage = { role: "user", content: question, timestamp: Date.now() };
@@ -802,8 +810,8 @@ export default function (pi: ExtensionAPI) {
 				if (controller.signal.aborted) return;
 				overlayRef?.startQuestion(question);
 				void runBtwTurn(ctx, model, thread, question, controller.signal, overlayRef!, (answer) => {
-					thread.push({ role: "user", content: [{ type: "text", text: question }] });
-					thread.push({ role: "assistant", content: [{ type: "text", text: answer }] });
+					thread.push({ role: "user", content: [{ type: "text", text: question }], timestamp: Date.now() } as Message);
+					thread.push({ role: "assistant", content: [{ type: "text", text: answer }], timestamp: Date.now() } as Message);
 					// 控制面板线程长度：超过上限丢弃最早轮次
 					if (thread.length > BTW_MAX_THREAD_TURNS * 2) {
 						thread.splice(0, thread.length - BTW_MAX_THREAD_TURNS * 2);

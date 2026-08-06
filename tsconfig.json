@@ -1,0 +1,25 @@
+{
+	"compilerOptions": {
+		"strict": true,
+		"noEmit": true,
+		"module": "esnext",
+		"moduleResolution": "bundler",
+		"target": "es2022",
+		"skipLibCheck": true,
+		"allowJs": false,
+		"esModuleInterop": true,
+		"resolveJsonModule": true,
+		// 运行时由 pi 经 jiti 加载，tsc 仅作静态检查；
+		// 以下 paths 把 pi 全局安装的包映射到本地检查，避免 TS2307。
+		"paths": {
+			"@earendil-works/pi-coding-agent": ["C:/Users/yanti/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+			"@earendil-works/pi-agent-core": ["C:/Users/yanti/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"],
+			"@earendil-works/pi-ai": ["C:/Users/yanti/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
+			"@earendil-works/pi-ai/compat": ["C:/Users/yanti/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/compat.d.ts"],
+			"@earendil-works/pi-tui": ["C:/Users/yanti/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.d.ts"],
+			"typebox": ["C:/Users/yanti/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.d.mts"]
+		},
+		"typeRoots": ["C:/Users/yanti/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/node_modules/@types"]
+	},
+	"include": ["extensions/**/*.ts"]
+}

@@ -10,7 +10,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 |---|---|---|
 | `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix（install.js:71） | install.js |
 | `node install.js --dry-run`（或 `-n`） | 试运行，只打印不修改 | install.js:30 |
-| `npx typescript --noEmit --strict --module esnext --moduleResolution bundler --target es2022 --skipLibCheck extensions/<file>.ts` | 扩展语法检查（无 tsconfig；`TS2307`/`TS2591`/`TS7006` 报错是缺 node_modules 所致，可忽略） | 本仓库惯例 |
+| `npx typescript -p tsconfig.json` | 全扩展类型检查（`tsconfig.json` 用 `paths` 把 pi 全局安装的 `@earendil-works/*` / `typebox` 映射到本地检查，当前 0 报错；pi 升级后若路径失效重跑 `node install.js` 或更新 paths） | 本仓库惯例 |
 
 无测试、无 lint、无 CI。安装后在 pi 里 `/reload` 热加载扩展生效。
 
@@ -50,7 +50,7 @@ docs/deepseek/      # DeepSeek 官方文档提取（api.md / pricing.md / thinki
 ## 注意事项
 
 - **改完扩展不重装不生效**：源码在仓库，运行时是 `~/.pi/agent/extensions/` 的副本，两处易不同步
-- 扩展运行时拿不到 `node_modules` 里的类型包，本地 tsc 报的模块解析类错误（TS2307/TS2591/TS7006）不影响 jiti 实际加载
+- `tsconfig.json` 仅服务本地 tsc 检查：把 pi 全局安装目录的 `@earendil-works/*` / `typebox` 通过 `paths` 映射进来（路径写死为 Windows 全局 npm 目录），运行时仍由 jiti 直接加载，不经 tsc；pi 升级或换机器后按需更新 `paths`
 - README 末尾「说明」一节提到的 `templates/` 目录已在 dab2af6 删除，该段说明已过时
 - `install.js` 会修改全局 `~/.pi/agent/settings.json`（theme 字段），跑 `--dry-run` 先预览
 - `docs/deepseek/` 是参考资料，不要当作可执行配置；`sounds/` 只放提示音
