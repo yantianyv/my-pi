@@ -7,6 +7,8 @@
  * - m 一键转正：把全部 Q/A 打包成 [btw 转交] 消息发给主 agent 继续处理
  * - 携带当前会话上下文（buildSessionContext，含压缩结果），能回答与当前
  *   任务相关的问题（如「刚才为什么选这个方案」「改了哪些文件」）
+ * - 始终携带只读工具（read / ls / grep / find，无 bash）：问「xx 函数在哪
+ *   定义」「这个配置是干嘛的」类问题可直接查证代码，只读不写
  * - 流式显示回答；Esc 关闭并中止请求；↑↓ 滚动查看完整回答
  *
  * 实现要点：
@@ -14,21 +16,30 @@
  * - 消息序列全量降级清洗：toolResult 降级为 user、剥离 tool_use/thinking 块、
  *   合并连续同角色、保证以 user 结尾——兼容 OpenAI（role 'tool' 配对校验）与
  *   Anthropic（tool_result 紧跟 assistant tool_use）两类端点，截断也安全；
- * - 流式用 streamSimple（无工具 Context），text_delta 累积，done 的最终消息为准；
+ * - 问答跑 pi-agent-core 官方 agentLoop（与 init 子代理同构）：每轮 LLM 调用
+ *   经 streamFn 包装转发 text_delta 到面板实现流式；工具轮次的状态
+ *   （tool_execution_start/end）在面板状态行显示当前工具；
  * - 浮层用 ctx.ui.custom + overlay 模式，组件持有 tui 引用，delta 时 requestRender。
  */
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
+import {
+	createReadOnlyTools,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type Theme,
+} from "@earendil-works/pi-coding-agent";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
-import type { Message, Model } from "@earendil-works/pi-ai";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AssistantMessageEventStream, Message, Model } from "@earendil-works/pi-ai";
+import { runAgentLoop, type AgentLoopConfig, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
 import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
 // ---------------------------------------------------------------------------
 // 可调配置
 // ---------------------------------------------------------------------------
 
-/** btw 单次回答最大输出 token */
-const BTW_MAX_TOKENS = 2048;
+/** btw 单次 LLM 调用最大输出 token（含工具轮次） */
+const BTW_MAX_TOKENS = 4096;
+/** btw 面板单轮问答最多跑几轮（一轮 = 一次 LLM 调用 + 可能的工具调用） */
+const BTW_MAX_TURNS = 6;
 /** 请求超时 */
 const BTW_TIMEOUT_MS = 5 * 60_000;
 /** 携带的主会话上下文消息条数上限（超出从最早丢弃，保留最近） */
@@ -57,6 +68,9 @@ const BTW_SYSTEM_PROMPT = [
 	"你是 btw 助手（by the way），运行在用户正在进行的编码任务旁边的侧栏问答面板里。",
 	"用户此刻就是在这个面板中与你对话——本面板独立于主会话，你的回答不会写入主会话。",
 	"",
+	"你可以使用只读工具（read / ls / grep / find）查证代码与文件内容来回答得更准确，",
+	"但只读不写：不要修改任何文件，也不能执行命令（没有 bash 工具）。",
+	"",
 	"输入结构：",
 	"- 前半部分是主会话的对话历史（用户消息、助手消息、工具输出），帮助你理解任务背景；",
 	"- 后半部分是本面板内你与此用户的历次问答（user 是问题、assistant 是你的回答）；",
@@ -65,8 +79,9 @@ const BTW_SYSTEM_PROMPT = [
 	"要求：",
 	"- 回答准确、简洁、直接：默认控制在几句话到一小段，像资深同事随口回答；用户明确要求详细时才展开",
 	"- 只回答当前问题本身，不要复述任务、不要列行动清单、不要建议下一步行动",
+	"- 需要查证时先用只读工具看文件，再回答；工具调用轮次里不要长篇大论，最终回答才展开",
 	"- 被问到关于你自己的问题（如「你知道自己在哪吗」「你能用工具吗」），如实说明：你是 btw 面板助手，",
-	"  独立于主会话，不能使用任何工具",
+	"  独立于主会话，只能读文件（read / ls / grep / find），不能修改文件或执行命令",
 	"- 追问时结合前面的问答（例如「我刚才提到的 xx 具体指？」），不要重复已给过的内容",
 	"- 不提及「对话历史」「上下文」等内部机制，直接回答问题",
 	"- 如果依据现有信息无法判断，明确说明这一点",
@@ -145,6 +160,24 @@ function extractText(message: { content?: Array<{ type: string; text?: string }>
 		.trim();
 }
 
+/** 标准消息直通转换：agentLoop 会话里只有 user/assistant/toolResult */
+function convertToLlm(messages: AgentMessage[]): Message[] {
+	return messages.filter(
+		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+	) as Message[];
+}
+
+/** 包装流：把 text_delta 转发给面板实现流式显示，其余原样透传 */
+async function* forwardDelta(
+	stream: AssistantMessageEventStream,
+	overlay: BtwOverlay,
+): AssistantMessageEventStream {
+	for await (const event of stream) {
+		if (event.type === "text_delta") overlay.appendAnswer(event.delta);
+		yield event;
+	}
+}
+
 /** 按显示宽度换行（考虑中文/全角字符，\n 保留为空行） */
 function wrapText(text: string, width: number): string[] {
 	const out: string[] = [];
@@ -200,6 +233,8 @@ class BtwOverlay {
 	private answer = "";
 	private status: BtwStatus = "thinking";
 	private errorText = "";
+	/** 正在执行的只读工具（如「read src/a.ts」），无则空串 */
+	private toolLabel = "";
 	private scrollOffset = 0;
 
 	private mode: PanelMode = "viewing";
@@ -263,6 +298,23 @@ class BtwOverlay {
 
 	isStreaming(): boolean {
 		return this.status === "streaming" || this.status === "thinking";
+	}
+
+	/** 工具开始执行：在状态行显示当前工具与目标 */
+	showTool(toolName: string, args: unknown): void {
+		const target =
+			(args as { path?: string })?.path ??
+			(args as { pattern?: string })?.pattern ??
+			(args as { query?: string })?.query ??
+			(args as { command?: string })?.command ??
+			"";
+		this.toolLabel = `🔧 ${toolName}${target ? ` ${target}` : ""}`;
+		this.tui.requestRender();
+	}
+
+	hideTool(): void {
+		this.toolLabel = "";
+		this.tui.requestRender();
 	}
 
 	getAnswer(): string {
@@ -413,7 +465,8 @@ class BtwOverlay {
 			let statusStr: string;
 			if (!this.currentQuestion) statusStr = th.fg("success", "✓ 待命 · Enter 提问");
 			else if (this.status === "thinking") statusStr = th.fg("dim", "⏳ 思考中…");
-			else if (this.status === "streaming") statusStr = th.fg("accent", "⏳ 回答中…");
+			else if (this.status === "streaming")
+				statusStr = th.fg("accent", this.toolLabel ? `⏳ ${this.toolLabel}` : "⏳ 回答中…");
 			else if (this.status === "done") statusStr = th.fg("success", "✓ 回答完毕");
 			else statusStr = th.fg("error", `✗ ${this.errorText}`);
 
@@ -448,53 +501,66 @@ async function runBtwTurn(
 	overlay: BtwOverlay,
 	onDone: (answer: string) => void,
 ): Promise<void> {
-	let auth;
-	try {
-		auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	} catch (e) {
-		overlay.fail(e instanceof Error ? e.message : String(e));
-		return;
-	}
-	if (!auth.ok || !auth.apiKey) {
-		overlay.fail(auth.ok ? `无 ${model.provider} 的 API key` : auth.error);
-		return;
-	}
+	// 只读工具集：read / ls / grep / find（无 bash，只读不写）
+	const tools = createReadOnlyTools(ctx.cwd);
 
-	// 组装：主会话上下文（清洗）+ 面板内历次问答 + 当前问题
+	// 历史 = 主会话上下文（清洗）+ 面板内历次问答；当前问题作为本次 prompts
 	const sessionMessages = ctx.sessionManager.buildSessionContext().messages;
 	const context = buildContextMessages(sessionMessages);
-	const messages = mergeAdjacent([
-		...context,
-		...thread,
-		{ role: "user", content: [{ type: "text", text: question }] },
-	]).slice(-BTW_MAX_TOTAL_MESSAGES);
+	const history = mergeAdjacent([...context, ...thread]).slice(-BTW_MAX_TOTAL_MESSAGES);
+	const userMessage: AgentMessage = { role: "user", content: question, timestamp: Date.now() };
 
-	const stream = streamSimple(
+	// 每次 LLM 调用前从模型注册表取最新认证（兼容 OAuth 刷新），并转发流式 delta 到面板
+	const streamFn: StreamFn = async (m, c, options) => {
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
+		if (!auth.ok) throw new Error(`认证失败：${auth.error}`);
+		const stream = streamSimple(m, c, {
+			...options,
+			apiKey: auth.apiKey ?? options?.apiKey,
+			headers: { ...auth.headers, ...options?.headers },
+		});
+		return forwardDelta(stream, overlay);
+	};
+
+	let turns = 0;
+	const config: AgentLoopConfig = {
 		model,
-		{ systemPrompt: BTW_SYSTEM_PROMPT, messages },
-		{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, maxTokens: BTW_MAX_TOKENS, signal },
-	);
+		maxTokens: BTW_MAX_TOKENS,
+		convertToLlm,
+		shouldStopAfterTurn: () => ++turns >= BTW_MAX_TURNS,
+	};
 
 	try {
-		for await (const event of stream) {
-			if (event.type === "text_delta") {
-				overlay.appendAnswer(event.delta);
-			} else if (event.type === "done") {
-				const text = extractText(event.message);
+		const newMessages = await runAgentLoop(
+			[userMessage],
+			{ systemPrompt: BTW_SYSTEM_PROMPT, messages: history, tools },
+			config,
+			(event) => {
+				if (event.type === "tool_execution_start") {
+					overlay.showTool(event.toolName, event.args);
+				} else if (event.type === "tool_execution_end") {
+					overlay.hideTool();
+				}
+			},
+			signal,
+			streamFn,
+		);
+
+		// 最终回答 = 最后一条含文本的 assistant 消息；优先于流式累积（后者含中间轮次文本）
+		for (let i = newMessages.length - 1; i >= 0; i--) {
+			const m = newMessages[i];
+			if (m.role !== "assistant") continue;
+			const text = extractText(m as { content?: Array<{ type: string; text?: string }> });
+			if (text) {
 				overlay.finish(text);
-				onDone(text || overlay.getAnswer());
-				return;
-			} else if (event.type === "error") {
-				overlay.fail(event.error.errorMessage ?? `请求失败（${event.reason}）`);
+				onDone(text);
 				return;
 			}
 		}
-		// 流正常结束但无 done 事件：用已累积文本收尾
-		if (overlay.isStreaming()) {
-			const text = overlay.getAnswer();
-			overlay.finish(text);
-			onDone(text);
-		}
+		// 没有找到文字回答（预算用尽等）：用累积文本兜底
+		const fallback = overlay.getAnswer();
+		overlay.finish(fallback);
+		onDone(fallback);
 	} catch (e) {
 		if (signal.aborted) return; // 用户已 Esc 关闭面板，无需再更新
 		overlay.fail(e instanceof Error ? e.message : String(e));
