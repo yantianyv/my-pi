@@ -256,6 +256,7 @@ export default function (pi: ExtensionAPI) {
 
 			const toolCallCounts = new Array<number>(tasks.length).fill(0);
 			const doneFlags = new Array<boolean>(tasks.length).fill(false);
+			const doneCount = () => doneFlags.filter(Boolean).length;
 			const report = () => {
 				const perTask = tasks
 					.map((t, i) => {
@@ -268,6 +269,8 @@ export default function (pi: ExtensionAPI) {
 					content: [{ type: "text", text: `子代理探索中（${modelName}）：\n${perTask}` }],
 					details: { model: modelName, total: tasks.length, succeeded: 0, tasks: [] },
 				});
+				// 进度广播：官方 setStatus 通道推给 hud 行 1 动态区（如「🔎 2/3」），与主 agent 输出解耦
+				ctx.ui.setStatus("explore", `🔎 ${doneCount()}/${tasks.length}`);
 			};
 			report();
 
@@ -284,6 +287,9 @@ export default function (pi: ExtensionAPI) {
 			});
 
 			const succeeded = results.filter((r) => r.ok).length;
+			// 完成广播：官方 setStatus 通道，hud 显示「🔎 ✓ 2/3」6 秒后自动消失（TTL 由本扩展自管）
+			ctx.ui.setStatus("explore", `🔎 ✓ ${succeeded}/${results.length}`);
+			setTimeout(() => ctx.ui.setStatus("explore", undefined), 6_000);
 			const sections = results.map((r) =>
 				r.ok ? `## 任务：${r.task}\n${r.report}` : `## 任务：${r.task}\n⚠ ${r.error}`,
 			);

@@ -5,7 +5,7 @@
  * - 对话进行中按 Ctrl+C 取消当前 agent 操作
  * - /init 命令：后台独立上下文中分析代码库并生成/更新 AGENTS.md
  *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话；
- *   进度经 pi.events 广播「claude-it:init-progress」，由 hud 在行 1 动态区显示）
+ *   进度经官方 ctx.ui.setStatus 通道推「init」状态，由 hud 在行 1 动态区显示）
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -204,14 +204,14 @@ export default function (pi: ExtensionAPI) {
 
 		let toolCalls = 0;
 		const modelName = `${model.provider}/${model.id}`;
-		// 进度经 pi.events 广播，由 hud 等展示层订阅后在行 1 动态区显示（与任务完成提醒同一通道）
-		pi.events.emit("claude-it:init-progress", { toolCalls });
+		// 进度经官方 setStatus 通道推给 hud 行 1 动态区（与任务完成提醒同一通道，hud 按 key 映射样式）
+		ctx.ui.setStatus("init", `⚙ init · ${toolCalls}`);
 
 		void (async () => {
 			try {
 				const result = await runInitAgent(ctx, model, prompt, controller.signal, () => {
 					toolCalls++;
-					pi.events.emit("claude-it:init-progress", { toolCalls });
+					ctx.ui.setStatus("init", `⚙ init · ${toolCalls}`);
 				});
 				ctx.ui.notify(
 					result.ok
@@ -221,7 +221,7 @@ export default function (pi: ExtensionAPI) {
 				);
 			} finally {
 				clearTimeout(timer);
-				pi.events.emit("claude-it:init-clear", {});
+				ctx.ui.setStatus("init", undefined); // init 结束，清除进度状态
 				initAbort = null;
 			}
 		})();

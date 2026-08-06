@@ -49,6 +49,20 @@ node install.js --dry-run  # 先预览要做什么，不修改
 
 git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 HUD。
 
+**行 1 动态区**（`📁 项目名` 之后，空闲时显示「会话 Nmin」占位）：各扩展经**官方 `ctx.ui.setStatus(key, text)` 通道**推送状态（setStatus 触发全局重绘，hud 零延迟可见），HUD 按样式表（颜色 + 优先级，数字大者胜出）显示一条；TTL 由各推送方自管：
+
+| 槽位 | 触发 | 示例 | 优先级 |
+|---|---|---|---|
+| 指令模式 | 输入以 `!` 开头 | `⚡ 指令模式` | 100 |
+| 余额查询失败 | 余额接口报错（错误变化时才推，防刷屏） | `⚠ 余额查询失败` | 95 |
+| 任务完成 | task-alert 推送（自管闪烁帧） | `✅ 任务完成`（闪烁） | 90 |
+| explore 进度 | explore 子代理派发中，实时更新 | `🔎 2/3` | 85 |
+| /init 进度 | claude-it 后台 init | `⚙ init · 5` | 80 |
+| 联网搜索 | web_search 执行中 | `🔍 搜索中` | 75 |
+| 短反馈 | 搜索完成 / explore 完成 / 模型切换 / token-saver 节省 | `🔍 5 条`、`🔎 ✓ 2/3`、`⇄ gpt-5`、`✂ 省 12.3k` | 70 |
+
+各扩展只负责 `setStatus(key, text)`，不知道 hud 的存在；`key` 与样式表约定在 `hud.ts` 的 `STATUS_STYLE`（未登记 key 默认灰字、不参与竞争）。hud 被 `/hud` 关闭时，这些状态自动回落**原生 footer 第 3 行**显示（官方 `getExtensionStatuses()` 通道），信息屏B 无缝接管。
+
 **已适配的余额 / 额度供应商：**
 
 | 供应商 | providerId | 接口 | 显示内容 |
@@ -94,7 +108,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 
 pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时给出三重提醒，便于及时回来发下一步指令：
 
 - **提示音**：播放 `sounds/task_complete.wav`（钢琴音色，移植自 ClaudeCodeInit）。跨平台：Windows 用 PowerShell `Media.SoundPlayer`，macOS 用 `afplay`，Linux 依次尝试 `paplay`/`aplay`，全部不可用时退到终端响铃；任何失败都静默；
-- **状态栏闪烁**：通过 `pi.events` 官方事件总线广播 `task-alert:done`，HUD 订阅后在行 1 动态区闪烁 `✅ 任务完成` / `✨ 任务完成`（替换「会话 Nmin」占位）。两扩展零耦合——task-alert 不知道 hud 的存在；HUD 被禁用时提示自然退化为标题栏动画；
+- **状态栏闪烁**：通过官方 `ctx.ui.setStatus("task-alert", …)` 通道推送闪烁帧（500ms 交替 `✅ 任务完成` / `✨ 任务完成`，本扩展自管帧切换与清除），HUD 按 `STATUS_STYLE` 映射样式后在行 1 动态区闪烁（替换「会话 Nmin」占位）。两扩展零耦合——task-alert 不知道 hud 的存在；HUD 被禁用时状态自动回落原生 footer 第 3 行，提示退化为标题栏动画；
 - **标题栏动画**：终端标题同步闪烁，切到其他窗口也能看到。
 
 撤销时机：任意按键（`onTerminalInput` 原始终端按键流，无需等到发送）/ 新任务开始立即撤；10 分钟无操作自动撤。

@@ -661,14 +661,32 @@ export default function (pi: ExtensionAPI) {
 	let gitTimer: ReturnType<typeof setInterval> | undefined;
 	let gitStats: GitStats | null = null;
 	let gitInflight = false;
-	// 动态显示区：id -> 内容，渲染时取优先级最高者（支持 TTL 过期）
-	interface DynamicSlot {
-		text: string; // 纯文本（不含 ANSI）
-		color?: string; // 主题颜色 token（渲染时截断后再上色，避免 ANSI 被截断）
-		priority: number;
-		expireAt?: number;
+	// 动态区样式表（官方 setStatus 通道的呈现层约定）：
+	// 扩展经 ctx.ui.setStatus(key, text) 推送状态，hud 渲染行 1 动态区时按 key 查样式
+	// （颜色 + 优先级，数字大者胜出）；TTL/闪烁由各推送方自管（setStatus 触发全局重绘，零延迟可见）。
+	// 未登记 key 默认灰字、priority 0（基本不显示）。
+	const STATUS_STYLE: Record<string, { color: string; priority: number }> = {
+		"hud-bash": { color: "warning", priority: 100 }, // 指令模式提示（输入以 ! 开头）
+		"balance-error": { color: "error", priority: 95 }, // 余额查询失败
+		"task-alert": { color: "success", priority: 90 }, // 任务完成（task-alert 自管闪烁帧）
+		"explore": { color: "accent", priority: 85 }, // explore 子代理进度
+		"init": { color: "warning", priority: 80 }, // claude-it /init 进度
+		"web-search": { color: "accent", priority: 75 }, // 联网搜索状态
+		"token-saver": { color: "muted", priority: 70 }, // 节省量反馈
+		"model-switch": { color: "accent", priority: 70 }, // 模型切换
+	};
+	/** 短时状态推送 + TTL 自动清除（hud 内部自用；各扩展的 TTL 由扩展自己管）。 */
+	const statusClearTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	function pushStatus(ctx: ExtensionContext, key: string, text: string, ttlMs: number) {
+		ctx.ui.setStatus(key, text);
+		const old = statusClearTimers.get(key);
+		if (old) clearTimeout(old);
+		statusClearTimers.set(
+			key,
+			setTimeout(() => ctx.ui.setStatus(key, undefined), ttlMs),
+		);
 	}
-	const dynamicSlots = new Map<string, DynamicSlot>();
+	let lastBalanceError = ""; // 上次余额查询错误（变化时才推送动态区警告，防刷屏）
 	let balance: BalanceState = { loading: false };
 	let inflight = false;
 	let lastAutoRefresh = 0;
@@ -719,6 +737,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const data = await adapter.fetch(ctx);
 			balance = { loading: false, providerId: provider, data, fetchedAt: Date.now() };
+			lastBalanceError = ""; // 查询成功，重置错误记忆
 		} catch (err) {
 			balance = {
 				loading: false,
@@ -726,6 +745,12 @@ export default function (pi: ExtensionAPI) {
 				error: err instanceof Error ? err.message : String(err),
 				fetchedAt: Date.now(),
 			};
+			// 动态区警告：错误内容变化时才推送，避免持续失败刷屏（TTL 15s 自动消失）
+			const msg = err instanceof Error ? err.message : String(err);
+			if (lastBalanceError !== msg) {
+				lastBalanceError = msg;
+				pushStatus(ctx, "balance-error", "⚠ 余额查询失败", 15_000);
+			}
 		} finally {
 			inflight = false;
 			lastAutoRefresh = Date.now();
@@ -752,15 +777,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	/** 设置动态区内容（同刻多条时按 priority 大的显示；ttlMs 后自动过期清除）。 */
-	function setDynamic(id: string, text: string, color: string | undefined, priority: number, ttlMs?: number) {
-		dynamicSlots.set(id, { text, color, priority, expireAt: ttlMs ? Date.now() + ttlMs : undefined });
-		tuiRef?.requestRender();
-	}
-
-	function clearDynamic(id: string) {
-		if (dynamicSlots.delete(id)) tuiRef?.requestRender();
-	}
+	// （setDynamic/clearDynamic 已随动态区迁移移除：短时消息统一走 ctx.ui.setStatus + pushStatus）
 
 	/** 余额行的纯文本描述（用于 /balance 的 notify）。 */
 	function describeBalance(): string {
@@ -802,8 +819,8 @@ export default function (pi: ExtensionAPI) {
 				const isBash = inputBuffer.trimStart().startsWith("!");
 				if (isBash !== bashModeHint) {
 					bashModeHint = isBash;
-					if (isBash) setDynamic("hud-bash", "⚡ 指令模式", "warning", 100);
-					else clearDynamic("hud-bash");
+					if (isBash) ctx.ui.setStatus("hud-bash", "⚡ 指令模式");
+					else ctx.ui.setStatus("hud-bash", undefined);
 				}
 			});
 
@@ -896,18 +913,18 @@ export default function (pi: ExtensionAPI) {
 					: badge;
 			};
 
-			// 动态区：固定宽度，取优先级最高的未过期消息；空闲时显示会话时长占位
-			const renderDynamic = (): string => {
-				const now = Date.now();
-				for (const [k, v] of dynamicSlots) {
-					if (v.expireAt !== undefined && v.expireAt <= now) dynamicSlots.delete(k);
-				}
-				let best: DynamicSlot | null = null;
-				for (const v of dynamicSlots.values()) {
-					if (!best || v.priority > best.priority) best = v;
+			// 动态区（信息屏B）：读官方 setStatus 通道的状态，按样式表取优先级最高者；
+			// 固定宽度，空闲时显示会话时长占位。TTL 由各推送方自管，无需本处清理。
+			const renderStatuses = (): string => {
+				let best: { text: string; color?: string; priority: number } | null = null;
+				for (const [key, text] of footerData.getExtensionStatuses()) {
+					if (!text) continue;
+					const style = STATUS_STYLE[key];
+					const priority = style?.priority ?? 0;
+					if (!best || priority > best.priority) best = { text, color: style?.color, priority };
 				}
 				if (!best) {
-					const tip = truncateToWidth(`会话 ${fmtDuration(now - startupTime)}`, RIGHT_SEG2, "");
+					const tip = truncateToWidth(`会话 ${fmtDuration(Date.now() - startupTime)}`, RIGHT_SEG2, "");
 					return theme.fg("muted", tip) + " ".repeat(RIGHT_SEG2 - visibleWidth(tip));
 				}
 				const truncated = truncateToWidth(best.text, RIGHT_SEG2, "");
@@ -919,7 +936,6 @@ export default function (pi: ExtensionAPI) {
 				dispose() {
 					unsubBranch();
 					unsubInput();
-					dynamicSlots.clear();
 					footerInstalled = false;
 					if (refreshTimer) {
 						clearInterval(refreshTimer);
@@ -937,7 +953,7 @@ export default function (pi: ExtensionAPI) {
 					// ---- 行 1：git 状态 + 项目名 + 动态区 ----
 					const left1 = renderGitLine();
 					const project = ctx.cwd.split(/[\\/]/).filter(Boolean).pop() || ctx.cwd;
-					const right1 = `${padLeft(project ? theme.fg("dim", `📁 ${project}`) : "", RIGHT_SEG1)}${theme.fg("dim", " │ ")}${renderDynamic()}`;
+					const right1 = `${padLeft(project ? theme.fg("dim", `📁 ${project}`) : "", RIGHT_SEG1)}${theme.fg("dim", " │ ")}${renderStatuses()}`;
 
 					// ---- 行 2：模型 + 用量 + 上下文 ----
 					const providerDisplay = model
@@ -989,12 +1005,7 @@ export default function (pi: ExtensionAPI) {
 						const pct = usage?.percent != null ? Math.round(usage.percent) : 0;
 						return `[${progressBar(pct, barWidth)}] ${numText}`;
 					})();
-					const statusSeg = [...footerData.getExtensionStatuses().values()]
-						.map((status) => theme.fg("dim", status))
-						.join(" │ ");
-					const right2 = `${padLeft(tokensSeg, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(ctxSeg, RIGHT_SEG2)}${
-						statusSeg ? `${theme.fg("dim", " │ ")}${statusSeg}` : ""
-					}`;
+					const right2 = `${padLeft(tokensSeg, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(ctxSeg, RIGHT_SEG2)}`;
 
 					// ---- 行 3：账户（余额 / plan）+ 消耗统计 ----
 					const left3 = renderBalanceLine();
@@ -1091,53 +1102,20 @@ pi.on("turn_end", async (_event, ctx) => {
 	pi.on("model_select", async (_event, ctx) => {
 		balance = { loading: false }; // 供应商可能变化，丢弃旧缓存
 		tuiRef?.requestRender();
+		// 动态区提示模型切换（3 秒 TTL 自动消失）
+		if (ctx.model?.id) pushStatus(ctx, "model-switch", `⇄ ${ctx.model.id}`, 3_000);
 		if (footerInstalled) void refreshBalance(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
 		stopThinkingAnimation();
-		stopTaskAlert();
+		for (const t of statusClearTimers.values()) clearTimeout(t);
+		statusClearTimers.clear();
 		if (gitTimer) {
 			clearInterval(gitTimer);
 			gitTimer = undefined;
 		}
 	});
-
-	// ---- 任务完成提醒（订阅 task-alert 扩展的 pi.events 事件，推进行 1 动态区） ----
-	// 两个扩展通过 pi 官方事件总线解耦：task-alert 只负责检测与发声，hud 只负责呈现。
-	let taskAlertTimer: ReturnType<typeof setInterval> | undefined;
-	let taskAlertFrame = 0;
-	const TASK_ALERT_FRAMES = ["✅ 任务完成", "✨ 任务完成"];
-
-	function stopTaskAlert() {
-		if (taskAlertTimer) {
-			clearInterval(taskAlertTimer);
-			taskAlertTimer = undefined;
-		}
-		clearDynamic("task-alert");
-	}
-
-	pi.events.on("task-alert:done", () => {
-		stopTaskAlert(); // 幂等：重复触发先清旧状态
-		taskAlertFrame = 0;
-		// priority 90：低于「⚡ 指令模式」(100)，不影响用户输入时的指令提示
-		setDynamic("task-alert", TASK_ALERT_FRAMES[0], "success", 90);
-		taskAlertTimer = setInterval(() => {
-			taskAlertFrame++;
-			setDynamic("task-alert", TASK_ALERT_FRAMES[taskAlertFrame % TASK_ALERT_FRAMES.length], "success", 90);
-		}, 500);
-	});
-
-	pi.events.on("task-alert:clear", () => stopTaskAlert());
-
-	// ---- init 进度（订阅 claude-it 的 pi.events 事件，显示在行 1 动态区） ----
-	// 同一事件总线解耦模式：claude-it 只负责跑后台 init，hud 只负责呈现。
-	pi.events.on("claude-it:init-progress", (data) => {
-		const n = (data as { toolCalls?: number })?.toolCalls ?? 0;
-		// priority 80：低于任务完成提醒（90）与指令模式提示（100）
-		setDynamic("init", `⚙ init · ${n}`, "warning", 80);
-	});
-	pi.events.on("claude-it:init-clear", () => clearDynamic("init"));
 
 	// ---- 命令 ----
 	pi.registerCommand("balance", {

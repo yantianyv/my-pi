@@ -144,9 +144,18 @@ export default function (pi: ExtensionAPI) {
 			if (signal?.aborted) {
 				return { content: [{ type: "text", text: "已取消" }], details: {} };
 			}
+			// 状态广播：官方 setStatus 通道推给 hud 行 1 动态区（🔍 搜索中）；TTL 由本扩展自管
+			let clearTimer: ReturnType<typeof setTimeout> | undefined;
+			const push = (text: string, ttlMs: number) => {
+				ctx.ui.setStatus("web-search", text);
+				if (clearTimer) clearTimeout(clearTimer);
+				clearTimer = setTimeout(() => ctx.ui.setStatus("web-search", undefined), ttlMs);
+			};
+			push("🔍 搜索中", 30_000); // 30s 兜底：即使下方漏发 done 也会自动消失，不悬挂
 			onUpdate?.({ content: [{ type: "text", text: `正在搜索：${params.query}` }], details: { progress: 10 } });
 			try {
 				const { summary, results } = await searchAndSummarize(ctx, params.query, params.language ?? "中文");
+				push(`🔍 ${results.length} 条`, 6_000);
 				const lines = [summary, "", `共 ${results.length} 条结果：`];
 				for (const r of results.slice(0, MAX_RESULTS_RETURN)) {
 					lines.push(`- ${r.title}\n  ${r.url}`);
@@ -160,6 +169,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
+				push("🔍 失败", 6_000);
 				return {
 					content: [{ type: "text", text: `搜索失败：${msg}` }],
 					details: { error: msg },

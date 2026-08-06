@@ -8,7 +8,7 @@
  *   ~/.pi/agent/tmp/ 并在结果末尾附文件路径，AI 需要时可自行 read 查看
  * - 仅当输出真正被修改时才写文件，干净输出零开销
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -232,7 +232,33 @@ function filterOutput(command: string, text: string): { filtered: string; trunca
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("tool_result", async (event: any) => {
+	// ---- 节省量反馈（官方 setStatus 通道推给 hud 行 1 动态区，节流防刷屏） ----
+	// 每次清洗成功后累计省下的字符/行数，节流窗口内合并为一条状态；TTL 6s 后自动清除。
+	const SAVE_EMIT_THROTTLE_MS = 4_000;
+	let savedChars = 0;
+	let savedLines = 0;
+	let lastSaveEmit = 0;
+	let saveClearTimer: NodeJS.Timeout | undefined;
+
+	function emitSaved(ctx: ExtensionContext) {
+		if (savedChars <= 0) return;
+		const now = Date.now();
+		if (now - lastSaveEmit < SAVE_EMIT_THROTTLE_MS) return; // 窗口内只累计，下次再发
+		const unit =
+			savedChars >= 1_000_000
+				? `${(savedChars / 1_000_000).toFixed(1)}M`
+				: savedChars >= 1_000
+					? `${(savedChars / 1_000).toFixed(1)}k`
+					: String(savedChars);
+		ctx.ui.setStatus("token-saver", `✂ 省 ${unit}`);
+		if (saveClearTimer) clearTimeout(saveClearTimer);
+		saveClearTimer = setTimeout(() => ctx.ui.setStatus("token-saver", undefined), 6_000);
+		savedChars = 0;
+		savedLines = 0;
+		lastSaveEmit = now;
+	}
+
+	pi.on("tool_result", async (event: any, ctx) => {
 		if (event.toolName !== "bash") return;
 
 		const command = (event.input as { command?: string })?.command ?? "";
@@ -245,6 +271,9 @@ export default function (pi: ExtensionAPI) {
 			if (truncated) {
 				const filepath = saveOriginal(command, original);
 				block.text = filtered + makeHint(filepath);
+				savedChars += original.length - filtered.length;
+				savedLines += original.split(/\r?\n/).length - filtered.split(/\r?\n/).length;
+				emitSaved(ctx);
 			}
 		}
 	});

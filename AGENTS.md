@@ -24,7 +24,7 @@ extensions/         # pi 扩展（安装目标 ~/.pi/agent/extensions/）
   explore-agent.ts  #   explore 工具：只读子代理并行探索代码库（read/ls/grep/find）
   token-saver.ts    #   上下文 token 节省器：自动清洗 bash 工具的冗余输出（git/npm/tsc/pip/docker/--help）
   hud.ts            #   3 行 HUD：git 状态 / 模型+token 速率 / 余额+消耗速率
-  task-alert.ts     #   任务完成提醒：提示音 + 标题动画 + 事件总线广播
+  task-alert.ts     #   任务完成提醒：提示音 + 标题动画 + setStatus 状态推送
   web-search.ts     #   联网搜索工具：web_search 自定义工具，agent 可调（kimi-coding 后端）
 themes/matrix.json  # 黑客帝国荧光绿主题
 sounds/task_complete.wav  # 任务完成提示音
@@ -36,10 +36,10 @@ docs/deepseek/      # DeepSeek 官方文档提取（api.md / pricing.md / thinki
 ## 架构要点
 
 - **安装模型**：仓库即源码，`install.js` 按扩展名（`.ts`/`.json`/`.wav`）复制到 `~/.pi/agent/` 下的 `themes/`、`extensions/`、`sounds/`；改扩展后必须重跑 install.js + pi 内 `/reload`。
-- **扩展间联动**：`task-alert.ts` 不直接操作 HUD，只在 `agent_settled` 时通过 `pi.events` 广播 `task-alert:done`（task-alert.ts:101）；`claude-it.ts` 同理广播 `claude-it:init-progress` 汇报 /init 进度；`hud.ts` 订阅两个事件（hud.ts:1120/1135）在行 1 动态区显示。扩展间零耦合，hud 缺席时各自退化为标题动画/无进度显示。
+- **扩展间联动**：展示层统一走**官方 `ctx.ui.setStatus(key, text)` 状态通道**（`task-alert` 推 `task-alert` 闪烁帧、`claude-it` 推 `init` 进度、`explore` 推 `explore` 进度、`web-search` 推 `web-search` 状态、`token-saver` 推 `token-saver` 节省量、hud 自身推 `balance-error`/`model-switch`/`hud-bash`）；`hud.ts` 渲染行 1 动态区时按 `STATUS_STYLE` 样式表（hud.ts:664）映射颜色与优先级（数字大者胜出），TTL/闪烁由各推送方自管。扩展间零耦合，hud 缺席时状态自动回落原生 footer 第 3 行（`getExtensionStatuses()`）。
 - **hud 余额适配**：`BALANCE_ADAPTERS` 注册表（hud.ts:572）按 providerId 逐一适配；DeepSeek 消耗按 `DEEPSEEK_PRICES`（hud.ts:179）人民币定价直算，峰谷开关 `DEEPSEEK_PEAK_PRICING`（hud.ts:186，当前 false）；其余供应商 USD × `EXCHANGE_RATE`。
 - **explore 子代理**：跑 pi-agent-core 官方 `agentLoop`，认证走 `ctx.modelRegistry.getApiKeyAndHeaders()`；子模型优先 `PREFERRED_MODELS`（explore-agent.ts:32），兜底选已认证最低价模型。
-- **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；进度经 `pi.events` 广播由 hud 行 1 动态区显示。同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:33-39）。
+- **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；进度经 `ctx.ui.setStatus("init", …)` 推送由 hud 行 1 动态区显示。同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:33-39）。
 
 ## 代码风格与约定
 

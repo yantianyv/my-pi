@@ -3,17 +3,16 @@
  *
  * 移植自 ClaudeCodeInit 的 hooks 提示音方案：
  * pi 完全空闲（agent_settled）时播放 task_complete.wav、动画终端标题，
- * 并通过 pi.events 事件总线广播 "task-alert:done" —— hud 等展示层扩展
- * 订阅该事件自行决定如何呈现（hud 显示在行 1 动态区，替换「会话 Nmin」）。
+ * 并通过官方 ctx.ui.setStatus 通道推送 "task-alert" 状态 —— hud 等展示层扩展
+ * 按 key 映射样式渲染在行 1 动态区（替换「会话 Nmin」）。
  *
  * 实现要点：
  * - 触发时机用 agent_settled 而非 agent_end：保证 pi 不会自动重试/压缩/继续；
- * - 联动走 pi.events 官方事件总线：本插件只做「检测 + 声音 + 标题」，
- *   不知道 hud 的存在；hud 被禁用时提示自然退化为标题栏动画；
+ * - 联动走官方 setStatus 通道：本插件只做「检测 + 声音 + 标题 + 闪烁帧」，
+ *   不知道 hud 的存在；hud 被禁用时状态自动回落原生 footer 第 3 行；
  * - 音频跨平台播放：Windows 用 PowerShell SoundPlayer，macOS 用 afplay，
  *   Linux 依次尝试 paplay/aplay，全失败退到终端响铃；任何失败都静默。
- * - 撤销时机：用户按键（onTerminalInput 原始按键流，无需等到发送）/
- *   新任务开始 / 超时自动撤 / 会话结束。
+ * - 撤销时机：用户按键（onTerminalInput 原始按键流，无需等到发送）/ 新任务开始 / 超时自动撤 / 会话结束。
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as os from "node:os";
@@ -46,6 +45,8 @@ const TITLE_INTERVAL_MS = 500;
 const AUTO_DISMISS_MS = 600_000;
 /** 标题栏动画帧 */
 const TITLE_FRAMES = ["✅ 任务完成 — pi", "✨ 任务完成 — pi"];
+/** HUD 动态区闪烁帧（官方 setStatus 通道，hud 按 key 映射样式渲染） */
+const STATUS_FRAMES = ["✅ 任务完成", "✨ 任务完成"];
 
 // ---------------------------------------------------------------------------
 // 扩展入口
@@ -54,6 +55,8 @@ const TITLE_FRAMES = ["✅ 任务完成 — pi", "✨ 任务完成 — pi"];
 export default function (pi: ExtensionAPI) {
 	let titleTimer: NodeJS.Timeout | undefined;
 	let dismissTimer: NodeJS.Timeout | undefined;
+	let statusTimer: NodeJS.Timeout | undefined; // HUD 动态区闪烁
+	let statusFrame = 0;
 	let frame = 0;
 	let alertActive = false;
 	let currentCtx: ExtensionContext | null = null;
@@ -62,16 +65,18 @@ export default function (pi: ExtensionAPI) {
 	function clearTimers() {
 		if (titleTimer) clearInterval(titleTimer);
 		if (dismissTimer) clearTimeout(dismissTimer);
+		if (statusTimer) clearInterval(statusTimer);
 		titleTimer = undefined;
 		dismissTimer = undefined;
+		statusTimer = undefined;
 	}
 
 	function stopAlert(ctx: ExtensionContext) {
 		if (!alertActive) return;
 		alertActive = false;
 		clearTimers();
-		// 通知展示层（hud 等）撤掉提醒
-		pi.events.emit("task-alert:clear", {});
+		// 撤掉 HUD 状态（官方 setStatus 通道，hud 行 1 动态区自动回落占位）
+		ctx.ui.setStatus("task-alert", undefined);
 		if (ctx.hasUI) ctx.ui.setTitle("");
 	}
 
@@ -97,8 +102,16 @@ export default function (pi: ExtensionAPI) {
 		alertActive = true;
 		playSound();
 
-		// 通知展示层（hud 订阅后会在行 1 动态区闪烁）
-		pi.events.emit("task-alert:done", {});
+		// HUD 动态区闪烁：官方 setStatus 通道（setStatus 触发全局重绘，hud 零延迟可见）；
+		// 帧切换由本扩展自管，stopAlert/超时自动撤时一并清掉
+		if (ctx.hasUI) {
+			statusFrame = 0;
+			ctx.ui.setStatus("task-alert", STATUS_FRAMES[0]);
+			statusTimer = setInterval(() => {
+				statusFrame++;
+				ctx.ui.setStatus("task-alert", STATUS_FRAMES[statusFrame % STATUS_FRAMES.length]);
+			}, TITLE_INTERVAL_MS);
+		}
 
 		if (ctx.hasUI) {
 			// 标题栏动画（切到其他窗口也能看到；hud 被禁用时这是唯一的视觉提醒）
