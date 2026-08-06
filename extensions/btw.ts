@@ -40,6 +40,8 @@ import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth, type TUI } fr
 const BTW_MAX_TOKENS = 4096;
 /** btw 面板单轮问答最多跑几轮（一轮 = 一次 LLM 调用 + 可能的工具调用） */
 const BTW_MAX_TURNS = 6;
+/** 空回答自动重试次数：部分模型（如 deepseek-v4-flash）偶发返回空 assistant 消息（content 空数组、无流式、瞬时完成），重试可大概率恢复 */
+const BTW_EMPTY_RETRY = 1;
 /** 请求超时 */
 const BTW_TIMEOUT_MS = 5 * 60_000;
 /** 携带的主会话上下文消息条数上限（超出从最早丢弃，保留最近） */
@@ -685,6 +687,16 @@ class BtwOverlay {
 // 后台流式问答
 // ---------------------------------------------------------------------------
 
+	// [DEBUG] 临时诊断日志（定位间歇性无文字回答后移除）
+	const dbg = (s: string) => {
+		try {
+			require("node:fs").appendFileSync(
+				require("node:path").join(require("node:os").homedir(), ".pi", "agent", "tmp", "btw-debug.log"),
+				`${new Date().toISOString().slice(11, 23)} ${s}\n`,
+			);
+		} catch {}
+	};
+
 async function runBtwTurn(
 	ctx: ExtensionCommandContext,
 	model: AnyModel,
@@ -693,7 +705,9 @@ async function runBtwTurn(
 	signal: AbortSignal,
 	overlay: BtwOverlay,
 	onDone: (answer: string) => void,
+	retries = 0,
 ): Promise<void> {
+	dbg(`[start] question=${question.slice(0, 40)} model=${model.id} retries=${retries}`);
 	// 只读工具集：read / ls / grep / find（无 bash，只读不写）
 	const tools = createReadOnlyTools(ctx.cwd);
 
@@ -732,24 +746,33 @@ async function runBtwTurn(
 			config,
 			(event) => {
 				if (event.type === "tool_execution_start") {
+					dbg(`[tool] ${event.toolName}`);
 					overlay.showTool(event.toolName, event.args);
 				} else if (event.type === "tool_execution_end") {
 					overlay.hideTool();
 				} else if (event.type === "message_update") {
 					// agentLoop 官方事件通道携带原始流事件：转发 text_delta 实现流式显示
 					const s = event.assistantMessageEvent;
+					dbg(`[evt] ${s.type}${s.type === "text_delta" ? ` len=${s.delta.length}` : ""}`);
 					if (s.type === "text_delta") overlay.appendAnswer(s.delta);
 				}
 			},
 			signal,
 			streamFn,
 		);
+		dbg(`[done] newMessages=${newMessages.length}`);
 
 		// 最终回答 = 最后一条含文本的 assistant 消息；优先于流式累积（后者含中间轮次文本）
 		for (let i = newMessages.length - 1; i >= 0; i--) {
 			const m = newMessages[i];
-			if (m.role !== "assistant") continue;
-			const text = extractText(m as { content?: Array<{ type: string; text?: string }> });
+			if (m.role !== "assistant") {
+				dbg(`[msg] i=${i} role=${m.role}`);
+				continue;
+			}
+			const sm = m as { content?: Array<{ type: string; text?: string }>; stopReason?: string; rawStopReason?: string; errorMessage?: string };
+			dbg(`[msg] i=${i} role=assistant contentType=${typeof m.content} keys=${Array.isArray(m.content) ? m.content.map((b: { type?: string }) => b.type).join(",") : typeof m.content} stop=${sm.stopReason} raw=${sm.rawStopReason} err=${sm.errorMessage ?? ""}`);
+			const text = extractText(sm);
+			dbg(`[msg]   extractText len=${text.length}`);
 			if (text) {
 				overlay.finish(text);
 				onDone(text);
@@ -758,10 +781,18 @@ async function runBtwTurn(
 		}
 		// 没有找到文字回答（预算用尽等）：用累积文本兜底
 		const fallback = overlay.getAnswer();
+		dbg(`[fallback] len=${fallback.length} retries=${retries}`);
+		if (!fallback && retries < BTW_EMPTY_RETRY) {
+			// 模型偶发空回答（如 deepseek-v4-flash 瞬时返回空 assistant 消息）：清空状态重试
+			dbg(`[retry] 空回答，重试 ${retries + 1}`);
+			overlay.startQuestion(question); // 清空 answer/status，重新进入 thinking
+			return runBtwTurn(ctx, model, thread, question, signal, overlay, onDone, retries + 1);
+		}
 		overlay.finish(fallback);
 		onDone(fallback);
 	} catch (e) {
 		if (signal.aborted) return; // 用户已 Esc 关闭面板，无需再更新
+		dbg(`[error] ${e instanceof Error ? e.message : String(e)}`);
 		overlay.fail(e instanceof Error ? e.message : String(e));
 	}
 }
