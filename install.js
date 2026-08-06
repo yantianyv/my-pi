@@ -15,6 +15,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { execSync } = require("child_process");
 
 const ROOT = __dirname;
 const PI_AGENT = path.join(os.homedir(), ".pi", "agent");
@@ -74,6 +75,45 @@ function applySettings() {
 	}
 }
 
+/** 探测 pi 全局安装根目录（含 @earendil-works/pi-coding-agent 的 node_modules 根）。 */
+function findPiGlobalRoot() {
+	// 优先 npm root -g（覆盖 Windows/macOS/Linux 的 npm 默认全局目录）
+	try {
+		const root = execSync("npm root -g", { encoding: "utf8", windowsHide: true }).trim();
+		if (root && fs.existsSync(path.join(root, "@earendil-works", "pi-coding-agent"))) return root;
+	} catch {}
+	// 兜底：常见全局目录（pnpm / nvm-global / brew / 系统 npm）
+	const candidates = [
+		process.env.APPDATA ? path.join(process.env.APPDATA, "npm", "node_modules") : null, // Windows
+		path.join(os.homedir(), ".npm-global", "node_modules"), // nvm 常见全局前缀
+		"/usr/local/lib/node_modules", // macOS / brew
+		"/usr/lib/node_modules", // Linux 系统 npm
+	];
+	for (const c of candidates) {
+		if (c && fs.existsSync(path.join(c, "@earendil-works", "pi-coding-agent"))) return c;
+	}
+	return null;
+}
+
+/** 用模板生成 tsconfig.json（paths 指向探测到的 pi 全局目录），换机器/pi 升级后重跑即可。 */
+function generateTsconfig() {
+	const templatePath = path.join(ROOT, "tsconfig.template.json");
+	const outPath = path.join(ROOT, "tsconfig.json");
+	if (!fs.existsSync(templatePath)) {
+		log(`跳过 tsconfig（模板不存在）: ${templatePath}`);
+		return;
+	}
+	const root = findPiGlobalRoot();
+	if (!root) {
+		log("跳过 tsconfig（未找到 pi 全局安装目录 @earendil-works/pi-coding-agent，可手动修改 tsconfig.json）");
+		return;
+	}
+	const template = fs.readFileSync(templatePath, "utf8");
+	const out = template.replace(/__PI_ROOT__/g, root.replace(/\\/g, "/")); // 统一正斜杠，JSON 免转义
+	log(`生成 tsconfig.json（paths → ${root}）`);
+	if (!dryRun) fs.writeFileSync(outPath, out, "utf8");
+}
+
 function main() {
 	console.log(`pi 一键配置安装 → ${PI_AGENT}\n`);
 	if (!fs.existsSync(path.join(THEMES_SRC, `${THEME_NAME}.json`))) {
@@ -84,6 +124,7 @@ function main() {
 	copyDir(EXT_SRC, EXT_DST);
 	copyDir(SOUNDS_SRC, SOUNDS_DST, [".wav"]);
 	applySettings();
+	generateTsconfig();
 	console.log(dryRun ? "\n试运行完成（未做任何修改），去掉 --dry-run 正式安装。" : "\n安装完成。在 pi 里执行 /reload 或重启后生效。");
 }
 

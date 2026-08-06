@@ -10,14 +10,15 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 |---|---|---|
 | `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix（install.js:71） | install.js |
 | `node install.js --dry-run`（或 `-n`） | 试运行，只打印不修改 | install.js:30 |
-| `npx typescript -p tsconfig.json` | 全扩展类型检查（`tsconfig.json` 用 `paths` 把 pi 全局安装的 `@earendil-works/*` / `typebox` 映射到本地检查，当前 0 报错；pi 升级后若路径失效重跑 `node install.js` 或更新 paths） | 本仓库惯例 |
+| `npx typescript -p tsconfig.json` | 全扩展类型检查（`tsconfig.json` 由 `install.js` 从 `tsconfig.template.json` 生成：探测 `npm root -g` 并用 `paths` 把 pi 全局安装的 `@earendil-works/*` / `typebox` 映射进来；当前 0 报错，换机器/pi 升级后重跑 `node install.js` 即可） | 本仓库惯例 |
 
 无测试、无 lint、无 CI。安装后在 pi 里 `/reload` 热加载扩展生效。
 
 ## 目录结构
 
 ```
-install.js          # 安装脚本：复制 .ts/.json/.wav 到 ~/.pi/agent/ 对应子目录
+install.js          # 安装脚本：复制 .ts/.json/.wav 到 ~/.pi/agent/ 对应子目录，并生成 tsconfig.json（探测 pi 全局目录）
+.gitignore          # 忽略生成物 tsconfig.json / node_modules
 README.md           # 项目说明（含 HUD 图例、各扩展用法、卸载方法）
 extensions/         # pi 扩展（安装目标 ~/.pi/agent/extensions/）
   claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn
@@ -50,7 +51,7 @@ docs/deepseek/      # DeepSeek 官方文档提取（api.md / pricing.md / thinki
 ## 注意事项
 
 - **改完扩展不重装不生效**：源码在仓库，运行时是 `~/.pi/agent/extensions/` 的副本，两处易不同步
-- `tsconfig.json` 仅服务本地 tsc 检查：把 pi 全局安装目录的 `@earendil-works/*` / `typebox` 通过 `paths` 映射进来（路径写死为 Windows 全局 npm 目录），运行时仍由 jiti 直接加载，不经 tsc；pi 升级或换机器后按需更新 `paths`
+- `tsconfig.template.json` → `install.js` 探测 pi 全局目录生成 `tsconfig.json`（`.gitignore` 忽略生成物，不入库）；生成物仅服务本地 tsc 检查（`paths` 映射 `@earendil-works/*` / `typebox`），运行时仍由 jiti 直接加载，不经 tsc。换机器/pi 升级路径变了重跑 `node install.js` 即可
 - README 末尾「说明」一节提到的 `templates/` 目录已在 dab2af6 删除，该段说明已过时
 - `install.js` 会修改全局 `~/.pi/agent/settings.json`（theme 字段），跑 `--dry-run` 先预览
 - `docs/deepseek/` 是参考资料，不要当作可执行配置；`sounds/` 只放提示音

@@ -1,0 +1,25 @@
+{
+	"compilerOptions": {
+		"strict": true,
+		"noEmit": true,
+		"module": "esnext",
+		"moduleResolution": "bundler",
+		"target": "es2022",
+		"skipLibCheck": true,
+		"esModuleInterop": true,
+		"resolveJsonModule": true,
+		// 本文件是模板：install.js 会探测 pi 全局安装目录并把 __PI_ROOT__ 替换为
+		// 实际路径生成 tsconfig.json（该生成物已被 .gitignore 忽略）。
+		// paths 把 pi 全局安装的包映射到本地检查，避免 TS2307；运行时仍由 jiti 加载。
+		"paths": {
+			"@earendil-works/pi-coding-agent": ["__PI_ROOT__/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+			"@earendil-works/pi-agent-core": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"],
+			"@earendil-works/pi-ai": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
+			"@earendil-works/pi-ai/compat": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/compat.d.ts"],
+			"@earendil-works/pi-tui": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.d.ts"],
+			"typebox": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.d.mts"]
+		},
+		"typeRoots": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@types"]
+	},
+	"include": ["extensions/**/*.ts"]
+}
