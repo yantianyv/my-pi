@@ -447,8 +447,10 @@ const kimiCodingAdapter: BalanceAdapter = {
 
 		// 状态判断：订阅额度耗尽 → error；额度/余额偏低 → warning
 		let status: BalanceStatus = "ok";
-		if (summary && summary.limit > 0) {
-			const ratio = summary.used / summary.limit;
+		const summaryLimit = summary?.limit ?? 0;
+		const summaryUsed = summary?.used ?? 0;
+		if (summaryLimit > 0) {
+			const ratio = summaryUsed / summaryLimit;
 			if (ratio >= 1) status = "error";
 			else if (ratio >= 0.8) status = "warning";
 		}
