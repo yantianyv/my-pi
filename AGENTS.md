@@ -30,6 +30,7 @@ extensions/         # pi 扩展（安装目标 ~/.pi/agent/extensions/）
 themes/matrix.json  # 黑客帝国荧光绿主题
 sounds/task_complete.wav  # 任务完成提示音
 patches/apply-pi-tui-scroll-freeze.mjs  # pi-tui 滚动冻结补丁：修复流式期间滚轮上翻被拽飞（见 README「pi-tui 滚动冻结补丁」节）；pi 升级后需重跑
+patches/apply-pi-ai-usage-guard.mjs     # pi-ai usage 缺失防护补丁：模型偶发返回无 usage 的 assistant 消息导致后续调用瞬时失败（见 README「pi-ai usage 缺失防护补丁」节）；pi 升级后需重跑
 docs/deepseek/      # DeepSeek 官方文档提取（api.md / pricing.md / thinking.md），适配参考
 .pi/                # 空目录（占位）
 ```
