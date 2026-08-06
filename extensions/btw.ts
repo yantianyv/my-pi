@@ -193,6 +193,30 @@ function wrapText(text: string, width: number): string[] {
 	return out;
 }
 
+/** 返回文本显示宽度达到 targetW 时的字符索引（供输入框水平滚动窗口定位） */
+function charIndexAtWidth(text: string, targetW: number): number {
+	let w = 0;
+	for (let i = 0; i < text.length; i++) {
+		const chW = visibleWidth(text[i]!);
+		if (w + chW > targetW) return i;
+		w += chW;
+	}
+	return text.length;
+}
+
+/** 从 startChar 起按显示宽度截取最多 maxW 宽的文本（不截断字符） */
+function sliceByWidth(text: string, startChar: number, maxW: number): string {
+	let out = "";
+	let w = 0;
+	for (let i = startChar; i < text.length; i++) {
+		const chW = visibleWidth(text[i]!);
+		if (w + chW > maxW) break;
+		out += text[i];
+		w += chW;
+	}
+	return out;
+}
+
 // ---------------------------------------------------------------------------
 // 浮层组件
 // ---------------------------------------------------------------------------
@@ -450,11 +474,24 @@ class BtwOverlay {
 
 		// 输入模式：输入行 + 提示；浏览模式：状态行 + 提示
 		if (this.mode === "input") {
-			let inputDisplay = this.inputText;
+			// 输入框用水平滚动窗口跟随光标（❯ 前缀占 4 个显示宽度），不截断内容
+			const inputW = Math.max(8, innerW - 5);
+			const full = this.inputText;
+			const totalW = visibleWidth(full);
+			let startChar = 0;
+			if (totalW > inputW) {
+				// 光标在窗口 60% 处：窗口起点 = 光标前留 60% 宽度的位置
+				const cursorW = visibleWidth(full.slice(0, this.inputCursor));
+				startChar = charIndexAtWidth(full, Math.max(0, cursorW - Math.floor(inputW * 0.6)));
+			}
+			const windowText = sliceByWidth(full, startChar, inputW);
+			const cursorInWindow = Math.min(Math.max(0, this.inputCursor - startChar), windowText.length);
+
+			let inputDisplay = windowText;
 			if (this.focused) {
-				const before = inputDisplay.slice(0, this.inputCursor);
-				const cursorChar = this.inputCursor < inputDisplay.length ? inputDisplay[this.inputCursor] : " ";
-				const after = inputDisplay.slice(this.inputCursor + 1);
+				const before = inputDisplay.slice(0, cursorInWindow);
+				const cursorChar = cursorInWindow < inputDisplay.length ? inputDisplay[cursorInWindow] : " ";
+				const after = inputDisplay.slice(cursorInWindow + 1);
 				inputDisplay = `${before}${CURSOR_MARKER}\x1b[7m${cursorChar}\x1b[27m${after}`;
 			}
 			lines.push(row(` ${th.fg("accent", "❯")} ${inputDisplay}`));
