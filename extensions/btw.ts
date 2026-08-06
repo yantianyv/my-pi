@@ -28,7 +28,7 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
-import type { AssistantMessageEventStream, Message, Model } from "@earendil-works/pi-ai";
+import type { Message, Model } from "@earendil-works/pi-ai";
 import { runAgentLoop, type AgentLoopConfig, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
 import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
@@ -165,17 +165,6 @@ function convertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
 		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
 	) as Message[];
-}
-
-/** 包装流：把 text_delta 转发给面板实现流式显示，其余原样透传 */
-async function* forwardDelta(
-	stream: AssistantMessageEventStream,
-	overlay: BtwOverlay,
-): AssistantMessageEventStream {
-	for await (const event of stream) {
-		if (event.type === "text_delta") overlay.appendAnswer(event.delta);
-		yield event;
-	}
 }
 
 /** 按显示宽度换行（考虑中文/全角字符，\n 保留为空行） */
@@ -510,16 +499,15 @@ async function runBtwTurn(
 	const history = mergeAdjacent([...context, ...thread]).slice(-BTW_MAX_TOTAL_MESSAGES);
 	const userMessage: AgentMessage = { role: "user", content: question, timestamp: Date.now() };
 
-	// 每次 LLM 调用前从模型注册表取最新认证（兼容 OAuth 刷新），并转发流式 delta 到面板
+	// 每次 LLM 调用前从模型注册表取最新认证（兼容 OAuth 刷新）；流对象保持原生
 	const streamFn: StreamFn = async (m, c, options) => {
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
 		if (!auth.ok) throw new Error(`认证失败：${auth.error}`);
-		const stream = streamSimple(m, c, {
+		return streamSimple(m, c, {
 			...options,
 			apiKey: auth.apiKey ?? options?.apiKey,
 			headers: { ...auth.headers, ...options?.headers },
 		});
-		return forwardDelta(stream, overlay);
 	};
 
 	let turns = 0;
@@ -540,6 +528,10 @@ async function runBtwTurn(
 					overlay.showTool(event.toolName, event.args);
 				} else if (event.type === "tool_execution_end") {
 					overlay.hideTool();
+				} else if (event.type === "message_update") {
+					// agentLoop 官方事件通道携带原始流事件：转发 text_delta 实现流式显示
+					const s = event.assistantMessageEvent;
+					if (s.type === "text_delta") overlay.appendAnswer(s.delta);
 				}
 			},
 			signal,
