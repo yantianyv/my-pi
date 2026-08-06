@@ -274,7 +274,7 @@ export default function (pi: ExtensionAPI) {
 			};
 			report();
 
-			const results = await pool(tasks, CONCURRENCY, async (task, i) => {
+			const results = await pool(tasks, CONCURRENCY, async (task: string, i) => {
 				try {
 					return await runSubAgent(ctx, model, task, signal, () => {
 						toolCallCounts[i]++;

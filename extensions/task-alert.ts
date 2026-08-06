@@ -53,9 +53,9 @@ const STATUS_FRAMES = ["✅ 任务完成", "✨ 任务完成"];
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
-	let titleTimer: NodeJS.Timeout | undefined;
-	let dismissTimer: NodeJS.Timeout | undefined;
-	let statusTimer: NodeJS.Timeout | undefined; // HUD 动态区闪烁
+	let titleTimer: ReturnType<typeof setTimeout> | undefined;
+	let dismissTimer: ReturnType<typeof setTimeout> | undefined;
+	let statusTimer: ReturnType<typeof setTimeout> | undefined; // HUD 动态区闪烁
 	let statusFrame = 0;
 	let frame = 0;
 	let alertActive = false;

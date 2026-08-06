@@ -238,7 +238,7 @@ export default function (pi: ExtensionAPI) {
 	let savedChars = 0;
 	let savedLines = 0;
 	let lastSaveEmit = 0;
-	let saveClearTimer: NodeJS.Timeout | undefined;
+	let saveClearTimer: ReturnType<typeof setTimeout> | undefined;
 
 	function emitSaved(ctx: ExtensionContext) {
 		if (savedChars <= 0) return;
