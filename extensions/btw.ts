@@ -4,7 +4,7 @@
  * - /btw <问题>：在主任务进行中打开右侧浮层，做临时问答（by the way）
  * - 面板内可多轮追问（Enter 输入，最多 BTW_MAX_THREAD_TURNS 轮），
  *   上下文 = 主会话 + 面板内历次问答，仍独立于主会话、零污染
- * - m 一键转正：把全部 Q/A 打包成 [btw 转交] 消息发给主 agent 继续处理
+ * - m 一键转正：把全部 Q/A 打包，随下一条消息附带发送（不立即发出，界面提示已附带）
  * - 携带当前会话上下文（buildSessionContext，含压缩结果），能回答与当前
  *   任务相关的问题（如「刚才为什么选这个方案」「改了哪些文件」）
  * - 始终携带只读工具（read / ls / grep / find，无 bash）：问「xx 函数在哪
@@ -774,6 +774,22 @@ export default function (pi: ExtensionAPI) {
 	// 同时只允许一个 btw 面板
 	let activeBtw: { abort: () => void } | null = null;
 
+	// ---- m 转正：暂存待附带的问答，等用户下一条交互消息随附发送 ----
+	// 按 m 不立即 sendUserMessage，而是记入 pendingTransfer；用户在 input 事件提交
+	// 下一条消息时（source === "interactive"）通过 transform 把问答拼到消息末尾，
+	// 输入框里用户只看到自己的文本 + "📎 已附带"提示，不出现原始问答内容。
+	let pendingTransfer: string | null = null;
+
+	pi.on("input", async (event, ctx) => {
+		if (pendingTransfer && event.source === "interactive") {
+			const attach = pendingTransfer;
+			pendingTransfer = null;
+			ctx.ui.setStatus("btw-transfer", undefined); // 提示随发送消失（hud 行 1 / 原生 footer 第 3 行）
+			return { action: "transform", text: `${event.text}\n\n---\n\n${attach}` };
+		}
+		return { action: "continue" };
+	});
+
 	pi.registerCommand("btw", {
 		description: "临时旁支问答（by the way）：侧栏问答，不写入会话历史；Enter 追问、m 转正",
 		handler: async (args, ctx: ExtensionCommandContext) => {
@@ -820,17 +836,18 @@ export default function (pi: ExtensionAPI) {
 				});
 			};
 
-			/** m 转正：把 btw 问答打包给主 agent 继续处理，然后关闭面板 */
+			/** m 转正：把 btw 问答打包，随下一条消息附带发送（不立即发出），然后关闭面板 */
 			const transfer = () => {
 				if (controller.signal.aborted) return;
 				const transcript = overlayRef?.getTranscript() ?? "";
 				if (!transcript) return;
-				const message =
+				pendingTransfer =
 					`[btw 转交] 以下是我在侧栏用 /btw 的临时问答（未写入本会话历史），` +
 					`其中值得继续跟进，请基于此继续处理：\n\n${transcript}\n\n` +
 					`（直接按内容继续即可，无需回应此来源标记本身）`;
-				pi.sendUserMessage(message, { deliverAs: "followUp" });
-				ctx.ui.notify("已把 btw 问答转交主 agent 处理", "info");
+				// 常驻提示直到随附发送（hud 开着显示在行 1 动态区，关着回落原生 footer 第 3 行）
+				ctx.ui.setStatus("btw-transfer", "📎 已附带 btw 问答");
+				ctx.ui.notify("📎 已附带 btw 问答，下一条消息将随附发送", "info");
 				closePanel?.();
 			};
 
@@ -863,9 +880,10 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// 会话切换/关闭时中止后台流
+	// 会话切换/关闭时中止后台流、清掉未发送的转交内容
 	pi.on("session_shutdown", async () => {
 		activeBtw?.abort();
 		activeBtw = null;
+		pendingTransfer = null;
 	});
 }
