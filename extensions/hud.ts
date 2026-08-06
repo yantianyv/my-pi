@@ -991,19 +991,45 @@ export default function (pi: ExtensionAPI) {
 					})();
 
 					const usage = ctx.getContextUsage();
-					// ctx 段固定总宽：bar 宽度随数字宽度自适应，`[bar] 262k` 恒为 16 格，分割线不偏移
-					// 上下文为 0 / 未返回时也不消失，显示空条 + 0，保持布局稳定
+					// ctx 段固定总宽：`[bar] tail` 恒为 16 格，分割线不偏移。
+					// 百分比自适应位置：进度条空白够时嵌入空白最左侧（`[██ 20%    ] 1m`），
+					// 空白不足（进度快满）时替换尾部上下文大小（`[█████████▏] 90%`）。
 					const ctxSeg = (() => {
-						const numText =
-							usage?.contextWindow != null
-								? fmtNum(usage.contextWindow)
-								: usage?.percent != null
-									? `${Math.round(usage.percent)}%`
-									: "0";
-						const numWidth = visibleWidth(numText);
-						const barWidth = Math.max(3, RIGHT_SEG2 - 3 - numWidth);
-						const pct = usage?.percent != null ? Math.round(usage.percent) : 0;
-						return `[${progressBar(pct, barWidth)}] ${numText}`;
+						const pctRaw = usage?.percent;
+						const pct = pctRaw != null ? Math.round(pctRaw) : 0;
+						const pctText = `${pct}%`;
+						const pctWidth = visibleWidth(pctText);
+						const windowText = usage?.contextWindow != null ? fmtNum(usage.contextWindow) : null;
+
+						// 无上下文窗口大小时退化为原逻辑：尾部显示百分比或 0
+						if (windowText == null) {
+							const numText = pctRaw != null ? pctText : "0";
+							const barWidth = Math.max(3, RIGHT_SEG2 - 3 - visibleWidth(numText));
+							return `[${progressBar(pct, barWidth)}] ${numText}`;
+						}
+						// 未返回百分比：空条 + 上下文大小（原样）
+						if (pctRaw == null) {
+							const barWidth = Math.max(3, RIGHT_SEG2 - 3 - visibleWidth(windowText));
+							return `[${progressBar(0, barWidth)}] ${windowText}`;
+						}
+
+						const barWidth = Math.max(3, RIGHT_SEG2 - 3 - visibleWidth(windowText));
+						// 已占用格数（满格 + 半格），与 progressBar 内部计算一致
+						const total = barWidth * 8;
+						const filledCells = Math.round((pct / 100) * total);
+						const used = Math.floor(filledCells / 8) + (filledCells % 8 ? 1 : 0);
+						const empty = Math.max(0, barWidth - used);
+
+						if (empty >= pctWidth + 1) {
+							// 方案 A：百分比嵌入进度条空白最左侧，尾部保留上下文大小
+							const bar = progressBar(pct, barWidth);
+							const core = bar.slice(0, bar.length - empty); // 去掉尾部空白（实体部分）
+							const rest = " ".repeat(empty - (pctWidth + 1));
+							return `[${core}${theme.fg("dim", ` ${pctText}`)}${rest}] ${windowText}`;
+						}
+						// 方案 B：进度条占满可用宽度，百分比替换尾部上下文大小
+						const barWidthB = Math.max(3, RIGHT_SEG2 - 3 - pctWidth);
+						return `[${progressBar(pct, barWidthB)}] ${pctText}`;
 					})();
 					const right2 = `${padLeft(tokensSeg, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(ctxSeg, RIGHT_SEG2)}`;
 
