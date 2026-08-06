@@ -56,7 +56,7 @@ const BTW_OVERLAY_WIDTH = "42%";
 const BTW_OVERLAY_MIN_WIDTH = 46;
 /** 浮层最大高度（终端高度百分比） */
 const BTW_OVERLAY_MAX_HEIGHT = "80%";
-/** 浮层渲染行数上限（render 自行控制在 maxHeight 内，保证边框完整） */
+/** 浮层渲染行数上限（render 按终端高度自适应，保证边框完整） */
 const BTW_MAX_ROWS = 32;
 /** 单条问题最多显示几行（超出截断） */
 const BTW_MAX_QUESTION_LINES = 4;
@@ -291,12 +291,14 @@ class BtwOverlay {
 
 	/** 工具开始执行：在状态行显示当前工具与目标 */
 	showTool(toolName: string, args: unknown): void {
-		const target =
+		const raw =
 			(args as { path?: string })?.path ??
 			(args as { pattern?: string })?.pattern ??
 			(args as { query?: string })?.query ??
 			(args as { command?: string })?.command ??
 			"";
+		// 窄面板下路径尾部（文件名/模式）比前缀更有用，超长保留尾部
+		const target = raw.length > 48 ? `…${raw.slice(-48)}` : raw;
 		this.toolLabel = `🔧 ${toolName}${target ? ` ${target}` : ""}`;
 		this.tui.requestRender();
 	}
@@ -323,6 +325,13 @@ class BtwOverlay {
 	/** 当前是否处于可交互状态（回答完成或出错，可追问/转正） */
 	private isSettled(): boolean {
 		return this.status === "done" || this.status === "error";
+	}
+
+	/** 按终端高度自适应面板最大行数：小终端收缩到 80% 高度内，避免底部被 maxHeight 截掉 */
+	private getMaxRows(): number {
+		const termRows = this.tui.terminal.rows;
+		if (!termRows || termRows <= 0) return BTW_MAX_ROWS;
+		return Math.max(12, Math.min(BTW_MAX_ROWS, Math.floor(termRows * 0.8)));
 	}
 
 	// ---- 组件接口 ----
@@ -431,8 +440,8 @@ class BtwOverlay {
 			if (this.status === "error") contentLines.push(th.fg("error", `  ✗ ${this.errorText}`));
 		}
 
-		// 滚动窗口
-		const budget = Math.max(1, BTW_MAX_ROWS - lines.length - 3);
+		// 滚动窗口：行数按终端高度自适应（小终端自动收缩，大终端保持 BTW_MAX_ROWS）
+		const budget = Math.max(1, this.getMaxRows() - lines.length - 3);
 		const maxOffset = Math.max(0, contentLines.length - budget);
 		if (this.scrollOffset > maxOffset) this.scrollOffset = maxOffset;
 		const visible = contentLines.slice(this.scrollOffset, this.scrollOffset + budget);
