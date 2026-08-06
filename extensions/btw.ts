@@ -78,6 +78,8 @@ const BTW_SYSTEM_PROMPT = [
 	"",
 	"要求：",
 	"- 回答准确、简洁、直接：默认控制在几句话到一小段，像资深同事随口回答；用户明确要求详细时才展开",
+	"- 专注当前问题本身：不要汇报/总结主会话的进度、状态或做了什么，除非用户明确要求",
+	"- 开场直接给答案，不要「让我看看」「梳理一下」「我发现了问题」这类过渡语或复盘",
 	"- 只回答当前问题本身，不要复述任务、不要列行动清单、不要建议下一步行动",
 	"- 需要查证时先用只读工具看文件，再回答；工具调用轮次里不要长篇大论，最终回答才展开",
 	"- 被问到关于你自己的问题（如「你知道自己在哪吗」「你能用工具吗」），如实说明：你是 btw 面板助手，",
@@ -134,8 +136,23 @@ function mergeAdjacent(messages: Message[]): Message[] {
  * 清洗主会话上下文：toolResult 降级为 user 消息（标注工具名）、剥离
  * tool_use/thinking 块、限制条数。清洗后全是 user/assistant 纯文本，
  * 任意截断点都安全。
+ *
+ * 主 agent 正在工作时（ctx.isIdle() 为 false），上下文截止到最近一次
+ * 用户输入（不含）——避免把未完成的 turn（partial assistant 消息、
+ * 中间工具结果）喂给 btw，让面板聚焦于任务开始前的稳定历史。
  */
-function buildContextMessages(sessionMessages: AgentMessage[]): Message[] {
+function buildContextMessages(sessionMessages: AgentMessage[], ctx: ExtensionCommandContext): Message[] {
+	if (!ctx.isIdle()) {
+		let lastUser = -1;
+		for (let i = sessionMessages.length - 1; i >= 0; i--) {
+			if (sessionMessages[i]!.role === "user") {
+				lastUser = i;
+				break;
+			}
+		}
+		if (lastUser >= 0) sessionMessages = sessionMessages.slice(0, lastUser);
+	}
+
 	const cleaned: Message[] = [];
 	for (const m of sessionMessages) {
 		if (m.role === "user" || m.role === "assistant") {
@@ -215,6 +232,28 @@ function sliceByWidth(text: string, startChar: number, maxW: number): string {
 		w += chW;
 	}
 	return out;
+}
+
+/** 行内 markdown 轻量渲染：行内代码 / 粗体 / 斜体（在 wrap 之后调用，ANSI 不参与宽度计算） */
+function renderInline(text: string, th: Theme): string {
+	// 行内代码 `code`（先处理，避免与粗体/斜体标记混淆）
+	text = text.replace(/`([^`\n]+)`/g, (_m, code: string) => th.fg("accent", code));
+	// 粗体 **bold**
+	text = text.replace(/\*\*([^*\n]+)\*\*/g, (_m, bold: string) => th.bold(bold));
+	// 斜体 *italic*（单个星号，粗体已被替换不会误伤）
+	text = text.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, (_m, pre: string, italic: string) => `${pre}${th.italic(italic)}`);
+	return text;
+}
+
+/** 单行 markdown 轻量渲染：代码块分隔 / 标题 / 列表前缀 + 行内样式 */
+function renderLine(line: string, th: Theme, inCodeBlock: boolean): string {
+	const trimmed = line.trimStart();
+	if (trimmed.startsWith("```")) return th.fg("muted", line);
+	if (inCodeBlock) return line;
+	if (/^#{1,6}\s/.test(trimmed)) return th.fg("accent", th.bold(line));
+	const listMatch = /^[-*]\s+/.exec(trimmed);
+	if (listMatch) return "• " + renderInline(trimmed.slice(listMatch[0].length), th);
+	return renderInline(line, th);
 }
 
 // ---------------------------------------------------------------------------
@@ -445,21 +484,30 @@ class BtwOverlay {
 		// 对话内容区：历史问答对 + 当前问答，统一成行供滚动
 		const contentWidth = innerW - 2;
 		const contentLines: string[] = [];
+		let inCode = false;
 		for (const { q, a } of this.qaPairs) {
+			inCode = false;
 			for (const ql of wrapText(q, contentWidth).slice(0, BTW_MAX_QUESTION_LINES)) {
 				contentLines.push(th.fg("muted", `Q ${ql}`));
 			}
-			for (const al of wrapText(a, contentWidth)) contentLines.push(th.fg("text", `  ${al}`));
+			for (const al of wrapText(a, contentWidth)) {
+				contentLines.push(`  ${renderLine(al, th, inCode)}`);
+				if (al.trimStart().startsWith("```")) inCode = !inCode;
+			}
 			contentLines.push("");
 		}
 		if (this.currentQuestion) {
+			inCode = false;
 			for (const ql of wrapText(this.currentQuestion, contentWidth).slice(0, BTW_MAX_QUESTION_LINES)) {
 				contentLines.push(th.fg("accent", `Q ${ql}`));
 			}
 			if (this.status === "thinking") {
 				contentLines.push(th.fg("dim", "  思考中…"));
 			} else {
-				for (const al of wrapText(this.answer, contentWidth)) contentLines.push(th.fg("text", `  ${al}`));
+				for (const al of wrapText(this.answer, contentWidth)) {
+					contentLines.push(`  ${renderLine(al, th, inCode)}`);
+					if (al.trimStart().startsWith("```")) inCode = !inCode;
+				}
 			}
 			if (this.status === "error") contentLines.push(th.fg("error", `  ✗ ${this.errorText}`));
 		}
@@ -541,7 +589,7 @@ async function runBtwTurn(
 
 	// 历史 = 主会话上下文（清洗）+ 面板内历次问答；当前问题作为本次 prompts
 	const sessionMessages = ctx.sessionManager.buildSessionContext().messages;
-	const context = buildContextMessages(sessionMessages);
+	const context = buildContextMessages(sessionMessages, ctx);
 	const history = mergeAdjacent([...context, ...thread]).slice(-BTW_MAX_TOTAL_MESSAGES);
 	const userMessage: AgentMessage = { role: "user", content: question, timestamp: Date.now() };
 
