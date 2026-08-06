@@ -20,6 +20,7 @@ node install.js --dry-run  # 先预览要做什么，不修改
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn | `~/.pi/agent/extensions/` |
 | `extensions/` | `explore-agent.ts` — `explore` 工具：只读子代理并行探索代码库、返回报告（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `task-alert.ts` — 任务完成提醒：提示音 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `btw.ts` — `/btw` 临时旁支问答：侧栏单轮问答，不写入会话历史（见下） | `~/.pi/agent/extensions/` |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `docs/deepseek/` | DeepSeek API / 价格 / 思考模式文档提取（适配参考） | — |
 
@@ -106,6 +107,16 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **无 token 过期问题**：认证走 `ctx.modelRegistry.getProviderAuth("kimi-coding")`——与 pi 其他 OAuth 同一条解析链，快过期时自动刷新；
 - **两段式流程**（实测必要）：kimi 一轮搜索就 `end_turn`，只回结果（正文加密）；扩展把结果塞回历史再要一次总结，agent 才能拿到文字正文；
 - **成本**：一次搜索 = 2 次 API 调用（各约 1 万+ token）+ 按次搜索费，避免频繁调用。
+
+## 临时旁支问答（extensions/btw.ts）
+
+对齐 Claude Code 的 `/btw`：主任务进行中想顺便问个小事（如「刚才为什么选这个方案」「改了哪些关键文件」），直接 `/btw <问题>` 在右侧浮层里得到回答，不打断当前任务、不污染主会话。
+
+- **零污染**：回答在独立上下文中单轮生成，不写入会话历史，主 agent 并行运行不受影响；
+- **带上下文**：自动携带当前会话已解析的上下文（含压缩结果），能回答与当前任务相关的问题；
+- **能力边界**（对齐 Claude Code）：单轮问答、无后续回合、不能使用工具，适合临时确认已知信息；需要探索新信息请用 `explore`，需要保留分支讨论用 `/fork`；
+- **操作**：流式显示回答，`Esc` 关闭并中止请求，`↑`/`↓` 滚动查看完整回答（自动换行）；同时只允许一个面板；
+- **成本控制**：只带最近 60 条上下文消息、单条工具输出截断 1500 字符、回答上限 2048 token（文件顶部可调）。
 
 ## pi-tui 滚动冻结补丁（patches/）
 
