@@ -68,33 +68,72 @@ type AnyModel = Model<any>;
 // 上下文构建
 // ---------------------------------------------------------------------------
 
-/** 从会话上下文提取可转发消息，截断超长 toolResult，并限制总条数 */
+/** 从消息中提取纯文本（剥离 tool_use / thinking 等非文本块） */
+function extractTextBlocks(m: AgentMessage): string {
+	if (typeof m.content === "string") return m.content.trim();
+	if (Array.isArray(m.content)) {
+		return m.content
+			.filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string")
+			.map((b) => b.text)
+			.join("\n")
+			.trim();
+	}
+	return "";
+}
+
+/** 把消息内容转成文本块数组（供合并） */
+function asTextBlocks(content: Message["content"]): Array<{ type: "text"; text: string }> {
+	if (typeof content === "string") return [{ type: "text", text: content }];
+	return content.filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string");
+}
+
+/**
+ * 从会话上下文构建 btw 调用的消息序列。
+ *
+ * 关键：不直接转发原始角色——toolResult 降级为 user 消息、剥离 tool_use/
+ * thinking 块、合并连续同角色、保证以 user 结尾。序列永远是干净的
+ * user/assistant 交替，兼容 OpenAI（role 'tool' 必须配对 tool_calls）与
+ * Anthropic（tool_result 必须紧跟 assistant tool_use）两类端点，截断也安全。
+ */
 function buildBtwMessages(sessionMessages: AgentMessage[], question: string): Message[] {
-	const kept: AgentMessage[] = [];
+	// 1) 逐条清洗
+	const cleaned: Message[] = [];
 	for (const m of sessionMessages) {
-		if (m.role === "user" || m.role === "assistant" || m.role === "toolResult") {
-			kept.push(m);
+		if (m.role === "user" || m.role === "assistant") {
+			const text = extractTextBlocks(m);
+			if (text) cleaned.push({ role: m.role, content: [{ type: "text", text }] });
+		} else if (m.role === "toolResult") {
+			const text = extractTextBlocks(m).slice(0, BTW_MAX_TOOL_RESULT_CHARS);
+			if (text) {
+				cleaned.push({ role: "user", content: [{ type: "text", text: `[工具 ${m.toolName} 输出]\n${text}` }] });
+			}
 		}
 	}
 
-	const trimmed: AgentMessage[] = kept.slice(-BTW_MAX_CONTEXT_MESSAGES).map((m) => {
-		if (m.role !== "toolResult" || !Array.isArray(m.content)) return m;
-		const content = m.content.map((block) => {
-			if (
-				block.type === "text" &&
-				typeof (block as { text?: unknown }).text === "string" &&
-				(block as { text: string }).text.length > BTW_MAX_TOOL_RESULT_CHARS
-			) {
-				return { ...block, text: (block as { text: string }).text.slice(0, BTW_MAX_TOOL_RESULT_CHARS) + "\n…[btw 截断]" };
-			}
-			return block;
-		});
-		return { ...m, content };
-	});
+	// 2) 截断：保留最近 N 条（清洗后全是 user/assistant，任意截断点都安全）
+	const kept = cleaned.slice(-BTW_MAX_CONTEXT_MESSAGES);
 
-	// 问题作为最后一条 user 消息
-	trimmed.push({ role: "user", content: [{ type: "text", text: question }] });
-	return trimmed as Message[];
+	// 3) 合并连续同角色（部分端点要求 user/assistant 严格交替）
+	const merged: Message[] = [];
+	for (const msg of kept) {
+		const last = merged[merged.length - 1];
+		if (last && last.role === msg.role) {
+			const sep = msg.role === "user" ? [{ type: "text", text: "\n\n" }] : [];
+			last.content = [...asTextBlocks(last.content), ...sep, ...asTextBlocks(msg.content)];
+		} else {
+			merged.push({ ...msg, content: asTextBlocks(msg.content) });
+		}
+	}
+
+	// 4) 追加问题，保证序列以 user 结尾
+	const questionBlock: Array<{ type: "text"; text: string }> = [{ type: "text", text: question }];
+	const last = merged[merged.length - 1];
+	if (last && last.role === "user") {
+		last.content = [...asTextBlocks(last.content), { type: "text", text: "\n\n（btw 临时问题）" }, ...questionBlock];
+	} else {
+		merged.push({ role: "user", content: questionBlock });
+	}
+	return merged;
 }
 
 /** 从最终 AssistantMessage 中提取纯文本回答 */
@@ -147,7 +186,8 @@ class BtwOverlay {
 
 	fail(error: string): void {
 		this.status = "error";
-		this.errorText = error;
+		// 错误消息（如 API 返回的 JSON）可能很长，截断避免占满面板
+		this.errorText = error.length > 300 ? error.slice(0, 300) + "…" : error;
 		this.tui.requestRender();
 	}
 
