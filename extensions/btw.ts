@@ -246,14 +246,127 @@ function renderInline(text: string, th: Theme): string {
 }
 
 /** 单行 markdown 轻量渲染：代码块分隔 / 标题 / 列表前缀 + 行内样式 */
-function renderLine(line: string, th: Theme, inCodeBlock: boolean): string {
+function renderLine(line: string, th: Theme): string {
 	const trimmed = line.trimStart();
 	if (trimmed.startsWith("```")) return th.fg("muted", line);
-	if (inCodeBlock) return line;
 	if (/^#{1,6}\s/.test(trimmed)) return th.fg("accent", th.bold(line));
 	const listMatch = /^[-*]\s+/.exec(trimmed);
 	if (listMatch) return "• " + renderInline(trimmed.slice(listMatch[0].length), th);
 	return renderInline(line, th);
+}
+
+// ---- markdown 表格（在 wrap 之前识别整块，避免换行拆散对齐） ----
+
+/** 表格行判定：以 | 开头且结尾，且中间还有 | */
+function isTableRow(line: string): boolean {
+	return line.startsWith("|") && line.endsWith("|") && line.includes("|", 1);
+}
+
+/** 拆分成单元格（去首尾 |，按 | 切分并 trim） */
+function splitTableRow(line: string): string[] {
+	return line.slice(1, -1).split("|").map((s) => s.trim());
+}
+
+/** 分隔行判定：如 |---|---|、|:--:| */
+function isTableSeparator(line: string): boolean {
+	if (!isTableRow(line)) return false;
+	return splitTableRow(line).every((cell) => /^:?-{1,}:?$/.test(cell));
+}
+
+/** 渲染 markdown 表格：列宽按内容自适应，超宽时压缩最宽列，表头高亮 */
+function renderTable(rows: string[][], th: Theme, maxW: number): string[] {
+	const colCount = Math.max(1, ...rows.map((r) => r.length));
+
+	// 列宽 = 该列单元格的最大可见宽度
+	const widths: number[] = [];
+	for (let c = 0; c < colCount; c++) {
+		let w = 0;
+		for (const r of rows) {
+			if (c < r.length) w = Math.max(w, visibleWidth(r[c]!));
+		}
+		widths.push(w);
+	}
+
+	// 总宽 = 边框 + 各列（内容 + 两侧 padding）+ 列分隔
+	const totalW = () => widths.reduce((a, b) => a + b, 0) + colCount * 3 + 1;
+	// 超宽压缩：反复削减当前最宽且可减的列，每列至少 1 宽
+	let guard = 0;
+	while (totalW() > maxW && guard < colCount * 50) {
+		guard++;
+		let widest = -1;
+		let widestW = 0;
+		for (let c = 0; c < colCount; c++) {
+			if (widths[c]! > 1 && widths[c]! > widestW) {
+				widestW = widths[c]!;
+				widest = c;
+			}
+		}
+		if (widest < 0) break; // 全部已到最小宽度
+		widths[widest] = widestW - 1;
+	}
+
+	const cells = (row: string[], isHeader: boolean): string => {
+		let line = "│";
+		for (let c = 0; c < colCount; c++) {
+			const cell = c < row.length ? row[c]! : "";
+			const display = truncateToWidth(cell, widths[c]!, "…", false);
+			const pad = Math.max(0, widths[c]! - visibleWidth(display));
+			const styled = isHeader ? th.bold(display) : display;
+			line += ` ${styled}${' '.repeat(pad)} │`;
+		}
+		return isHeader ? th.fg("accent", line) : th.fg("text", line);
+	};
+	const separator = (): string => {
+		let line = "├";
+		for (let c = 0; c < colCount; c++) {
+			line += "─".repeat(widths[c]! + 2) + (c < colCount - 1 ? "┼" : "┤");
+		}
+		return th.fg("muted", line);
+	};
+
+	const out: string[] = [];
+	out.push(`  ${cells(rows[0]!, true)}`);
+	out.push(`  ${separator()}`);
+	for (const r of rows.slice(1)) out.push(`  ${cells(r, false)}`);
+	return out;
+}
+
+/** 渲染一段回答：识别表格块整体渲染，其余按行 wrap + 行内样式（含代码块状态） */
+function renderAnswer(text: string, th: Theme, contentWidth: number): string[] {
+	const rawLines = text.split("\n");
+	const out: string[] = [];
+	let inCode = false;
+	let i = 0;
+	while (i < rawLines.length) {
+		const line = rawLines[i]!;
+		const trimmed = line.trim();
+
+		if (trimmed.startsWith("```")) {
+			out.push(`  ${th.fg("muted", line)}`);
+			inCode = !inCode;
+			i++;
+			continue;
+		}
+		if (inCode) {
+			for (const l of wrapText(line, contentWidth)) out.push(`  ${l}`);
+			i++;
+			continue;
+		}
+		// 表格块：当前行是表格行且下一行是分隔行
+		if (isTableRow(trimmed) && i + 1 < rawLines.length && isTableSeparator(rawLines[i + 1]!.trim())) {
+			const rows: string[][] = [splitTableRow(trimmed)];
+			i += 2; // 跳过表头行与分隔行
+			while (i < rawLines.length && isTableRow(rawLines[i]!.trim())) {
+				rows.push(splitTableRow(rawLines[i]!.trim()));
+				i++;
+			}
+			out.push(...renderTable(rows, th, contentWidth));
+			continue;
+		}
+		for (const l of wrapText(line, contentWidth)) out.push(`  ${renderLine(l, th)}`);
+		i++;
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,30 +597,21 @@ class BtwOverlay {
 		// 对话内容区：历史问答对 + 当前问答，统一成行供滚动
 		const contentWidth = innerW - 2;
 		const contentLines: string[] = [];
-		let inCode = false;
 		for (const { q, a } of this.qaPairs) {
-			inCode = false;
 			for (const ql of wrapText(q, contentWidth).slice(0, BTW_MAX_QUESTION_LINES)) {
 				contentLines.push(th.fg("muted", `Q ${ql}`));
 			}
-			for (const al of wrapText(a, contentWidth)) {
-				contentLines.push(`  ${renderLine(al, th, inCode)}`);
-				if (al.trimStart().startsWith("```")) inCode = !inCode;
-			}
+			contentLines.push(...renderAnswer(a, th, contentWidth));
 			contentLines.push("");
 		}
 		if (this.currentQuestion) {
-			inCode = false;
 			for (const ql of wrapText(this.currentQuestion, contentWidth).slice(0, BTW_MAX_QUESTION_LINES)) {
 				contentLines.push(th.fg("accent", `Q ${ql}`));
 			}
 			if (this.status === "thinking") {
 				contentLines.push(th.fg("dim", "  思考中…"));
 			} else {
-				for (const al of wrapText(this.answer, contentWidth)) {
-					contentLines.push(`  ${renderLine(al, th, inCode)}`);
-					if (al.trimStart().startsWith("```")) inCode = !inCode;
-				}
+				contentLines.push(...renderAnswer(this.answer, th, contentWidth));
 			}
 			if (this.status === "error") contentLines.push(th.fg("error", `  ✗ ${this.errorText}`));
 		}
