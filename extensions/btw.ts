@@ -527,6 +527,15 @@ class BtwOverlay {
 
 	// ---- 流式回调（runBtwTurn 调用） ----
 
+	/** 当前实际使用的模型（provider/id），问答开始时由 ask / 故障转移更新 */
+	private modelLabel = "";
+
+	/** 设置当前实际使用的模型名并重绘（auto 故障转移换模型时也会调用） */
+	setModel(label: string): void {
+		this.modelLabel = label;
+		this.tui.requestRender();
+	}
+
 	/** 开始回答新问题：清空当前回答并滚到最新 */
 	startQuestion(question: string): void {
 		this.currentQuestion = question;
@@ -695,8 +704,8 @@ class BtwOverlay {
 		const blank = () => row("");
 		const lines: string[] = [];
 
-		// 顶部边框 + 标题
-		const titleStr = ` ${th.fg("accent", "💬 btw")} `;
+		// 顶部边框 + 标题（含实际使用模型，随 ask / 故障转移更新）
+		const titleStr = ` ${th.fg("accent", "💬 btw")}${this.modelLabel ? `${th.fg("dim", " · ")}${th.fg("dim", this.modelLabel)}` : ""} `;
 		const titleW = visibleWidth(titleStr);
 		lines.push(border(`╭${titleStr}${"─".repeat(Math.max(0, innerW - titleW))}╮`));
 
@@ -1060,6 +1069,7 @@ async function runBtwTurn(
 		// auto 模式故障转移：本次调用失败（认证/网络/API 错误）换下一个更贵的模型重试
 		const next = failover?.();
 		if (next) {
+			overlay.setModel(`${next.provider}/${next.id}`); // 标题同步实际使用模型
 			overlay.startQuestion(question);
 			return runBtwTurn(ctx, next, thread, question, signal, overlay, onDone, failover, retries);
 		}
@@ -1136,6 +1146,7 @@ export default function (pi: ExtensionAPI) {
 					overlayRef?.fail("没有可用的已认证模型");
 					return;
 				}
+				overlayRef?.setModel(`${p.model.provider}/${p.model.id}`); // 标题栏显示实际使用模型
 				overlayRef?.startQuestion(question);
 				void runBtwTurn(ctx, p.model, thread, question, controller.signal, overlayRef!, (answer) => {
 					thread.push({ role: "user", content: [{ type: "text", text: question }], timestamp: Date.now() } as Message);
