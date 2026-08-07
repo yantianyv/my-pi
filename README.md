@@ -23,12 +23,12 @@ node install.js --dry-run  # 先预览要做什么，不修改
 | `extensions/` | `task-alert.ts` — 任务完成提醒：提示音 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `btw.ts` — `/btw` 临时旁支问答：侧栏单轮问答，不写入会话历史（见下） | `~/.pi/agent/extensions/` |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
-| `models.json` | OpenRouter 路由配置模板：`modelOverrides` → `compat.openRouterRouting`（已在则深度合并，保留手改的其他 provider/模型） | `~/.pi/agent/models.json` |
+| `models.json` | OpenRouter 路由配置模板：provider 级 `compat.openRouterRouting`（对所有 OpenRouter 模型生效；已在则深度合并，保留手改的其他 provider） | `~/.pi/agent/models.json` |
 | `docs/deepseek/` | DeepSeek API / 价格 / 思考模式文档提取（适配参考） | — |
 
 ## OpenRouter 路由策略（models.json）
 
-通过 `compat.openRouterRouting` 把 OpenRouter 官方 `provider` 路由参数原样透传（pi 原生支持，无需扩展代码）。当前模板用的是**软限制**方案：
+通过 `compat.openRouterRouting` 把 OpenRouter 官方 `provider` 路由参数原样透传（pi 原生支持，无需扩展代码）。当前模板用的是**软限制**方案，且配置在 **provider 级 `compat`**——pi 会把它合并进 OpenRouter 的每个模型，因此**对所有 OpenRouter 模型生效**（无需按模型逐个写）：
 
 ```jsonc
 "openRouterRouting": {
@@ -41,9 +41,9 @@ node install.js --dry-run  # 先预览要做什么，不修改
 
 - **效果**：价格优先；能达到 p50 ≥ 50 tok/s、延迟 ≤ 3s 的提供商排前面（速度是**软约束**，不达标只降级、不失败，仍走最便宜者）。
 - **透传**：整个 `openRouterRouting` 会作为请求体的 `provider` 字段发出，从而**取代 OpenRouter 默认的价格加权均衡/工具 Auto Exacto 路由**。
-- **改模型**：在 `providers.openrouter.modelOverrides` 里按模型 `id` 增删条目即可（id 必须是 OpenRouter 目录里真实存在的，如 `deepseek/deepseek-v3.2`）。
+- **改策略**：直接改 `providers.openrouter.compat.openRouterRouting` 即可，全局生效。若只想个别模型不同，可用 `modelOverrides` 按模型 `id` 覆盖（id 须是目录里真实存在者）。
 - **与认证无关**：路由配置不触碰 `auth.json` 的 API key，改完 `/reload`（或重启 pi）即生效，**无需重新登录**。
-- **合并语义**：`install.js` 对已存在的 `~/.pi/agent/models.json` 做深度合并——模板里没写的键、你手改的 provider/模型都保留，模板里有的键以仓库为准。
+- **合并语义**：`install.js` 对已存在的 `~/.pi/agent/models.json` 做深度合并——模板里没写的键、你手改的其他 provider 都保留，模板里有的键以仓库为准（只增不删）。
 
 ## 3 行 HUD（extensions/hud/）
 
@@ -97,7 +97,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 
 | MiMo Token Plan CN | `xiaomi-token-plan-cn` | 无 API | 显示控制台链接 |
 
 - 余额：官方 `GET /user/balance`（DeepSeek：充值 + 赠送）或 `GET /v1/usages`（Kimi：加油包 + 订阅额度），低余额/额度耗尽变色警示。余额行精简格式：主金额 = 充值/现金余额，赠送以 `+ X.XX` 追加（无赠送省略）。
-- 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot 等按量付费显示 `¥/min + 累计`；Kimi / MiMo 等订阅制仅显示会话 token 累计。DeepSeek 按官方人民币定价直算（`hud/cost.ts` 的 `DEEPSEEK_PRICES`：缓存命中 ¥0.02/0.025、未命中 ¥1/3、输出 ¥2/6 每百万 tokens），不再经 USD×汇率；峰谷定价（高峰 2 倍）已预留开关 `DEEPSEEK_PEAK_PRICING`，官方生效后改为 true。其余供应商仍用 pi 成本(USD)×`EXCHANGE_RATE` 换算。所有供应商在 HUD 第 2 行统一显示 `↑input ↓output rate/s` 的输出 token 速率；该速率为 EMA 平滑值（历史 80% + 新 turn 20%，首轮直接采用），基于 `output token / turn 实际耗时`，比长期平均更能反映当前生成速度，但不是严格的逐 chunk 实时流式速率。
+- 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot / OpenRouter 等按量付费显示 `¥/min + 累计`；Kimi / MiMo 等订阅制仅显示会话 token 累计。DeepSeek 按官方人民币定价直算（`hud/cost.ts` 的 `DEEPSEEK_PRICES`：缓存命中 ¥0.02/0.025、未命中 ¥1/3、输出 ¥2/6 每百万 tokens），不再经 USD×汇率；峰谷定价（高峰 2 倍）已预留开关 `DEEPSEEK_PEAK_PRICING`，官方生效后改为 true。其余供应商用 pi 成本(USD)×汇率换算，**汇率统一取实时值**：`hud/cost.ts` 的 `refreshExchangeRate()` 多源拉取（frankfurter(ECB) → open.er-api，均每日快照、免 key），随余额刷新 1h 节流一次，失败回退静态近似值 `EXCHANGE_RATE`（7.2，可自行校准）；`getUsdCnyRate()` / `isLiveRate()` 供余额适配层使用。OpenRouter 余额（USD）与单 Key 限额同步换算 RMB 显示，明细附原始 USD 金额与所用汇率（回退时标注「近似」）。所有供应商在 HUD 第 2 行统一显示 `↑input ↓output rate/s` 的输出 token 速率；该速率为 EMA 平滑值（历史 80% + 新 turn 20%，首轮直接采用），基于 `output token / turn 实际耗时`，比长期平均更能反映当前生成速度，但不是严格的逐 chunk 实时流式速率。
 - 思考折叠：默认折叠（`settings.json` 的 `hideThinkingBlock: true`），折叠标签为动画 `Thinking.` → `Thinking..` → `Thinking...`（随思考过程增长），`Ctrl+T` 切换展开。
 - 命令：`/balance` 手动刷新余额；`/hud` 开关 HUD；`/balance-debug` 调试当前供应商的余额接口（打印认证来源 + 原始 HTTP 响应）。
 
