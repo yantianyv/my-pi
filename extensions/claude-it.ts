@@ -6,6 +6,8 @@
  * - /init 命令：后台独立上下文中分析代码库并生成/更新 AGENTS.md
  *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话；
  *   进度经官方 ctx.ui.setStatus 通道推「init」状态，由 hud 在行 1 动态区显示）
+ * - 启动清屏：pi 冷启动（TUI 模式）时清一遍屏，主界面从干净画面开始
+ *   （借 setWidget 工厂同步拿到 TUI 实例：清视口 + 强制全量重绘，用完即删）
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -22,8 +24,32 @@ import {
 } from "@earendil-works/pi-agent-core";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai";
+import { Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
+
+// ---------------------------------------------------------------------------
+// 启动清屏：pi 冷启动（TUI 模式）时清一遍屏，主界面从干净画面开始
+// ---------------------------------------------------------------------------
+
+/** 启动清屏开关（Claude Code 风格；不需要时置 false 即可） */
+const CLEAR_SCREEN_ON_STARTUP = true;
+/** 占位 widget 的 key：借 setWidget 工厂同步拿到 TUI 实例，用完即删，不留痕迹 */
+const STARTUP_CLEAR_WIDGET_KEY = "startup-clear";
+
+function clearScreenOnStartup(ctx: ExtensionContext) {
+	// setWidget 的工厂会同步收到 TUI 实例（interactive-mode 内即 this.ui）：
+	// 1) clearScreen() 清视口（\x1b[2J\x1b[H，保留 scrollback 可向上翻阅）；
+	// 2) requestRender(true) 重置差分渲染状态并立即全量重绘——
+	//    清屏后若只做普通差分渲染，TUI 会以为旧帧还在、仅重绘变化行导致画面残缺。
+	ctx.ui.setWidget(STARTUP_CLEAR_WIDGET_KEY, (tui) => {
+		tui.terminal.clearScreen();
+		tui.requestRender(true);
+		return new Text("", 0, 0);
+	});
+	// 清屏 + 全量重绘都在工厂同步调用内完成，随即移除占位 widget，无视觉残留
+	ctx.ui.setWidget(STARTUP_CLEAR_WIDGET_KEY, undefined);
+}
 
 // ---------------------------------------------------------------------------
 // /init：后台独立上下文分析代码库，生成 AGENTS.md（对齐 Claude Code 的 /init）
@@ -301,7 +327,12 @@ export default function (pi: ExtensionAPI) {
 	let currentCtx: ExtensionContext | null = null;
 	let ctrlCHandlerInstalled = false;
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
+		// 启动清屏：仅 TUI 模式冷启动时执行（/reload、/new、/resume、/fork 不清屏）
+		if (CLEAR_SCREEN_ON_STARTUP && event.reason === "startup" && ctx.mode === "tui") {
+			clearScreenOnStartup(ctx);
+		}
+
 		currentCtx = ctx;
 		if (ctx.mode !== "tui" || ctrlCHandlerInstalled) return;
 		ctrlCHandlerInstalled = true;
