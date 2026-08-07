@@ -71,10 +71,6 @@ const BTW_MAX_INPUT_LENGTH = 300;
 
 /** btw 默认模型设置：auto = 已认证可用模型中最便宜的，按价格顺序故障转移；auto-not-free = 忽略免费模型 */
 const BTW_DEFAULT_MODEL = "auto";
-/** /btw-config 无参数交互列表展示的最便宜模型个数（其余模型可用参数形式指定） */
-const BTW_CONFIG_TOP_N = 10;
-/** /btw-config 搜索结果显示的模型个数上限（匹配更多时提示总数） */
-const BTW_CONFIG_SEARCH_TOP_N = 20;
 
 /** btw 助手的系统提示词（固定指令在前，利于 provider 端 prompt 缓存命中） */
 const BTW_SYSTEM_PROMPT = [
@@ -786,6 +782,194 @@ class BtwOverlay {
 }
 
 // ---------------------------------------------------------------------------
+// btw 模型选择器（可搜索列表组件）
+// ---------------------------------------------------------------------------
+
+interface ModelSelectItem {
+	/** 显示文本（纯文本，无 ANSI） */
+	label: string;
+	/** 选择后写入 btwModelSetting 的值：'auto' | 'auto-not-free' | 'provider/modelId' */
+	value: string;
+	/** 搜索用归一化文本（小写），命中 provider / id / 显示名任意部分即可 */
+	search: string;
+}
+
+/**
+ * 可搜索模型选择器：顶部搜索框实时过滤（打字即搜），下方列表展示全部可选模型，
+ * ↑↓ 移动选择、Enter 确认、Esc 取消。输入框聚焦态直接接收字符（无需先按 Enter）。
+ */
+class ModelSelectOverlay {
+	focused = true;
+
+	private tui: TUI;
+	private theme: Theme;
+	private done: (result: string | null) => void;
+	private items: ModelSelectItem[];
+	/** 当前生效设置（列表里带 ✓ 标记） */
+	private current: string;
+
+	private query = "";
+	private queryCursor = 0;
+	private filtered: ModelSelectItem[] = [];
+	private selectedIndex = 0;
+	private scrollOffset = 0;
+
+	constructor(
+		tui: TUI,
+		theme: Theme,
+		items: ModelSelectItem[],
+		current: string,
+		done: (result: string | null) => void,
+	) {
+		this.tui = tui;
+		this.theme = theme;
+		this.items = items;
+		this.current = current;
+		this.done = done;
+		// 初始定位到当前设置项（找不到则第一项）
+		const idx = items.findIndex((it) => it.value === current);
+		this.selectedIndex = idx >= 0 ? idx : 0;
+		this.applyFilter();
+		this.clampScroll();
+	}
+
+	/** 重新过滤并钳制选中项 */
+	private applyFilter(): void {
+		const q = this.query.trim().toLowerCase();
+		this.filtered = q ? this.items.filter((it) => it.search.includes(q)) : this.items;
+		if (this.selectedIndex >= this.filtered.length) {
+			this.selectedIndex = Math.max(0, this.filtered.length - 1);
+		}
+		this.tui.requestRender();
+	}
+
+	/** 列表可见行数（按终端高度自适应） */
+	private getListRows(): number {
+		const termRows = this.tui.terminal.rows;
+		if (!termRows || termRows <= 0) return 20;
+		return Math.max(6, Math.min(24, Math.floor(termRows * 0.6)));
+	}
+
+	/** 滚动窗口跟随选中项：上超窗顶对齐，下超窗底留一行 */
+	private clampScroll(): void {
+		const rows = this.getListRows();
+		if (this.selectedIndex < this.scrollOffset) {
+			this.scrollOffset = this.selectedIndex;
+		} else if (this.selectedIndex >= this.scrollOffset + rows - 1) {
+			this.scrollOffset = this.selectedIndex - rows + 2;
+		}
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape")) {
+			this.done(null);
+			return;
+		}
+		if (matchesKey(data, "return")) {
+			const item = this.filtered[this.selectedIndex];
+			if (item) this.done(item.value);
+			return;
+		}
+		if (matchesKey(data, "backspace")) {
+			if (this.queryCursor > 0) {
+				this.query = this.query.slice(0, this.queryCursor - 1) + this.query.slice(this.queryCursor);
+				this.queryCursor--;
+				this.applyFilter();
+			}
+			return;
+		}
+		if (matchesKey(data, "left")) {
+			this.queryCursor = Math.max(0, this.queryCursor - 1);
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "right")) {
+			this.queryCursor = Math.min(this.query.length, this.queryCursor + 1);
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "up")) {
+			if (this.selectedIndex > 0) {
+				this.selectedIndex--;
+				this.clampScroll();
+				this.tui.requestRender();
+			}
+			return;
+		}
+		if (matchesKey(data, "down")) {
+			if (this.selectedIndex < this.filtered.length - 1) {
+				this.selectedIndex++;
+				this.clampScroll();
+				this.tui.requestRender();
+			}
+			return;
+		}
+		// 可打印字符：插入搜索词并实时过滤
+		if (data.length === 1 && data.charCodeAt(0) >= 32) {
+			this.query = this.query.slice(0, this.queryCursor) + data + this.query.slice(this.queryCursor);
+			this.queryCursor++;
+			this.applyFilter();
+		}
+	}
+
+	render(width: number): string[] {
+		const th = this.theme;
+		const innerW = Math.max(1, width - 2);
+		const border = (s: string) => th.fg("border", s);
+		const row = (content: string) => border("│") + truncateToWidth(content, innerW, "…", true) + border("│");
+		const lines: string[] = [];
+
+		// 顶部边框 + 标题
+		const titleStr = ` ${th.fg("accent", "🔍 选择 btw 模型")} `;
+		lines.push(border(`╭${titleStr}${"─".repeat(Math.max(0, innerW - visibleWidth(titleStr)))}╮`));
+
+		// 搜索框：水平滚动窗口跟随光标（❯ 前缀占 4 个显示宽度），不截断内容
+		const inputW = Math.max(8, innerW - 3);
+		const full = this.query;
+		const totalW = visibleWidth(full);
+		let startChar = 0;
+		if (totalW > inputW) {
+			const cursorW = visibleWidth(full.slice(0, this.queryCursor));
+			startChar = charIndexAtWidth(full, Math.max(0, cursorW - Math.floor(inputW * 0.6)));
+		}
+		const windowText = sliceByWidth(full, startChar, inputW);
+		const cursorInWindow = Math.min(Math.max(0, this.queryCursor - startChar), windowText.length);
+		let inputDisplay = windowText;
+		if (this.focused) {
+			const before = inputDisplay.slice(0, cursorInWindow);
+			const cursorChar = cursorInWindow < inputDisplay.length ? inputDisplay[cursorInWindow] : " ";
+			const after = inputDisplay.slice(cursorInWindow + 1);
+			inputDisplay = `${before}${CURSOR_MARKER}\x1b[7m${cursorChar}\x1b[27m${after}`;
+		}
+		lines.push(row(` ${th.fg("accent", "❯")} ${inputDisplay}`));
+
+		// 列表：滚动窗口 + 当前项 ✓ 标记 + 选中项反显
+		const listRows = this.getListRows();
+		this.clampScroll();
+		const visible = this.filtered.slice(this.scrollOffset, this.scrollOffset + listRows);
+		for (let i = 0; i < visible.length; i++) {
+			const item = visible[i]!;
+			const isCurrent = item.value === this.current;
+			const isSelected = this.scrollOffset + i === this.selectedIndex;
+			let text = `${isCurrent ? "✓ " : "  "}${item.label}`;
+			if (isSelected) text = `\x1b[7m${text}\x1b[27m`;
+			lines.push(row(` ${text}`));
+		}
+		for (let i = visible.length; i < listRows; i++) lines.push(row(""));
+
+		// 状态行
+		const currentItem = this.filtered[this.selectedIndex];
+		const status = currentItem ? `${this.filtered.length} 个匹配 · 当前：${currentItem.value}` : "无匹配";
+		lines.push(row(th.fg("dim", `${status} · ↑↓ 选择 · Enter 确认 · Esc 取消`)));
+		lines.push(border(`╰${"─".repeat(innerW)}╯`));
+		return lines;
+	}
+
+	invalidate(): void {}
+	dispose(): void {}
+}
+
+// ---------------------------------------------------------------------------
 // 后台流式问答
 // ---------------------------------------------------------------------------
 
@@ -1043,7 +1227,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// 无参数：交互选择（非交互模式只展示当前设置与用法）
+			// 无参数：打开可搜索模型选择器（非交互模式只展示当前设置与用法）
 			if (!ctx.hasUI) {
 				ctx.ui.notify(
 					`当前 btw 模型：${btwModelSetting}。用法：/btw-config auto、auto-not-free 或 /btw-config provider/modelId`,
@@ -1051,68 +1235,41 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-
-			// 搜索：输入关键词，从全部已认证模型中筛选再选
-			const runSearch = async (): Promise<void> => {
-				const keyword = (await ctx.ui.input("搜索模型（provider/modelId 关键词，Esc 取消）：", "deepseek"))?.trim();
-				if (!keyword) return;
-				const matches = listAvailableModels(ctx).filter((m) =>
-					`${m.provider}/${m.id}`.toLowerCase().includes(keyword.toLowerCase()),
-				);
-				if (matches.length === 0) {
-					ctx.ui.notify(`未找到包含「${keyword}」的模型`, "warning");
-					return;
-				}
-				const shown = matches.slice(0, BTW_CONFIG_SEARCH_TOP_N);
-				const options = [
-					...shown.map(
-						(m) => `${m.provider}/${m.id}（${formatModelPrice(m)} · ctx ${formatContextWindow(m.contextWindow)}）`,
-					),
-					`…共 ${matches.length} 个匹配（以上为前 ${shown.length} 个）`,
-					"取消",
-				];
-				const choice = await ctx.ui.select(`搜索「${keyword}」：选择模型`, options);
-				if (!choice || choice.startsWith("取消") || choice.startsWith("…")) return;
-				const setting = choice.match(/^([^（(]+)/)?.[1]?.trim();
-				if (setting) {
-					btwModelSetting = setting;
-					ctx.ui.notify(`btw 模型已设为 ${setting}`, "info");
-				}
-			};
-
-			const top = listAvailableModels(ctx).slice(0, BTW_CONFIG_TOP_N);
-			const options = [
-				`${btwModelSetting === "auto" ? "✓ " : ""}auto（默认）：最便宜可用模型，按价格顺序故障转移`,
-				`${btwModelSetting === "auto-not-free" ? "✓ " : ""}auto-not-free：忽略免费模型，最便宜的非免费模型按价格顺序故障转移`,
-				"🔍 搜索模型…",
-				...top.map((m) => {
-					const setting = `${m.provider}/${m.id}`;
-					return `${btwModelSetting === setting ? "✓ " : ""}${setting}（${formatModelPrice(m)}）`;
-				}),
-				"取消",
+			// 列表 = 两个 auto 策略 + 全部已认证可用模型（价格升序）；顶部搜索框实时过滤
+			const models = listAvailableModels(ctx);
+			const items: ModelSelectItem[] = [
+				{
+					label: "auto（默认）：最便宜可用模型，按价格顺序故障转移",
+					value: "auto",
+					search: "auto 默认",
+				},
+				{
+					label: "auto-not-free：忽略免费模型，最便宜的非免费模型按价格顺序故障转移",
+					value: "auto-not-free",
+					search: "auto-not-free 忽略免费",
+				},
+				...models.map((m) => ({
+					label: `${m.provider}/${m.id}（${formatModelPrice(m)} · ctx ${formatContextWindow(m.contextWindow)}）`,
+					value: `${m.provider}/${m.id}`,
+					search: `${m.provider}/${m.id} ${m.name ?? ""}`.toLowerCase(),
+				})),
 			];
-			const choice = await ctx.ui.select(`btw 使用模型（当前：${btwModelSetting}）`, options);
-			if (!choice || choice.startsWith("取消")) return;
-			if (choice.includes("搜索模型")) {
-				await runSearch();
-				return;
-			}
-			// 选项文本可能带 "✓ " 前缀，去掉后还原设置串
-			const clean = choice.replace(/^✓\s*/, "");
-			if (clean.startsWith("auto-not-free")) {
-				btwModelSetting = "auto-not-free";
-				ctx.ui.notify(`btw 模型已设为 auto-not-free（${modelSettingLabel("auto-not-free")}）`, "info");
-				return;
-			}
-			if (clean.startsWith("auto")) {
-				btwModelSetting = "auto";
-				ctx.ui.notify(`btw 模型已设为 auto（${modelSettingLabel("auto")}）`, "info");
-				return;
-			}
-			const setting = clean.match(/^([^（(]+)/)?.[1]?.trim();
-			if (setting) {
-				btwModelSetting = setting;
-				ctx.ui.notify(`btw 模型已设为 ${setting}`, "info");
+			const result = await ctx.ui.custom<string | null>(
+				(tui, theme, _kb, done) => new ModelSelectOverlay(tui, theme, items, btwModelSetting, done),
+				{
+					overlay: true,
+					overlayOptions: {
+						anchor: "right-center",
+						width: "58%",
+						minWidth: 58,
+						maxHeight: "90%",
+						margin: { right: 1 },
+					},
+				},
+			);
+			if (result) {
+				btwModelSetting = result;
+				ctx.ui.notify(`btw 模型已设为 ${result}（${modelSettingLabel(result)}）`, "info");
 			}
 		},
 	});
