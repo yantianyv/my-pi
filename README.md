@@ -156,7 +156,7 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **Markdown 轻量渲染**：回答区支持行内粗体/斜体/代码、`#` 标题、`-` 列表、``` 代码块、markdown 表格（列宽自适应、超宽自动压缩、表头高亮）样式，阅读更清晰；
 - **只读工具常驻**：面板内始终可读文件/搜索代码（`read` / `ls` / `grep` / `find`，无 bash、只读不写），问「xx 函数在哪定义」「这个配置是干嘛的」类问题可直接查证代码，工具执行时状态行显示 `🔧 read src/a.ts`；需要跨仓库大规模探索仍建议用 `explore`，需要保留分支讨论用 `/fork`；
 - **操作**：流式显示回答（含工具轮次的中间过程文本），`Esc` 关闭并中止请求；同时只允许一个面板；
-- **模型可选（/btw-config）**：默认 `auto` = 当前已认证可用模型中最便宜的（input+output 单价合计，同价按 id 序），并按价格从低到高**故障转移**——最便宜模型调用失败（认证/网络/API 错误）自动换下一个更贵的模型重试，全部失败才报错；`auto-not-free` 机制相同但忽略价格 ≤ 0 的免费模型；也可 `/btw-config provider/modelId` 指定固定模型；`/btw-config` 不带参数弹出**可搜索选择器**：顶部输入框打字即实时过滤（匹配 provider/id/显示名，不区分大小写），列表展示全部已认证可用模型（价格、上下文窗口），`↑↓` 选择、`Enter` 确认、`Esc` 取消，当前设置带 ✓ 标记；面板标题栏常驻显示实际使用的模型名（auto 故障转移换模型时同步更新），开面板时 also notify 当前生效模型；
+- **模型可选（/btw-config）**：默认 `auto` = 当前已认证可用模型中最便宜的（input+output 单价合计，同价按 id 序），并按价格从低到高**故障转移**——最便宜模型调用失败（认证/网络/API 错误）自动换下一个更贵的模型重试，全部失败才报错；`auto-not-free` 机制相同但忽略价格 ≤ 0 的免费模型；也可 `/btw-config provider/modelId` 指定固定模型；`/btw-config` 不带参数弹出**可搜索选择器**：顶部输入框打字即实时过滤（匹配 provider/id/显示名，不区分大小写），列表展示全部已认证可用模型（价格、上下文窗口），`↑↓` 选择、`Enter` 确认、`Esc` 取消，当前设置带 ✓ 标记；面板标题栏常驻显示实际使用的模型名（auto 故障转移换模型时同步更新），开面板时 also notify 当前生效模型；设置持久化到 `~/.pi/agent/btw-config.json`，`/reload` 重载扩展后保留；
 - **成本控制**：主会话上下文限最近 60 条、单条工具输出截断 1500 字符、单轮问答最多 6 轮 LLM 调用、回答上限 4096 token、面板线程限 8 轮（文件顶部可调）。
 - **缓存友好（无需额外配置）**：btw 与主会话走同一序列化管线，pi-ai 自动给 system + 最后一条 user 消息打 `cache_control`（Claude Code 同款做法，缓存前缀）——btw 的系统提示词是常量、面板线程是稳定增长前缀，短时间内追问、agentLoop 多轮工具迭代都能命中 provider 前缀缓存；DeepSeek / OpenAI 兼容端点走自动前缀缓存。Anthropic 类端点可用环境变量 `PI_CACHE_RETENTION=long` 把缓存 TTL 提到 1 小时（需模型支持）。注意：“复用主会话缓存”不可行——严格前缀匹配下，btw 的序列与主会话序列不同，缓存 key 天然不重合，这是设计使然。
 
@@ -195,6 +195,39 @@ node patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂等），重�
 2. `pi-ai/dist/api/anthropic-messages.js`：`message_start` 解析 usage 处改可选链——兼容端点（如 deepseek）响应缺 usage 字段时不再抛 `'input_tokens'` 类异常（防御）。
 
 注意：补丁打在全局 `node_modules` 的 pi-ai 上，**pi 每次升级会覆盖，需重跑脚本**；若版本变动导致匹配失败，脚本会拒绝执行并提示人工核对。
+
+## 祖冲之汉化补丁（patches/apply-zuchongzhi-zh.mjs）
+
+pi 无官方 i18n（settings 无 language 字段，TUI 文案硬编码在 `dist/modes/interactive/` 下）；扩展 API 只有「新增渲染」钩子（renderer 按 customType 精确匹配、markdownTransformer 只作用于消息区域），没有覆盖原生 UI（footer/菜单/对话框//settings 界面）的钩子，主题又是纯颜色 schema。汉化只能直接替换 dist 编译产物里的字符串——祖冲之算 π，π 的汉化者。
+
+```bash
+node patches/apply-zuchongzhi-zh.mjs             # 应用/升级（幂等），重启 pi 生效
+node patches/apply-zuchongzhi-zh.mjs --dry-run   # 试运行（只打印将替换的数量）
+node patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
+```
+
+覆盖首批高频可见文案，**236 处 / 9 个文件**：
+
+| 文件 | 处数 | 内容 |
+|---|---|---|
+| `settings-selector.js` | 75 | `/settings` 界面全部标题/描述/按钮 |
+| `interactive-mode.js` | 112 | 命令反馈、usage 信息面板、警告提示 |
+| `session-selector.js` | 16 | `/resume` 会话选择器 |
+| `tree-selector.js` | 9 | `/tree`（标签提示 + 消息前缀） |
+| `config-selector.js` | 8 | `/config` 节名（全局资源/技能/主题…） |
+| `login-dialog.js` | 7 | 登录对话框 |
+| `model-selector.js` | 4 | `/model` |
+| `footer.js` | 4 | `no-model` / `thinking off` / `(订阅)` / `(自动)` |
+| `trust-selector.js` | 1 | 项目信任 |
+
+安全机制（逐条核对过 dist 源码上下文）：
+
+1. **只替换双引号字符串字面量**（`quoted: false` 条目仅限模板字符串内确认无歧义的文案，如 footer 的 `thinking off`）——绝不碰 JS 标识符/属性名（踩过 `onTerminalInput:` 被 `Input:` 误伤的坑，已加引号边界修复并 diff 验证零误伤）；不碰小写 value（`"apply"`/`"save and go back"`/`"dark"` 等是配置值或下拉框返回值，替换会改行为）、颜色 key、快捷键 key、HTTP 头名。
+2. **写盘前 `node --check` 语法验证**，失败不写盘并报错。
+3. **自动备份 + `--restore` 一键还原**；状态与备份在 `~/.pi/agent/tmp/zuchongzhi/`。
+4. **幂等（SHA256 记录）**：pi 升级覆盖 dist 后哈希变化自动重打；缺失目标串（升级后文案变动）只警告不致命，汇总列出供人工核对。
+
+注意：补丁打在全局 `node_modules` 的 pi 上，**pi 每次升级会覆盖，需重跑脚本**；汉化不影响会话文件与 LLM 上下文（仅 TUI 显示层），还原后重启即回英文。
 
 ## 卸载
 

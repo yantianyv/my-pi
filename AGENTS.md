@@ -27,6 +27,7 @@ extensions/         # pi 扩展（安装目标 ~/.pi/agent/extensions/）
     hud-balance.ts  #     hud-balance：供应商余额适配器（BALANCE_ADAPTERS 注册表）
     hud-cost.ts     #     hud-cost：消耗统计 / DeepSeek 定价 / 按量付费文本 / 实时汇率
     hud-git.ts      #     hud-git：git 状态解析
+  btw.ts        #   /btw 临时旁支问答浮层 + /btw-config 模型配置（设置持久化到 ~/.pi/agent/btw-config.json）
   btf-think.ts  # 思考折叠标签动画（Thinking... 逐帧动画，独立 UI 反馈插件）
   claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn
   explore-agent.ts  #   explore 工具：只读子代理并行探索代码库（read/ls/grep/find）
@@ -37,6 +38,7 @@ themes/matrix.json  # 黑客帝国荧光绿主题
 sounds/task_complete.wav  # 任务完成提示音
 patches/apply-pi-tui-scroll-freeze.mjs  # pi-tui 滚动冻结补丁：修复流式期间滚轮上翻被拽飞（见 README「pi-tui 滚动冻结补丁」节）；pi 升级后需重跑
 patches/apply-pi-ai-usage-guard.mjs     # pi-ai usage 缺失防护补丁：模型偶发返回无 usage 的 assistant 消息导致后续调用瞬时失败（见 README「pi-ai usage 缺失防护补丁」节）；pi 升级后需重跑
+patches/apply-zuchongzhi-zh.mjs        # 祖冲之汉化补丁：pi 无官方 i18n，直接替换 dist 编译产物硬编码英文为中文（236 处/9 文件，见 README「祖冲之汉化补丁」节）；pi 升级后需重跑
 models.json                          # OpenRouter 路由模板：install.js 复制/深度合并到 ~/.pi/agent/models.json（见 README「OpenRouter 路由策略」节）
 docs/deepseek/      # DeepSeek 官方文档提取（api.md / pricing.md / thinking.md），适配参考
 .pi/                # 空目录（占位）
