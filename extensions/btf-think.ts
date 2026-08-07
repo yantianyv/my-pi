@@ -1,5 +1,5 @@
 /**
- * beautiful-thinking：思考折叠标签动画
+ * btf-think：思考折叠标签动画
  *
  * turn_start 起把折叠的「Thinking」标签变成 Thinking. → Thinking.. → Thinking...
  * 逐帧动画（400ms/帧），turn_end / session_shutdown 时恢复默认标签。

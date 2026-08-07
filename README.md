@@ -17,7 +17,7 @@ node install.js --dry-run  # 先预览要做什么，不修改
 |------|------|----------|
 | `themes/` | `matrix.json` — 黑客帝国风格荧光绿主题 | `~/.pi/agent/themes/` |
 | `extensions/` | `hud/` — 3 行 HUD 状态栏（多文件扩展：`index.ts` 入口 + `balance.ts` 余额适配 + `cost.ts` 消耗统计 + `git.ts` git 解析，见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `beautiful-thinking.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking...，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
+| `extensions/` | `btf-think.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking...，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn | `~/.pi/agent/extensions/` |
 | `extensions/` | `explore-agent.ts` — `explore` 工具：只读子代理并行探索代码库、返回报告（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `task-alert.ts` — 任务完成提醒：提示音 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
@@ -200,7 +200,7 @@ node patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂等），重�
 ```bash
 rm ~/.pi/agent/themes/matrix.json
 rm -r ~/.pi/agent/extensions/hud
-rm ~/.pi/agent/extensions/beautiful-thinking.ts
+rm ~/.pi/agent/extensions/btf-think.ts
 rm ~/.pi/agent/extensions/claude-it.ts
 rm ~/.pi/agent/extensions/explore-agent.ts
 rm ~/.pi/agent/extensions/task-alert.ts
