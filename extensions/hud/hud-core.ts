@@ -573,6 +573,25 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("git", {
+		description: "打开可视化 Git 面板（stage / unstage / discard / commit / refresh）",
+		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("/git 仅在交互模式下可用", "warning");
+				return;
+			}
+			if (!gitMod) {
+				ctx.ui.notify("hud-git 子模块缺失，无法打开 Git 面板", "error");
+				return;
+			}
+			if (!(await gitMod.isGitRepo(ctx.cwd))) {
+				ctx.ui.notify("当前目录不是 git 仓库", "warning");
+				return;
+			}
+			await gitMod.openGitPanel(ctx, () => void refreshGitStats(ctx));
+		},
+	});
+
 	pi.registerCommand("hud", {
 		description: "切换 3 行 HUD 状态栏",
 		handler: async (_args, ctx) => {
