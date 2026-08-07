@@ -2,10 +2,11 @@
 /**
  * pi 一键配置安装脚本
  *
- * 把本项目的 themes/、extensions/ 和 sounds/ 安装到 pi 全局配置目录：
+ * 把本项目的 themes/、extensions/、sounds/ 和 models.json 安装到 pi 全局配置目录：
  *   ~/.pi/agent/themes/      （主题）
  *   ~/.pi/agent/extensions/  （扩展）
  *   ~/.pi/agent/sounds/      （提示音）
+ *   ~/.pi/agent/models.json  （OpenRouter 路由等模型配置，已存在则深度合并）
  * 并把 settings.json 的 theme 设为本项目主题。
  *
  * 用法：
@@ -27,6 +28,7 @@ const EXT_DST = path.join(PI_AGENT, "extensions");
 const SOUNDS_DST = path.join(PI_AGENT, "sounds");
 
 const THEME_NAME = "matrix"; // 默认启用的主题（对应 themes/matrix.json）
+const MODELS_SRC = path.join(ROOT, "models.json"); // 仓库里的 models.json 模板
 
 const dryRun = process.argv.includes("--dry-run") || process.argv.includes("-n");
 const log = (...m) => console.log((dryRun ? "[DRY-RUN] " : "") + m.join(" "));
@@ -37,13 +39,68 @@ function copyDir(src, dst, exts = [".json", ".ts"]) {
 		return;
 	}
 	fs.mkdirSync(dst, { recursive: true });
-	for (const f of fs.readdirSync(src)) {
-		if (!exts.some((e) => f.endsWith(e))) continue;
-		const from = path.join(src, f);
-		const to = path.join(dst, f);
+	for (const f of fs.readdirSync(src, { withFileTypes: true })) {
+		const from = path.join(src, f.name);
+		// 子目录递归（多文件扩展，如 extensions/hud/{index,balance,cost,git}.ts）
+		if (f.isDirectory()) {
+			if (f.name === "node_modules") continue;
+			copyDir(from, path.join(dst, f.name), exts);
+			continue;
+		}
+		if (!exts.some((e) => f.name.endsWith(e))) continue;
+		const to = path.join(dst, f.name);
 		log(`复制 ${path.relative(ROOT, from)} -> ${to}`);
 		if (!dryRun) fs.copyFileSync(from, to);
 	}
+}
+
+function isPlainObject(v) {
+	return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * 深度合并两个 JSON 对象（返回新对象，不改动入参）。
+ * 标量/数组：override 直接覆盖 base；对象：递归合并。
+ */
+function deepMerge(base, override) {
+	const out = { ...base };
+	for (const k of Object.keys(override)) {
+		if (isPlainObject(base?.[k]) && isPlainObject(override[k])) {
+			out[k] = deepMerge(base[k], override[k]);
+		} else {
+			out[k] = override[k];
+		}
+	}
+	return out;
+}
+
+/** 安装/合并 models.json：不存在则复制，存在则把仓库模板层层合并进既有配置（保留用户手改的其他 provider/模型）。 */
+function installModelsJson() {
+	if (!fs.existsSync(MODELS_SRC)) {
+		log(`跳过 models.json（模板不存在）: ${MODELS_SRC}`);
+		return;
+	}
+	const dstPath = path.join(PI_AGENT, "models.json");
+	let repo, merged;
+	try {
+		repo = JSON.parse(fs.readFileSync(MODELS_SRC, "utf8"));
+	} catch (e) {
+		log(`警告: 仓库模板 ${MODELS_SRC} 无法解析，跳过 models.json`);
+		return;
+	}
+	if (fs.existsSync(dstPath)) {
+		let existing = {};
+		try {
+			existing = JSON.parse(fs.readFileSync(dstPath, "utf8"));
+		} catch {
+			log(`警告: 无法解析 ${dstPath}，将用仓库模板覆盖`);
+		}
+		merged = deepMerge(existing, repo);
+	} else {
+		merged = repo;
+	}
+	log(`更新 models.json（${dstPath}）`);
+	if (!dryRun) fs.writeFileSync(dstPath, JSON.stringify(merged, null, 2) + "\n", "utf8");
 }
 
 function applySettings() {
@@ -124,6 +181,7 @@ function main() {
 	copyDir(EXT_SRC, EXT_DST);
 	copyDir(SOUNDS_SRC, SOUNDS_DST, [".wav"]);
 	applySettings();
+	installModelsJson();
 	generateTsconfig();
 	console.log(dryRun ? "\n试运行完成（未做任何修改），去掉 --dry-run 正式安装。" : "\n安装完成。在 pi 里执行 /reload 或重启后生效。");
 }

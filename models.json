@@ -1,0 +1,18 @@
+{
+  "providers": {
+    "openrouter": {
+      "modelOverrides": {
+        "deepseek/deepseek-v3.2": {
+          "compat": {
+            "openRouterRouting": {
+              "sort": { "by": "price", "partition": "model" },
+              "preferred_min_throughput": { "p50": 50 },
+              "preferred_max_latency": { "p50": 3 },
+              "allow_fallbacks": true
+            }
+          }
+        }
+      }
+    }
+  }
+}
