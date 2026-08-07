@@ -109,9 +109,16 @@ type AnyModel = Model<any>;
 /** 当前 btw 模型设置：'auto'（默认）/ 'auto-not-free'（忽略免费模型）或 'provider/modelId'；/btw-config 修改，模块级跨命令持久 */
 let btwModelSetting: string = BTW_DEFAULT_MODEL;
 
-/** 模型单价合计（input + output，$/M tokens；价格缺失按 0 计） */
+/**
+ * 模型单价合计（input + output，$/M tokens）；OpenRouter 动态定价模型用负数标记
+ * （如 openrouter/auto 为 -1000000），视为价格未知排到最后，避免 auto 误选。
+ */
 function modelTotalCost(m: AnyModel): number {
-	return (m.cost?.input ?? 0) + (m.cost?.output ?? 0);
+	const c = m.cost;
+	if (!c) return Infinity;
+	const { input = 0, output = 0 } = c;
+	if (input < 0 || output < 0) return Infinity;
+	return input + output;
 }
 
 /** 可用（已认证）模型按价格升序排列，同价按 id 字典序保证列表稳定；excludeFree 时忽略价格 ≤ 0 的免费模型 */
@@ -124,10 +131,12 @@ function listAvailableModels(ctx: ExtensionCommandContext, opts?: { excludeFree?
 		.sort((a, b) => modelTotalCost(a) - modelTotalCost(b) || a.id.localeCompare(b.id));
 }
 
-/** 模型价格展示文本，如 `$0.14/$0.28 per M`（input/output，单位美元每百万 token） */
+/** 模型价格展示文本：`$0.14/$0.28 per M`（input/output，单位美元每百万 token）；负数价格（动态定价）标「动态定价」 */
 function formatModelPrice(m: AnyModel): string {
 	const c = m.cost;
-	return c ? `$${c.input}/${c.output} per M` : "价格未知";
+	if (!c) return "价格未知";
+	if (c.input < 0 || c.output < 0) return "动态定价";
+	return `$${c.input}/${c.output} per M`;
 }
 
 /** 上下文窗口可读化：1048576 → 1M、262144 → 256K */
@@ -966,9 +975,9 @@ class ModelSelectOverlay {
 		}
 		for (let i = visible.length; i < listRows; i++) lines.push(row(""));
 
-		// 状态行
+		// 状态行：选中项在列表里已反显 + ✓ 标记当前设置，这里只提示数量与操作
 		const currentItem = this.filtered[this.selectedIndex];
-		const status = currentItem ? `${this.filtered.length} 个匹配 · 当前：${currentItem.value}` : "无匹配";
+		const status = currentItem ? `${this.filtered.length} 个匹配` : "无匹配（Esc 取消）";
 		lines.push(row(th.fg("dim", `${status} · ↑↓ 选择 · Enter 确认 · Esc 取消`)));
 		lines.push(border(`╰${"─".repeat(innerW)}╯`));
 		return lines;
@@ -1055,12 +1064,25 @@ async function runBtwTurn(
 				return;
 			}
 		}
-		// 没有找到文字回答（预算用尽等）：用累积文本兜底
+		// 没有找到文字回答（预算用尽等）：先在同一模型重试（模型偶发空回答），
+		// 重试用尽仍空则视为该模型不可用——auto 模式换下一个更贵的模型（failover），
+		// 全部候选都空回答才如实报错，避免「（无文字回答）」静默吞掉问题。
 		const fallback = overlay.getAnswer();
-		if (!fallback && retries < BTW_EMPTY_RETRY) {
-			// 模型偶发空回答（如 deepseek-v4-flash 瞬时返回空 assistant 消息）：清空状态重试
-			overlay.startQuestion(question); // 清空 answer/status，重新进入 thinking
-			return runBtwTurn(ctx, model, thread, question, signal, overlay, onDone, failover, retries + 1);
+		if (!fallback) {
+			if (retries < BTW_EMPTY_RETRY) {
+				// 模型偶发空回答（如 deepseek-v4-flash 瞬时返回空 assistant 消息）：清空状态重试
+				overlay.startQuestion(question); // 清空 answer/status，重新进入 thinking
+				return runBtwTurn(ctx, model, thread, question, signal, overlay, onDone, failover, retries + 1);
+			}
+			// 同一模型重试用尽仍空（订阅套餐/0 价模型等可能实际不可用）：换下一个更贵的
+			const next = failover?.();
+			if (next) {
+				overlay.setModel(`${next.provider}/${next.id}`); // 标题同步实际使用模型
+				overlay.startQuestion(question);
+				return runBtwTurn(ctx, next, thread, question, signal, overlay, onDone, failover, 0);
+			}
+			overlay.fail(`所有候选模型均无文字回答（最后尝试：${model.provider}/${model.id}）`);
+			return;
 		}
 		overlay.finish(fallback);
 		onDone(fallback);
