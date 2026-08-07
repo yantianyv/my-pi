@@ -7,6 +7,8 @@
  * - m 一键转正：把全部 Q/A 打包，随下一条消息附带发送（不立即发出，界面提示已附带）
  * - 携带当前会话上下文（buildSessionContext，含压缩结果），能回答与当前
  *   任务相关的问题（如「刚才为什么选这个方案」「改了哪些文件」）
+ * - /btw-config：配置 btw 使用的模型；默认 auto = 已认证可用模型中最便宜的，
+ *   按价格顺序故障转移（便宜模型调用失败自动换下一个更贵的重试，全失败才报错）
  * - 始终携带只读工具（read / ls / grep / find，无 bash）：问「xx 函数在哪
  *   定义」「这个配置是干嘛的」类问题可直接查证代码，只读不写
  * - 流式显示回答；Esc 关闭并中止请求；↑↓ 滚动查看完整回答
@@ -65,6 +67,11 @@ const BTW_MAX_QUESTION_LINES = 4;
 /** 输入框最多多少个字符 */
 const BTW_MAX_INPUT_LENGTH = 300;
 
+/** btw 默认模型设置：auto = 已认证可用模型中最便宜的，按价格顺序故障转移 */
+const BTW_DEFAULT_MODEL = "auto";
+/** /btw-config 无参数交互列表展示的最便宜模型个数（其余模型可用参数形式指定） */
+const BTW_CONFIG_TOP_N = 10;
+
 /** btw 助手的系统提示词（固定指令在前，利于 provider 端 prompt 缓存命中） */
 const BTW_SYSTEM_PROMPT = [
 	"你是 btw 助手（by the way），运行在用户正在进行的编码任务旁边的侧栏问答面板里。",
@@ -94,6 +101,76 @@ const BTW_SYSTEM_PROMPT = [
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyModel = Model<any>;
+
+// ---------------------------------------------------------------------------
+// btw 模型选择
+// ---------------------------------------------------------------------------
+
+/** 当前 btw 模型设置：'auto'（默认）或 'provider/modelId'；/btw-config 修改，模块级跨命令持久 */
+let btwModelSetting: string = BTW_DEFAULT_MODEL;
+
+/** 模型单价合计（input + output，$/M tokens；价格缺失按 0 计） */
+function modelTotalCost(m: AnyModel): number {
+	return (m.cost?.input ?? 0) + (m.cost?.output ?? 0);
+}
+
+/** 可用（已认证）模型按价格升序排列，同价按 id 字典序保证列表稳定 */
+function listAvailableModels(ctx: ExtensionCommandContext): AnyModel[] {
+	const reg = ctx.modelRegistry;
+	return reg
+		.getAvailable()
+		.filter((m) => reg.hasConfiguredAuth(m))
+		.sort((a, b) => modelTotalCost(a) - modelTotalCost(b) || a.id.localeCompare(b.id));
+}
+
+/** 模型价格展示文本，如 `$0.14/$0.28 per M`（input/output，单位美元每百万 token） */
+function formatModelPrice(m: AnyModel): string {
+	const c = m.cost;
+	return c ? `$${c.input}/${c.output} per M` : "价格未知";
+}
+
+/**
+ * 按设置串查找已认证模型：含 '/' 视为精确 provider/modelId；否则按模型 id
+ * 子串匹配（不区分大小写，唯一命中才返回，多命中由调用方列出候选）
+ */
+function findConfiguredModel(ctx: ExtensionCommandContext, setting: string): AnyModel | undefined {
+	const reg = ctx.modelRegistry;
+	if (setting.includes("/")) {
+		const [provider, id] = setting.split("/", 2);
+		const m = reg.find(provider.trim(), id?.trim() ?? "");
+		return m && reg.hasConfiguredAuth(m) ? m : undefined;
+	}
+	const matches = listAvailableModels(ctx).filter((m) => m.id.toLowerCase().includes(setting.toLowerCase()));
+	return matches.length === 1 ? matches[0] : undefined;
+}
+
+interface BtwModelPlan {
+	mode: "auto" | "fixed";
+	/** 当前要使用的模型；没有已认证可用模型时为 undefined */
+	model: AnyModel | undefined;
+	/** auto 模式：返回下一个更贵的模型（故障转移链），耗尽返回 undefined；fixed 模式恒为 undefined */
+	failover: (() => AnyModel | undefined) | undefined;
+}
+
+/**
+ * 解析当前 btw 模型设置：auto = 最便宜可用模型（含按价格升序的故障转移链）；
+ * 固定模型不可用（认证被移除等）时静默回退 auto，保证问答尽量可用。
+ */
+function resolveBtwModel(ctx: ExtensionCommandContext): BtwModelPlan {
+	if (btwModelSetting !== "auto") {
+		const fixed = findConfiguredModel(ctx, btwModelSetting);
+		if (fixed) return { mode: "fixed", model: fixed, failover: undefined };
+		btwModelSetting = "auto";
+	}
+	const sorted = listAvailableModels(ctx);
+	if (sorted.length === 0) return { mode: "auto", model: undefined, failover: undefined };
+	let idx = 0;
+	return {
+		mode: "auto",
+		model: sorted[0],
+		failover: () => sorted[++idx],
+	};
+}
 
 // ---------------------------------------------------------------------------
 // 消息清洗与组装
@@ -436,6 +513,7 @@ class BtwOverlay {
 		this.answer = "";
 		this.status = "thinking";
 		this.errorText = "";
+		this.toolLabel = ""; // 新问题/故障转移重试开始时清掉残留的工具标签
 		this.scrollOffset = Number.MAX_SAFE_INTEGER; // render 时 clamp 到底部
 		this.tui.requestRender();
 	}
@@ -695,6 +773,7 @@ async function runBtwTurn(
 	signal: AbortSignal,
 	overlay: BtwOverlay,
 	onDone: (answer: string) => void,
+	failover?: () => AnyModel | undefined,
 	retries = 0,
 ): Promise<void> {
 	// 只读工具集：read / ls / grep / find（无 bash，只读不写）
@@ -764,12 +843,18 @@ async function runBtwTurn(
 		if (!fallback && retries < BTW_EMPTY_RETRY) {
 			// 模型偶发空回答（如 deepseek-v4-flash 瞬时返回空 assistant 消息）：清空状态重试
 			overlay.startQuestion(question); // 清空 answer/status，重新进入 thinking
-			return runBtwTurn(ctx, model, thread, question, signal, overlay, onDone, retries + 1);
+			return runBtwTurn(ctx, model, thread, question, signal, overlay, onDone, failover, retries + 1);
 		}
 		overlay.finish(fallback);
 		onDone(fallback);
 	} catch (e) {
 		if (signal.aborted) return; // 用户已 Esc 关闭面板，无需再更新
+		// auto 模式故障转移：本次调用失败（认证/网络/API 错误）换下一个更贵的模型重试
+		const next = failover?.();
+		if (next) {
+			overlay.startQuestion(question);
+			return runBtwTurn(ctx, next, thread, question, signal, overlay, onDone, failover, retries);
+		}
 		overlay.fail(e instanceof Error ? e.message : String(e));
 	}
 }
@@ -810,11 +895,16 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("用法：/btw <问题>", "warning");
 				return;
 			}
-			const model = ctx.model as AnyModel | undefined;
-			if (!model) {
-				ctx.ui.notify("当前没有可用模型，无法启动 btw", "error");
+			const plan = resolveBtwModel(ctx);
+			if (!plan.model) {
+				ctx.ui.notify("没有可用的已认证模型，无法启动 btw（请先配置 provider 认证）", "error");
 				return;
 			}
+			ctx.ui.notify(
+				`btw 使用模型：${plan.model.provider}/${plan.model.id}` +
+					(plan.mode === "auto" ? "（auto，最便宜可用，按价格顺序故障转移）" : ""),
+				"info",
+			);
 			if (activeBtw) {
 				ctx.ui.notify("已有 btw 面板打开，先按 Esc 关闭再提问", "warning");
 				return;
@@ -832,8 +922,14 @@ export default function (pi: ExtensionAPI) {
 			/** 发起一轮问答（首问与追问共用） */
 			const ask = (question: string) => {
 				if (controller.signal.aborted) return;
+				// 每次提问重新解析：auto 实时选当前最便宜模型；固定模型失效自动回退 auto
+				const p = resolveBtwModel(ctx);
+				if (!p.model) {
+					overlayRef?.fail("没有可用的已认证模型");
+					return;
+				}
 				overlayRef?.startQuestion(question);
-				void runBtwTurn(ctx, model, thread, question, controller.signal, overlayRef!, (answer) => {
+				void runBtwTurn(ctx, p.model, thread, question, controller.signal, overlayRef!, (answer) => {
 					thread.push({ role: "user", content: [{ type: "text", text: question }], timestamp: Date.now() } as Message);
 					thread.push({ role: "assistant", content: [{ type: "text", text: answer }], timestamp: Date.now() } as Message);
 					// 控制面板线程长度：超过上限丢弃最早轮次
@@ -841,7 +937,7 @@ export default function (pi: ExtensionAPI) {
 						thread.splice(0, thread.length - BTW_MAX_THREAD_TURNS * 2);
 					}
 					overlayRef?.commit();
-				});
+				}, p.failover);
 			};
 
 			/** m 转正：把 btw 问答打包，随下一条消息附带发送（不立即发出），然后关闭面板 */
@@ -884,6 +980,75 @@ export default function (pi: ExtensionAPI) {
 				activeBtw = null;
 				// 面板关闭（Esc/转正/超时/会话切换）后中止仍在跑的流式请求
 				controller.abort();
+			}
+		},
+	});
+
+	// ---- /btw-config：配置 btw 问答使用的模型 ----
+	pi.registerCommand("btw-config", {
+		description: "配置 btw 使用的模型：auto（默认，最便宜可用模型、按价格顺序故障转移）或 provider/modelId；不带参数进入交互选择",
+		handler: async (args, ctx) => {
+			const arg = args?.trim() ?? "";
+
+			// 带参数：直接设置
+			if (arg) {
+				if (arg === "auto") {
+					btwModelSetting = "auto";
+					ctx.ui.notify("btw 模型已设为 auto（最便宜可用模型，按价格顺序故障转移）", "info");
+					return;
+				}
+				const m = findConfiguredModel(ctx, arg);
+				if (m) {
+					btwModelSetting = `${m.provider}/${m.id}`;
+					ctx.ui.notify(`btw 模型已设为 ${btwModelSetting}`, "info");
+					return;
+				}
+				// 未命中：子串匹配到多个时列出部分候选，没有时给用法提示
+				const matches = listAvailableModels(ctx).filter((x) =>
+					`${x.provider}/${x.id}`.toLowerCase().includes(arg.toLowerCase()),
+				);
+				ctx.ui.notify(
+					matches.length > 0
+						? `「${arg}」匹配 ${matches.length} 个模型（${matches
+								.slice(0, 3)
+								.map((x) => `${x.provider}/${x.id}`)
+								.join("、")}${matches.length > 3 ? " 等" : ""}），请用完整 provider/modelId 指定`
+						: `未找到「${arg}」。用法：/btw-config auto 或 /btw-config provider/modelId`,
+					"warning",
+				);
+				return;
+			}
+
+			// 无参数：交互选择（非交互模式只展示当前设置与用法）
+			if (!ctx.hasUI) {
+				ctx.ui.notify(
+					`当前 btw 模型：${btwModelSetting}。用法：/btw-config auto 或 /btw-config provider/modelId`,
+					"info",
+				);
+				return;
+			}
+			const top = listAvailableModels(ctx).slice(0, BTW_CONFIG_TOP_N);
+			const options = [
+				`${btwModelSetting === "auto" ? "✓ " : ""}auto（默认）：最便宜可用模型，按价格顺序故障转移`,
+				...top.map((m) => {
+					const setting = `${m.provider}/${m.id}`;
+					return `${btwModelSetting === setting ? "✓ " : ""}${setting}（${formatModelPrice(m)}）`;
+				}),
+				"取消",
+			];
+			const choice = await ctx.ui.select(`btw 使用模型（当前：${btwModelSetting}）`, options);
+			if (!choice || choice.startsWith("取消")) return;
+			// 选项文本可能带 "✓ " 前缀，去掉后还原设置串
+			const clean = choice.replace(/^✓\s*/, "");
+			if (clean.startsWith("auto")) {
+				btwModelSetting = "auto";
+				ctx.ui.notify("btw 模型已设为 auto（最便宜可用模型，按价格顺序故障转移）", "info");
+				return;
+			}
+			const setting = clean.match(/^([^（(]+)/)?.[1]?.trim();
+			if (setting) {
+				btwModelSetting = setting;
+				ctx.ui.notify(`btw 模型已设为 ${setting}`, "info");
 			}
 		},
 	});
