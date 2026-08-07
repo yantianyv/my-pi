@@ -359,6 +359,8 @@ export default async function (pi: ExtensionAPI) {
 			};
 
 			const renderGitLine = (): string => {
+				// hud-git 子模块缺失：明确提示，而非误导性的「⎇ -」（后者会被误认为非 git 仓库）
+				if (!gitMod) return theme.fg("warning", "⎇ 模块缺失");
 				if (!gitStats) return theme.fg("dim", "⎇ -");
 				const g = gitStats;
 				const badge = theme.fg("accent", `⎇ ${g.branch ?? "HEAD"}`);
@@ -493,7 +495,10 @@ export default async function (pi: ExtensionAPI) {
 								return `[${progressBar(pct, barWidthB)}] ${pctText}`;
 							})()
 						: "";
-					const right2 = `${padLeft(tokensSeg, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(ctxSeg, RIGHT_SEG2)}`;
+					// hud-cost 子模块缺失：行 2 右侧统一提示，而非空白
+					const right2 = costMod
+						? `${padLeft(tokensSeg, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(ctxSeg, RIGHT_SEG2)}`
+						: `${padLeft(theme.fg("warning", "用量 模块缺失"), RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo("", RIGHT_SEG2)}`;
 
 					// ---- 行 3：账户（余额 / plan）+ 消耗统计 ----
 					const left3 = renderBalanceLine();
