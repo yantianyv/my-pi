@@ -35,9 +35,17 @@ const createWindow = _createWindow as (html?: string) => any;
 // 可调配置（改这里后 node install.js 重装生效）
 // ---------------------------------------------------------------------------
 
-/** 浏览器 UA（bing/360 对默认 UA 会降级或返回挑战页） */
-const UA =
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+/** 标准浏览器请求头：部分站点对请求特征缺失的客户端会返回降级内容，补齐标准字段可提升站点兼容性与内容完整性 */
+const BROWSER_HEADERS: Record<string, string> = {
+	"User-Agent":
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,image/avif,image/webp,*/*;q=0.8",
+	"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+	"Accept-Encoding": "gzip, deflate, br",
+	"Cache-Control": "no-cache",
+	Connection: "keep-alive",
+	"Upgrade-Insecure-Requests": "1",
+};
 /** 通用网页搜索源顺序（bing 主 + 360 备；bing 被限流自动降级） */
 const WEB_SOURCES_ORDER = ["bing", "so360"] as const;
 /** 单次搜索返回给 agent 的结果条数上限 */
@@ -80,18 +88,37 @@ function stripTags(s: string): string {
 	return s.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
 
-/** GET 文本（带 UA / 中文语言头 / 超时），非 2xx 抛错 */
+/** 从 Content-Type 头或 HTML <meta> 提取字符编码（缺失/不识别 → utf-8），兼容 gbk/big5 等常见非 utf-8 站点 */
+function detectCharset(bytes: Uint8Array, ctypeHeader: string): string {
+	const norm = (cs: string): string => {
+		const c = cs.trim().toLowerCase();
+		if (/^gbk$|^gb2312$|^gb18030$/.test(c)) return "gb18030";
+		if (/^big5/.test(c)) return "big5";
+		return "utf-8";
+	};
+	const m = /charset\s*=\s*["']?([\w.-]+)/i.exec(ctypeHeader);
+	if (m) return norm(m[1]);
+	// HTML 前 4KB 找 <meta charset=...> / http-equiv Content-Type（用 ascii 解码找标签即可，乱码无碍）
+	const head = new TextDecoder("ascii").decode(bytes.slice(0, 4096));
+	const m2 = /<meta[^>]+charset\s*=\s*["']?\s*([\w.-]+)/i.exec(head);
+	if (m2) return norm(m2[1]);
+	return "utf-8";
+}
+
+/** 按检测出的字符编码解码响应体（避免非 utf-8 页面乱码） */
+function decodeBody(bytes: Uint8Array, ctypeHeader: string): string {
+	return new TextDecoder(detectCharset(bytes, ctypeHeader)).decode(bytes);
+}
+
+/** GET 文本（浏览器标准请求头 / 超时），非 2xx 抛错 */
 async function httpGet(url: string, timeoutMs: number): Promise<string> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		const res = await fetch(url, {
-			headers: { "User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9" },
-			signal: controller.signal,
-			redirect: "follow",
-		});
+		const res = await fetch(url, { headers: BROWSER_HEADERS, signal: controller.signal, redirect: "follow" });
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		return await res.text();
+		const buf = await res.arrayBuffer();
+		return decodeBody(new Uint8Array(buf), res.headers.get("content-type") ?? "");
 	} finally {
 		clearTimeout(timer);
 	}
@@ -265,24 +292,36 @@ async function fetchAsMarkdown(
 	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 	const onAbort = () => controller.abort();
 	signal?.addEventListener("abort", onAbort);
-	try {
+	// 临时性服务端错误（5xx / 429）重试一次；超时（AbortError）与 4xx 不重试
+	const doFetch = async (): Promise<Response> => {
 		const res = await fetch(u.href, {
-			headers: {
-				"User-Agent": UA,
-				Accept: "text/html,application/xhtml+xml,*/*;q=0.8",
-				"Accept-Language": "zh-CN,zh;q=0.9",
-			},
+			headers: BROWSER_HEADERS,
 			signal: controller.signal,
 			redirect: "follow",
 		});
-		if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-		const ctype = (res.headers.get("content-type") ?? "").toLowerCase();
-		if (ctype && !ctype.includes("html") && !ctype.includes("text/") && !ctype.includes("xml")) {
-			throw new Error(`非 HTML 内容（${ctype}），无法转 markdown；请改用 web_search 查摘要`);
+		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		return res;
+	};
+	let res: Response;
+	try {
+		res = await doFetch();
+	} catch (e) {
+		const status = e instanceof Error ? Number(/^HTTP (\d{3})/.exec(e.message)?.[1] ?? 0) : 0;
+		if (status >= 500 || status === 429) {
+			await new Promise((r) => setTimeout(r, 400));
+			res = await doFetch();
+		} else {
+			throw e;
 		}
-		const buf = await res.arrayBuffer();
-		const bytes = Math.min(buf.byteLength, FETCH_MAX_BYTES);
-		const html = new TextDecoder().decode(new Uint8Array(buf, 0, bytes));
+	}
+	const ctype = (res.headers.get("content-type") ?? "").toLowerCase();
+	if (ctype && !ctype.includes("html") && !ctype.includes("text/") && !ctype.includes("xml")) {
+		throw new Error(`非 HTML 内容（${ctype}），无法转 markdown；请改用 web_search 查摘要`);
+	}
+	const buf = await res.arrayBuffer();
+	const bytes = Math.min(buf.byteLength, FETCH_MAX_BYTES);
+	const html = decodeBody(new Uint8Array(buf, 0, bytes), res.headers.get("content-type") ?? "");
+	try {
 		const { markdown, title } = htmlToMarkdown(html, u.href);
 		let out = markdown;
 		let truncated = bytes < buf.byteLength; // 字节被截断
