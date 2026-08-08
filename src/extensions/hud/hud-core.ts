@@ -508,7 +508,17 @@ export default async function (pi: ExtensionAPI) {
 						: `${padLeft(theme.fg("warning", "用量 模块缺失"), RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo("", RIGHT_SEG2)}`;
 
 					// ---- 行 3：账户（余额 / plan）+ 消耗统计 ----
-					const left3 = renderBalanceLine();
+					// DeepSeek 峰谷徽章（计费相关 → 行 3，挂在余额行末尾）：官方高峰时段（北京时间 9:00-12:00 /
+					// 14:00-18:00），仅显示当前状态——高峰 = warning 橙黄提醒、低峰 = success 绿。纯时段判断，
+					// 与计价开关 DEEPSEEK_PEAK_PRICING 无关：无论计价是否生效都如实反映时段，供用户安排使用。
+					const peakTag =
+						model?.provider === "deepseek" && costMod
+							? (() => {
+									const isPeak = costMod.isDeepSeekPeakHour(Date.now());
+									return `${theme.fg("dim", " ・ ")}${theme.fg(isPeak ? "warning" : "success", isPeak ? "高峰" : "低峰")}`;
+								})()
+							: "";
+					const left3 = renderBalanceLine() + peakTag;
 					// 消耗统计按 provider 单独适配（adapter.rateText）
 					const adapter =
 						ctx.model?.provider && balanceMod ? balanceMod.BALANCE_ADAPTERS[ctx.model.provider] : undefined;

@@ -312,15 +312,17 @@ const DEEPSEEK_PRICES: Record<string, DeepSeekPrice> = {
 	"deepseek-v4-pro": { cacheHit: 0.025, cacheMiss: 3, output: 6 },
 };
 
-// 峰谷定价：官方「即将采用」高峰时段价格 = 平时 2 倍（北京时间每日 9:00-12:00 / 14:00-18:00）。
+// 峰谷定价：官方公布的「高峰时段价格 = 平时 2 倍」方案（北京时间每日 9:00-12:00 / 14:00-18:00）。
 // 正式生效前保持 false（避免高估），官方通知上线后改为 true。
+// 时段判断（isDeepSeekPeakHour）与计费开关独立：无论计价是否生效，都如实反映当前所处时段，供 HUD 展示提醒。
 const DEEPSEEK_PEAK_PRICING = false;
 const DEEPSEEK_PEAK_HOURS: Array<[number, number]> = [
 	[9, 12],
 	[14, 18],
 ];
 
-function isDeepSeekPeakHour(ts: number): boolean {
+/** 当前是否处于 DeepSeek 官方高峰时段（北京时间；纯时段判断，与计价开关 DEEPSEEK_PEAK_PRICING 无关）。 */
+export function isDeepSeekPeakHour(ts: number): boolean {
 	const hour = new Date(ts + 8 * 3_600_000).getUTCHours(); // 北京时间 = UTC+8
 	return DEEPSEEK_PEAK_HOURS.some(([start, end]) => hour >= start && hour < end);
 }
