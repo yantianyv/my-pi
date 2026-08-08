@@ -127,7 +127,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 
 - **子代理形态**：跑 pi-agent-core 的官方 `agentLoop`，拥有 pi 官方只读工具集（`read` / `ls` / `grep` / `find`），自主决定探索路径；主 agent 不指定文件，只描述任务（如「搞清 auth 模块的登录流程，给出关键文件与函数」）。
 - **模型调用**：直接走 pi 已登录的通道——认证来自 `ctx.modelRegistry.getApiKeyAndHeaders()`（含 OAuth），请求由 pi-ai 自己的 provider 实现发出，支持任意 API 类型。
-- **子模型选择**：优先 `PREFERRED_MODELS`（默认 `deepseek/deepseek-v4-flash`），不可用时自动选已认证且价格最低的模型；`/explore-model` 命令可查看当前选中的子模型。
+- **子模型选择**：默认 `auto`——优先 `PREFERRED_MODELS`（默认 `deepseek/deepseek-v4-flash`），不可用时自动选已认证且价格最低的模型；`/explore-model` 可配置子模型（与 `/btw-config` 同款交互）：`auto` / `auto-not-free`（忽略免费模型）/ `provider/modelId` 固定指定，无参数打开**可搜索选择器**（↑↓ 选择、Enter 确认、Esc 取消、顶部搜索框实时过滤、当前项 ✓ 标记），设置持久化到 `~/.pi/agent/explore-model.json`，`/reload` 后保留。
 - **预算保护**：一次最多 6 个任务、3 并发、单子代理最多 12 轮 / 4 分钟超时、跟随主 agent 的 abort 信号（Ctrl+C 可中断）。
 - **结果**：所有子代理的报告汇总为一个 Markdown 返回给主 agent；单任务失败不影响其他任务。
 
