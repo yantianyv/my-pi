@@ -25,7 +25,6 @@ import {
 } from "@earendil-works/pi-agent-core";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Message } from "@earendil-works/pi-ai";
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Type } from "typebox";
@@ -39,6 +38,8 @@ import {
 	ModelSelectOverlay,
 	modelSettingLabel,
 } from "./shared/model-select";
+import { isModelConfig, loadJsonConfig, saveJsonConfig } from "./shared/config";
+import { setStatusWithTTL } from "./shared/status";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -70,27 +71,14 @@ const SUBAGENT_MAX_TOKENS = 4096;
 /** 当前 explore 模型设置：'auto'（默认）/ 'auto-not-free'（忽略免费模型）或 'provider/modelId'；/explore-model 修改并持久化 */
 let exploreModelSetting: string = loadExploreModelSetting();
 
-/** 读取持久化的 explore 模型设置；文件缺失/损坏/内容非法时返回默认 auto */
+/** 读取持久化的 explore 模型设置；文件缺失/损坏/内容非法时返回默认 auto（复用 shared/config 通用工具） */
 function loadExploreModelSetting(): string {
-	try {
-		if (fs.existsSync(EXPLORE_MODEL_CONFIG_FILE)) {
-			const d = JSON.parse(fs.readFileSync(EXPLORE_MODEL_CONFIG_FILE, "utf8")) as { model?: unknown };
-			if (typeof d.model === "string" && d.model.trim()) return d.model;
-		}
-	} catch {
-		/* 配置文件损坏视为默认 */
-	}
-	return EXPLORE_DEFAULT_MODEL;
+	return loadJsonConfig<{ model: string }>(EXPLORE_MODEL_CONFIG_FILE, { model: EXPLORE_DEFAULT_MODEL }, isModelConfig).model;
 }
 
 /** 持久化 explore 模型设置到 ~/.pi/agent/explore-model.json；写失败静默（仅本次会话生效，reload 后回默认） */
 function saveExploreModelSetting(value: string): void {
-	try {
-		fs.mkdirSync(path.dirname(EXPLORE_MODEL_CONFIG_FILE), { recursive: true });
-		fs.writeFileSync(EXPLORE_MODEL_CONFIG_FILE, JSON.stringify({ model: value }, null, 2) + "\n", "utf8");
-	} catch {
-		/* 写配置失败不影响本次运行 */
-	}
+	saveJsonConfig(EXPLORE_MODEL_CONFIG_FILE, { model: value });
 }
 
 /** 设置 explore 模型并持久化（/explore-model 所有设置入口统一走这里，避免漏存） */
@@ -345,9 +333,8 @@ export default function (pi: ExtensionAPI) {
 			});
 
 			const succeeded = results.filter((r) => r.ok).length;
-			// 完成广播：官方 setStatus 通道，hud 显示「🔎 ✓ 2/3」6 秒后自动消失（TTL 由本扩展自管）
-			ctx.ui.setStatus("explore", `🔎 ✓ ${succeeded}/${results.length}`);
-			setTimeout(() => ctx.ui.setStatus("explore", undefined), 6_000);
+			// 完成广播：官方 setStatus 通道，hud 显示「🔎 ✓ 2/3」6 秒后自动消失（TTL 由 shared/status 管理）
+			setStatusWithTTL(ctx, "explore", `🔎 ✓ ${succeeded}/${results.length}`, 6_000);
 			const sections = results.map((r) =>
 				r.ok ? `## 任务：${r.task}\n${r.report}` : `## 任务：${r.task}\n⚠ ${r.error}`,
 			);

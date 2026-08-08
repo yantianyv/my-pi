@@ -13,6 +13,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setStatusWithTTL } from "./shared/status";
 
 const TMP_DIR = path.join(os.homedir(), ".pi", "agent", "tmp");
 const UNIVERSAL_MAX_LINES = 200;
@@ -238,7 +239,6 @@ export default function (pi: ExtensionAPI) {
 	let savedChars = 0;
 	let savedLines = 0;
 	let lastSaveEmit = 0;
-	let saveClearTimer: ReturnType<typeof setTimeout> | undefined;
 
 	function emitSaved(ctx: ExtensionContext) {
 		if (savedChars <= 0) return;
@@ -250,9 +250,7 @@ export default function (pi: ExtensionAPI) {
 				: savedChars >= 1_000
 					? `${(savedChars / 1_000).toFixed(1)}k`
 					: String(savedChars);
-		ctx.ui.setStatus("token-saver", `✂ 省 ${unit}`);
-		if (saveClearTimer) clearTimeout(saveClearTimer);
-		saveClearTimer = setTimeout(() => ctx.ui.setStatus("token-saver", undefined), 6_000);
+		setStatusWithTTL(ctx, "token-saver", `✂ 省 ${unit}`, 6_000); // TTL 由 shared/status 管理（同 key 重复调用自动重置）
 		savedChars = 0;
 		savedLines = 0;
 		lastSaveEmit = now;

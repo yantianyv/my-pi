@@ -10,7 +10,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 |---|---|---|
 | `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix（install.js:150）；**傻瓜式一键**：首次自动 npm install（esbuild 缺失时）→ 自动执行 src/build.js 构建 → 安装（`--skip-build` 跳过构建，dry-run 只预览不执行任何修改）；脚本路径自适应（任意目录下 node <绝对路径>/install.js 均可） | install.js |
 | `node install.js --dry-run`（或 `-n`） | 试运行，只打印不修改（不触发自动构建） | install.js:36 |
-| `node src/build.js` | 伪编译：esbuild 把 src/extensions/ 源码（含 shared/、hud/ 子模块）内联打包成 dist/extensions/ 下的零耦合单文件（hud/ → hud.ts），并把 src/static/ 静态部署物拷贝到 dist/；install.js 会自动调用，也可手动单独跑 | src/build.js |
+| `node src/build.js` | 伪编译：esbuild 把 src/extensions/ 源码（含 shared/、hud/ 子模块）内联打包成 dist/extensions/ 下的零耦合单文件（hud/ → hud.ts），并把 static/ 静态部署物拷贝到 dist/；install.js 会自动调用，也可手动单独跑 | src/build.js |
 | `npm install` | 首次拉取构建依赖（在 src/ 下执行，esbuild 装入 src/node_modules） | src/package.json |
 | `npx typescript -p src/config/tsconfig.json` | 全扩展类型检查（`tsconfig.json` 由 `install.js` 从 `tsconfig.template.json` 生成：探测 `npm root -g` 并用 `paths` 把 pi 全局安装的 `@earendil-works/*` / `typebox` 映射进来；当前 0 报错，换机器/pi 升级后重跑 `node install.js` 即可） | 本仓库惯例 |
 
@@ -47,14 +47,14 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
     token-saver.ts    #   上下文 token 节省器：自动清洗 bash 工具的冗余输出（git/npm/tsc/pip/docker/--help）
     task-alert.ts     #   任务完成提醒：提示音 + 标题动画 + setStatus 状态推送
     web-search.ts     #   联网搜索工具：web_search 自定义工具，agent 可调（kimi-coding 后端）
-  static/           #   静态部署物（build.js 原样拷入 dist/，见 README 各补丁节）
-    themes/matrix.json  #     黑客帝国荧光绿主题
-    sounds/task_complete.wav  #     任务完成提示音
-    patches/            #     pi 补丁脚本
-      apply-pi-tui-scroll-freeze.mjs  #       pi-tui 滚动冻结补丁：修复流式期间滚轮上翻被拽飞；pi 升级后需重跑
-      apply-pi-ai-usage-guard.mjs     #       pi-ai usage 缺失防护补丁：模型偶发返回无 usage 的 assistant 消息导致后续调用瞬时失败；pi 升级后需重跑
-      apply-zuchongzhi-zh.mjs        #       祖冲之汉化补丁：pi 无官方 i18n，直接替换 dist 编译产物硬编码英文为中文（236 处/9 文件）；pi 升级后需重跑
-    models.json        #     OpenRouter 路由模板：install.js 复制/深度合并到 ~/.pi/agent/models.json（见 README「OpenRouter 路由策略」节）
+static/              #   静态部署物（build.js 原样拷入 dist/，见 README 各补丁节；仓库根目录）
+  themes/matrix.json  #     黑客帝国荧光绿主题
+  sounds/task_complete.wav  #     任务完成提示音
+  patches/            #     pi 补丁脚本
+    apply-pi-tui-scroll-freeze.mjs  #       pi-tui 滚动冻结补丁：修复流式期间滚轮上翻被拽飞；pi 升级后需重跑
+    apply-pi-ai-usage-guard.mjs     #       pi-ai usage 缺失防护补丁：模型偶发返回无 usage 的 assistant 消息导致后续调用瞬时失败；pi 升级后需重跑
+    apply-zuchongzhi-zh.mjs        #       祖冲之汉化补丁：pi 无官方 i18n，直接替换 dist 编译产物硬编码英文为中文（236 处/9 文件）；pi 升级后需重跑
+  models.json        #     OpenRouter 路由模板：install.js 复制/深度合并到 ~/.pi/agent/models.json（见 README「OpenRouter 路由策略」节）
 dist/               # 全部部署物（build.js 生成，gitignore 不入库）：install.js 只认这里；每次 install 自动重建，克隆后 cd src && npm install && node install.js 即用
   extensions/       #   扩展产物：每扩展一个零耦合单文件 .ts（hud.ts 由 hud/ 合并而来）
     btw.ts          #     内含 shared/model-select.ts 内联（btw 与 explore 共用模型选择器）

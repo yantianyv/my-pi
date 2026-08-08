@@ -18,6 +18,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { setStatusWithTTL } from "./shared/status";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -144,13 +145,8 @@ export default function (pi: ExtensionAPI) {
 			if (signal?.aborted) {
 				return { content: [{ type: "text", text: "已取消" }], details: {} };
 			}
-			// 状态广播：官方 setStatus 通道推给 hud 行 1 动态区（🔍 搜索中）；TTL 由本扩展自管
-			let clearTimer: ReturnType<typeof setTimeout> | undefined;
-			const push = (text: string, ttlMs: number) => {
-				ctx.ui.setStatus("web-search", text);
-				if (clearTimer) clearTimeout(clearTimer);
-				clearTimer = setTimeout(() => ctx.ui.setStatus("web-search", undefined), ttlMs);
-			};
+			// 状态广播：官方 setStatus 通道推给 hud 行 1 动态区（🔍 搜索中）；TTL 由 shared/status 管理（同 key 重复调用自动重置）
+			const push = (text: string, ttlMs: number) => setStatusWithTTL(ctx, "web-search", text, ttlMs);
 			push("🔍 搜索中", 30_000); // 30s 兜底：即使下方漏发 done 也会自动消失，不悬挂
 			onUpdate?.({ content: [{ type: "text", text: `正在搜索：${params.query}` }], details: { progress: 10 } });
 			try {

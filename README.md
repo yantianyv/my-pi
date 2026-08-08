@@ -179,7 +179,7 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 修「agent 工作时滚轮上翻会被拽飞（滚到顶部）」的问题。根因：流式输出时整条消息每帧从 markdown 源码重渲染，消息开头几行持续变化；一旦滚出视口，pi-tui 判定 `firstChanged < prevViewportTop` 就整屏重绘——发 `\x1b[3J` 清空终端滚动缓冲区再全量重写，实测每秒 2~3 次，Windows Terminal 的滚动位置随之丢失。
 
 ```bash
-node src/static/patches/apply-pi-tui-scroll-freeze.mjs   # 打补丁/升级（幂等），重启 pi 生效
+node static/patches/apply-pi-tui-scroll-freeze.mjs   # 打补丁/升级（幂等），重启 pi 生效
 ```
 
 补丁思路（同 Claude Code / Ink `<Static>`）：
@@ -200,7 +200,7 @@ node src/static/patches/apply-pi-tui-scroll-freeze.mjs   # 打补丁/升级（�
 修「模型偶发无文字回答」（实测 deepseek-v4-flash，/btw 面板表现为 `（无文字回答）`，主会话同理可触发）。根因：pi-ai 的 `estimate.js` 估算上下文 token 时对每条 assistant 消息调 `calculateContextTokens(assistant.usage)`，**usage 为 undefined 时抛 TypeError**（`Cannot read properties of undefined (reading 'totalTokens')`）。该异常发生在每次 LLM 调用的**请求构建阶段**（`clampMaxTokensToContext` → `estimateContextTokens` → `getLastAssistantUsageInfo`），只要 history（含主会话上下文，compaction summary 消息常缺 usage）里混入一条缺 usage 的 assistant 消息，后续调用就**瞬时失败**（1~5ms 返回 `stopReason="error"`，请求根本没发出）——这也解释了为何失败总是“瞬时”。
 
 ```bash
-node src/static/patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂等），重启 pi 生效
+node static/patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂等），重启 pi 生效
 ```
 
 补丁内容（覆盖 pi-ai 两个文件，幂等）：
@@ -215,9 +215,9 @@ node src/static/patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂�
 pi 无官方 i18n（settings 无 language 字段，TUI 文案硬编码在 `dist/modes/interactive/` 下）；扩展 API 只有「新增渲染」钩子（renderer 按 customType 精确匹配、markdownTransformer 只作用于消息区域），没有覆盖原生 UI（footer/菜单/对话框//settings 界面）的钩子，主题又是纯颜色 schema。汉化只能直接替换 dist 编译产物里的字符串——祖冲之算 π，π 的汉化者。
 
 ```bash
-node src/static/patches/apply-zuchongzhi-zh.mjs             # 应用/升级（幂等），重启 pi 生效
-node src/static/patches/apply-zuchongzhi-zh.mjs --dry-run   # 试运行（只打印将替换的数量）
-node src/static/patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
+node static/patches/apply-zuchongzhi-zh.mjs             # 应用/升级（幂等），重启 pi 生效
+node static/patches/apply-zuchongzhi-zh.mjs --dry-run   # 试运行（只打印将替换的数量）
+node static/patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
 ```
 
 覆盖首批高频可见文案，**236 处 / 9 个文件**：

@@ -13,7 +13,8 @@
  */
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { renderInputWithCursor } from "./ui";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnyModel = Model<any>;
@@ -263,10 +264,7 @@ export class ModelSelectOverlay {
 		const cursorInWindow = Math.min(Math.max(0, this.queryCursor - startChar), windowText.length);
 		let inputDisplay = windowText;
 		if (this.focused) {
-			const before = inputDisplay.slice(0, cursorInWindow);
-			const cursorChar = cursorInWindow < inputDisplay.length ? inputDisplay[cursorInWindow] : " ";
-			const after = inputDisplay.slice(cursorInWindow + 1);
-			inputDisplay = `${before}${CURSOR_MARKER}\x1b[7m${cursorChar}\x1b[27m${after}`;
+			inputDisplay = renderInputWithCursor(inputDisplay, cursorInWindow);
 		}
 		lines.push(row(` ${th.fg("accent", "❯")} ${inputDisplay}`));
 

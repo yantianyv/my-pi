@@ -33,13 +33,14 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
-import type { Message, Model } from "@earendil-works/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runAgentLoop, type AgentLoopConfig, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
-import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import {
+	AnyModel,
 	charIndexAtWidth,
 	findConfiguredModel,
 	formatContextWindow,
@@ -50,6 +51,8 @@ import {
 	modelSettingLabel,
 	sliceByWidth,
 } from "./shared/model-select";
+import { isModelConfig, loadJsonConfig, saveJsonConfig } from "./shared/config";
+import { renderInputWithCursor } from "./shared/ui";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -116,9 +119,6 @@ const BTW_SYSTEM_PROMPT = [
 	"- 如果依据现有信息无法判断，明确说明这一点",
 ].join("\n");
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyModel = Model<any>;
-
 /** btw 模型设置的人话说明（复用 shared modelSettingLabel，带 btw 的 auto 策略文案） */
 function btwSettingLabel(setting: string): string {
 	return modelSettingLabel(setting, {
@@ -134,27 +134,14 @@ function btwSettingLabel(setting: string): string {
 /** 当前 btw 模型设置：'auto'（默认）/ 'auto-not-free'（忽略免费模型）或 'provider/modelId'；/btw-config 修改并持久化 */
 let btwModelSetting: string = loadBtwModelSetting();
 
-/** 读取持久化的 btw 模型设置；文件缺失/损坏/内容非法时返回默认 auto */
+/** 读取持久化的 btw 模型设置；文件缺失/损坏/内容非法时返回默认 auto（复用 shared/config 通用工具） */
 function loadBtwModelSetting(): string {
-	try {
-		if (fs.existsSync(BTW_CONFIG_FILE)) {
-			const d = JSON.parse(fs.readFileSync(BTW_CONFIG_FILE, "utf8")) as { model?: unknown };
-			if (typeof d.model === "string" && d.model.trim()) return d.model;
-		}
-	} catch {
-		/* 配置文件损坏视为默认 */
-	}
-	return BTW_DEFAULT_MODEL;
+	return loadJsonConfig<{ model: string }>(BTW_CONFIG_FILE, { model: BTW_DEFAULT_MODEL }, isModelConfig).model;
 }
 
 /** 持久化 btw 模型设置到 ~/.pi/agent/btw-config.json；写失败静默（仅本次会话生效，reload 后回默认） */
 function saveBtwModelSetting(value: string): void {
-	try {
-		fs.mkdirSync(path.dirname(BTW_CONFIG_FILE), { recursive: true });
-		fs.writeFileSync(BTW_CONFIG_FILE, JSON.stringify({ model: value }, null, 2) + "\n", "utf8");
-	} catch {
-		/* 写配置失败不影响本次运行 */
-	}
+	saveJsonConfig(BTW_CONFIG_FILE, { model: value });
 }
 
 /** 设置 btw 模型并持久化（/btw-config 所有设置入口统一走这里，避免漏存） */
@@ -736,10 +723,7 @@ class BtwOverlay {
 
 			let inputDisplay = windowText;
 			if (this.focused) {
-				const before = inputDisplay.slice(0, cursorInWindow);
-				const cursorChar = cursorInWindow < inputDisplay.length ? inputDisplay[cursorInWindow] : " ";
-				const after = inputDisplay.slice(cursorInWindow + 1);
-				inputDisplay = `${before}${CURSOR_MARKER}\x1b[7m${cursorChar}\x1b[27m${after}`;
+				inputDisplay = renderInputWithCursor(inputDisplay, cursorInWindow);
 			}
 			lines.push(row(` ${th.fg("accent", "❯")} ${inputDisplay}`));
 			lines.push(row(th.fg("dim", "Enter 发送 · Esc 取消")));

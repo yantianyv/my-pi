@@ -15,9 +15,9 @@
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { loadJsonConfig, saveJsonConfig } from "../shared/config";
 
 // ---------------------------------------------------------------------------
 // 实时汇率（USD→CNY）：多源拉取 → 磁盘缓存 → 无（显示原始货币）
@@ -32,24 +32,19 @@ let rateSource: RateSource = "none";
 const RATE_CACHE_FILE = path.join(os.homedir(), ".pi", "agent", "tmp", "exchange-rate.json");
 
 function loadRateCache(): number | null {
-	try {
-		if (fs.existsSync(RATE_CACHE_FILE)) {
-			const d = JSON.parse(fs.readFileSync(RATE_CACHE_FILE, "utf8")) as { rate?: unknown };
-			if (typeof d.rate === "number" && d.rate > 0) return d.rate;
-		}
-	} catch {
-		/* 缓存损坏视为无缓存 */
-	}
-	return null;
+	const d = loadJsonConfig<{ rate: number }>(
+		RATE_CACHE_FILE,
+		{ rate: 0 },
+		(v): v is { rate: number } => {
+			const r = (v as { rate?: unknown } | null)?.rate;
+			return typeof r === "number" && r > 0;
+		},
+	);
+	return d.rate > 0 ? d.rate : null;
 }
 
 function saveRateCache(rate: number): void {
-	try {
-		fs.mkdirSync(path.dirname(RATE_CACHE_FILE), { recursive: true });
-		fs.writeFileSync(RATE_CACHE_FILE, JSON.stringify({ rate, fetchedAt: Date.now() }));
-	} catch {
-		/* 写缓存失败不影响功能 */
-	}
+	saveJsonConfig(RATE_CACHE_FILE, { rate, fetchedAt: Date.now() });
 }
 
 /** 当前可用的 USD→CNY 汇率；null = 无汇率（调用方应显示原始货币）。 */
