@@ -25,6 +25,8 @@ const path = require("path");
 const ROOT = path.join(__dirname, ".."); // 仓库根目录（本脚本在 src/ 内）
 const SRC = path.join(ROOT, "src");
 const DIST = path.join(ROOT, "dist");
+// 被 install.js 调用时传入（此时不打印“去运行 install.js”之类的提示，避免误导）
+const fromInstall = process.argv.includes("--from-install");
 
 // esbuild 是 src/package.json 的 devDependency，安装在 src/node_modules——
 // 本脚本就在 src/ 内，require 从 src/ 向上解析自然命中，无需 createRequire hack
@@ -105,7 +107,13 @@ async function main() {
 		process.exit(1);
 	}
 
-	console.log(`\n${ok}/${entries.length} 个扩展构建成功。运行 node install.js 安装 dist/ 产物。`);
+	if (fromInstall) {
+		console.log(`${ok}/${entries.length} 个扩展构建成功。`);
+	} else {
+		console.log(
+			`\n${ok}/${entries.length} 个扩展构建成功。\n提示：install.js 会自动构建，无需单独运行本脚本——直接在仓库根目录运行 node install.js 即可。`,
+		);
+	}
 }
 
 main().catch((err) => {

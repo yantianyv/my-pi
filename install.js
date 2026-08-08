@@ -17,6 +17,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { execSync, spawnSync } = require("child_process");
+const readline = require("node:readline");
 
 const ROOT = __dirname;
 const PI_AGENT = path.join(os.homedir(), ".pi", "agent");
@@ -40,17 +41,30 @@ const log = (...m) => console.log((dryRun ? "[DRY-RUN] " : "") + m.join(" "));
 const SRC_DIR = path.join(ROOT, "src");
 const ESBUILD_DIR = path.join(SRC_DIR, "node_modules", "esbuild");
 
-/** 确保构建依赖已安装：src/node_modules/esbuild 缺失（克隆后首次）时自动 npm install（dry-run 只提示） */
-function ensureDeps() {
+/** 确保构建依赖已安装：src/node_modules/esbuild 缺失（克隆后首次）时自动 npm install
+ *  - 交互终端（TTY）且未传 -y：询问确认后再装
+ *  - 非交互（agent/CI 调用）或传了 -y：直接装（无人值守）；dry-run 只提示 */
+async function ensureDeps() {
 	if (fs.existsSync(ESBUILD_DIR)) return;
-	log("未找到 esbuild（构建依赖），自动执行 npm install（src/ 下）…");
+	log("未找到 esbuild（构建依赖）");
 	if (dryRun) return; // 试运行不执行
+	const yes = process.argv.includes("-y") || process.argv.includes("--yes");
+	if (!yes && process.stdin.isTTY) {
+		const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+		const answer = await new Promise((resolve) => {
+			rl.question("  是否自动执行 npm install 拉取构建依赖（esbuild）？（Y/n） ", resolve);
+		});
+		rl.close();
+		if (answer.trim().toLowerCase().startsWith("n")) {
+			console.error("已取消。请手动执行 cd src && npm install 后重新运行 install.js。");
+			process.exit(1);
+		}
+	}
+	log("自动执行 npm install（src/ 下）…");
 	try {
 		execSync("npm install", { cwd: SRC_DIR, stdio: "inherit" });
 	} catch {
-		console.error(
-			"\nnpm install 失败（需要网络）。请手动执行 cd src && npm install 后重新运行 install.js。",
-		);
+		console.error("\nnpm install 失败（需要网络）。请手动执行 cd src && npm install 后重新运行 install.js。");
 		process.exit(1);
 	}
 }
@@ -63,7 +77,7 @@ function autoBuild() {
 	}
 	log(`自动构建：node ${path.relative(ROOT, BUILD_SCRIPT)}`);
 	if (dryRun) return; // 试运行不执行
-	const r = spawnSync(process.execPath, [BUILD_SCRIPT], { cwd: ROOT, stdio: "inherit" });
+	const r = spawnSync(process.execPath, [BUILD_SCRIPT, "--from-install"], { cwd: ROOT, stdio: "inherit" });
 	if (r.status !== 0) {
 		console.error(`\n构建失败（退出码 ${r.status}）。请检查 src/ 源码与网络后重试。`);
 		process.exit(1);
@@ -208,11 +222,11 @@ function generateTsconfig() {
 	if (!dryRun) fs.writeFileSync(outPath, out, "utf8");
 }
 
-function main() {
+async function main() {
 	console.log(`pi 一键配置安装 → ${PI_AGENT}\n`);
 	// 默认自动构建（dry-run / --skip-build 跳过）；构建失败即退出
 	if (!skipBuild) {
-		ensureDeps();
+		await ensureDeps();
 		autoBuild();
 	}
 	// 构建后 dist 应已生成；仍缺失时：dry-run 给出预期说明，正式安装报错退出
@@ -237,4 +251,7 @@ function main() {
 	console.log(dryRun ? "\n试运行完成（未做任何修改），去掉 --dry-run 正式安装。" : "\n安装完成。在 pi 里执行 /reload 或重启后生效。");
 }
 
-main();
+main().catch((err) => {
+	console.error(err);
+	process.exit(1);
+});

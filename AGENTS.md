@@ -8,7 +8,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 
 | 命令 | 作用 | 出处 |
 |---|---|---|
-| `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix（install.js:150）；**傻瓜式一键**：首次自动 npm install（esbuild 缺失时）→ 自动执行 src/build.js 构建 → 安装（`--skip-build` 跳过构建，dry-run 只预览不执行任何修改）；脚本路径自适应（任意目录下 node <绝对路径>/install.js 均可） | install.js |
+| `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix（install.js:150）；**傻瓜式一键**：首次自动 npm install（esbuild 缺失时，TTY 下询问确认、`-y` 跳过确认无人值守）→ 自动执行 src/build.js 构建 → 安装（`--skip-build` 跳过构建，dry-run 只预览不执行任何修改）；脚本路径自适应（任意目录下 node <绝对路径>/install.js 均可） | install.js |
 | `node install.js --dry-run`（或 `-n`） | 试运行，只打印不修改（不触发自动构建） | install.js:36 |
 | `node src/build.js` | 伪编译：esbuild 把 src/extensions/ 源码（含 shared/、hud/ 子模块）内联打包成 dist/extensions/ 下的零耦合单文件（hud/ → hud.ts）；静态资源不经本脚本；install.js 会自动调用，也可手动单独跑 | src/build.js |
 | `npm install` | 首次拉取构建依赖（在 src/ 下执行，esbuild 装入 src/node_modules） | src/package.json |
@@ -23,7 +23,7 @@ install.js          # 安装脚本（根目录）：扩展产物从 dist/extensi
 .gitignore          # 忽略生成物 tsconfig.json / node_modules / dist（产物不入库）
 README.md           # 项目说明（含 HUD 图例、各扩展用法、卸载方法）
 src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（build.js 的唯一输入）
-  package.json      #   构建工具声明（esbuild devDependency；npm install 拉取）+ npm scripts；非运行时依赖
+  package.json      #   构建工具声明（esbuild devDependency；npm install 拉取）+ typecheck script；非运行时依赖
   package-lock.json #   npm 锁定文件（入库）
   node_modules/     #   npm install 生成（gitignore，不入库）
   build.js          #   伪编译脚本（与 npm 生态同层，require esbuild 自然命中 src/node_modules）：只打包扩展产物到 dist/extensions/（静态资源不经编译，install.js 直接从 static/ 装）
