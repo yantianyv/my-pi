@@ -607,7 +607,8 @@ export default function (pi: ExtensionAPI) {
 		updateWidget(ctx, s);
 		const state = s.getState();
 		const derived = s.getDerived();
-		ctx.ui.notify(summaryLine(state, derived), "info");
+		// 空工作流（无任务）不弹状态通知，避免「进度 0/0｜当前：全部完成」
+		if (derived.all.length > 0) ctx.ui.notify(summaryLine(state, derived), "info");
 	});
 
 	// hud 开启/关闭时重算展示方式：hud 接管底部行（面板隐藏） vs workflow 自绘常驻面板。

@@ -269,7 +269,8 @@ export function updateWidget(ctx: ExtensionContext, store: WorkflowStore) {
 			ctx.ui.setWidget("workflow-mgr", (_tui, theme) => renderWidget(state, derived, theme), {
 				placement: "belowEditor",
 			});
-			ctx.ui.setStatus("workflow-mgr", summaryLine(state, derived));
+			// 空工作流（无任务）不推状态摘要，避免「进度 0/0｜当前：全部完成」
+			ctx.ui.setStatus("workflow-mgr", derived.all.length > 0 ? summaryLine(state, derived) : undefined);
 		} else {
 			ctx.ui.setWidget("workflow-mgr", undefined, { placement: "belowEditor" });
 			ctx.ui.setStatus("workflow-mgr", undefined);
