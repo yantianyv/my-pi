@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-08T17:30:51.130Z",
+  "currentTaskId": "0.1",
+  "tasks": {
+    "0.1": {
+      "status": "todo"
+    },
+    "0.2": {
+      "status": "todo"
+    },
+    "1.1": {
+      "status": "todo"
+    },
+    "1.2": {
+      "status": "todo"
+    },
+    "0.3": {
+      "status": "done",
+      "doneAt": "2026-08-08T17:27:56.229Z",
+      "note": "布局调整完成：无工作流隐藏、去前缀标记、紧凑布局、selectedBg 背景区分"
+    }
+  },
+  "milestones": {
+    "面板验收": {
+      "done": true,
+      "date": "2026-08-09"
+    },
+    "布局定稿": {
+      "done": false,
+      "date": "2026-08-10"
+    },
+    "功能完整": {
+      "done": false,
+      "date": "2026-08-15"
+    },
+    "最终交付": {
+      "done": false
+    }
+  },
+  "decisions": [],
+  "log": [
+    {
+      "ts": "2026-08-08T17:24:08.869Z",
+      "event": "milestone",
+      "msg": "面板验收 2026-08-09 done=false"
+    },
+    {
+      "ts": "2026-08-08T17:24:08.869Z",
+      "event": "task_start",
+      "taskId": "0.3",
+      "msg": "检查常驻面板布局"
+    },
+    {
+      "ts": "2026-08-08T17:27:56.229Z",
+      "event": "task_done",
+      "taskId": "0.3",
+      "msg": "检查常驻面板布局"
+    },
+    {
+      "ts": "2026-08-08T17:28:21.269Z",
+      "event": "milestone",
+      "msg": "面板验收  done=true"
+    },
+    {
+      "ts": "2026-08-08T17:30:51.129Z",
+      "event": "milestone",
+      "msg": "布局定稿 2026-08-10 done=false"
+    },
+    {
+      "ts": "2026-08-08T17:30:51.129Z",
+      "event": "milestone",
+      "msg": "功能完整 2026-08-15 done=false"
+    },
+    {
+      "ts": "2026-08-08T17:30:51.130Z",
+      "event": "milestone",
+      "msg": "最终交付  done=false"
+    }
+  ]
+}

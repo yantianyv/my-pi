@@ -107,6 +107,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 - 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot / OpenRouter 等按量付费显示 `¥/min + 累计`；Kimi / MiMo 等订阅制仅显示会话 token 累计。DeepSeek 按官方人民币定价直算（`hud/cost.ts` 的 `DEEPSEEK_PRICES`：缓存命中 ¥0.02/0.025、未命中 ¥1/3、输出 ¥2/6 每百万 tokens），不再经 USD×汇率；峰谷定价（高峰 2 倍）已预留开关 `DEEPSEEK_PEAK_PRICING`，官方生效后改为 true（生效前 HUD 行 3 的「高峰/低峰」徽章仍如实显示当前时段，见上图例，仅提醒不参与计价）。其余供应商成本内部按**原始货币 USD** 记录，显示时按汇率换算 RMB。**汇率三态**（`hud/cost.ts`）：① 实时（多源拉取 frankfurter(ECB) → open.er-api，每日快照、免 key，随余额刷新 1h 节流一次）→ ② 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`，拉取失败时读缓存）→ ③ 无汇率（断网且无缓存，显示原始货币 USD，**不使用任何固定近似汇率**）。OpenRouter 余额：有汇率时换算 RMB（明细附原始 USD + 汇率，缓存标注「(缓存)」），无汇率时直接显示 USD 原始值。所有供应商在 HUD 第 2 行统一显示 `↑input ↓output rate/s` 的输出 token 速率；该速率为 EMA 平滑值（历史 80% + 新 turn 20%，首轮直接采用），基于 `output token / turn 实际耗时`，比长期平均更能反映当前生成速度，但不是严格的逐 chunk 实时流式速率。
 - 思考折叠：默认折叠（`settings.json` 的 `hideThinkingBlock: true`），折叠标签为动画 `Thinking.` → `Thinking..` → `Thinking...` → `Thinking....`（4 帧循环，随思考过程增长），`Ctrl+T` 切换展开。
 - 命令：`/balance` 手动刷新余额；`/git` 打开 git 可视化面板；`/hud` 开关 HUD。
+- **额外底部行接口**：通用 `__PI_HUD_API__`（`registerExtraRows(provider)` / `notifyExtraRowsUpdate()`）——workflow-mgr 等扩展注册渲染函数，hud 只把返回的行追加到 footer 底部（屏幕最底），**内容与样式由注册方决定**。当前 workflow-mgr 使用：其常驻面板内容（任务/分工/里程碑 ≈4 行，12 格进度条 + selectedBg 底色与面板同款）在底部渲染，面板隐藏；`/hud` 关闭时置 `__PI_HUD_ACTIVE__=false` 并派发 `hud:state-change`，workflow-mgr 自动注销底部行、恢复自绘面板。
 
 说明：DeepSeek 按量付费，余额过低变色警示；Kimi For Coding 为订阅制 + 加油包（Extra Usage）混合，优先显示加油包余额，没有加油包则显示订阅额度，订阅额度耗尽或余额过低变色警示，右下角显示会话 token 累计；Kimi 开放平台（`moonshotai`/`moonshotai-cn`）为按量付费，显示现金 + 赠金余额；MiMo Token Plan CN（`xiaomi-token-plan-cn`）无公开余量 API，余额行显示控制台链接，右下角显示会话 token 累计。所有供应商都在 HUD 第 2 行统一显示输出 token 速率。
 
@@ -177,6 +178,17 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **模型可选（/btw-config）**：默认 `auto` = 当前已认证可用模型中最便宜的（input+output 单价合计，同价按 id 序），并按价格从低到高**故障转移**——最便宜模型调用失败（认证/网络/API 错误）自动换下一个更贵的模型重试，全部失败才报错；`auto-not-free` 机制相同但忽略价格 ≤ 0 的免费模型；也可 `/btw-config provider/modelId` 指定固定模型；`/btw-config` 不带参数弹出**可搜索选择器**：顶部输入框打字即实时过滤（匹配 provider/id/显示名，不区分大小写），列表展示全部已认证可用模型（价格、上下文窗口），`↑↓` 选择、`Enter` 确认、`Esc` 取消，当前设置带 ✓ 标记；面板标题栏常驻显示实际使用的模型名（auto 故障转移换模型时同步更新），开面板时 also notify 当前生效模型；设置持久化到 `~/.pi/agent/btw-config.json`，`/reload` 重载扩展后保留；
 - **成本控制**：主会话上下文限最近 60 条、单条工具输出截断 1500 字符、单轮问答最多 6 轮 LLM 调用、回答上限 4096 token、面板线程限 8 轮（文件顶部可调）。
 - **缓存友好（无需额外配置）**：btw 与主会话走同一序列化管线，pi-ai 自动给 system + 最后一条 user 消息打 `cache_control`（Claude Code 同款做法，缓存前缀）——btw 的系统提示词是常量、面板线程是稳定增长前缀，短时间内追问、agentLoop 多轮工具迭代都能命中 provider 前缀缓存；DeepSeek / OpenAI 兼容端点走自动前缀缓存。Anthropic 类端点可用环境变量 `PI_CACHE_RETENTION=long` 把缓存 TTL 提到 1 小时（需模型支持）。注意：“复用主会话缓存”不可行——严格前缀匹配下，btw 的序列与主会话序列不同，缓存 key 天然不重合，这是设计使然。
+
+## 人机协作任务面板（src/extensions/workflow-mgr/）
+
+通用工作流面板：AI 是**流程指挥者**（拆解、排序、验证、推进），你是**执行者**（做任务、拍板）。对 AI 说「帮我规划 X」，它会用 `wf_workflow` 建出阶段→任务工作流，常驻面板立刻出现——你抬眼就知道「现在该做什么」。泛化自论文工作流垂直版（thesis-workflow），工作流定义不再写死，AI 用工具动态创建，可加载任意任务。
+
+- **数据（项目级、跨会话、可 git 审查）**：`.pi/workflow/workflow.json`（工作流定义：阶段→任务，含人机分工/交付物/完成信号/依赖）、`state.json`（进度：当前任务/任务状态/里程碑/决策/日志）、`config.json`（面板开关）；默认工作流为「搭建个人博客」最小示例，AI 会按需改造；
+- **常驻面板**：输入框下方背景色区块，3~5 行——当前任务（最显眼）+ 阶段 + 右对齐进度条（`▓`实心/`░`空心，附 完成数/总数）、分工两行 `你:/AI:`、阻塞 warning 提示、里程碑三态（`▶`当前目标/`○`未完成/`✓`已完成）；宽度自适应（`visibleWidth`：中文=2 列、块元素=1 列），窗口 resize 自动重排；空工作流显示「无任务，请先让 AI 用 wf_workflow 规划」；**hud 接管**：hud 存在且开启时，面板内容改由 hud 在 footer 底部渲染（屏幕最底，任务/分工/里程碑 ≈4 行），常驻面板隐藏——经 hud 通用接口 `__PI_HUD_API__.registerExtraRows` 注册渲染函数（**内容与样式由 workflow 自决**，与常驻面板同款：12 格进度条 + selectedBg 底色，确保体验一致），`notifyExtraRowsUpdate` 请求重绘，零耦合零 import；**常驻面板开关联动**：`showPanel=false` 时 hud 底部行一并隐藏；`/hud` 关闭后自动恢复自绘面板（`hud:state-change` 事件驱动）；
+- **工具（8 个）**：`wf_workflow`（list/add/edit/remove/reset——add 时 stageId 不存在自动建阶段、id 自动生成如 1.2、防依赖环；remove 同步清状态、空阶段自动移除；reset 回内置示例）、`wf_status`（当前任务+分工+交付物+完成信号+下一步+阻塞+里程碑）、`wf_start`（不填 id 自动开始下一个依赖满足的待办；对 blocked 调用即解除）、`wf_done`（先按完成信号验证再调，自动推进下一步）、`wf_block`、`wf_rollback`（回退 todo/doing，输出依赖警告清单不自动回退下游）、`wf_decision`（记录拍板）、`wf_milestone`（动态增删里程碑）；
+- **命令**：`/workflow-config` 轻量功能浮窗（居中浮窗：显示详细信息/常驻面板开关，↑↓ 选择 Enter 执行 Esc 关闭；详细信息页任意键返回），快捷子命令 `toggle`、`done|start [id]`、`block <原因>`；
+- **AI 角色注入**：`before_agent_start` 把「指挥者角色」指南追加进 systemPrompt（不进对话、不膨胀会话文件）：下达指令格式（📋任务/🎯目标/📌做法/✅回报/🔍验证）、完成信号验证后 `wf_done`、决策用 `wf_decision` 记录；
+- **渲染回归测试**：`node src/extensions/workflow-mgr/test/render.test.mjs`（test/ 下 node_modules junction 指向 pi 全局包；esbuild bundle 扩展 + mock pi/ctx → 三态渲染断言：不抛异常、行宽不溢出、中文/空工作流/完成态、工具流程推进、toggle 持久化）。
 
 ## pi-tui 滚动冻结补丁（patches/）
 

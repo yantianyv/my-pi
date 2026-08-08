@@ -30,9 +30,12 @@
  *
  * 动态区：经官方 ctx.ui.setStatus(key, text) 通道读状态（pi 原生接口），
  * 各插件推状态**不依赖 hud**（hud 缺席时原生 footer 自动展示）；hud 加载时仍置
- * globalThis.__PI_HUD_ACTIVE__ 供未来真正依赖 hud 特有功能的扩展校验。
+ * globalThis.__PI_HUD_ACTIVE__：hud 存在且开启时置 true（/hud 关闭或 footer 卸载时置 false），
+ * 供依赖 hud 特有功能的扩展校验——当前 workflow-mgr 据此决定「hud 接管底部行 vs 自绘常驻面板」；
+ * globalThis.__PI_HUD_API__：通用「额外底部行」接口，扩展注册渲染函数（内容与样式自决），
+ * hud 只 append 到 footer 底部；注册方经 notifyExtraRowsUpdate 请求重绘（零耦合，无 import）。
  */
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -73,9 +76,33 @@ const THINKING_LABEL: Record<string, string> = {
 	max: "max",
 };
 
+/**
+ * 通用「额外底部行」接口：workflow-mgr 等扩展经全局 __PI_HUD_API__.registerExtraRows 注册
+ * 渲染函数（内容与样式由注册方决定），hud 只把返回的行追加到 footer 底部（屏幕最底）。
+ */
+type HudExtraRowsProvider = (theme: Theme, width: number) => string[] | null;
+const extraRowProviders = new Set<HudExtraRowsProvider>();
+
+/** node @types 的 process 事件签名只认 Signals，自定义事件名需类型断言（运行时无影响） */
+const proc = process as unknown as {
+	on: (e: string, fn: () => void) => unknown;
+	off: (e: string, fn: () => void) => unknown;
+	emit: (e: string) => boolean;
+};
+
 export default async function (pi: ExtensionAPI) {
-	// 存在性标志：供未来真正依赖 hud 特有功能的扩展校验（当前无插件依赖）
+	// 存在性标志 + 通用底部行接口：workflow-mgr 等扩展注册渲染函数（内容与样式自决），
+	// hud 只负责 append 到 footer 底部；notifyExtraRowsUpdate 通知重绘（footer 已装时）
 	(globalThis as Record<string, unknown>).__PI_HUD_ACTIVE__ = true;
+	(globalThis as Record<string, unknown>).__PI_HUD_API__ = {
+		registerExtraRows: (provider: HudExtraRowsProvider) => {
+			extraRowProviders.add(provider);
+			return () => {
+				extraRowProviders.delete(provider);
+			};
+		},
+		notifyExtraRowsUpdate: () => tuiRef?.requestRender(),
+	};
 
 	// ---- 子模块可选加载：任一缺失时对应功能降级，不拖垮整个 HUD ----
 	let balanceMod: typeof import("./hud-balance") | null = null;
@@ -125,6 +152,7 @@ export default async function (pi: ExtensionAPI) {
 		"web-search": { color: "accent", priority: 75 }, // 联网搜索状态（web-tool）
 		"web-fetch": { color: "accent", priority: 74 }, // 网页抓取状态（web-tool）
 		"token-saver": { color: "muted", priority: 70 }, // 节省量反馈
+		"workflow-mgr": { color: "accent", priority: 72 }, // 人机协作任务面板摘要（workflow-mgr）
 		"model-switch": { color: "accent", priority: 70 }, // 模型切换
 	};
 	/** 短时状态推送 + TTL 自动清除（hud 内部自用；各扩展的 TTL 由扩展自己管）。 */
@@ -256,6 +284,15 @@ export default async function (pi: ExtensionAPI) {
 
 	function installFooter(ctx: ExtensionContext) {
 		ctx.ui.setFooter((tui, theme, footerData) => {
+			// 存在且开启标记 + 通知依赖 hud 的扩展（workflow-mgr 等）立即接管/切换展示
+			(globalThis as Record<string, unknown>).__PI_HUD_ACTIVE__ = true;
+			// 通知依赖 hud 的扩展接管底部行。reload 收尾期间监听器（如 workflow-mgr）可能因 ctx
+			// stale 抛错，try/catch 保证 emit 失败不反噬 hud 自身的 footer 安装/卸载流程。
+			try {
+				proc.emit("hud:state-change");
+			} catch {
+				// 消费者异常不影响 hud
+			}
 			tuiRef = tui;
 			footerInstalled = true;
 			const unsubBranch = footerData.onBranchChange(() => {
@@ -402,6 +439,14 @@ export default async function (pi: ExtensionAPI) {
 
 			return {
 				dispose() {
+					(globalThis as Record<string, unknown>).__PI_HUD_ACTIVE__ = false;
+					// 通知依赖 hud 的扩展（workflow-mgr）恢复自绘面板。reload 收尾期间消费者可能因 ctx
+					// stale 抛错，try/catch 避免中断 pi 的 reload/卸载流程。
+					try {
+						proc.emit("hud:state-change");
+					} catch {
+						// 消费者异常不影响 hud dispose
+					}
 					unsubBranch();
 					unsubInput();
 					footerInstalled = false;
@@ -535,7 +580,14 @@ export default async function (pi: ExtensionAPI) {
 					const line1 = layout(left1, right1, width);
 					const line2 = layout(left2, right2, width);
 					const line3 = layout(left3, right3, width);
-					return [line1, line2, line3].map((l) => truncateToWidth(l, width));
+					const base = [line1, line2, line3].map((l) => truncateToWidth(l, width));
+					// 额外底部行：遍历注册方（workflow-mgr 等），把各自渲染的行追加到最底
+					const extra: string[] = [];
+					for (const p of extraRowProviders) {
+						const rows = p(theme, width);
+						if (rows) extra.push(...rows);
+					}
+					return base.concat(extra);
 				},
 			};
 		});
