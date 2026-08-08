@@ -3,3 +3,5 @@ tsconfig.json
 node_modules/
 # docs/ 是本地参考资料（DeepSeek 官方文档提取，版权归 DeepSeek），不入库
 docs/
+# dist/ 是构建产物（build.js 生成）：每次 install 自动重建，不入库
+dist/

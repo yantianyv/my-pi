@@ -6,37 +6,36 @@
  * src/extensions/hud/ 多文件便于维护），本脚本用 esbuild 把每个扩展入口 + 其
  * 相对依赖内联打包成 dist/extensions/ 下的零耦合单文件 .ts（产物只保留对 pi
  * 官方包 @earendil-works/*、typebox 的外部引用，扩展之间互不依赖），并把
- * 静态部署物（themes/ sounds/ patches/ models.json）原样拷贝到 dist/。
+ * 静态部署物（src/static/ 下的 themes/ sounds/ patches/ models.json）原样拷贝到 dist/。
  *
  * - 多文件扩展（src/extensions/hud/）的 index 入口打包成 <目录名>.ts 单文件，
  *   解决 hud 被拆分为子目录/子模块的问题——产物与其它扩展一致；
  * - 产物是 ESM（内容为 JS 语法的 .ts 文件），pi 经 jiti 加载，与手写源码无差异；
- * - tsconfig 用 tsconfig.build.json（无 paths）：主 tsconfig.json 的 paths 会把
- *   包名解析成 pi 全局目录绝对路径，导致 packages: "external" 的包名匹配失效、
+ * - tsconfig 用 src/config/tsconfig.build.json（无 paths）：主 tsconfig 的 paths 会
+ *   把包名解析成 pi 全局目录绝对路径，导致 packages: "external" 的包名匹配失效、
  *   意外内联 typebox 等大包。
  *
- * 用法：npm install（首次）→ node build.js → node install.js
- * 改了 src/ 后重跑 node build.js。
+ * 用法：cd src && npm install（首次）→ node install.js（根目录，自动调用本脚本）
+ * 或直接 node src/build.js。改了 src/ 后重跑。
  */
-const { createRequire } = require("node:module");
 const fs = require("fs");
 const path = require("path");
 
-const ROOT = __dirname;
-// esbuild 安装在 src/node_modules（package.json 在 src/ 下，npm install 在那里生成），
-// 用 src/package.json 位置创建 require 以便解析到 esbuild
-const req = createRequire(path.join(ROOT, "src", "package.json"));
+const ROOT = path.join(__dirname, ".."); // 仓库根目录（本脚本在 src/ 内）
+const SRC = path.join(ROOT, "src");
+const DIST = path.join(ROOT, "dist");
+
+// esbuild 是 src/package.json 的 devDependency，安装在 src/node_modules——
+// 本脚本就在 src/ 内，require 从 src/ 向上解析自然命中，无需 createRequire hack
 let esbuild;
 try {
-	esbuild = req("esbuild");
+	esbuild = require("esbuild");
 } catch {
 	console.error("未找到 esbuild（构建依赖）。首次使用请先执行：cd src && npm install\n");
 	process.exit(1);
 }
-const SRC = path.join(ROOT, "src");
-const DIST = path.join(ROOT, "dist");
 
-/** 静态部署物：原样拷贝到 dist/ 对应子目录（不做任何编译） */
+/** 静态部署物：src/static/ 下的子目录原样拷贝到 dist/ 对应子目录（不做任何编译） */
 const STATIC_DIRS = ["themes", "sounds", "patches"];
 const STATIC_FILES = ["models.json"];
 
@@ -125,11 +124,11 @@ async function main() {
 
 	// 2) 组装静态部署物
 	for (const d of STATIC_DIRS) {
-		const srcDir = path.join(SRC, d);
+		const srcDir = path.join(SRC, "static", d);
 		if (fs.existsSync(srcDir)) copyDir(srcDir, path.join(DIST, d));
 	}
 	for (const f of STATIC_FILES) {
-		const srcFile = path.join(SRC, f);
+		const srcFile = path.join(SRC, "static", f);
 		if (fs.existsSync(srcFile)) fs.copyFileSync(srcFile, path.join(DIST, f));
 	}
 	console.log("✓ 静态部署物（themes/ sounds/ patches/ models.json）已拷贝");

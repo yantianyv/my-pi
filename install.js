@@ -22,7 +22,7 @@ const ROOT = __dirname;
 const PI_AGENT = path.join(os.homedir(), ".pi", "agent");
 // 只安装 build.js 的产物；install 默认先自动执行一次 build（--skip-build 可跳过）
 const DIST = path.join(ROOT, "dist");
-const BUILD_SCRIPT = path.join(ROOT, "build.js");
+const BUILD_SCRIPT = path.join(ROOT, "src", "build.js");
 const THEMES_SRC = path.join(DIST, "themes");
 const EXT_SRC = path.join(DIST, "extensions");
 const SOUNDS_SRC = path.join(DIST, "sounds");
