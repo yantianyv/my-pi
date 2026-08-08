@@ -67,8 +67,6 @@ function httpStatusHint(status: number, retried: boolean): string {
 	};
 	return `HTTP ${status}${reason[status] ?? ""}${retried ? "，已换请求特征重试仍失败" : ""}`;
 }
-/** 通用网页搜索源顺序（bing 主 + 360 备；bing 被限流自动降级） */
-const WEB_SOURCES_ORDER = ["bing", "so360"] as const;
 /** 单次搜索返回给 agent 的结果条数上限 */
 const MAX_RESULTS = 10;
 /** 搜索单源超时（毫秒） */
@@ -221,22 +219,54 @@ async function searchNpm(query: string): Promise<SearchResult[]> {
 	return results;
 }
 
-/** 通用网页搜索降级链：按 WEB_SOURCES_ORDER 依次尝试，bing 被限流（<2 条）自动降级，全失败抛错附各源原因 */
+/** 提取查询中的有效特征词（≥2 字且非中文停用词），用于结果相关度评估 */
+function queryKeywords(q: string): string[] {
+	const stops = new Set(["的", "了", "和", "与", "或", "在", "是", "有", "等", "及", "为", "中", "以", "之", "于"]);
+	return q.split(/[\s,，。、;；:：]+/).filter((w) => w.length >= 2 && !stops.has(w));
+}
+
+/** 按查询特征词在结果标题/URL/摘要中的命中率衡量结果相关度（0~1） */
+function relevance(results: SearchResult[], keywords: string[]): number {
+	if (!keywords.length || !results.length) return 0;
+	let hits = 0;
+	for (const r of results) {
+		const hay = `${r.title} ${r.url} ${r.snippet}`;
+		if (keywords.some((k) => hay.includes(k))) hits++;
+	}
+	return hits / results.length;
+}
+
+/** 通用网页搜索：双源并行 + 按查询特征词命中率择优（cn.bing 对长中文查询常降级成只匹配首词，360 对中文长查询质量高；英文/短查询 bing 更稳——命中率高者胜，同分默认 bing） */
 async function searchWeb(query: string): Promise<{ results: SearchResult[]; source: string }> {
+	const keywords = queryKeywords(query);
+	const attempts = await Promise.allSettled([
+		searchBing(query).then((results) => ({ src: "bing" as const, results })),
+		searchSo360(query).then((results) => ({ src: "so360" as const, results })),
+	]);
+	let best: { src: "bing" | "so360"; results: SearchResult[] } | null = null;
+	let bestScore = -1;
 	const errors: string[] = [];
-	for (const src of WEB_SOURCES_ORDER) {
-		try {
-			const results = src === "bing" ? await searchBing(query) : await searchSo360(query);
-			if (src === "bing" && results.length < 2) {
-				errors.push("bing: 被限流（<2 条）");
-				continue;
-			}
-			if (results.length > 0) return { results: results.slice(0, MAX_RESULTS), source: src };
+	for (const a of attempts) {
+		if (a.status === "rejected") {
+			errors.push(`${a.reason instanceof Error ? a.reason.message : String(a.reason)}`);
+			continue;
+		}
+		const { src, results } = a.value;
+		if (!results.length) {
 			errors.push(`${src}: 无结果`);
-		} catch (e) {
-			errors.push(`${src}: ${e instanceof Error ? e.message : String(e)}`);
+			continue;
+		}
+		if (src === "bing" && results.length < 2) {
+			errors.push("bing: 被限流（<2 条）");
+			continue;
+		}
+		const score = relevance(results, keywords);
+		if (score > bestScore) {
+			bestScore = score;
+			best = { src, results };
 		}
 	}
+	if (best) return { results: best.results.slice(0, MAX_RESULTS), source: best.src };
 	throw new Error(`所有搜索源失败：${errors.join("；")}`);
 }
 
