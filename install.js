@@ -6,6 +6,7 @@
  *   dist/extensions/   → ~/.pi/agent/extensions/  （扩展产物，零耦合单文件）
  *   static/themes/     → ~/.pi/agent/themes/      （主题）
  *   static/sounds/     → ~/.pi/agent/sounds/      （提示音）
+ *   static/skills/     → ~/.pi/agent/skills/      （pi skills：目录含 SKILL.md 被递归发现）
  *   static/models.json → ~/.pi/agent/models.json  （OpenRouter 路由等模型配置，已存在则深度合并）
  * 并把 settings.json 的 theme 设为本项目主题。
  *
@@ -27,10 +28,12 @@ const BUILD_SCRIPT = path.join(ROOT, "src", "build.js");
 const THEMES_SRC = path.join(ROOT, "static", "themes");
 const EXT_SRC = path.join(DIST, "extensions");
 const SOUNDS_SRC = path.join(ROOT, "static", "sounds");
+const SKILLS_SRC = path.join(ROOT, "static", "skills");
 const MODELS_SRC = path.join(ROOT, "static", "models.json");
 const THEMES_DST = path.join(PI_AGENT, "themes");
 const EXT_DST = path.join(PI_AGENT, "extensions");
 const SOUNDS_DST = path.join(PI_AGENT, "sounds");
+const SKILLS_DST = path.join(PI_AGENT, "skills");
 
 const THEME_NAME = "matrix"; // 默认启用的主题（对应 static/themes/matrix.json）
 
@@ -245,6 +248,7 @@ async function main() {
 	copyDir(THEMES_SRC, THEMES_DST);
 	copyDir(EXT_SRC, EXT_DST);
 	copyDir(SOUNDS_SRC, SOUNDS_DST, [".wav"]);
+	copyDir(SKILLS_SRC, SKILLS_DST, [".md"]);
 	applySettings();
 	installModelsJson();
 	generateTsconfig();
