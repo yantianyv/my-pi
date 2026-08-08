@@ -20,13 +20,13 @@ const { execSync, spawnSync } = require("child_process");
 
 const ROOT = __dirname;
 const PI_AGENT = path.join(os.homedir(), ".pi", "agent");
-// 只安装 build.js 的产物；install 默认先自动执行一次 build（--skip-build 可跳过）
+// 扩展产物只认 build.js 的输出（dist/extensions/）；静态资源直接从仓库 static/ 安装（无需编译）
 const DIST = path.join(ROOT, "dist");
 const BUILD_SCRIPT = path.join(ROOT, "src", "build.js");
-const THEMES_SRC = path.join(DIST, "themes");
+const THEMES_SRC = path.join(ROOT, "static", "themes");
 const EXT_SRC = path.join(DIST, "extensions");
-const SOUNDS_SRC = path.join(DIST, "sounds");
-const MODELS_SRC = path.join(DIST, "models.json");
+const SOUNDS_SRC = path.join(ROOT, "static", "sounds");
+const MODELS_SRC = path.join(ROOT, "static", "models.json");
 const THEMES_DST = path.join(PI_AGENT, "themes");
 const EXT_DST = path.join(PI_AGENT, "extensions");
 const SOUNDS_DST = path.join(PI_AGENT, "sounds");

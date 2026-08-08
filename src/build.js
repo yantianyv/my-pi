@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
- * 伪编译构建：把 src/ 源码组装成 dist/ 部署物（install.js 只认 dist/）
+ * 伪编译构建：把 src/extensions/ 源码组装成 dist/extensions/ 部署物（install.js 只认 dist/）
  *
  * 架构：源码层高复用（src/extensions/shared/ 共享模块被多个扩展 import 复用，
  * src/extensions/hud/ 多文件便于维护），本脚本用 esbuild 把每个扩展入口 + 其
  * 相对依赖内联打包成 dist/extensions/ 下的零耦合单文件 .ts（产物只保留对 pi
- * 官方包 @earendil-works/*、typebox 的外部引用，扩展之间互不依赖），并把
- * 静态部署物（static/ 下的 themes/ sounds/ patches/ models.json）原样拷贝到 dist/。
+ * 官方包 @earendil-works/*、typebox 的外部引用，扩展之间互不依赖）。
+ * 静态资源（static/ 下的 themes/ sounds/ patches/ models.json）无需编译，
+ * 不经本脚本，install.js 直接从 static/ 安装。
  *
  * - 多文件扩展（src/extensions/hud/）的 index 入口打包成 <目录名>.ts 单文件，
  *   解决 hud 被拆分为子目录/子模块的问题——产物与其它扩展一致；
@@ -33,24 +34,6 @@ try {
 } catch {
 	console.error("未找到 esbuild（构建依赖）。首次使用请先执行：cd src && npm install\n");
 	process.exit(1);
-}
-
-/** 静态部署物：static/（仓库根目录）下的子目录原样拷贝到 dist/ 对应子目录（不做任何编译） */
-const STATIC_DIRS = ["themes", "sounds", "patches"];
-const STATIC_FILES = ["models.json"];
-
-/** 递归拷贝目录（不拷贝 node_modules） */
-function copyDir(src, dst) {
-	fs.mkdirSync(dst, { recursive: true });
-	for (const f of fs.readdirSync(src, { withFileTypes: true })) {
-		const from = path.join(src, f.name);
-		if (f.isDirectory()) {
-			if (f.name === "node_modules") continue;
-			copyDir(from, path.join(dst, f.name));
-		} else {
-			fs.copyFileSync(from, path.join(dst, f.name));
-		}
-	}
 }
 
 /** 收集扩展构建入口：src/extensions/ 顶层 *.ts + 子目录 index.ts/index.js（多文件扩展），排除 shared/ 等无入口目录 */
@@ -118,20 +101,9 @@ async function main() {
 		}
 	}
 	if (ok !== entries.length) {
-		console.error(`\n${ok}/${entries.length} 个扩展构建失败，中止（静态资源未拷贝）。`);
+		console.error(`\n${ok}/${entries.length} 个扩展构建失败，中止。`);
 		process.exit(1);
 	}
-
-	// 2) 组装静态部署物
-	for (const d of STATIC_DIRS) {
-		const srcDir = path.join(ROOT, "static", d);
-		if (fs.existsSync(srcDir)) copyDir(srcDir, path.join(DIST, d));
-	}
-	for (const f of STATIC_FILES) {
-		const srcFile = path.join(ROOT, "static", f);
-		if (fs.existsSync(srcFile)) fs.copyFileSync(srcFile, path.join(DIST, f));
-	}
-	console.log("✓ 静态部署物（themes/ sounds/ patches/ models.json）已拷贝");
 
 	console.log(`\n${ok}/${entries.length} 个扩展构建成功。运行 node install.js 安装 dist/ 产物。`);
 }
