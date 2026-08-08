@@ -10,7 +10,8 @@
  * - /btw-config：配置 btw 使用的模型；默认 auto = 已认证可用模型中最便宜的，
  *   按价格顺序故障转移（便宜模型调用失败自动换下一个更贵的重试，全失败才报错）；
  *   另有 auto-not-free（忽略价格 ≤ 0 的免费模型）与任意 provider/modelId 可选，
- *   交互选择里支持关键词搜索模型
+ *   交互选择里支持关键词搜索模型；设置持久化到 ~/.pi/agent/btw-config.json，
+ *   /reload 重载扩展后保留
  * - 始终携带只读工具（read / ls / grep / find，无 bash）：问「xx 函数在哪
  *   定义」「这个配置是干嘛的」类问题可直接查证代码，只读不写
  * - 流式显示回答；Esc 关闭并中止请求；↑↓ 滚动查看完整回答
@@ -33,6 +34,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { runAgentLoop, type AgentLoopConfig, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
 import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
@@ -71,6 +75,8 @@ const BTW_MAX_INPUT_LENGTH = 300;
 
 /** btw 默认模型设置：auto = 已认证可用模型中最便宜的，按价格顺序故障转移；auto-not-free = 忽略免费模型 */
 const BTW_DEFAULT_MODEL = "auto";
+/** btw 模型设置持久化文件（agent 目录下，/btw-config 修改后写入，/reload 重载扩展后恢复） */
+const BTW_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "btw-config.json");
 
 /** btw 助手的系统提示词（固定指令在前，利于 provider 端 prompt 缓存命中） */
 const BTW_SYSTEM_PROMPT = [
@@ -106,8 +112,37 @@ type AnyModel = Model<any>;
 // btw 模型选择
 // ---------------------------------------------------------------------------
 
-/** 当前 btw 模型设置：'auto'（默认）/ 'auto-not-free'（忽略免费模型）或 'provider/modelId'；/btw-config 修改，模块级跨命令持久 */
-let btwModelSetting: string = BTW_DEFAULT_MODEL;
+/** 当前 btw 模型设置：'auto'（默认）/ 'auto-not-free'（忽略免费模型）或 'provider/modelId'；/btw-config 修改并持久化 */
+let btwModelSetting: string = loadBtwModelSetting();
+
+/** 读取持久化的 btw 模型设置；文件缺失/损坏/内容非法时返回默认 auto */
+function loadBtwModelSetting(): string {
+	try {
+		if (fs.existsSync(BTW_CONFIG_FILE)) {
+			const d = JSON.parse(fs.readFileSync(BTW_CONFIG_FILE, "utf8")) as { model?: unknown };
+			if (typeof d.model === "string" && d.model.trim()) return d.model;
+		}
+	} catch {
+		/* 配置文件损坏视为默认 */
+	}
+	return BTW_DEFAULT_MODEL;
+}
+
+/** 持久化 btw 模型设置到 ~/.pi/agent/btw-config.json；写失败静默（仅本次会话生效，reload 后回默认） */
+function saveBtwModelSetting(value: string): void {
+	try {
+		fs.mkdirSync(path.dirname(BTW_CONFIG_FILE), { recursive: true });
+		fs.writeFileSync(BTW_CONFIG_FILE, JSON.stringify({ model: value }, null, 2) + "\n", "utf8");
+	} catch {
+		/* 写配置失败不影响本次运行 */
+	}
+}
+
+/** 设置 btw 模型并持久化（/btw-config 所有设置入口统一走这里，避免漏存） */
+function setBtwModelSetting(value: string): void {
+	btwModelSetting = value;
+	saveBtwModelSetting(value);
+}
 
 /**
  * 模型单价合计（input + output，$/M tokens）；OpenRouter 动态定价模型用负数标记
@@ -1234,13 +1269,13 @@ export default function (pi: ExtensionAPI) {
 			// 带参数：直接设置
 			if (arg) {
 				if (arg === "auto" || arg === "auto-not-free") {
-					btwModelSetting = arg;
+					setBtwModelSetting(arg);
 					ctx.ui.notify(`btw 模型已设为 ${arg}（${modelSettingLabel(arg)}）`, "info");
 					return;
 				}
 				const m = findConfiguredModel(ctx, arg);
 				if (m) {
-					btwModelSetting = `${m.provider}/${m.id}`;
+					setBtwModelSetting(`${m.provider}/${m.id}`);
 					ctx.ui.notify(`btw 模型已设为 ${btwModelSetting}`, "info");
 					return;
 				}
@@ -1301,7 +1336,7 @@ export default function (pi: ExtensionAPI) {
 				},
 			);
 			if (result) {
-				btwModelSetting = result;
+				setBtwModelSetting(result);
 				ctx.ui.notify(`btw 模型已设为 ${result}（${modelSettingLabel(result)}）`, "info");
 			}
 		},
