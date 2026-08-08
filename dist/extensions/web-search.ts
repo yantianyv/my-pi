@@ -1,4 +1,4 @@
-// extensions/web-search.ts
+// src/extensions/web-search.ts
 import { Type } from "typebox";
 var KIMI_PROVIDER = "kimi-coding";
 var ENDPOINT = "https://api.kimi.com/coding/v1/messages";

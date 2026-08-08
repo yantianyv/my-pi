@@ -7,13 +7,13 @@
 ## 快速开始
 
 ```bash
-npm install             # 首次：拉取构建依赖（esbuild，仅构建需要）
-node build.js           # 伪编译：源码 → dist/extensions/ 零耦合单文件产物
-node install.js         # 安装到 ~/.pi/agent/（优先安装 dist 产物）
-node install.js --dry-run  # 先预览要做什么，不修改
+cd src && npm install     # 首次：拉取构建依赖（esbuild，装入 src/node_modules）
+node build.js             # 伪编译：src/ 源码 → dist/ 零耦合单文件产物
+node install.js           # 安装到 ~/.pi/agent/（只认 dist/ 产物）
+node install.js --dry-run # 先预览要做什么，不修改
 ```
 
-安装后重启 pi 或执行 `/reload` 生效。**伪编译架构**：源码层 `extensions/shared/` 共享模块（如 btw 与 explore 共用的模型选择器）在 `build.js` 时内联进各扩展产物——原始代码高复用、编译产物零耦合；`hud/` 多文件扩展也被合并为单个 `hud.ts`（详见「伪编译架构」节）。
+安装后重启 pi 或执行 `/reload` 生效。**伪编译架构**：源码层 `src/extensions/shared/` 共享模块（如 btw 与 explore 共用的模型选择器）在 `build.js` 时内联进各扩展产物——原始代码高复用、编译产物零耦合；`src/extensions/hud/` 多文件扩展也被合并为单个 `hud.ts`（详见「伪编译架构」节）。
 
 ## 包含内容
 
@@ -51,7 +51,7 @@ node install.js --dry-run  # 先预览要做什么，不修改
 - **与认证无关**：路由配置不触碰 `auth.json` 的 API key，改完 `/reload`（或重启 pi）即生效，**无需重新登录**。
 - **合并语义**：`install.js` 对已存在的 `~/.pi/agent/models.json` 做深度合并——模板里没写的键、你手改的其他 provider 都保留，模板里有的键以仓库为准（只增不删）。
 
-## 3 行 HUD（extensions/hud/）
+## 3 行 HUD（src/extensions/hud/）
 
 ```
 ⎇ main ・ 暂存1 ・ 修改2 ・ 未跟踪3               📁 my_pi
@@ -109,7 +109,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 
 说明：DeepSeek 按量付费，余额过低变色警示；Kimi For Coding 为订阅制 + 加油包（Extra Usage）混合，优先显示加油包余额，没有加油包则显示订阅额度，订阅额度耗尽或余额过低变色警示，右下角显示会话 token 累计；Kimi 开放平台（`moonshotai`/`moonshotai-cn`）为按量付费，显示现金 + 赠金余额；MiMo Token Plan CN（`xiaomi-token-plan-cn`）无公开余量 API，余额行显示控制台链接，右下角显示会话 token 累计。所有供应商都在 HUD 第 2 行统一显示输出 token 速率。
 
-## Claude Code 风格增强（extensions/claude-it.ts）
+## Claude Code 风格增强（src/extensions/claude-it.ts）
 
 让 pi 的操作习惯更接近 Claude Code：
 
@@ -123,7 +123,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 
 **新增供应商适配**：在 `hud/balance.ts` 的 `BALANCE_ADAPTERS` 注册表里添加一个 `BalanceAdapter` 即可（参考 `deepseekAdapter` 或 `kimiCodingAdapter`）。余额/余量在 `fetch` 里实现；右下角消耗统计在 `rateText(ctx, now)` 里单独实现（按量付费用 `hud/cost.ts` 共享的 `meteredRateText`，订阅制可返回 token 消耗，不需要则返回 `null`）。
 
-## 并行探索子代理（extensions/explore-agent.ts）
+## 并行探索子代理（src/extensions/explore-agent.ts）
 
 类似 Claude Code 的 explore agent：注册 `explore` 工具，主 agent 只负责**分配任务**，每个任务派一个子代理自主探索并返回精炼报告——节省主上下文、降低成本（默认用廉价模型）、加快速度。
 
@@ -133,17 +133,17 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 - **预算保护**：一次最多 6 个任务、3 并发、单子代理最多 12 轮 / 4 分钟超时、跟随主 agent 的 abort 信号（Ctrl+C 可中断）。
 - **结果**：所有子代理的报告汇总为一个 Markdown 返回给主 agent；单任务失败不影响其他任务。
 
-## 任务完成提醒（extensions/task-alert.ts）
+## 任务完成提醒（src/extensions/task-alert.ts）
 
 pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时给出三重提醒，便于及时回来发下一步指令；**Ctrl+C 打断（abort）不算完成，不触发提醒**：打断后 agent-loop 的最后一条 assistant 消息 `stopReason="aborted"`，task-alert 据此跳过。
 
-- **提示音**：播放 `sounds/task_complete.wav`（钢琴音色，移植自 ClaudeCodeInit）。跨平台：Windows 用 PowerShell `Media.SoundPlayer`，macOS 用 `afplay`，Linux 依次尝试 `paplay`/`aplay`，全部不可用时退到终端响铃；任何失败都静默；
+- **提示音**：播放 `sounds/task_complete.wav`（钢琴音色，移植自 ClaudeCodeInit，源码在 src/sounds/）。跨平台：Windows 用 PowerShell `Media.SoundPlayer`，macOS 用 `afplay`，Linux 依次尝试 `paplay`/`aplay`，全部不可用时退到终端响铃；任何失败都静默；
 - **状态栏闪烁**：通过官方 `ctx.ui.setStatus("task-alert", …)` 通道推送闪烁帧（500ms 交替 `✅ 任务完成` / `✨ 任务完成`，本扩展自管帧切换与清除），HUD 按 `STATUS_STYLE` 映射样式后在行 1 动态区闪烁（替换「会话 Nmin」占位）。两扩展零耦合——task-alert 不知道 hud 的存在；HUD 被禁用时状态自动回落原生 footer 第 3 行，提示退化为标题栏动画；
 - **标题栏动画**：终端标题同步闪烁，切到其他窗口也能看到。
 
 撤销时机：任意按键（`onTerminalInput` 原始终端按键流，无需等到发送）/ 新任务开始立即撤；10 分钟无操作自动撤。
 
-## 上下文 Token 节省器（extensions/token-saver.ts）
+## 上下文 Token 节省器（src/extensions/token-saver.ts）
 
 自动清洗 bash 工具的冗余输出，节省上下文 token（0 配置，加载即生效）：
 
@@ -151,7 +151,7 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **截断保护**：超长输出截断后保存到 `~/.pi/agent/tmp/` 并附文件路径，需要时可 read 查看全文；
 - **节省量反馈**：经官方 `ctx.ui.setStatus("token-saver", "✂ 省 Xk")` 通道推送，HUD 行 1 动态区显示（见上「短反馈」槽位），hud 缺席时回落原生 footer。
 
-## 联网搜索（extensions/web-search.ts）
+## 联网搜索（src/extensions/web-search.ts）
 
 注册 `web_search` 自定义工具，agent 需要查实时信息（GitHub issue、文档、新闻、价格）时直接调用，返回中文总结 + 结果标题/URL 列表。
 
@@ -160,7 +160,7 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **两段式流程**（实测必要）：kimi 一轮搜索就 `end_turn`，只回结果（正文加密）；扩展把结果塞回历史再要一次总结，agent 才能拿到文字正文；
 - **成本**：一次搜索 = 2 次 API 调用（各约 1 万+ token）+ 按次搜索费，避免频繁调用。
 
-## 临时旁支问答（extensions/btw.ts）
+## 临时旁支问答（src/extensions/btw.ts）
 
 对齐 Claude Code 的 `/btw`：主任务进行中想顺便问个小事（如「刚才为什么选这个方案」「改了哪些关键文件」），直接 `/btw <问题>` 在右侧浮层里得到回答，不打断当前任务、不污染主会话。
 
@@ -180,7 +180,7 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 修「agent 工作时滚轮上翻会被拽飞（滚到顶部）」的问题。根因：流式输出时整条消息每帧从 markdown 源码重渲染，消息开头几行持续变化；一旦滚出视口，pi-tui 判定 `firstChanged < prevViewportTop` 就整屏重绘——发 `\x1b[3J` 清空终端滚动缓冲区再全量重写，实测每秒 2~3 次，Windows Terminal 的滚动位置随之丢失。
 
 ```bash
-node patches/apply-pi-tui-scroll-freeze.mjs   # 打补丁/升级（幂等），重启 pi 生效
+node src/patches/apply-pi-tui-scroll-freeze.mjs   # 打补丁/升级（幂等），重启 pi 生效
 ```
 
 补丁思路（同 Claude Code / Ink `<Static>`）：
@@ -201,7 +201,7 @@ node patches/apply-pi-tui-scroll-freeze.mjs   # 打补丁/升级（幂等），�
 修「模型偶发无文字回答」（实测 deepseek-v4-flash，/btw 面板表现为 `（无文字回答）`，主会话同理可触发）。根因：pi-ai 的 `estimate.js` 估算上下文 token 时对每条 assistant 消息调 `calculateContextTokens(assistant.usage)`，**usage 为 undefined 时抛 TypeError**（`Cannot read properties of undefined (reading 'totalTokens')`）。该异常发生在每次 LLM 调用的**请求构建阶段**（`clampMaxTokensToContext` → `estimateContextTokens` → `getLastAssistantUsageInfo`），只要 history（含主会话上下文，compaction summary 消息常缺 usage）里混入一条缺 usage 的 assistant 消息，后续调用就**瞬时失败**（1~5ms 返回 `stopReason="error"`，请求根本没发出）——这也解释了为何失败总是“瞬时”。
 
 ```bash
-node patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂等），重启 pi 生效
+node src/patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂等），重启 pi 生效
 ```
 
 补丁内容（覆盖 pi-ai 两个文件，幂等）：
@@ -216,9 +216,9 @@ node patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂等），重�
 pi 无官方 i18n（settings 无 language 字段，TUI 文案硬编码在 `dist/modes/interactive/` 下）；扩展 API 只有「新增渲染」钩子（renderer 按 customType 精确匹配、markdownTransformer 只作用于消息区域），没有覆盖原生 UI（footer/菜单/对话框//settings 界面）的钩子，主题又是纯颜色 schema。汉化只能直接替换 dist 编译产物里的字符串——祖冲之算 π，π 的汉化者。
 
 ```bash
-node patches/apply-zuchongzhi-zh.mjs             # 应用/升级（幂等），重启 pi 生效
-node patches/apply-zuchongzhi-zh.mjs --dry-run   # 试运行（只打印将替换的数量）
-node patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
+node src/patches/apply-zuchongzhi-zh.mjs             # 应用/升级（幂等），重启 pi 生效
+node src/patches/apply-zuchongzhi-zh.mjs --dry-run   # 试运行（只打印将替换的数量）
+node src/patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
 ```
 
 覆盖首批高频可见文案，**236 处 / 9 个文件**：
@@ -263,6 +263,6 @@ rm ~/.pi/agent/sounds/task_complete.wav
 
 ## 说明
 
-- **伪编译架构**：`extensions/` 是源码（`shared/` 共享模块被多个扩展 import 复用，`hud/` 拆分为多文件便于维护）；`node build.js` 用 esbuild 把每个扩展入口内联打包成 `dist/extensions/` 单文件（零耦合、只依赖 pi 官方包；`hud/` 合并为 `hud.ts`）；`install.js` 优先安装产物。产物入库，克隆后 `npm install && node install.js` 即可用；改了源码后重跑 `node build.js` 并提交新产物。
+- **伪编译架构**：`src/` 是全部源码与素材（`extensions/` 扩展源码，`shared/` 共享模块被多个扩展 import 复用，`hud/` 拆分为多文件便于维护，`themes/` `sounds/` `patches/` `models.json` 为静态部署物，`package.json` + `config/` 为构建工具与配置）；`node build.js` 用 esbuild 把每个扩展入口内联打包成 `dist/extensions/` 单文件（零耦合、只依赖 pi 官方包；`hud/` 合并为 `hud.ts`），并把静态素材拷到 `dist/`；`install.js` 只认 `dist/`。产物入库，克隆后 `cd src && npm install && node install.js` 即可用；改了源码后重跑 `node build.js` 并提交新产物。
 - `docs/deepseek/` 是本地参考资料（不入库，版权归 DeepSeek），供 deepseek 适配开发时查价格、思考模式、API 细节。
 

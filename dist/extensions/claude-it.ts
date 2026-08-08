@@ -1,4 +1,4 @@
-// extensions/claude-it.ts
+// src/extensions/claude-it.ts
 import {
   createBashTool,
   createEditTool,

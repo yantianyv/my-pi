@@ -13,7 +13,7 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// extensions/hud/hud-cost.ts
+// src/extensions/hud/hud-cost.ts
 var hud_cost_exports = {};
 __export(hud_cost_exports, {
   currencySymbol: () => currencySymbol,
@@ -245,7 +245,7 @@ function meteredRateText(ctx, now) {
 }
 var usdCnyRate, rateSource, RATE_CACHE_FILE, RATE_WINDOW_MS, MIN_WINDOW_MS, costEvents, lastRecordedCny, lastRecordedUsd, startupTime, lastRecordedOutputTotal, turnStartTime, smoothedTokenRate, TOKEN_RATE_SMOOTH_FACTOR, fmtNum, DEEPSEEK_PRICES, DEEPSEEK_PEAK_PRICING, DEEPSEEK_PEAK_HOURS;
 var init_hud_cost = __esm({
-  "extensions/hud/hud-cost.ts"() {
+  "src/extensions/hud/hud-cost.ts"() {
     usdCnyRate = null;
     rateSource = "none";
     RATE_CACHE_FILE = path.join(os.homedir(), ".pi", "agent", "tmp", "exchange-rate.json");
@@ -282,7 +282,7 @@ var init_hud_cost = __esm({
   }
 });
 
-// extensions/hud/hud-balance.ts
+// src/extensions/hud/hud-balance.ts
 var hud_balance_exports = {};
 __export(hud_balance_exports, {
   BALANCE_ADAPTERS: () => BALANCE_ADAPTERS,
@@ -376,7 +376,7 @@ function moonshotAdapter(providerId, baseUrl) {
 }
 var deepseekAdapter, KIMI_CODING_BASE_URL, KIMI_FIXED_POINT_CENTS, kimiCodingAdapter, moonshotaiAdapter, moonshotaiCnAdapter, xiaomiTokenPlanCnAdapter, openrouterAdapter, BALANCE_ADAPTERS;
 var init_hud_balance = __esm({
-  "extensions/hud/hud-balance.ts"() {
+  "src/extensions/hud/hud-balance.ts"() {
     init_hud_cost();
     deepseekAdapter = {
       providerId: "deepseek",
@@ -592,7 +592,7 @@ var init_hud_balance = __esm({
   }
 });
 
-// extensions/hud/hud-git.ts
+// src/extensions/hud/hud-git.ts
 var hud_git_exports = {};
 __export(hud_git_exports, {
   generateCommitMessage: () => generateCommitMessage,
@@ -877,7 +877,7 @@ async function openGitPanel(ctx, onRefresh) {
 }
 var execFileAsync, GIT_TIMEOUT_MS, LONG_GIT_TIMEOUT_MS, PANEL_MIN_WIDTH, COMMIT_MAX_DISPLAY_LINES, COMMIT_AI_MODELS, COMMIT_DIFF_MAX_CHARS, COMMIT_AI_TIMEOUT_MS, GitPanel;
 var init_hud_git = __esm({
-  "extensions/hud/hud-git.ts"() {
+  "src/extensions/hud/hud-git.ts"() {
     execFileAsync = promisify(execFile);
     GIT_TIMEOUT_MS = 8e3;
     LONG_GIT_TIMEOUT_MS = 3e4;
@@ -1288,7 +1288,7 @@ var init_hud_git = __esm({
   }
 });
 
-// extensions/hud/hud-core.ts
+// src/extensions/hud/hud-core.ts
 import { truncateToWidth as truncateToWidth2, visibleWidth as visibleWidth2 } from "@earendil-works/pi-tui";
 import { execFile as execFile2 } from "child_process";
 import { promisify as promisify2 } from "util";

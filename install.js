@@ -2,11 +2,11 @@
 /**
  * pi 一键配置安装脚本
  *
- * 把本项目的 themes/、extensions/、sounds/ 和 models.json 安装到 pi 全局配置目录：
- *   ~/.pi/agent/themes/      （主题）
- *   ~/.pi/agent/extensions/  （扩展）
- *   ~/.pi/agent/sounds/      （提示音）
- *   ~/.pi/agent/models.json  （OpenRouter 路由等模型配置，已存在则深度合并）
+ * 把 build.js 生成的 dist/ 部署物安装到 pi 全局配置目录：
+ *   dist/themes/      → ~/.pi/agent/themes/      （主题）
+ *   dist/extensions/  → ~/.pi/agent/extensions/  （扩展产物，零耦合单文件）
+ *   dist/sounds/      → ~/.pi/agent/sounds/      （提示音）
+ *   dist/models.json  → ~/.pi/agent/models.json  （OpenRouter 路由等模型配置，已存在则深度合并）
  * 并把 settings.json 的 theme 设为本项目主题。
  *
  * 用法：
@@ -20,18 +20,17 @@ const { execSync } = require("child_process");
 
 const ROOT = __dirname;
 const PI_AGENT = path.join(os.homedir(), ".pi", "agent");
-const THEMES_SRC = path.join(ROOT, "themes");
-// 伪编译架构：优先安装 build.js 的产物（dist/extensions/，零耦合单文件）；
-// 未构建时回退源码（extensions/，含 shared/ 共享模块与 hud/ 子目录）
-const EXT_DIST = path.join(ROOT, "dist", "extensions");
-const EXT_SRC = fs.existsSync(EXT_DIST) ? EXT_DIST : path.join(ROOT, "extensions");
-const SOUNDS_SRC = path.join(ROOT, "sounds");
+// 只安装 build.js 的产物；dist 缺失说明还没构建（改 src/ 后先 node build.js）
+const DIST = path.join(ROOT, "dist");
+const THEMES_SRC = path.join(DIST, "themes");
+const EXT_SRC = path.join(DIST, "extensions");
+const SOUNDS_SRC = path.join(DIST, "sounds");
+const MODELS_SRC = path.join(DIST, "models.json");
 const THEMES_DST = path.join(PI_AGENT, "themes");
 const EXT_DST = path.join(PI_AGENT, "extensions");
 const SOUNDS_DST = path.join(PI_AGENT, "sounds");
 
-const THEME_NAME = "matrix"; // 默认启用的主题（对应 themes/matrix.json）
-const MODELS_SRC = path.join(ROOT, "models.json"); // 仓库里的 models.json 模板
+const THEME_NAME = "matrix"; // 默认启用的主题（对应 dist/themes/matrix.json）
 
 const dryRun = process.argv.includes("--dry-run") || process.argv.includes("-n");
 const log = (...m) => console.log((dryRun ? "[DRY-RUN] " : "") + m.join(" "));
@@ -157,27 +156,32 @@ function findPiGlobalRoot() {
 
 /** 用模板生成 tsconfig.json（paths 指向探测到的 pi 全局目录），换机器/pi 升级后重跑即可。 */
 function generateTsconfig() {
-	const templatePath = path.join(ROOT, "tsconfig.template.json");
-	const outPath = path.join(ROOT, "tsconfig.json");
+	const templatePath = path.join(ROOT, "src", "config", "tsconfig.template.json");
+	const outPath = path.join(ROOT, "src", "config", "tsconfig.json");
 	if (!fs.existsSync(templatePath)) {
 		log(`跳过 tsconfig（模板不存在）: ${templatePath}`);
 		return;
 	}
 	const root = findPiGlobalRoot();
 	if (!root) {
-		log("跳过 tsconfig（未找到 pi 全局安装目录 @earendil-works/pi-coding-agent，可手动修改 tsconfig.json）");
+		log("跳过 tsconfig（未找到 pi 全局安装目录 @earendil-works/pi-coding-agent，可手动修改 src/config/tsconfig.json）");
 		return;
 	}
 	const template = fs.readFileSync(templatePath, "utf8");
 	const out = template.replace(/__PI_ROOT__/g, root.replace(/\\/g, "/")); // 统一正斜杠，JSON 免转义
-	log(`生成 tsconfig.json（paths → ${root}）`);
+	log(`生成 src/config/tsconfig.json（paths → ${root}）`);
 	if (!dryRun) fs.writeFileSync(outPath, out, "utf8");
 }
 
 function main() {
 	console.log(`pi 一键配置安装 → ${PI_AGENT}\n`);
+	// 只认 build.js 的产物；缺失时明确提示，避免误装旧版本
+	if (!fs.existsSync(DIST) || !fs.existsSync(path.join(DIST, "extensions"))) {
+		console.error(`错误: 未找到构建产物 ${DIST}。请先运行 node build.js（改过 src/ 后也要重跑）再安装。`);
+		process.exit(1);
+	}
 	if (!fs.existsSync(path.join(THEMES_SRC, `${THEME_NAME}.json`))) {
-		console.error(`错误: 找不到默认主题 ${THEME_NAME}.json`);
+		console.error(`错误: 找不到默认主题 ${THEME_NAME}.json（${THEMES_SRC}）`);
 		process.exit(1);
 	}
 	copyDir(THEMES_SRC, THEMES_DST);

@@ -21,5 +21,5 @@
 		},
 		"typeRoots": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@types"]
 	},
-	"include": ["extensions/**/*.ts"]
+	"include": ["../extensions/**/*.ts"]
 }

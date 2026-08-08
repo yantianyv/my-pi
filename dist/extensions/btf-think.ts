@@ -1,4 +1,4 @@
-// extensions/btf-think.ts
+// src/extensions/btf-think.ts
 var FRAME_INTERVAL_MS = 400;
 function btf_think_default(pi) {
   let thinkingAnimTimer;

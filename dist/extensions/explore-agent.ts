@@ -1,4 +1,4 @@
-// extensions/explore-agent.ts
+// src/extensions/explore-agent.ts
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import {
   runAgentLoop
@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Type } from "typebox";
 
-// extensions/shared/model-select.ts
+// src/extensions/shared/model-select.ts
 import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 function modelTotalCost(m) {
   const c = m.cost;
@@ -220,7 +220,7 @@ var ModelSelectOverlay = class {
   }
 };
 
-// extensions/explore-agent.ts
+// src/extensions/explore-agent.ts
 var PREFERRED_MODELS = [["deepseek", "deepseek-v4-flash"]];
 var EXPLORE_MODEL_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "explore-model.json");
 var EXPLORE_DEFAULT_MODEL = "auto";

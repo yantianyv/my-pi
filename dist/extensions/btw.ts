@@ -1,4 +1,4 @@
-// extensions/btw.ts
+// src/extensions/btw.ts
 import {
   createReadOnlyTools
 } from "@earendil-works/pi-coding-agent";
@@ -9,7 +9,7 @@ import * as path from "node:path";
 import { runAgentLoop } from "@earendil-works/pi-agent-core";
 import { CURSOR_MARKER as CURSOR_MARKER2, matchesKey as matchesKey2, truncateToWidth as truncateToWidth2, visibleWidth as visibleWidth2 } from "@earendil-works/pi-tui";
 
-// extensions/shared/model-select.ts
+// src/extensions/shared/model-select.ts
 import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 function modelTotalCost(m) {
   const c = m.cost;
@@ -220,7 +220,7 @@ var ModelSelectOverlay = class {
   }
 };
 
-// extensions/btw.ts
+// src/extensions/btw.ts
 var BTW_MAX_TOKENS = 4096;
 var BTW_MAX_TURNS = 6;
 var BTW_EMPTY_RETRY = 1;

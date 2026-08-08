@@ -1,4 +1,4 @@
-// extensions/task-alert.ts
+// src/extensions/task-alert.ts
 import * as os from "node:os";
 import * as path from "node:path";
 var SOUND_PATH = path.join(os.homedir(), ".pi", "agent", "sounds", "task_complete.wav");
