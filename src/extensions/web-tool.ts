@@ -35,17 +35,38 @@ const createWindow = _createWindow as (html?: string) => any;
 // 可调配置（改这里后 node install.js 重装生效）
 // ---------------------------------------------------------------------------
 
-/** 标准浏览器请求头：部分站点对请求特征缺失的客户端会返回降级内容，补齐标准字段可提升站点兼容性与内容完整性 */
-const BROWSER_HEADERS: Record<string, string> = {
-	"User-Agent":
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-	Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,image/avif,image/webp,*/*;q=0.8",
-	"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-	"Accept-Encoding": "gzip, deflate, br",
-	"Cache-Control": "no-cache",
-	Connection: "keep-alive",
-	"Upgrade-Insecure-Requests": "1",
-};
+/** 浏览器标识池：常规浏览器变体（桌面 Chrome 默认；部分站点对不同标识的兼容性不同，被拒时轮换重试） */
+const UA_POOL = [
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+	"Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+] as const;
+
+/** 按浏览器标识构建标准请求头（Accept / Accept-Language / Accept-Encoding 等常规字段） */
+function browserHeaders(ua: string): Record<string, string> {
+	return {
+		"User-Agent": ua,
+		Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,image/avif,image/webp,*/*;q=0.8",
+		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+		"Accept-Encoding": "gzip, deflate, br",
+		"Cache-Control": "no-cache",
+		Connection: "keep-alive",
+		"Upgrade-Insecure-Requests": "1",
+	};
+}
+
+/** 按 HTTP 状态给出如实提示（告知 agent 换源或稍后再试，避免盲目重试） */
+function httpStatusHint(status: number, retried: boolean): string {
+	const reason: Record<number, string> = {
+		401: "（站点要求身份验证，可能需登录）",
+		403: "（站点拒绝本次访问——可能要求登录、地区限制或不同意程序化访问，建议改用 web_search 查摘要）",
+		404: "（页面不存在，URL 可能已失效）",
+		406: "（站点不接受当前请求特征）",
+		429: "（请求过于频繁，建议稍后再试）",
+	};
+	return `HTTP ${status}${reason[status] ?? ""}${retried ? "，已换请求特征重试仍失败" : ""}`;
+}
 /** 通用网页搜索源顺序（bing 主 + 360 备；bing 被限流自动降级） */
 const WEB_SOURCES_ORDER = ["bing", "so360"] as const;
 /** 单次搜索返回给 agent 的结果条数上限 */
@@ -115,7 +136,7 @@ async function httpGet(url: string, timeoutMs: number): Promise<string> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		const res = await fetch(url, { headers: BROWSER_HEADERS, signal: controller.signal, redirect: "follow" });
+		const res = await fetch(url, { headers: browserHeaders(UA_POOL[0]), signal: controller.signal, redirect: "follow" });
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
 		const buf = await res.arrayBuffer();
 		return decodeBody(new Uint8Array(buf), res.headers.get("content-type") ?? "");
@@ -292,10 +313,10 @@ async function fetchAsMarkdown(
 	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 	const onAbort = () => controller.abort();
 	signal?.addEventListener("abort", onAbort);
-	// 临时性服务端错误（5xx / 429）重试一次；超时（AbortError）与 4xx 不重试
-	const doFetch = async (): Promise<Response> => {
+	// 首次默认浏览器标识；被拒（403/406/429）或服务端错误（5xx）时换备用标识重试一次；超时（AbortError）与其余 4xx 不重试
+	const doFetch = async (ua: string): Promise<Response> => {
 		const res = await fetch(u.href, {
-			headers: BROWSER_HEADERS,
+			headers: browserHeaders(ua),
 			signal: controller.signal,
 			redirect: "follow",
 		});
@@ -304,14 +325,18 @@ async function fetchAsMarkdown(
 	};
 	let res: Response;
 	try {
-		res = await doFetch();
+		res = await doFetch(UA_POOL[0]);
 	} catch (e) {
 		const status = e instanceof Error ? Number(/^HTTP (\d{3})/.exec(e.message)?.[1] ?? 0) : 0;
-		if (status >= 500 || status === 429) {
+		if (status >= 500 || status === 429 || status === 403 || status === 406) {
 			await new Promise((r) => setTimeout(r, 400));
-			res = await doFetch();
+			try {
+				res = await doFetch(UA_POOL[1] ?? UA_POOL[0]);
+			} catch (e2) {
+				throw new Error(httpStatusHint(status, true));
+			}
 		} else {
-			throw e;
+			throw new Error(httpStatusHint(status, false));
 		}
 	}
 	const ctype = (res.headers.get("content-type") ?? "").toLowerCase();
@@ -331,6 +356,10 @@ async function fetchAsMarkdown(
 			if (cut < maxChars * 0.7) cut = maxChars;
 			out = out.slice(0, cut).trimEnd();
 			truncated = true;
+		}
+		// 正文极短：可能是需登录 / JS 渲染 / 空壳页面，如实提示避免误判为抓取成功
+		if (out.trim().length < 80) {
+			out += "\n\n> ⚠️ 页面正文极短——可能需登录、JS 渲染或页面已失效，内容可信度有限，建议用 web_search 核对。";
 		}
 		return { markdown: out, title, finalUrl: res.url || u.href, bytes: buf.byteLength, truncated };
 	} finally {
