@@ -122,7 +122,8 @@ export default async function (pi: ExtensionAPI) {
 		"task-alert": { color: "success", priority: 90 }, // 任务完成（task-alert 自管闪烁帧）
 		"explore": { color: "accent", priority: 85 }, // explore 子代理进度
 		"init": { color: "warning", priority: 80 }, // claude-it /init 进度
-		"web-search": { color: "accent", priority: 75 }, // 联网搜索状态
+		"web-search": { color: "accent", priority: 75 }, // 联网搜索状态（web-tool）
+		"web-fetch": { color: "accent", priority: 74 }, // 网页抓取状态（web-tool）
 		"token-saver": { color: "muted", priority: 70 }, // 节省量反馈
 		"model-switch": { color: "accent", priority: 70 }, // 模型切换
 	};
@@ -134,7 +135,13 @@ export default async function (pi: ExtensionAPI) {
 		if (old) clearTimeout(old);
 		statusClearTimers.set(
 			key,
-			setTimeout(() => ctx.ui.setStatus(key, undefined), ttlMs),
+			setTimeout(() => {
+				try {
+					ctx.ui.setStatus(key, undefined);
+				} catch {
+					// 旧 ctx 已失效（reload / session 替换后 TTL 才到期），吞掉避免 uncaughtException
+				}
+			}, ttlMs),
 		);
 	}
 	let lastBalanceError = ""; // 上次余额查询错误（变化时才推送动态区警告，防刷屏）

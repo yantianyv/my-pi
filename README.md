@@ -26,7 +26,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `task-alert.ts` — 任务完成提醒：提示音 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `btw.ts` — `/btw` 临时旁支问答：侧栏单轮问答，不写入会话历史（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `token-saver.ts` — 上下文 token 节省器：自动清洗 bash 工具冗余输出（见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `web-search.ts` — 联网搜索工具：`web_search` 自定义工具，agent 可调（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
 | `patches/` | 三个 pi 补丁：tui 滚动冻结 / ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `models.json` | OpenRouter 路由配置模板：provider 级 `compat.openRouterRouting`（对所有 OpenRouter 模型生效；已在则深度合并，保留手改的其他 provider） | `~/.pi/agent/models.json` |
@@ -85,6 +85,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | explore 进度 | explore 子代理派发中，实时更新 | `🔎 2/3` | 85 |
 | /init 进度 | claude-it 后台 init | `⚙ init · 5` | 80 |
 | 联网搜索 | web_search 执行中 | `🔍 搜索中` | 75 |
+| 网页抓取 | web_fetch 执行中 | `⬇️ 抓取中` | 74 |
 | 短反馈 | 搜索完成 / explore 完成 / 模型切换 / token-saver 节省 | `🔍 5 条`、`🔎 ✓ 2/3`、`⇄ gpt-5`、`✂ 省 12.3k` | 70 |
 
 各扩展只负责 `setStatus(key, text)`，不知道 hud 的存在；`key` 与样式表约定在 `hud/hud-core.ts` 的 `STATUS_STYLE`（未登记 key 默认灰字、不参与竞争）。hud 被 `/hud` 关闭时，这些状态自动回落**原生 footer 第 3 行**显示（官方 `getExtensionStatuses()` 通道），信息屏B 无缝接管。
@@ -150,14 +151,16 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **截断保护**：超长输出截断后保存到 `~/.pi/agent/tmp/` 并附文件路径，需要时可 read 查看全文；
 - **节省量反馈**：经官方 `ctx.ui.setStatus("token-saver", "✂ 省 Xk")` 通道推送，HUD 行 1 动态区显示（见上「短反馈」槽位），hud 缺席时回落原生 footer。
 
-## 联网搜索（src/extensions/web-search.ts）
+## 联网工具（src/extensions/web-tool.ts）
 
-注册 `web_search` 自定义工具，agent 需要查实时信息（GitHub issue、文档、新闻、价格）时直接调用，返回中文总结 + 结果标题/URL 列表。
+注册 `web_search`（多源搜索）与 `web_fetch`（抓网页转 markdown）两个自定义工具：agent 查实时信息（GitHub issue、文档、新闻、价格）时搜索，需要深读时抓取，全部**零 API key 零费用**（不依赖 kimi 订阅）。
 
-- **后端**：固定走 kimi-coding 订阅（Anthropic 兼容端点 + `web_search_20250305` 服务端工具），与 pi 当前用哪个模型/供应商无关；kimi-coding 登出后工具报错提示重新 `/login`；
-- **无 token 过期问题**：认证走 `ctx.modelRegistry.getProviderAuth("kimi-coding")`——与 pi 其他 OAuth 同一条解析链，快过期时自动刷新；
-- **两段式流程**（实测必要）：kimi 一轮搜索就 `end_turn`，只回结果（正文加密）；扩展把结果塞回历史再要一次总结，agent 才能拿到文字正文；
-- **成本**：一次搜索 = 2 次 API 调用（各约 1 万+ token）+ 按次搜索费，避免频繁调用。
+- **`web_search` 多源搜索**：`query` + 可选 `source`（`web` 默认 / `npm` 垂类）；返回 标题+URL+摘要 列表，无 AI 总结——由主 agent 自行判断，成本为 0；
+  - **通用网页**：cn.bing.com RSS 为主 + 360 搜索 HTML 备用，自动降级——bing 免费接口限流特征（连续请求后只回 1 条 item）命中即换 360（实测 360 稳定、`data-mdurl` 带真实 URL）；源顺序在文件顶部可调；
+  - **npm 垂类**（`source: "npm"`）：npm registry JSON API 查包名/版本/描述/主页；pypi.org 搜索页有 Client Challenge 反爬，Python 包走默认网页搜索（如 `site:pypi.org/project/`）；
+- **`web_fetch` 抓取转 markdown**：`url` + 可选 `maxChars`（默认 12000、上限 60000）；HTML 经 domino 解析 → 启发式选正文容器（article/main/常见内容 class，回退 body）→ turndown(+gfm) 转 markdown（表格/代码块/列表/引用）→ 相对链接补全为绝对 → 压缩空行/截断；非 HTML（PDF 等）与抓不到的站点（GitHub 等被墙、反爬挑战页）如实报错并提示改用搜索；
+- **token 节约**：正文提取 + 截断，实测 100KB HTML 页面 → 约 800 字符 markdown；turndown/domino/gfm 由 build.js（esbuild）内联进单文件产物，运行时零外部依赖（build.js external 白名单只留 `@earendil-works/*` 与 `typebox`）；
+- **可调配置**：文件顶部「可调配置」区（源顺序、结果数、超时、字节/字符上限），改后 `node install.js` 重装生效。
 
 ## 临时旁支问答（src/extensions/btw.ts）
 
@@ -254,7 +257,7 @@ rm ~/.pi/agent/extensions/explore-agent.ts
 rm ~/.pi/agent/extensions/task-alert.ts
 rm ~/.pi/agent/extensions/btw.ts
 rm ~/.pi/agent/extensions/token-saver.ts
-rm ~/.pi/agent/extensions/web-search.ts
+rm ~/.pi/agent/extensions/web-tool.ts
 rm ~/.pi/agent/sounds/task_complete.wav
 ```
 

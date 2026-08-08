@@ -13,7 +13,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { setStatusWithTTL } from "./shared/status";
+import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
 
 const TMP_DIR = path.join(os.homedir(), ".pi", "agent", "tmp");
 const UNIVERSAL_MAX_LINES = 200;
@@ -233,6 +233,8 @@ function filterOutput(command: string, text: string): { filtered: string; trunca
 }
 
 export default function (pi: ExtensionAPI) {
+	// reload / session 替换前清掉 TTL 定时器（旧 ctx 已失效，到期回调会抛 stale 错误）
+	pi.on("session_shutdown", async () => clearStatusTimers());
 	// ---- 节省量反馈（官方 setStatus 通道推给 hud 行 1 动态区，节流防刷屏） ----
 	// 每次清洗成功后累计省下的字符/行数，节流窗口内合并为一条状态；TTL 6s 后自动清除。
 	const SAVE_EMIT_THROTTLE_MS = 4_000;

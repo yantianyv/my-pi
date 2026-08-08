@@ -39,7 +39,7 @@ import {
 	modelSettingLabel,
 } from "./shared/model-select";
 import { isModelConfig, loadJsonConfig, saveJsonConfig } from "./shared/config";
-import { setStatusWithTTL } from "./shared/status";
+import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -264,6 +264,8 @@ interface ExploreDetails {
 }
 
 export default function (pi: ExtensionAPI) {
+	// reload / session 替换前清掉 TTL 定时器（旧 ctx 已失效，到期回调会抛 stale 错误）
+	pi.on("session_shutdown", async () => clearStatusTimers());
 	pi.registerTool({
 		name: "explore",
 		label: "探索子代理",

@@ -23,13 +23,13 @@ install.js          # 安装脚本（根目录）：扩展产物从 dist/extensi
 .gitignore          # 忽略生成物 tsconfig.json / node_modules / dist（产物不入库）
 README.md           # 项目说明（含 HUD 图例、各扩展用法、卸载方法）
 src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（build.js 的唯一输入）
-  package.json      #   构建工具声明（esbuild devDependency；npm install 拉取）+ typecheck script；非运行时依赖
+  package.json      #   构建工具声明（esbuild + turndown/domino/gfm 构建时内联依赖；npm install 拉取）+ typecheck script；非运行时依赖
   package-lock.json #   npm 锁定文件（入库）
   node_modules/     #   npm install 生成（gitignore，不入库）
   build.js          #   伪编译脚本（与 npm 生态同层，require esbuild 自然命中 src/node_modules）：只打包扩展产物到 dist/extensions/（静态资源不经编译，install.js 直接从 static/ 装）
   config/           #   tsconfig 模板 / 构建配置 / 生成物
     tsconfig.template.json  #     install.js 探测 pi 全局目录后替换 __PI_ROOT__ 生成 tsconfig.json
-    tsconfig.build.json     #     build.js 专用：无 paths 的构建 tsconfig（主 tsconfig 的 paths 会破坏 packages: external）
+    tsconfig.build.json     #     build.js 专用：无 paths 的构建 tsconfig（主 tsconfig 的 paths 会破坏 external 白名单的包名匹配）
     tsconfig.json           #     生成物（gitignore，不入库）
   extensions/       #   扩展源码（产物 dist/extensions/ 由 build.js 生成）
     shared/         #     共享模块：只被扩展 import，不直接部署；build.js 内联进各产物
@@ -46,7 +46,7 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
     explore-agent.ts  #   explore 工具：只读子代理并行探索代码库（read/ls/grep/find）
     token-saver.ts    #   上下文 token 节省器：自动清洗 bash 工具的冗余输出（git/npm/tsc/pip/docker/--help）
     task-alert.ts     #   任务完成提醒：提示音 + 标题动画 + setStatus 状态推送
-    web-search.ts     #   联网搜索工具：web_search 自定义工具，agent 可调（kimi-coding 后端）
+    web-tool.ts       #   联网工具：web_search 多源搜索（bing.cn 主 + 360 备 + npm 垂类，零 key 零费用，无 AI 总结）+ web_fetch 抓网页转 markdown（正文提取 + 截断；turndown/domino/gfm 由 build.js 内联）
 static/              #   静态部署物（无需编译，install.js 直接从这装到 ~/.pi/agent/，见 README 各补丁节；仓库根目录）
   themes/matrix.json  #     黑客帝国荧光绿主题
   sounds/task_complete.wav  #     任务完成提示音
@@ -65,9 +65,9 @@ dist/               # 扩展产物（build.js 生成，gitignore 不入库）：
 
 ## 架构要点
 
-- **伪编译架构**：`src/`（源码：extensions/ 含 shared/ 共享模块与 hud/ 子目录）→ `src/build.js`（esbuild bundle 扩展，与 npm 生态同层、require esbuild 自然命中）→ `dist/extensions/`（扩展产物，**gitignore 不入库**）；静态资源（static/）无需编译，install.js 直接从 static/ 安装。`install.js` 每次运行先自动 build（缺失即报错提示）。克隆后 `cd src && npm install && node install.js` 即用（dist 自动重建，无需入库）；改了 src/ 后 `node install.js` 一步构建+安装。构建用 `src/config/tsconfig.build.json`（无 paths）——主 tsconfig 的 paths 会把包名解析成 pi 全局绝对路径，导致 `packages: external` 包名匹配失效、意外内联 typebox。
+- **伪编译架构**：`src/`（源码：extensions/ 含 shared/ 共享模块与 hud/ 子目录）→ `src/build.js`（esbuild bundle 扩展，与 npm 生态同层、require esbuild 自然命中）→ `dist/extensions/`（扩展产物，**gitignore 不入库**）；静态资源（static/）无需编译，install.js 直接从 static/ 安装。`install.js` 每次运行先自动 build（缺失即报错提示）。克隆后 `cd src && npm install && node install.js` 即用（dist 自动重建，无需入库）；改了 src/ 后 `node install.js` 一步构建+安装。构建用 `src/config/tsconfig.build.json`（无 paths）——主 tsconfig 的 paths 会把包名解析成 pi 全局绝对路径，导致 external 白名单的包名匹配失效、意外内联 typebox。产物 external 白名单只留 `@earendil-works/*` 与 `typebox`，其余 npm 依赖（如 web-tool 的 turndown/domino/gfm）被 esbuild 内联进单文件——产物仍是零外部依赖单文件，运行时零安装。
 - **安装模型**：`install.js` 把 dist/extensions/ 产物与 static/ 静态资源（themes/sounds/models.json）复制到 `~/.pi/agent/` 对应位置；改扩展源码后跑 `node install.js`（自动 build）+ pi 内 `/reload`；改静态资源（主题色、提示音）只需 `node install.js --skip-build` 重装即可，无需重新编译。
-- **扩展间联动**：展示层统一走**官方 `ctx.ui.setStatus(key, text)` 状态通道**（`task-alert` 推 `task-alert` 闪烁帧、`claude-it` 推 `init` 进度、`explore` 推 `explore` 进度、`web-search` 推 `web-search` 状态、`token-saver` 推 `token-saver` 节省量、hud 自身推 `balance-error`/`model-switch`/`hud-bash`）；`hud/hud-core.ts` 渲染行 1 动态区时按 `STATUS_STYLE` 样式表（hud/hud-core.ts）映射颜色与优先级（数字大者胜出），TTL/闪烁由各推送方自管。扩展间零耦合：setStatus 是 pi 原生接口，各插件推状态**不依赖 hud**（hud 缺席时状态自动回落原生 footer 第 3 行 `getExtensionStatuses()`，hud 兼容该通道仅做展示）。hud 仍置 `globalThis.__PI_HUD_ACTIVE__` 供未来真正依赖 hud 特有功能的扩展校验（当前无插件依赖）。
+- **扩展间联动**：展示层统一走**官方 `ctx.ui.setStatus(key, text)` 状态通道**（`task-alert` 推 `task-alert` 闪烁帧、`claude-it` 推 `init` 进度、`explore` 推 `explore` 进度、`web-tool` 推 `web-search`/`web-fetch` 状态、`token-saver` 推 `token-saver` 节省量、hud 自身推 `balance-error`/`model-switch`/`hud-bash`）；`hud/hud-core.ts` 渲染行 1 动态区时按 `STATUS_STYLE` 样式表（hud/hud-core.ts）映射颜色与优先级（数字大者胜出），TTL/闪烁由各推送方自管。扩展间零耦合：setStatus 是 pi 原生接口，各插件推状态**不依赖 hud**（hud 缺席时状态自动回落原生 footer 第 3 行 `getExtensionStatuses()`，hud 兼容该通道仅做展示）。hud 仍置 `globalThis.__PI_HUD_ACTIVE__` 供未来真正依赖 hud 特有功能的扩展校验（当前无插件依赖）。
 - **hud 余额适配**：`BALANCE_ADAPTERS` 注册表（hud/hud-balance.ts）按 providerId 逐一适配；DeepSeek 消耗按 `DEEPSEEK_PRICES`（hud/hud-cost.ts）官方人民币定价直算（恒 ¥，永不依赖汇率），峰谷开关 `DEEPSEEK_PEAK_PRICING`（hud/hud-cost.ts，当前 false）；其余供应商成本按原始货币 USD 记录、显示时换算。汇率三态（hud/hud-cost.ts）：实时（frankfurter→open.er-api 多源，1h 节流）→ 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`）→ 无（断网且无缓存，显示原始货币 USD，不用固定近似值）。hud 子模块**可选加载**：任一缺失时对应功能降级（余额行显「模块缺失」/ 隐藏消耗统计 / git 恒「⎇ -」），不拖垮整个 HUD。
 - **explore 子代理**：跑 pi-agent-core 官方 `agentLoop`，认证走 `ctx.modelRegistry.getApiKeyAndHeaders()`；子模型默认 `auto`（优先 `PREFERRED_MODELS`，explore-agent.ts:32，兜底选已认证最低价模型），`/explore-model` 可配 `auto`/`auto-not-free`/固定 provider/modelId，无参数弹可搜索选择器（与 /btw-config 同款 ModelSelectOverlay），设置持久化到 `~/.pi/agent/explore-model.json`。
 - **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；进度经 `ctx.ui.setStatus("init", …)` 推送由 hud 行 1 动态区显示。同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:61-65）。

@@ -7,6 +7,12 @@
  * text 传 undefined 则手动清除、不挂新定时器。
  *
  * 复杂行为（闪烁帧、多层撤销、多阶段）仍由调用方自管（如 task-alert 的闪烁）。
+ *
+ * 生命周期：定时器闭包捕获调用方传入的 ctx——/reload、ctx.switchSession() 等
+ * 场景下旧 ctx 会失效，到期回调再调 ctx.ui.setStatus 会抛 stale 错误（曾导致
+ * pi 因 uncaughtException 崩溃）。双保险：
+ * 1. 调用方在 session_shutdown 时调 clearStatusTimers() 主动清空（治本）；
+ * 2. 到期回调内 try/catch 吞掉失效 ctx 错误（兜底，防漏网扩展）。
  */
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -27,8 +33,18 @@ export function setStatusWithTTL(
 	timers.set(
 		key,
 		setTimeout(() => {
-			ctx.ui.setStatus(key, undefined);
+			try {
+				ctx.ui.setStatus(key, undefined);
+			} catch {
+				// 旧 ctx 已失效（reload / session 替换后 TTL 才到期），吞掉避免 uncaughtException
+			}
 			timers.delete(key);
 		}, ttlMs),
 	);
+}
+
+/** 清空所有 TTL 定时器（reload / quit / session 替换前由各调用方在 session_shutdown 里调用） */
+export function clearStatusTimers(): void {
+	for (const timer of timers.values()) clearTimeout(timer);
+	timers.clear();
 }

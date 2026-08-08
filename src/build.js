@@ -13,7 +13,7 @@
  *   解决 hud 被拆分为子目录/子模块的问题——产物与其它扩展一致；
  * - 产物是 ESM（内容为 JS 语法的 .ts 文件），pi 经 jiti 加载，与手写源码无差异；
  * - tsconfig 用 src/config/tsconfig.build.json（无 paths）：主 tsconfig 的 paths 会
- *   把包名解析成 pi 全局目录绝对路径，导致 packages: "external" 的包名匹配失效、
+ *   把包名解析成 pi 全局目录绝对路径，导致 external 白名单的包名匹配失效、
  *   意外内联 typebox 等大包。
  *
  * 用法：cd src && npm install（首次）→ node install.js（根目录，自动调用本脚本）
@@ -58,15 +58,17 @@ function collectEntries(dir) {
 
 async function buildExtension(entry) {
 	try {
-		// packages: "external"：import 的包（@earendil-works/*、typebox 等）保持外部引用，
-		// 相对 import（./shared/...）被内联；产物单文件、零耦合
+		// external 白名单：pi 官方包（@earendil-works/*）与 typebox 保持外部引用（jiti 运行时
+		// 经 pi 全局安装目录解析），其余 npm 包（如 web-tool 内联的 turndown/domino/gfm）被
+		// bundle 进产物——产物仍是零外部依赖单文件。显式白名单而非 packages: "external"
+		// 才能让 npm 依赖内联（packages: external 会把一切包名 import 都外部化）。
 		await esbuild.build({
 			entryPoints: [entry.src],
 			outfile: entry.out,
 			bundle: true,
 			format: "esm",
 			platform: "node",
-			packages: "external",
+			external: ["@earendil-works/*", "typebox"],
 			tsconfig: path.join(ROOT, "src", "config", "tsconfig.build.json"),
 			target: "es2022",
 			logLevel: "silent",
@@ -98,8 +100,14 @@ async function main() {
 	// 清理 dist/extensions 里已不存在的旧产物（如某扩展被移除）
 	for (const f of fs.readdirSync(path.join(DIST, "extensions"))) {
 		if (f.endsWith(".ts") && !entries.some((e) => e.out.endsWith(f))) {
-			fs.rmSync(path.join(DIST, "extensions", f), { force: true });
-			console.log(`– 清理旧产物 ${f}`);
+			// rmSync({force:true}) 在 Windows（Node 24）上对刚写入的文件会静默删除失败，
+			// 改用 unlinkSync（实测可靠）；失败仅告警不中断构建
+			try {
+				fs.unlinkSync(path.join(DIST, "extensions", f));
+				console.log(`– 清理旧产物 ${f}`);
+			} catch (e) {
+				console.warn(`  ⚠ 清理旧产物 ${f} 失败：${e instanceof Error ? e.message : String(e)}`);
+			}
 		}
 	}
 	if (ok !== entries.length) {
