@@ -15,6 +15,7 @@
  * - 撤销时机：用户按键（onTerminalInput 原始按键流，无需等到发送）/ 新任务开始 / 超时自动撤 / 会话结束。
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -48,6 +49,16 @@ const TITLE_FRAMES = ["✅ 任务完成 — pi", "✨ 任务完成 — pi"];
 /** HUD 动态区闪烁帧（官方 setStatus 通道，hud 按 key 映射样式渲染） */
 const STATUS_FRAMES = ["✅ 任务完成", "✨ 任务完成"];
 
+/** 判断 turn 是否被中断（abort）：倒序找最后一条 assistant 消息，stopReason 为 "aborted" 即被打断 */
+function isAbortedEnd(messages: readonly AgentMessage[]): boolean {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i] as { role?: string; stopReason?: string } | null;
+		if (!m || typeof m !== "object") continue;
+		if (m.role === "assistant") return m.stopReason === "aborted";
+	}
+	return false;
+}
+
 // ---------------------------------------------------------------------------
 // 扩展入口
 // ---------------------------------------------------------------------------
@@ -61,6 +72,8 @@ export default function (pi: ExtensionAPI) {
 	let alertActive = false;
 	let currentCtx: ExtensionContext | null = null;
 	let inputHookInstalled = false;
+	/** 上一次 agent_end 是否因 Ctrl+C/abort 中断（中断不算完成，不触发提醒） */
+	let lastEndWasAbort = false;
 
 	function clearTimers() {
 		if (titleTimer) clearInterval(titleTimer);
@@ -98,7 +111,17 @@ export default function (pi: ExtensionAPI) {
 		tryNext(0);
 	}
 
+	// 记录本 turn 是否被打断：abort 后 agent-loop 的最后一条 assistant 消息 stopReason="aborted"，
+	// 此时 agent_settled 视为「打断完成」而非「任务完成」，不响铃不闪烁
+	pi.on("agent_end", async (event) => {
+		lastEndWasAbort = isAbortedEnd(event.messages);
+	});
+
 	pi.on("agent_settled", async (_event, ctx) => {
+		if (lastEndWasAbort) {
+			lastEndWasAbort = false;
+			return; // Ctrl+C 打断：不触发完成提醒
+		}
 		alertActive = true;
 		playSound();
 
@@ -127,7 +150,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// 新任务开始 / 提交输入 → 立即撤掉提醒
-	pi.on("agent_start", async (_event, ctx) => stopAlert(ctx));
+	pi.on("agent_start", async (_event, ctx) => {
+		lastEndWasAbort = false; // 防残留：新 turn 开始时重置中断标记
+		stopAlert(ctx);
+	});
 	pi.on("input", async (_event, ctx) => {
 		stopAlert(ctx);
 		return { action: "continue" };

@@ -2,7 +2,9 @@
  * claude-it: 让 pi 更像 Claude Code
  *
  * - /exit 命令（/quit 的别名）与直接输入 exit 退出
- * - 对话进行中按 Ctrl+C 取消当前 agent 操作
+ * - 对话进行中按 Ctrl+C 取消当前 agent 操作；打断后窗口内再按一次 Ctrl+C
+ *   预填 /rewind 命令（回车即回退到上一条用户消息，内容放回输入框）
+ * - /rewind 命令：回退到上一条用户消息，消息内容放回输入框
  * - /init 命令：后台独立上下文中分析代码库并生成/更新 AGENTS.md
  *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话；
  *   进度经官方 ctx.ui.setStatus 通道推「init」状态，由 hud 在行 1 动态区显示）
@@ -36,6 +38,8 @@ import * as path from "node:path";
 const CLEAR_SCREEN_ON_STARTUP = true;
 /** 占位 widget 的 key：借 setWidget 工厂同步拿到 TUI 实例，用完即删，不留痕迹 */
 const STARTUP_CLEAR_WIDGET_KEY = "startup-clear";
+/** 双击 Ctrl+C 回退窗口（ms）：第一次 Ctrl+C 打断后，此窗口内的第二次 Ctrl+C 触发回退 */
+const REWIND_WINDOW_MS = 2_000;
 
 function clearScreenOnStartup(ctx: ExtensionContext) {
 	// setWidget 的工厂会同步收到 TUI 实例（interactive-mode 内即 this.ui）：
@@ -49,6 +53,21 @@ function clearScreenOnStartup(ctx: ExtensionContext) {
 	});
 	// 清屏 + 全量重绘都在工厂同步调用内完成，随即移除占位 widget，无视觉残留
 	ctx.ui.setWidget(STARTUP_CLEAR_WIDGET_KEY, undefined);
+}
+
+/** 从消息 content（string 或 TextContent[]）提取纯文本 */
+function extractText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content
+			.filter(
+				(c): c is { type: "text"; text: string } =>
+					!!c && typeof c === "object" && (c as { type?: string }).type === "text",
+			)
+			.map((c) => c.text)
+			.join("\n");
+	}
+	return "";
 }
 
 // ---------------------------------------------------------------------------
@@ -323,9 +342,50 @@ export default function (pi: ExtensionAPI) {
 		return { action: "continue" };
 	});
 
-	// 3) Ctrl+C 取消当前 turn（Claude Code 风格）
+	// 3.5) /rewind：回退到上一条用户消息（消息内容放回输入框）
+	//      navigateTree 是命令 ctx 专属能力（事件 ctx 没有）：同一会话文件内把叶子切回
+	//      该 user 消息的父节点（丢弃其后的全部内容），interactive-mode 会自动清屏重绘
+	//      并在输入框为空时把消息文本填回输入框；双击 Ctrl+C 会预填本命令，回车即执行
+	pi.registerCommand("rewind", {
+		description: "回退到上一条用户消息，消息内容放回输入框",
+		handler: async (_args, ctx) => {
+			// 从根到叶遍历（getBranch 返回当前叶子路径，顺序为根→叶），找最后一条 user 消息
+			const entries = ctx.sessionManager.getBranch();
+			let targetId: string | null = null;
+			for (let i = entries.length - 1; i >= 0; i--) {
+				const e = entries[i];
+				if (e.type === "message" && e.message.role === "user") {
+					targetId = e.id;
+					break;
+				}
+			}
+			if (!targetId) {
+				ctx.ui.notify("没有可回退的用户消息", "warning");
+				return;
+			}
+			// 叶子就是这条 user 消息（打断发生在回答生成前）：navigateTree 会 no-op，直接回填文本
+			if (targetId === ctx.sessionManager.getLeafId()) {
+				const entry = ctx.sessionManager.getEntry(targetId);
+				const msg = entry && entry.type === "message" ? (entry.message as { content?: unknown }).content : undefined;
+				const text = msg !== undefined ? extractText(msg) : "";
+				if (text) ctx.ui.setEditorText(text);
+				ctx.ui.notify("已把上一条消息放回输入框", "info");
+				return;
+			}
+			const result = (await ctx.navigateTree(targetId)) as { cancelled: boolean; editorText?: string };
+			if (result.cancelled) return;
+			// interactive-mode 已在输入框为空时自动回填 editorText；此处仅兜底（RPC 模式等）
+			if (result.editorText && !ctx.ui.getEditorText().trim()) {
+				ctx.ui.setEditorText(result.editorText);
+			}
+			ctx.ui.notify("已回退到上一条消息，内容已在输入框", "info");
+		},
+	});
+
+	// 3) Ctrl+C：第一次打断当前 turn；打断后窗口内再按一次 → 预填 /rewind（回车即回退）
 	let currentCtx: ExtensionContext | null = null;
 	let ctrlCHandlerInstalled = false;
+	let lastAbortAt = 0;
 
 	pi.on("session_start", async (event, ctx) => {
 		// 启动清屏：仅 TUI 模式冷启动时执行（/reload、/new、/resume、/fork 不清屏）
@@ -337,8 +397,21 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.mode !== "tui" || ctrlCHandlerInstalled) return;
 		ctrlCHandlerInstalled = true;
 		ctx.ui.onTerminalInput((data) => {
-			if (data === "\x03" && currentCtx && !currentCtx.isIdle()) {
+			if (data !== "\x03" || !currentCtx) return { consume: false };
+
+			if (!currentCtx.isIdle()) {
+				// 第一次 Ctrl+C：中止当前 turn（打断后 agent_end 的最后一条 assistant 消息
+				// stopReason=aborted，task-alert 据此不触发完成提醒）
+				lastAbortAt = Date.now();
 				currentCtx.abort();
+				return { consume: true };
+			}
+
+			// 空闲时再按 Ctrl+C：打断窗口内 → 预填 /rewind 命令，回车即回退到上一条消息
+			if (lastAbortAt > 0 && Date.now() - lastAbortAt < REWIND_WINDOW_MS) {
+				lastAbortAt = 0;
+				currentCtx.ui.setEditorText("/rewind");
+				currentCtx.ui.notify("按回车执行 /rewind：回退到上一条用户消息", "info");
 				return { consume: true };
 			}
 			return { consume: false };
