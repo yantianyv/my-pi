@@ -18,12 +18,15 @@ node install.js --dry-run  # 先预览要做什么，不修改
 | 目录 | 内容 | 安装目标 |
 |------|------|----------|
 | `themes/` | `matrix.json` — 黑客帝国风格荧光绿主题 | `~/.pi/agent/themes/` |
-| `extensions/` | `hud/` — 3 行 HUD 状态栏（多文件扩展：`index.ts` 入口 + `balance.ts` 余额适配 + `cost.ts` 消耗统计 + `git.ts` git 解析，见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `btf-think.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking...，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
+| `extensions/` | `hud/` — 3 行 HUD 状态栏（多文件扩展：`index.ts` 入口 + `hud-core.ts` 核心 + `hud-balance.ts` 余额适配 + `hud-cost.ts` 消耗统计 + `hud-git.ts` git 解析，见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `btf-think.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking... → Thinking....，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn | `~/.pi/agent/extensions/` |
 | `extensions/` | `explore-agent.ts` — `explore` 工具：只读子代理并行探索代码库、返回报告（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `task-alert.ts` — 任务完成提醒：提示音 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `btw.ts` — `/btw` 临时旁支问答：侧栏单轮问答，不写入会话历史（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `token-saver.ts` — 上下文 token 节省器：自动清洗 bash 工具冗余输出（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `web-search.ts` — 联网搜索工具：`web_search` 自定义工具，agent 可调（见下） | `~/.pi/agent/extensions/` |
+| `patches/` | 三个 pi 补丁：tui 滚动冻结 / ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `models.json` | OpenRouter 路由配置模板：provider 级 `compat.openRouterRouting`（对所有 OpenRouter 模型生效；已在则深度合并，保留手改的其他 provider） | `~/.pi/agent/models.json` |
 
@@ -69,7 +72,7 @@ node install.js --dry-run  # 先预览要做什么，不修改
 | 行3 `订阅 周 123/500` | 订阅额度余量（Kimi Code 周额度 / 小时频限） |
 | 行3 `消耗≈¥0.020/min` | 最近 10 分钟平均每分钟消耗（仅按量付费供应商显示） |
 
-git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 HUD。
+git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 git 可视化面板（分支/暂存/修改/未跟踪）；`/hud` 开关 HUD。
 
 **行 1 动态区**（`📁 项目名` 之后，空闲时显示「会话 Nmin」占位）：各扩展经**官方 `ctx.ui.setStatus(key, text)` 通道**推送状态（setStatus 触发全局重绘，hud 零延迟可见），HUD 按样式表（颜色 + 优先级，数字大者胜出）显示一条；TTL 由各推送方自管：
 
@@ -99,8 +102,8 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/hud` 开关 
 
 - 余额：官方 `GET /user/balance`（DeepSeek：充值 + 赠送）或 `GET /v1/usages`（Kimi：加油包 + 订阅额度），低余额/额度耗尽变色警示。余额行精简格式：主金额 = 充值/现金余额，赠送以 `+ X.XX` 追加（无赠送省略）。
 - 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot / OpenRouter 等按量付费显示 `¥/min + 累计`；Kimi / MiMo 等订阅制仅显示会话 token 累计。DeepSeek 按官方人民币定价直算（`hud/cost.ts` 的 `DEEPSEEK_PRICES`：缓存命中 ¥0.02/0.025、未命中 ¥1/3、输出 ¥2/6 每百万 tokens），不再经 USD×汇率；峰谷定价（高峰 2 倍）已预留开关 `DEEPSEEK_PEAK_PRICING`，官方生效后改为 true。其余供应商成本内部按**原始货币 USD** 记录，显示时按汇率换算 RMB。**汇率三态**（`hud/cost.ts`）：① 实时（多源拉取 frankfurter(ECB) → open.er-api，每日快照、免 key，随余额刷新 1h 节流一次）→ ② 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`，拉取失败时读缓存）→ ③ 无汇率（断网且无缓存，显示原始货币 USD，**不使用任何固定近似汇率**）。OpenRouter 余额：有汇率时换算 RMB（明细附原始 USD + 汇率，缓存标注「(缓存)」），无汇率时直接显示 USD 原始值。所有供应商在 HUD 第 2 行统一显示 `↑input ↓output rate/s` 的输出 token 速率；该速率为 EMA 平滑值（历史 80% + 新 turn 20%，首轮直接采用），基于 `output token / turn 实际耗时`，比长期平均更能反映当前生成速度，但不是严格的逐 chunk 实时流式速率。
-- 思考折叠：默认折叠（`settings.json` 的 `hideThinkingBlock: true`），折叠标签为动画 `Thinking.` → `Thinking..` → `Thinking...`（随思考过程增长），`Ctrl+T` 切换展开。
-- 命令：`/balance` 手动刷新余额；`/hud` 开关 HUD。
+- 思考折叠：默认折叠（`settings.json` 的 `hideThinkingBlock: true`），折叠标签为动画 `Thinking.` → `Thinking..` → `Thinking...` → `Thinking....`（4 帧循环，随思考过程增长），`Ctrl+T` 切换展开。
+- 命令：`/balance` 手动刷新余额；`/git` 打开 git 可视化面板；`/hud` 开关 HUD。
 
 说明：DeepSeek 按量付费，余额过低变色警示；Kimi For Coding 为订阅制 + 加油包（Extra Usage）混合，优先显示加油包余额，没有加油包则显示订阅额度，订阅额度耗尽或余额过低变色警示，右下角显示会话 token 累计；Kimi 开放平台（`moonshotai`/`moonshotai-cn`）为按量付费，显示现金 + 赠金余额；MiMo Token Plan CN（`xiaomi-token-plan-cn`）无公开余量 API，余额行显示控制台链接，右下角显示会话 token 累计。所有供应商都在 HUD 第 2 行统一显示输出 token 速率。
 
@@ -136,6 +139,14 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **标题栏动画**：终端标题同步闪烁，切到其他窗口也能看到。
 
 撤销时机：任意按键（`onTerminalInput` 原始终端按键流，无需等到发送）/ 新任务开始立即撤；10 分钟无操作自动撤。
+
+## 上下文 Token 节省器（extensions/token-saver.ts）
+
+自动清洗 bash 工具的冗余输出，节省上下文 token（0 配置，加载即生效）：
+
+- **清洗规则**：git（status/log/diff 精简）、npm/pnpm（去安装横幅）、tsc（去重复错误头）、pip、docker、`--help` 长帮助文本；
+- **截断保护**：超长输出截断后保存到 `~/.pi/agent/tmp/` 并附文件路径，需要时可 read 查看全文；
+- **节省量反馈**：经官方 `ctx.ui.setStatus("token-saver", "✂ 省 Xk")` 通道推送，HUD 行 1 动态区显示（见上「短反馈」槽位），hud 缺席时回落原生 footer。
 
 ## 联网搜索（extensions/web-search.ts）
 
@@ -239,13 +250,15 @@ rm ~/.pi/agent/extensions/btf-think.ts
 rm ~/.pi/agent/extensions/claude-it.ts
 rm ~/.pi/agent/extensions/explore-agent.ts
 rm ~/.pi/agent/extensions/task-alert.ts
+rm ~/.pi/agent/extensions/btw.ts
+rm ~/.pi/agent/extensions/token-saver.ts
+rm ~/.pi/agent/extensions/web-search.ts
 rm ~/.pi/agent/sounds/task_complete.wav
 ```
 
-（`settings.json` 里的 `"theme": "matrix"` 改回其他主题即可。）
+（`settings.json` 里的 `"theme": "matrix"` 改回其他主题即可；`models.json` 已并入你手改的 `~/.pi/agent/models.json`（深度合并，模板键以仓库为准），要还原需手动移除模板注入的 `providers.openrouter.compat.openRouterRouting`；三个补丁打在全局 node_modules 上，重装 pi 即还原，祖冲之汉化另有 `--restore` 一键还原英文。）
 
 ## 说明
 
-- `templates/` 是自定义 provider 的起步模板（OpenAI-compatible 和 OAuth），放在 `.pi/extensions/` 外避免被 pi 自动加载成假 provider；需要时把对应文件复制到 `~/.pi/agent/extensions/` 再改。
 - `docs/deepseek/` 是本地参考资料（不入库，版权归 DeepSeek），供 deepseek 适配开发时查价格、思考模式、API 细节。
 
