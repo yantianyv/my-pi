@@ -67,7 +67,7 @@ dist/               # 扩展产物（build.js 生成，gitignore 不入库）：
     btw.ts          #     内含 shared/model-select.ts 内联（btw 与 explore 共用模型选择器）
     hud.ts          #     hud/ 五个子模块合并为单文件（解决 hud 拆分问题）
     ...             #     其余扩展与源码同名
-.pi/                # 项目级运行时数据：workflow/ 三 JSON（workflow.json/state.json/config.json，可 git 审查）；空目录占位防空
+.pi/                # 项目级运行时数据：workflow/ 三 JSON（workflow.json/state.json/config.json，可 git 审查）+ archive/ 归档留档（wf_workflow archive 移入，无找回功能）；空目录占位防空
 ```
 
 ## 架构要点

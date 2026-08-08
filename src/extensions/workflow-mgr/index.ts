@@ -74,8 +74,9 @@ const milestoneParams = Type.Object({
 	done: Type.Optional(Type.Boolean({ description: "是否已完成" })),
 });
 const workflowParams = Type.Object({
-	action: StringEnum(["list", "add", "edit", "remove", "reset"], {
-		description: "操作类型：list 查看全量；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段；remove 删除任务；reset 清空工作流",
+	action: StringEnum(["list", "add", "edit", "remove", "archive", "reset"], {
+		description:
+			"操作类型：list 查看全量；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段；remove 删除任务；archive 归档整个工作流（收尾退出视野，数据留档）；reset 清空工作流",
 	}),
 	stageId: Type.Optional(Type.String({ description: "阶段 ID；add 时不存在则自动创建新阶段" })),
 	stageName: Type.Optional(Type.String({ description: "阶段名（add 创建新阶段时使用，缺省用 stageId）" })),
@@ -132,6 +133,7 @@ export default function (pi: ExtensionAPI) {
 			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）。" +
 			"list 查看全量（含各任务状态）；add 新增任务（stageId 不存在自动创建阶段，id 缺省自动生成）；" +
 			"edit 修改任务任意字段（传空数组清空列表字段）；remove 删除任务（同步清理状态与空阶段）；" +
+			"archive 归档当前工作流（工作全部完成后的收尾：退出面板视野，数据移入 .pi/workflow/archive/ 留档，不提供找回功能，需要时手动查看）；" +
 			"reset 清空工作流（无阶段无任务，不可逆）。规划复杂项目时先用 add 建出完整骨架，再逐步细化。",
 		promptSnippet: "workflow: create/update the human-AI collaboration workflow definition",
 		parameters: workflowParams,
@@ -260,6 +262,21 @@ export default function (pi: ExtensionAPI) {
 				}
 				return { content: [{ type: "text", text }], details: { kind: "workflow-remove", state: lightState(state) } };
 			}
+
+			// archive：工作流收尾——退出用户视野，数据留档（不提供找回功能，需时手动查 archive/）
+			s.archiveAll();
+			updateWidget(ctx, s);
+			return {
+				content: [
+					{
+						type: "text",
+						text:
+							"已归档工作流：退出面板视野，数据移入 .pi/workflow/archive/（按时间戳-名称分目录留档，可 git 审查）。\n" +
+							"不提供找回功能——真需要时手动查看该目录；当前工作流为空，用 wf_workflow add 开新任务。",
+					},
+				],
+				details: { kind: "workflow-archive", state: lightState(s.getState()) },
+			};
 
 			// reset
 			s.resetAll();

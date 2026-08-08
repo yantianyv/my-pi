@@ -12,8 +12,8 @@
  *
  * 路径：.pi/workflow/{workflow,state,config}.json（项目级、跨会话、可 git 审查）。
  */
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadJsonConfig, saveJsonConfig } from "../shared/config";
 import {
@@ -309,5 +309,25 @@ export class WorkflowStore {
 		this.state = freshState(this.wf);
 		this.commitWorkflow();
 		this.commitState();
+	}
+
+	/**
+	 * 归档（wf_workflow archive 用）：把当前工作流三 JSON 移动到 archive/<时间戳>-<名称>/ 留档。
+	 * 当前工作流区清空（hasWorkflowFile → false，面板自动隐藏退出视野）；数据保留可 git 审查，
+	 * 但不提供找回功能——真需要时由人手动查看 archive/ 目录。
+	 */
+	archiveAll(): void {
+		const base = join(dirname(workflowPath(this.ctx)), "archive");
+		const name = (this.wf?.stages[0]?.name ?? "工作流").replace(/[\\/:*?"<>|\s]+/g, "-");
+		const ts = new Date().toISOString().replace(/[:.]/g, "-");
+		const dir = join(base, `${ts}-${name}`);
+		mkdirSync(dir, { recursive: true });
+		for (const p of [workflowPath(this.ctx), statePath(this.ctx), panelConfigPath(this.ctx)]) {
+			if (existsSync(p)) renameSync(p, join(dir, basename(p)));
+		}
+		this.wf = null;
+		this.derived = null;
+		this.state = null;
+		this.panelCfg = null;
 	}
 }

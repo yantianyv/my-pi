@@ -19,7 +19,7 @@
  * 用法：node src/extensions/workflow-mgr/test/render.test.mjs（仓库根目录执行）
  */
 import { build } from "esbuild";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -454,6 +454,31 @@ async function scenarioH() {
 	rmSync(dir, { recursive: true, force: true });
 }
 
+/* ============================== 场景 I：wf_workflow archive 归档 ============================== */
+async function scenarioI() {
+	console.log("\n场景 I：wf_workflow archive 归档（退出视野 + 数据留档）");
+	const mod = await importBundle();
+	const pi = makePi();
+	mod.default(pi);
+	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
+	const caps = {};
+	const ctx = makeCtx(dir, caps);
+	await fireEvent(pi, ctx, "session_start");
+	check("归档前推送常驻 widget", !!caps.widget?.factory);
+	const t = pi.tools.find((x) => x.name === "wf_workflow");
+	const r = await t.execute("1", { action: "archive" }, undefined, undefined, ctx);
+	check("归档结果告知数据位置（对 AI 透明）", r.content[0].text.includes(".pi/workflow/archive/"));
+	check("归档后当前区无 workflow.json", !existsSync(join(dir, ".pi", "workflow", "workflow.json")));
+	const base = join(dir, ".pi", "workflow", "archive");
+	check("归档目录留档（至少 workflow.json）", readdirSync(base).some((d) => readdirSync(join(base, d)).includes("workflow.json")));
+	// 缓存清空 + 文件移走 → hasWorkflowFile false → 不再推 widget（退出用户视野）
+	const caps2 = {};
+	const ctx2 = makeCtx(dir, caps2);
+	await fireEvent(pi, ctx2, "session_start");
+	check("归档后不再推常驻 widget（退出视野）", !caps2.widget?.factory);
+	rmSync(dir, { recursive: true, force: true });
+}
+
 /* ============================== 工具：bundle + 加载 ============================== */
 let bundleMod = null;
 async function importBundle() {
@@ -510,6 +535,7 @@ try {
 	await scenarioF();
 	await scenarioG();
 	await scenarioH();
+	await scenarioI();
 	console.log(failures === 0 ? "\n✅ 全部通过" : `\n❌ ${failures} 项失败`);
 	process.exit(failures === 0 ? 0 : 1);
 } finally {
