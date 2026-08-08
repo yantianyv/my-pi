@@ -183,9 +183,9 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 
 通用工作流面板：AI 是**流程指挥者**（拆解、排序、验证、推进），你是**执行者**（做任务、拍板）。对 AI 说「帮我规划 X」，它会用 `wf_workflow` 建出阶段→任务工作流，常驻面板立刻出现——你抬眼就知道「现在该做什么」。泛化自论文工作流垂直版（thesis-workflow），工作流定义不再写死，AI 用工具动态创建，可加载任意任务。
 
-- **数据（项目级、跨会话、可 git 审查）**：`.pi/workflow/workflow.json`（工作流定义：阶段→任务，含人机分工/交付物/完成信号/依赖）、`state.json`（进度：当前任务/任务状态/里程碑/决策/日志）、`config.json`（面板开关）；默认工作流为「搭建个人博客」最小示例，AI 会按需改造；
+- **数据（项目级、跨会话、可 git 审查）**：`.pi/workflow/workflow.json`（工作流定义：阶段→任务，含人机分工/交付物/完成信号/依赖）、`state.json`（进度：当前任务/任务状态/里程碑/决策/日志）、`config.json`（面板开关）；**无内置示例**：从未创建过时为空工作流（常驻面板整体隐藏），AI 用 `wf_workflow` 从零创建；
 - **常驻面板**：输入框下方背景色区块，3~5 行——当前任务（最显眼）+ 阶段 + 右对齐进度条（`▓`实心/`░`空心，附 完成数/总数）、分工两行 `你:/AI:`、阻塞 warning 提示、里程碑三态（`▶`当前目标/`○`未完成/`✓`已完成）；宽度自适应（`visibleWidth`：中文=2 列、块元素=1 列），窗口 resize 自动重排；空工作流显示「无任务，请先让 AI 用 wf_workflow 规划」；**hud 接管**：hud 存在且开启时，面板内容改由 hud 在 footer 底部渲染（屏幕最底，任务/分工/里程碑 ≈4 行），常驻面板隐藏——经 hud 通用接口 `__PI_HUD_API__.registerExtraRows` 注册渲染函数（**内容与样式由 workflow 自决**，与常驻面板同款：12 格进度条 + selectedBg 底色，确保体验一致），`notifyExtraRowsUpdate` 请求重绘，零耦合零 import；**常驻面板开关联动**：`showPanel=false` 时 hud 底部行一并隐藏；`/hud` 关闭后自动恢复自绘面板（`hud:state-change` 事件驱动）；
-- **工具（8 个）**：`wf_workflow`（list/add/edit/remove/reset——add 时 stageId 不存在自动建阶段、id 自动生成如 1.2、防依赖环；remove 同步清状态、空阶段自动移除；reset 回内置示例）、`wf_status`（当前任务+分工+交付物+完成信号+下一步+阻塞+里程碑）、`wf_start`（不填 id 自动开始下一个依赖满足的待办；对 blocked 调用即解除）、`wf_done`（先按完成信号验证再调，自动推进下一步）、`wf_block`、`wf_rollback`（回退 todo/doing，输出依赖警告清单不自动回退下游）、`wf_decision`（记录拍板）、`wf_milestone`（动态增删里程碑）；
+- **工具（8 个）**：`wf_workflow`（list/add/edit/remove/reset——add 时 stageId 不存在自动建阶段、id 自动生成如 1.2、防依赖环；remove 同步清状态、空阶段自动移除；reset 清空工作流）、`wf_status`（当前任务+分工+交付物+完成信号+下一步+阻塞+里程碑）、`wf_start`（不填 id 自动开始下一个依赖满足的待办；对 blocked 调用即解除）、`wf_done`（先按完成信号验证再调，自动推进下一步）、`wf_block`、`wf_rollback`（回退 todo/doing，输出依赖警告清单不自动回退下游）、`wf_decision`（记录拍板）、`wf_milestone`（动态增删里程碑）；
 - **命令**：`/workflow-config` 轻量功能浮窗（居中浮窗：显示详细信息/常驻面板开关，↑↓ 选择 Enter 执行 Esc 关闭；详细信息页任意键返回），快捷子命令 `toggle`、`done|start [id]`、`block <原因>`；
 - **AI 角色注入**：`before_agent_start` 把「指挥者角色」指南追加进 systemPrompt（不进对话、不膨胀会话文件）：下达指令格式（📋任务/🎯目标/📌做法/✅回报/🔍验证）、完成信号验证后 `wf_done`、决策用 `wf_decision` 记录；
 - **渲染回归测试**：`node src/extensions/workflow-mgr/test/render.test.mjs`（test/ 下 node_modules junction 指向 pi 全局包；esbuild bundle 扩展 + mock pi/ctx → 三态渲染断言：不抛异常、行宽不溢出、中文/空工作流/完成态、工具流程推进、toggle 持久化）。

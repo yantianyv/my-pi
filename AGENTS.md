@@ -52,7 +52,6 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       brief.ts        #     AI 简报：renderBrief（当前任务+分工+完成信号）/ summaryLine / lightState
       panel.ts        #     展示层：常驻 widget（belowEditor）+ /wfmg 完整面板 + 非 TUI 文本回落
       types.ts        #     TaskDef/StageDef/WorkflowState/PanelConfig 类型 + schema 常量
-      DEFAULT_WORKFLOW.ts #   内置最小示例（搭建个人博客）——AI 用 wf_workflow 改造/重置
       test/render.test.mjs #   渲染回归测试（esbuild bundle + mock pi/ctx；test/node_modules junction 指 pi 全局，不入库）
     web-tool.ts       #   联网工具：web_search 多源搜索（bing.cn 主 + 360 备 + npm 垂类，零 key 零费用，无 AI 总结）+ web_fetch 抓网页转 markdown（正文提取 + 截断；turndown/domino/gfm 由 build.js 内联）
 static/              #   静态部署物（无需编译，install.js 直接从这装到 ~/.pi/agent/，见 README 各补丁节；仓库根目录）

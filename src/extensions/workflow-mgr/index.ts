@@ -23,7 +23,7 @@
  * 事件：session_start 加载+刷新+notify；before_agent_start 向 systemPrompt 追加
  *       「指挥者角色」指南（不注入 message——避免淹没对话、膨胀会话文件）。
  *
- * 架构：多文件扩展（index/store/brief/panel/types/DEFAULT_WORKFLOW），build.js
+ * 架构：多文件扩展（index/store/brief/panel/types），build.js
  * 打包为单文件 dist/extensions/workflow-mgr.ts；展示层走官方 setStatus 通道
  * （key "workflow-mgr"），hud 缺席时自动回落原生 footer。
  */
@@ -75,7 +75,7 @@ const milestoneParams = Type.Object({
 });
 const workflowParams = Type.Object({
 	action: StringEnum(["list", "add", "edit", "remove", "reset"], {
-		description: "操作类型：list 查看全量；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段；remove 删除任务；reset 重置为内置示例工作流",
+		description: "操作类型：list 查看全量；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段；remove 删除任务；reset 清空工作流",
 	}),
 	stageId: Type.Optional(Type.String({ description: "阶段 ID；add 时不存在则自动创建新阶段" })),
 	stageName: Type.Optional(Type.String({ description: "阶段名（add 创建新阶段时使用，缺省用 stageId）" })),
@@ -132,7 +132,7 @@ export default function (pi: ExtensionAPI) {
 			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）。" +
 			"list 查看全量（含各任务状态）；add 新增任务（stageId 不存在自动创建阶段，id 缺省自动生成）；" +
 			"edit 修改任务任意字段（传空数组清空列表字段）；remove 删除任务（同步清理状态与空阶段）；" +
-			"reset 重置为内置示例工作流（不可逆）。规划复杂项目时先用 add 建出完整骨架，再逐步细化。",
+			"reset 清空工作流（无阶段无任务，不可逆）。规划复杂项目时先用 add 建出完整骨架，再逐步细化。",
 		promptSnippet: "workflow: create/update the human-AI collaboration workflow definition",
 		parameters: workflowParams,
 		async execute(_id, params: WorkflowParams, _signal, _onUpdate, ctx) {
@@ -269,7 +269,7 @@ export default function (pi: ExtensionAPI) {
 					{
 						type: "text",
 						text:
-							"已重置为内置示例工作流（搭建个人博客）。\n用 wf_workflow add/edit 改造成当前项目的工作流；add 时 stageId 不存在会自动创建阶段。",
+							"已清空工作流（无阶段无任务）。\n用 wf_workflow add 从零创建（stageId 不存在会自动创建阶段）；从未创建过时常驻面板隐藏。",
 					},
 				],
 				details: { kind: "workflow-reset", state: lightState(s.getState()) },

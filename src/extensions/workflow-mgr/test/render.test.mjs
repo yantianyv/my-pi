@@ -4,7 +4,7 @@
  *
  * 目的：抓「Box is not defined」这类 import 漏写、布局拆行、宽度溢出等问题
  * （真实踩过的坑）。覆盖三态渲染 + 核心工具流程：
- * - 场景 A：内置示例工作流（中文任务名）→ 常驻 widget + /workflow-config 完整面板
+ * - 场景 A：示例工作流（中文任务名）→ 常驻 widget + /workflow-config 完整面板
  * - 场景 B：空工作流 → 面板不崩溃、显示「无任务」引导
  * - 场景 C：全部任务 done → 面板显示完成态
  * - 流程：wf_start → wf_done 自动推进 → state.json 落盘可复查
@@ -137,13 +137,13 @@ async function await0(pi, ctx, ev) {
 	await fireEvent(pi, ctx, ev);
 }
 
-/* ============================== 场景 A：内置示例工作流 ============================== */
+/* ============================== 场景 A：示例工作流 ============================== */
 async function scenarioA() {
-	console.log("\n场景 A：内置示例工作流（中文任务名 + 宽度断言）");
+	console.log("\n场景 A：示例工作流（中文任务名 + 宽度断言）");
 	const mod = await importBundle();
 	const pi = makePi();
 	mod.default(pi);
-	// 写真实 workflow.json（同内置示例：4 任务）——文件存在 → 面板显示
+	// 写真实 workflow.json（同示例工作流：4 任务）——文件存在 → 面板显示
 	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
 	const caps = {};
 	const ctx = makeCtx(dir, caps);
@@ -283,10 +283,10 @@ async function scenarioD() {
 	const ctx = makeCtx(dir, caps);
 	await fireEvent(pi, ctx, "session_start");
 	check("无工作流时不推 widget", caps.widget === undefined || caps.widget.factory === undefined);
-	// 工具仍可用：wf_status 返回内置示例信息
+	// 工具仍可用：wf_status 返回示例工作流信息
 	const s = pi.tools.find((t) => t.name === "wf_status");
 	const r = await s.execute("1", {}, undefined, undefined, ctx);
-	check("wf_status 仍可用（提示内置示例）", r.content[0].text.includes("工作流"));
+	check("wf_status 仍可用（提示示例工作流）", r.content[0].text.includes("工作流"));
 	rmSync(dir, { recursive: true, force: true });
 }
 
@@ -475,7 +475,7 @@ async function importBundle() {
 
 const readFile = (p) => readFileSync(p, "utf8");
 
-/** 内置示例 fixture：与 DEFAULT_WORKFLOW 相同的 4 任务（真实落盘文件） */
+/** 示例工作流 fixture：4 任务的示例工作流（真实落盘文件） */
 const DEFAULT_WORKFLOW_FIXTURE = {
 	schemaVersion: 1,
 	stages: [

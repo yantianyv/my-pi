@@ -16,7 +16,6 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadJsonConfig, saveJsonConfig } from "../shared/config";
-import { DEFAULT_WORKFLOW } from "./DEFAULT_WORKFLOW";
 import {
 	PANEL_SCHEMA_VERSION,
 	STATE_SCHEMA_VERSION,
@@ -47,6 +46,9 @@ function statePath(ctx: ExtensionContext): string {
 function panelConfigPath(ctx: ExtensionContext): string {
 	return join(ctx.cwd, CONFIG_DIR_NAME, "workflow", "config.json");
 }
+
+/** 空工作流：无内置示例——数据缺失 / wf_workflow reset 后均为「无阶段无任务」，AI 用 wf_workflow 从零创建 */
+const EMPTY_WORKFLOW: WorkflowDef = { schemaVersion: WORKFLOW_SCHEMA_VERSION, stages: [] };
 
 const isStr = (v: unknown): v is string => typeof v === "string";
 const isStrArray = (v: unknown): v is string[] => Array.isArray(v) && v.every(isStr);
@@ -254,8 +256,8 @@ export class WorkflowStore {
 
 	getWorkflow(): WorkflowDef {
 		if (!this.wf) {
-			// fallback 深拷贝，避免对默认示例的修改污染下次加载
-			this.wf = loadJsonConfig(workflowPath(this.ctx), cloneWorkflow(DEFAULT_WORKFLOW), isWorkflowDef);
+			// 无内置示例：文件缺失 → 空工作流（无阶段无任务），面板按 hasWorkflowFile 隐藏/显示空提示
+			this.wf = loadJsonConfig(workflowPath(this.ctx), cloneWorkflow(EMPTY_WORKFLOW), isWorkflowDef);
 		}
 		return this.wf;
 	}
@@ -300,9 +302,9 @@ export class WorkflowStore {
 		if (this.panelCfg) saveJsonConfig(panelConfigPath(this.ctx), this.panelCfg);
 	}
 
-	/** 全量重置：工作流回默认示例 + 状态重建（wf_workflow reset 用） */
+	/** 全量重置：清空工作流（无阶段无任务）+ 状态重建（wf_workflow reset 用） */
 	resetAll(): void {
-		this.wf = cloneWorkflow(DEFAULT_WORKFLOW);
+		this.wf = cloneWorkflow(EMPTY_WORKFLOW);
 		this.derived = null;
 		this.state = freshState(this.wf);
 		this.commitWorkflow();
