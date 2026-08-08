@@ -37,6 +37,24 @@ const dryRun = process.argv.includes("--dry-run") || process.argv.includes("-n")
 const skipBuild = process.argv.includes("--skip-build");
 const log = (...m) => console.log((dryRun ? "[DRY-RUN] " : "") + m.join(" "));
 
+const SRC_DIR = path.join(ROOT, "src");
+const ESBUILD_DIR = path.join(SRC_DIR, "node_modules", "esbuild");
+
+/** 确保构建依赖已安装：src/node_modules/esbuild 缺失（克隆后首次）时自动 npm install（dry-run 只提示） */
+function ensureDeps() {
+	if (fs.existsSync(ESBUILD_DIR)) return;
+	log("未找到 esbuild（构建依赖），自动执行 npm install（src/ 下）…");
+	if (dryRun) return; // 试运行不执行
+	try {
+		execSync("npm install", { cwd: SRC_DIR, stdio: "inherit" });
+	} catch {
+		console.error(
+			"\nnpm install 失败（需要网络）。请手动执行 cd src && npm install 后重新运行 install.js。",
+		);
+		process.exit(1);
+	}
+}
+
 /** 自动构建：install 前先跑 build.js（dry-run 只预览不构建；--skip-build 显式跳过） */
 function autoBuild() {
 	if (!fs.existsSync(BUILD_SCRIPT)) {
@@ -47,9 +65,7 @@ function autoBuild() {
 	if (dryRun) return; // 试运行不执行
 	const r = spawnSync(process.execPath, [BUILD_SCRIPT], { cwd: ROOT, stdio: "inherit" });
 	if (r.status !== 0) {
-		console.error(
-			`\n构建失败（退出码 ${r.status}）。请先执行 cd src && npm install（拉取 esbuild），再重新 install。`,
-		);
+		console.error(`\n构建失败（退出码 ${r.status}）。请检查 src/ 源码与网络后重试。`);
 		process.exit(1);
 	}
 }
@@ -195,7 +211,10 @@ function generateTsconfig() {
 function main() {
 	console.log(`pi 一键配置安装 → ${PI_AGENT}\n`);
 	// 默认自动构建（dry-run / --skip-build 跳过）；构建失败即退出
-	if (!skipBuild) autoBuild();
+	if (!skipBuild) {
+		ensureDeps();
+		autoBuild();
+	}
 	// 构建后 dist 应已生成；仍缺失时：dry-run 给出预期说明，正式安装报错退出
 	if (!fs.existsSync(DIST) || !fs.existsSync(path.join(DIST, "extensions"))) {
 		if (dryRun) {

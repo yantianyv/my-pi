@@ -8,7 +8,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 
 | 命令 | 作用 | 出处 |
 |---|---|---|
-| `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix（install.js:150）；**默认先自动执行 src/build.js** 再安装（`--skip-build` 跳过，dry-run 只预览不构建）；脚本路径自适应（任意目录下 node <绝对路径>/install.js 均可） | install.js |
+| `node install.js` | 安装 themes/extensions/sounds 到 `~/.pi/agent/`，并把 settings.json 的 theme 设为 matrix（install.js:150）；**傻瓜式一键**：首次自动 npm install（esbuild 缺失时）→ 自动执行 src/build.js 构建 → 安装（`--skip-build` 跳过构建，dry-run 只预览不执行任何修改）；脚本路径自适应（任意目录下 node <绝对路径>/install.js 均可） | install.js |
 | `node install.js --dry-run`（或 `-n`） | 试运行，只打印不修改（不触发自动构建） | install.js:36 |
 | `node src/build.js` | 伪编译：esbuild 把 src/extensions/ 源码（含 shared/、hud/ 子模块）内联打包成 dist/extensions/ 下的零耦合单文件（hud/ → hud.ts），并把 src/static/ 静态部署物拷贝到 dist/；install.js 会自动调用，也可手动单独跑 | src/build.js |
 | `npm install` | 首次拉取构建依赖（在 src/ 下执行，esbuild 装入 src/node_modules） | src/package.json |

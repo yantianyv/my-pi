@@ -7,12 +7,12 @@
 ## 快速开始
 
 ```bash
-cd src && npm install     # 首次：拉取构建依赖（esbuild，装入 src/node_modules）
-node install.js           # 自动先构建（build.js）再安装到 ~/.pi/agent/
+git clone <repo> && cd <repo>
+node install.js           # 一键：自动 npm install（首次，需网络）→ 构建 → 安装到 ~/.pi/agent/
 node install.js --dry-run # 先预览要做什么，不修改
 ```
 
-安装后重启 pi 或执行 `/reload` 生效。**伪编译架构**：源码层 `src/extensions/shared/` 共享模块（如 btw 与 explore 共用的模型选择器）在 `build.js` 时内联进各扩展产物——原始代码高复用、编译产物零耦合；`src/extensions/hud/` 多文件扩展也被合并为单个 `hud.ts`（详见「伪编译架构」节）。
+安装后重启 pi 或执行 `/reload` 生效。首次运行会自动拉取构建依赖（esbuild）并构建产物，之后每次运行都是：构建 + 安装一步到位。**伪编译架构**：源码层 `src/extensions/shared/` 共享模块（如 btw 与 explore 共用的模型选择器）在构建时内联进各扩展产物——原始代码高复用、编译产物零耦合；`src/extensions/hud/` 多文件扩展也被合并为单个 `hud.ts`（详见「伪编译架构」节）。
 
 ## 包含内容
 
