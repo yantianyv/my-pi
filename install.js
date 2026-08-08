@@ -21,7 +21,10 @@ const { execSync } = require("child_process");
 const ROOT = __dirname;
 const PI_AGENT = path.join(os.homedir(), ".pi", "agent");
 const THEMES_SRC = path.join(ROOT, "themes");
-const EXT_SRC = path.join(ROOT, "extensions");
+// 伪编译架构：优先安装 build.js 的产物（dist/extensions/，零耦合单文件）；
+// 未构建时回退源码（extensions/，含 shared/ 共享模块与 hud/ 子目录）
+const EXT_DIST = path.join(ROOT, "dist", "extensions");
+const EXT_SRC = fs.existsSync(EXT_DIST) ? EXT_DIST : path.join(ROOT, "extensions");
 const SOUNDS_SRC = path.join(ROOT, "sounds");
 const THEMES_DST = path.join(PI_AGENT, "themes");
 const EXT_DST = path.join(PI_AGENT, "extensions");

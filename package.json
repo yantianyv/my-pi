@@ -1,0 +1,13 @@
+{
+	"name": "my-pi",
+	"private": true,
+	"description": "pi 个人定制配置仓库：主题、扩展、提示音（伪编译架构：源码高复用，产物零耦合）",
+	"scripts": {
+		"build": "node build.js",
+		"install": "node install.js",
+		"typecheck": "npx typescript -p tsconfig.json"
+	},
+	"devDependencies": {
+		"esbuild": "^0.28.0"
+	}
+}

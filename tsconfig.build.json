@@ -1,0 +1,9 @@
+{
+	// build.js 专用：让 esbuild 忽略 tsconfig.json 里的 paths 映射（paths 把
+	// typebox/@earendil-works/* 指向 pi 全局安装目录的绝对路径，会破坏
+	// --packages=external 的包名匹配导致意外内联）。构建时显式 --tsconfig 指向本文件。
+	"compilerOptions": {
+		"moduleResolution": "bundler",
+		"target": "es2022"
+	}
+}

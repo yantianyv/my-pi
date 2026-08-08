@@ -7,18 +7,20 @@
 ## 快速开始
 
 ```bash
-node install.js            # 安装到 ~/.pi/agent/
+npm install             # 首次：拉取构建依赖（esbuild，仅构建需要）
+node build.js           # 伪编译：源码 → dist/extensions/ 零耦合单文件产物
+node install.js         # 安装到 ~/.pi/agent/（优先安装 dist 产物）
 node install.js --dry-run  # 先预览要做什么，不修改
 ```
 
-安装后重启 pi 或执行 `/reload` 生效。
+安装后重启 pi 或执行 `/reload` 生效。**伪编译架构**：源码层 `extensions/shared/` 共享模块（如 btw 与 explore 共用的模型选择器）在 `build.js` 时内联进各扩展产物——原始代码高复用、编译产物零耦合；`hud/` 多文件扩展也被合并为单个 `hud.ts`（详见「伪编译架构」节）。
 
 ## 包含内容
 
 | 目录 | 内容 | 安装目标 |
 |------|------|----------|
 | `themes/` | `matrix.json` — 黑客帝国风格荧光绿主题 | `~/.pi/agent/themes/` |
-| `extensions/` | `hud/` — 3 行 HUD 状态栏（多文件扩展：`index.ts` 入口 + `hud-core.ts` 核心 + `hud-balance.ts` 余额适配 + `hud-cost.ts` 消耗统计 + `hud-git.ts` git 解析，见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `hud/`（源码多文件：`index.ts` + `hud-core.ts` + `hud-balance.ts` + `hud-cost.ts` + `hud-git.ts`；build.js 合并为单文件 `hud.ts` 产物）— 3 行 HUD 状态栏，见下 | `~/.pi/agent/extensions/` |
 | `extensions/` | `btf-think.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking... → Thinking....，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`） | `~/.pi/agent/extensions/` |
 | `extensions/` | `explore-agent.ts` — `explore` 工具：只读子代理并行探索代码库、返回报告（见下） | `~/.pi/agent/extensions/` |
@@ -246,7 +248,7 @@ node patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
 
 ```bash
 rm ~/.pi/agent/themes/matrix.json
-rm -r ~/.pi/agent/extensions/hud
+rm ~/.pi/agent/extensions/hud.ts
 rm ~/.pi/agent/extensions/btf-think.ts
 rm ~/.pi/agent/extensions/claude-it.ts
 rm ~/.pi/agent/extensions/explore-agent.ts
@@ -261,5 +263,6 @@ rm ~/.pi/agent/sounds/task_complete.wav
 
 ## 说明
 
+- **伪编译架构**：`extensions/` 是源码（`shared/` 共享模块被多个扩展 import 复用，`hud/` 拆分为多文件便于维护）；`node build.js` 用 esbuild 把每个扩展入口内联打包成 `dist/extensions/` 单文件（零耦合、只依赖 pi 官方包；`hud/` 合并为 `hud.ts`）；`install.js` 优先安装产物。产物入库，克隆后 `npm install && node install.js` 即可用；改了源码后重跑 `node build.js` 并提交新产物。
 - `docs/deepseek/` 是本地参考资料（不入库，版权归 DeepSeek），供 deepseek 适配开发时查价格、思考模式、API 细节。
 
