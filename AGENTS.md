@@ -40,7 +40,6 @@ patches/apply-pi-tui-scroll-freeze.mjs  # pi-tui 滚动冻结补丁：修复流�
 patches/apply-pi-ai-usage-guard.mjs     # pi-ai usage 缺失防护补丁：模型偶发返回无 usage 的 assistant 消息导致后续调用瞬时失败（见 README「pi-ai usage 缺失防护补丁」节）；pi 升级后需重跑
 patches/apply-zuchongzhi-zh.mjs        # 祖冲之汉化补丁：pi 无官方 i18n，直接替换 dist 编译产物硬编码英文为中文（236 处/9 文件，见 README「祖冲之汉化补丁」节）；pi 升级后需重跑
 models.json                          # OpenRouter 路由模板：install.js 复制/深度合并到 ~/.pi/agent/models.json（见 README「OpenRouter 路由策略」节）
-docs/deepseek/      # DeepSeek 官方文档提取（api.md / pricing.md / thinking.md），适配参考
 .pi/                # 空目录（占位）
 ```
 
@@ -64,5 +63,5 @@ docs/deepseek/      # DeepSeek 官方文档提取（api.md / pricing.md / thinki
 - `tsconfig.template.json` → `install.js` 探测 pi 全局目录生成 `tsconfig.json`（`.gitignore` 忽略生成物，不入库）；生成物仅服务本地 tsc 检查（`paths` 映射 `@earendil-works/*` / `typebox`），运行时仍由 jiti 直接加载，不经 tsc。换机器/pi 升级路径变了重跑 `node install.js` 即可
 - README 末尾「说明」一节提到的 `templates/` 目录已在 dab2af6 删除，该段说明已过时
 - `install.js` 会修改全局 `~/.pi/agent/settings.json`（theme 字段），跑 `--dry-run` 先预览；copyDir 已支持子目录递归（多文件扩展 hud/）
-- `docs/deepseek/` 是参考资料，不要当作可执行配置；`sounds/` 只放提示音
+- `docs/deepseek/` 是本地参考资料（不入库，版权归 DeepSeek），不要当作可执行配置；`sounds/` 只放提示音
 - `claude-it.ts` 会拦截裸输入 `exit`（不带 `/`）直接退出 pi，属刻意设计
