@@ -84,8 +84,9 @@ function renderWidget(state: WorkflowState, derived: Derived, theme: Theme) {
 		}
 		const stagePart = curStage
 			? theme.fg("dim", `${curStage.name} ${stageDone}/${curStage.tasks.length}`)
-			: theme.fg("dim", "—");
-		const left = taskPart + theme.fg("dim", "  ┃  ") + stagePart;
+			: "";
+		// 无当前阶段（空任务 / 全部完成）时不显示分隔符与占位符，避免「全部任务已完成  ┃  —」
+		const left = taskPart + (stagePart ? theme.fg("dim", "  ┃  ") + stagePart : "");
 		const right = bar + theme.fg("dim", ` ${doneCount}/${derived.all.length}`);
 		const pad = Math.max(2, availW - visibleWidth(left) - visibleWidth(right));
 		box.addChild(new Text(left + " ".repeat(pad) + right, 1, 0));
@@ -180,12 +181,13 @@ export function renderHudRows(state: WorkflowState, derived: Derived, theme: The
 	const stageDone = curStage ? curStage.tasks.filter((t) => state.tasks[t.id]?.status === "done").length : 0;
 	const stagePart = curStage
 		? theme.fg("dim", `${curStage.name} ${stageDone}/${curStage.tasks.length}`)
-		: theme.fg("dim", "—");
+		: "";
+	// 无当前阶段（空任务 / 全部完成）时不显示分隔符与占位符，避免「全部任务已完成  ┃  —」
 	const BARS = 12;
 	const filled = Math.min(BARS, Math.round((doneCount / Math.max(1, derived.all.length)) * BARS));
 	let bar = "";
 	for (let i = 0; i < BARS; i++) bar += i < filled ? theme.fg("accent", "▓") : theme.fg("dim", "░");
-	const left = taskPart + theme.fg("dim", "  ┃  ") + stagePart;
+	const left = taskPart + (stagePart ? theme.fg("dim", "  ┃  ") + stagePart : "");
 	const right = bar + theme.fg("dim", ` ${doneCount}/${derived.all.length}`);
 	const pad = Math.max(2, width - visibleWidth(left) - visibleWidth(right));
 	rows.push(left + " ".repeat(pad) + right);
