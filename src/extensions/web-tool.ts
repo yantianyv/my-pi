@@ -236,7 +236,7 @@ function relevance(results: SearchResult[], keywords: string[]): number {
 	return hits / results.length;
 }
 
-/** 通用网页搜索：双源并行 + 按查询特征词命中率择优（cn.bing 对长中文查询常降级成只匹配首词，360 对中文长查询质量高；英文/短查询 bing 更稳——命中率高者胜，同分默认 bing） */
+/** 通用网页搜索：双源并行 + 按查询特征词命中率择优。根因：cn.bing.com（中国版）查询理解会把「地名+机构名」组合（如“陕西师范大学”）降级成地域搜索丢弃长尾词（已实测：含“陕西师范大学”的查询全泛化成“陕西省”，无关词数；裸请求/参数/编码均无法影响）；360 对这类中文查询正常。命中率高者胜，同分默认 bing（英文/短查询 bing 更稳） */
 async function searchWeb(query: string): Promise<{ results: SearchResult[]; source: string }> {
 	const keywords = queryKeywords(query);
 	const attempts = await Promise.allSettled([
