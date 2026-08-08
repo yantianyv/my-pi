@@ -16,12 +16,13 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { execSync } = require("child_process");
+const { execSync, spawnSync } = require("child_process");
 
 const ROOT = __dirname;
 const PI_AGENT = path.join(os.homedir(), ".pi", "agent");
-// 只安装 build.js 的产物；dist 缺失说明还没构建（改 src/ 后先 node build.js）
+// 只安装 build.js 的产物；install 默认先自动执行一次 build（--skip-build 可跳过）
 const DIST = path.join(ROOT, "dist");
+const BUILD_SCRIPT = path.join(ROOT, "build.js");
 const THEMES_SRC = path.join(DIST, "themes");
 const EXT_SRC = path.join(DIST, "extensions");
 const SOUNDS_SRC = path.join(DIST, "sounds");
@@ -33,7 +34,25 @@ const SOUNDS_DST = path.join(PI_AGENT, "sounds");
 const THEME_NAME = "matrix"; // 默认启用的主题（对应 dist/themes/matrix.json）
 
 const dryRun = process.argv.includes("--dry-run") || process.argv.includes("-n");
+const skipBuild = process.argv.includes("--skip-build");
 const log = (...m) => console.log((dryRun ? "[DRY-RUN] " : "") + m.join(" "));
+
+/** 自动构建：install 前先跑 build.js（dry-run 只预览不构建；--skip-build 显式跳过） */
+function autoBuild() {
+	if (!fs.existsSync(BUILD_SCRIPT)) {
+		console.error(`错误: 未找到构建脚本 ${BUILD_SCRIPT}`);
+		process.exit(1);
+	}
+	log(`自动构建：node ${path.relative(ROOT, BUILD_SCRIPT)}`);
+	if (dryRun) return; // 试运行不执行
+	const r = spawnSync(process.execPath, [BUILD_SCRIPT], { cwd: ROOT, stdio: "inherit" });
+	if (r.status !== 0) {
+		console.error(
+			`\n构建失败（退出码 ${r.status}）。请先执行 cd src && npm install（拉取 esbuild），再重新 install。`,
+		);
+		process.exit(1);
+	}
+}
 
 function copyDir(src, dst, exts = [".json", ".ts"]) {
 	if (!fs.existsSync(src)) {
@@ -175,10 +194,16 @@ function generateTsconfig() {
 
 function main() {
 	console.log(`pi 一键配置安装 → ${PI_AGENT}\n`);
-	// 只认 build.js 的产物；缺失时明确提示，避免误装旧版本
+	// 默认自动构建（dry-run / --skip-build 跳过）；构建失败即退出
+	if (!skipBuild) autoBuild();
+	// 构建后 dist 应已生成；仍缺失时：dry-run 给出预期说明，正式安装报错退出
 	if (!fs.existsSync(DIST) || !fs.existsSync(path.join(DIST, "extensions"))) {
-		console.error(`错误: 未找到构建产物 ${DIST}。请先运行 node build.js（改过 src/ 后也要重跑）再安装。`);
-		process.exit(1);
+		if (dryRun) {
+			console.log("dist 产物缺失——正式安装时会先自动执行 build.js 生成后再安装。\n");
+		} else {
+			console.error(`错误: 自动构建后仍找不到产物 ${DIST}。请先手动运行 node build.js 排查（或用 --skip-build 跳过自动构建）。`);
+			process.exit(1);
+		}
 	}
 	if (!fs.existsSync(path.join(THEMES_SRC, `${THEME_NAME}.json`))) {
 		console.error(`错误: 找不到默认主题 ${THEME_NAME}.json（${THEMES_SRC}）`);

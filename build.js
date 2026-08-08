@@ -26,7 +26,13 @@ const ROOT = __dirname;
 // esbuild 安装在 src/node_modules（package.json 在 src/ 下，npm install 在那里生成），
 // 用 src/package.json 位置创建 require 以便解析到 esbuild
 const req = createRequire(path.join(ROOT, "src", "package.json"));
-const esbuild = req("esbuild");
+let esbuild;
+try {
+	esbuild = req("esbuild");
+} catch {
+	console.error("未找到 esbuild（构建依赖）。首次使用请先执行：cd src && npm install\n");
+	process.exit(1);
+}
 const SRC = path.join(ROOT, "src");
 const DIST = path.join(ROOT, "dist");
 

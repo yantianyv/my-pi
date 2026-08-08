@@ -8,8 +8,7 @@
 
 ```bash
 cd src && npm install     # 首次：拉取构建依赖（esbuild，装入 src/node_modules）
-node build.js             # 伪编译：src/ 源码 → dist/ 零耦合单文件产物
-node install.js           # 安装到 ~/.pi/agent/（只认 dist/ 产物）
+node install.js           # 自动先构建（build.js）再安装到 ~/.pi/agent/
 node install.js --dry-run # 先预览要做什么，不修改
 ```
 
