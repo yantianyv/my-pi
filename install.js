@@ -2,11 +2,11 @@
 /**
  * pi 一键配置安装脚本
  *
- * 把 build.js 生成的 dist/ 部署物安装到 pi 全局配置目录：
- *   dist/themes/      → ~/.pi/agent/themes/      （主题）
- *   dist/extensions/  → ~/.pi/agent/extensions/  （扩展产物，零耦合单文件）
- *   dist/sounds/      → ~/.pi/agent/sounds/      （提示音）
- *   dist/models.json  → ~/.pi/agent/models.json  （OpenRouter 路由等模型配置，已存在则深度合并）
+ * 安装到 pi 全局配置目录（扩展产物来自 build.js 生成的 dist/，静态资源直接从仓库 static/ 装，无需编译）：
+ *   dist/extensions/   → ~/.pi/agent/extensions/  （扩展产物，零耦合单文件）
+ *   static/themes/     → ~/.pi/agent/themes/      （主题）
+ *   static/sounds/     → ~/.pi/agent/sounds/      （提示音）
+ *   static/models.json → ~/.pi/agent/models.json  （OpenRouter 路由等模型配置，已存在则深度合并）
  * 并把 settings.json 的 theme 设为本项目主题。
  *
  * 用法：
@@ -32,7 +32,7 @@ const THEMES_DST = path.join(PI_AGENT, "themes");
 const EXT_DST = path.join(PI_AGENT, "extensions");
 const SOUNDS_DST = path.join(PI_AGENT, "sounds");
 
-const THEME_NAME = "matrix"; // 默认启用的主题（对应 dist/themes/matrix.json）
+const THEME_NAME = "matrix"; // 默认启用的主题（对应 static/themes/matrix.json）
 
 const dryRun = process.argv.includes("--dry-run") || process.argv.includes("-n");
 const skipBuild = process.argv.includes("--skip-build");
