@@ -3,7 +3,7 @@
  *
  * - /exit 命令（/quit 的别名）与直接输入 exit 退出
  * - 对话进行中按 Ctrl+C 取消当前 agent 操作；打断后窗口内再按一次 Ctrl+C
- *   预填 /rewind 命令（回车即回退到上一条用户消息，内容放回输入框）
+ *   直接执行 /rewind 回退到上一条用户消息（内容放回输入框）
  * - /rewind 命令：回退到上一条用户消息，消息内容放回输入框
  * - /init 命令：后台独立上下文中分析代码库并生成/更新 AGENTS.md
  *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话；
@@ -382,7 +382,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// 3) Ctrl+C：第一次打断当前 turn；打断后窗口内再按一次 → 预填 /rewind（回车即回退）
+	// 3) Ctrl+C：第一次打断当前 turn；打断后窗口内再按一次 → 直接执行 /rewind 回退
 	let currentCtx: ExtensionContext | null = null;
 	let ctrlCHandlerInstalled = false;
 	let lastAbortAt = 0;
@@ -407,12 +407,13 @@ export default function (pi: ExtensionAPI) {
 				return { consume: true };
 			}
 
-			// 空闲时再按 Ctrl+C：打断窗口内 → 预填 /rewind 命令，回车即回退到上一条消息
+			// 空闲时再按 Ctrl+C：打断窗口内 → 直接执行 /rewind 回退到上一条消息
 			if (lastAbortAt > 0 && Date.now() - lastAbortAt < REWIND_WINDOW_MS) {
 				lastAbortAt = 0;
 				currentCtx.ui.setEditorText("/rewind");
-				currentCtx.ui.notify("按回车执行 /rewind：回退到上一条用户消息", "info");
-				return { consume: true };
+				currentCtx.ui.notify("正在执行 /rewind：回退到上一条用户消息", "info");
+				// 把当前按键替换成回车，让 /rewind 走正常命令提交流程
+				return { consume: false, data: "\r" };
 			}
 			return { consume: false };
 		});
