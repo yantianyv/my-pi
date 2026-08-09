@@ -31,9 +31,10 @@ export function registerEvents(pi: ExtensionAPI) {
 	// hud 开启/关闭时重算展示方式：hud 接管底部行（面板隐藏） vs workflow 自绘常驻面板。
 	// hud 是事件源（footer dispose 时 emit("hud:state-change")），本扩展持最新 ctx 响应，不依赖加载顺序。
 	// reload 陷阱：/reload 先 dispose 旧 UI（hud dispose → emit 本事件）再发 session_shutdown，
-	// 此时旧 ctx 已被 pi 标记 stale，getStore(lastCtx) 访问 ctx.cwd 触发 assertActive 抛错——
-	// process 事件回调里的异常无人捕获会成为 uncaughtException 直接杀掉 pi。这里 try/catch
-	// 静默跳过：旧实例即将卸载，刷新交给新实例的 session_start 完成。
+	// 此时 lastCtx 已被 pi 标记 stale，getStore 因 cwd 已固化不会再崩（stale-ctx 修复），但
+	// updateWidget(lastCtx) 访问 lastCtx.ui 仍会触发 assertActive 抛错——process 事件回调里的
+	// 异常无人捕获会成为 uncaughtException 直接杀掉 pi，这里 try/catch 静默跳过：旧实例即将
+	// 卸载，刷新交给新实例的 session_start 完成。
 	const onHudStateChange = () => {
 		if (!lastCtx) return;
 		try {

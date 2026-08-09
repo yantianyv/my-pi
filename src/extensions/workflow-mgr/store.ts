@@ -40,14 +40,14 @@ export interface Derived {
 
 /* ------------------------------ 路径与校验 ------------------------------ */
 
-function workflowPath(ctx: ExtensionContext): string {
-	return join(ctx.cwd, CONFIG_DIR_NAME, "workflow", "workflow.json");
+function workflowPath(cwd: string): string {
+	return join(cwd, CONFIG_DIR_NAME, "workflow", "workflow.json");
 }
-function statePath(ctx: ExtensionContext): string {
-	return join(ctx.cwd, CONFIG_DIR_NAME, "workflow", "state.json");
+function statePath(cwd: string): string {
+	return join(cwd, CONFIG_DIR_NAME, "workflow", "state.json");
 }
-function panelConfigPath(ctx: ExtensionContext): string {
-	return join(ctx.cwd, CONFIG_DIR_NAME, "workflow", "config.json");
+function panelConfigPath(cwd: string): string {
+	return join(cwd, CONFIG_DIR_NAME, "workflow", "config.json");
 }
 
 /** 空工作流：无内置示例——数据缺失 / wf_workflow reset 后均为「无阶段无任务」，AI 用 wf_workflow 从零创建 */
@@ -230,21 +230,23 @@ export function logEvent(state: WorkflowState, event: string, msg?: string, task
 /**
  * 单会话缓存容器：三个 JSON + 派生表。
  * session_start 或 cwd 变化时重建（重建即从磁盘重新加载——文件被外部修改后自动生效）。
+ *
+ * stale 防护：构造时把 cwd 固化为字符串，之后不再持有/访问 ctx——session 替换
+ * （compaction / reload）后旧 ctx 被 pi 标记 stale，任何属性访问都会抛
+ * assertActive 错误（此前 getStore 比较 sessionStore.cwd 时动态访问旧 ctx 即崩溃）。
+ * 路径函数全部接收固化 cwd，store 方法在 stale 后仍可安全读写磁盘。
  */
 export class WorkflowStore {
-	private ctx: ExtensionContext;
+	/** 构造时固化的工作目录：后续所有文件操作基于此值，不访问可能 stale 的 ctx */
+	readonly cwd: string;
 	private wf: WorkflowDef | null = null;
 	private derived: Derived | null = null;
 	private state: WorkflowState | null = null;
 	private panelCfg: PanelConfig | null = null;
 
 	constructor(ctx: ExtensionContext) {
-		this.ctx = ctx;
-	}
-
-	/** 当前会话工作目录（getStore 据此检测会话切换，自动重建） */
-	get cwd(): string {
-		return this.ctx.cwd;
+		// 构造时刻的 ctx 必然是新鲜的（getStore 只在事件/工具携带的新 ctx 下新建），固化后彻底解耦
+		this.cwd = ctx.cwd;
 	}
 
 	/** 清空全部缓存（下次访问重新从磁盘加载） */
@@ -257,13 +259,13 @@ export class WorkflowStore {
 
 	/** 工作流定义文件是否已落盘（从未创建过工作流 → 常驻面板整体隐藏） */
 	hasWorkflowFile(): boolean {
-		return existsSync(workflowPath(this.ctx));
+		return existsSync(workflowPath(this.cwd));
 	}
 
 	getWorkflow(): WorkflowDef {
 		if (!this.wf) {
 			// 无内置示例：文件缺失 → 空工作流（无阶段无任务），面板按 hasWorkflowFile 隐藏/显示空提示
-			this.wf = loadJsonConfig(workflowPath(this.ctx), cloneWorkflow(EMPTY_WORKFLOW), isWorkflowDef);
+			this.wf = loadJsonConfig(workflowPath(this.cwd), cloneWorkflow(EMPTY_WORKFLOW), isWorkflowDef);
 		}
 		return this.wf;
 	}
@@ -276,7 +278,7 @@ export class WorkflowStore {
 	getState(): WorkflowState {
 		if (!this.state) {
 			const wf = this.getWorkflow();
-			this.state = loadJsonConfig(statePath(this.ctx), freshState(wf), isWorkflowState);
+			this.state = loadJsonConfig(statePath(this.cwd), freshState(wf), isWorkflowState);
 			// 1.7 拍板：decisions → notes 替换，旧数据直接丢弃（插件未被大规模使用，不迁移）
 			const old = (this.state as WorkflowState & { decisions?: unknown }).decisions;
 			if (old !== undefined || !Array.isArray(this.state.notes)) {
@@ -290,7 +292,7 @@ export class WorkflowStore {
 
 	getPanelConfig(): PanelConfig {
 		if (!this.panelCfg) {
-			this.panelCfg = loadJsonConfig(panelConfigPath(this.ctx), { schemaVersion: PANEL_SCHEMA_VERSION, showPanel: true }, isPanelConfig);
+			this.panelCfg = loadJsonConfig(panelConfigPath(this.cwd), { schemaVersion: PANEL_SCHEMA_VERSION, showPanel: true }, isPanelConfig);
 		}
 		return this.panelCfg;
 	}
@@ -298,7 +300,7 @@ export class WorkflowStore {
 	/** 工作流落盘 + 派生表失效（下次 getDerived 重建） */
 	commitWorkflow(): void {
 		if (this.wf) {
-			saveJsonConfig(workflowPath(this.ctx), this.wf);
+			saveJsonConfig(workflowPath(this.cwd), this.wf);
 			this.derived = null;
 		}
 	}
@@ -306,12 +308,12 @@ export class WorkflowStore {
 	commitState(): void {
 		if (this.state) {
 			this.state.updatedAt = new Date().toISOString();
-			saveJsonConfig(statePath(this.ctx), this.state);
+			saveJsonConfig(statePath(this.cwd), this.state);
 		}
 	}
 
 	commitPanelConfig(): void {
-		if (this.panelCfg) saveJsonConfig(panelConfigPath(this.ctx), this.panelCfg);
+		if (this.panelCfg) saveJsonConfig(panelConfigPath(this.cwd), this.panelCfg);
 	}
 
 	/** 全量重置：清空工作流（无阶段无任务）+ 状态重建（wf_workflow reset 用） */
@@ -352,12 +354,12 @@ export class WorkflowStore {
 			this.state.currentTaskId = null;
 			this.commitState();
 		}
-		const base = join(dirname(workflowPath(this.ctx)), "archive");
+		const base = join(dirname(workflowPath(this.cwd)), "archive");
 		const name = (this.wf?.stages[0]?.name ?? "工作流").replace(/[\\/:*?"<>|\s]+/g, "-");
 		const ts = new Date().toISOString().replace(/[:.]/g, "-");
 		const dir = join(base, `${ts}-${name}`);
 		mkdirSync(dir, { recursive: true });
-		for (const p of [workflowPath(this.ctx), statePath(this.ctx), panelConfigPath(this.ctx)]) {
+		for (const p of [workflowPath(this.cwd), statePath(this.cwd), panelConfigPath(this.cwd)]) {
 			if (existsSync(p)) renameSync(p, join(dir, basename(p)));
 		}
 		this.wf = null;
@@ -372,6 +374,9 @@ export class WorkflowStore {
 /**
  * 单会话 store：会话内按 cwd 缓存，cwd 变化自动重建（重建即从磁盘重载）。
  * 由 tools/commands/events 各模块共享——index 只负责组装，不再持有 store 生命周期。
+ *
+ * stale 防护：WorkflowStore 构造时已固化 cwd（不持有 ctx），此处的 cwd 比较是纯字符串
+ * 比较，session 替换后旧实例即使持有 stale ctx 引用也不触发访问，直接重建/复用。
  */
 let sessionStore: WorkflowStore | null = null;
 export function getStore(ctx: ExtensionContext): WorkflowStore {

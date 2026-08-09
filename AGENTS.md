@@ -52,11 +52,12 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       tools.ts       #     工具注册：wf_switch（完成+推进一步到位，complete=false 搁置）/ wf_note（AI 记录，对用户透明）/ wf_milestone（增删改）等 7 工具；wf_workflow import 初始化一次性导入（草稿 json，id 自动生成 + 全图环检测带链路，非空拒绝）
       commands.ts    #     /workflow-config 命令：只留无参（TUI 浮窗 / 非 TUI 文本面板），无子命令
       events.ts      #     事件钩子：session_start / hud:state-change / session_shutdown / before_agent_start（三态条件注入）
-      store.ts        #     数据层：workflow/state/config 三 JSON 加载保存 + 派生表（含 mode）+ reconcile 一致性 + 依赖环检测
+      store.ts        #     数据层：workflow/state/config 三 JSON 加载保存 + 派生表（含 mode）+ reconcile 一致性 + 依赖环检测；WorkflowStore 构造时固化 cwd（不持有 ctx），session 替换后不触发 stale
       brief.ts        #     AI 简报：renderBrief（当前任务+分工+完成信号+最近记录）/ summaryLine / lightState
       panel.ts        #     展示层：常驻 widget（belowEditor）+ /workflow-config 浮窗 + 非 TUI 文本回落（compactLines 单一渲染源）
       types.ts        #     TaskDef/StageDef/WorkflowState(mode+notes)/PanelConfig 类型 + schema 常量
       test/render.test.mjs #   渲染回归测试（esbuild bundle + mock pi/ctx；test/node_modules junction 指 pi 全局，不入库；15 场景 A-O）
+      test/stale-ctx.test.mjs#  stale ctx 回归测试：session 替换后 getStore 不崩（固化 cwd）+ cwd 变化重建
     web-tool.ts       #   联网工具：web_search 多源搜索（bing.cn 主 + 360 备 + npm 垂类，零 key 零费用，无 AI 总结）+ web_fetch 抓网页转 markdown（正文提取 + 截断；turndown/domino/gfm 由 build.js 内联）
 static/              #   静态部署物（无需编译，install.js 直接从这装到 ~/.pi/agent/，见 README 各补丁节；仓库根目录）
   themes/matrix.json  #     黑客帝国荧光绿主题
