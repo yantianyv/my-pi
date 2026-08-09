@@ -325,19 +325,15 @@ export class WorkflowStore {
 
 	/**
 	 * 归档（wf_workflow archive 用）：把当前工作流三 JSON 移动到 archive/<时间戳>-<名称>/ 留档。
-	 * 归档 = 「完成整个清单」（0.1 拍板）：未完成任务自动标记 done，currentTaskId 清空；
-	 * 当前工作流区清空（hasWorkflowFile → false，面板自动隐藏退出视野）；数据保留可 git 审查，
+	 * 归档 ≠ 完成（可能是放弃/暂停/换方案）：不再强制标 done，快照保留任务真实状态，
+	 * 收尾状态经 status 字符串记录（archiveStatus 字段）供追溯；当前工作流区清空
+	 * （hasWorkflowFile → false，面板自动隐藏退出视野）；数据保留可 git 审查，
 	 * 但不提供找回功能——真需要时由人手动查看 archive/ 目录。
 	 */
-	archiveAll(): void {
-		// 归档前：所有未完成任务标记 done（快照统一干净）
+	archiveAll(status = ""): void {
+		// 归档前：写入收尾状态描述（不强制改任务状态）
 		if (this.state) {
-			for (const st of Object.values(this.state.tasks)) {
-				if (st.status !== "done") {
-					st.status = "done";
-					st.doneAt = st.doneAt ?? new Date().toISOString();
-				}
-			}
+			this.state.archiveStatus = status;
 			this.state.currentTaskId = null;
 			this.commitState();
 		}

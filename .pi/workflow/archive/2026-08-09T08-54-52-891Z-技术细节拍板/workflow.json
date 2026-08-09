@@ -1,0 +1,154 @@
+{
+  "schemaVersion": 1,
+  "stages": [
+    {
+      "id": "design",
+      "name": "技术细节拍板",
+      "goal": "把 wf_todo 的技术细节逐项定稿，再动手实现",
+      "tasks": [
+        {
+          "id": "0.1",
+          "title": "数据模型与存储",
+          "desc": "确定 todo 数据模型：todo.json 结构（schemaVersion/items 字段——{id,title,done,createdAt,taskId?}）、存储位置（.pi/workflow/todo.json vs 独立文件）、校验规则（可复用 shared/config 的 loadJsonConfig 模式）、与 workflow.json/state.json 的隔离关系（裸 todo 不触发工作流机制的关键：数据独立）",
+          "humanTasks": [
+            "拍板数据模型与存储位置"
+          ],
+          "aiTasks": [
+            "给出 todo.json 结构草案（字段/校验/加载保存方案）",
+            "说明与 workflow 数据的隔离机制（为什么裸 todo 不触发工作流）"
+          ],
+          "deliverable": "",
+          "doneSignal": "用户拍板数据模型与存储位置，wf_note 已记录",
+          "deps": []
+        },
+        {
+          "id": "0.2",
+          "title": "wf_todo 工具语义",
+          "desc": "确定 wf_todo 工具语义：action 枚举（add/check/uncheck/list/clear？）、id 生成（t1/t2 自增，与 wf_note 一致）、taskId 挂载取舍（第一版做不做）、与 wf_note/wf_workflow 的边界（todo=待办步骤，note=已发生结论，workflow=项目级流程）",
+          "humanTasks": [
+            "拍板 action 集与 taskId 挂载取舍"
+          ],
+          "aiTasks": [
+            "给出 wf_todo schema 与语义草案（含 action 枚举/id 生成）",
+            "梳理三个工具的边界（todo/note/workflow）"
+          ],
+          "deliverable": "",
+          "doneSignal": "用户拍板工具语义，wf_note 已记录",
+          "deps": []
+        },
+        {
+          "id": "0.3",
+          "title": "展示与提示词策略",
+          "desc": "确定展示与提示词策略：setStatus 摘要格式（「清单 2/5」）、/workflow-config 浮窗或非 TUI 文本面板是否加 todo 屏、注入策略（零改动确认——不过度约束，靠工具描述按需发现）、工具描述写法（使用场景 + 与 wf_workflow 边界）",
+          "humanTasks": [
+            "拍板展示范围与注入策略"
+          ],
+          "aiTasks": [
+            "给出 setStatus/浮窗展示方案",
+            "起草工具描述文案（使用场景 + 边界）"
+          ],
+          "deliverable": "",
+          "doneSignal": "用户拍板展示与提示词方案，wf_note 已记录",
+          "deps": []
+        }
+      ]
+    },
+    {
+      "id": "impl",
+      "name": "实现",
+      "goal": "按拍板的技术细节实现 wf_todo，保持极简",
+      "tasks": [
+        {
+          "id": "1.1",
+          "title": "todo 数据层实现",
+          "desc": "按 0.1 拍板实现 todo 数据层：todo.json 加载/保存/校验（复用 shared/config 模式），独立于 WorkflowStore 缓存（或扩展 store.ts 增加 todo 缓存），清空操作（clear）",
+          "humanTasks": [],
+          "aiTasks": [
+            "实现 todo 数据层（结构/校验/加载保存）",
+            "保持与 workflow/state 数据隔离"
+          ],
+          "deliverable": "",
+          "doneSignal": "数据层可用（加载/保存/校验/清空）+ 测试覆盖",
+          "deps": [
+            "0.1"
+          ]
+        },
+        {
+          "id": "1.2",
+          "title": "wf_todo 工具与展示实现",
+          "desc": "按 0.2/0.3 拍板实现：wf_todo 工具注册（action 枚举/参数 schema/id 生成）+ setStatus 摘要推送（「清单 2/5」）+ /workflow-config 浮窗或文本面板 todo 屏（按拍板范围）",
+          "humanTasks": [],
+          "aiTasks": [
+            "实现 wf_todo 工具（按拍板 schema）",
+            "实现展示（setStatus 摘要/浮窗屏）"
+          ],
+          "deliverable": "",
+          "doneSignal": "wf_todo 手工调用可用（add/check/.../list）+ 摘要推送 + 测试覆盖",
+          "deps": [
+            "0.2",
+            "0.3",
+            "1.1"
+          ]
+        },
+        {
+          "id": "1.3",
+          "title": "工具描述与文档",
+          "desc": "工具描述定稿（使用场景：长任务/多步骤分解、中断恢复锚点；边界：wf_todo=手头步骤，wf_workflow=项目级，wf_note=已发生结论）+ README/AGENTS.md 更新（wf_todo 说明、与 workflow 隔离机制）",
+          "humanTasks": [
+            "确认文档内容"
+          ],
+          "aiTasks": [
+            "定稿 wf_todo 工具描述",
+            "更新 README/AGENTS.md"
+          ],
+          "deliverable": "",
+          "doneSignal": "文档与新行为一致，用户确认",
+          "deps": [
+            "1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "verify",
+      "name": "测试与验收",
+      "goal": "测试兜底 + 真实任务验证 wf_todo 价值",
+      "tasks": [
+        {
+          "id": "2.1",
+          "title": "测试场景 P 与回归",
+          "desc": "新增测试场景 P：wf_todo 全流程（add/check/uncheck/list/clear + id 生成）+ 隔离性（仅 wf_todo 时无 workflow.json、不触发注入、无面板）+ 与 wf_workflow 并存互不干扰；全量回归确保 A-P 全绿",
+          "humanTasks": [],
+          "aiTasks": [
+            "实现场景 P（工具流程 + 隔离性 + 并存）",
+            "全量回归"
+          ],
+          "deliverable": "",
+          "doneSignal": "render.test.mjs 全部场景通过",
+          "deps": [
+            "1.1",
+            "1.2"
+          ]
+        },
+        {
+          "id": "2.2",
+          "title": "安装与真实验收",
+          "desc": "install + /reload 部署；用真实长任务（5+ 步）试跑 wf_todo，验证实际价值：是否减少漏步、中断后能 list 恢复；确认「不过度约束」体验（AI 自觉用而非被强迫）",
+          "humanTasks": [
+            "参与真实任务试跑，确认体验"
+          ],
+          "aiTasks": [
+            "跑 build/install",
+            "组织真实长任务试跑并评估"
+          ],
+          "deliverable": "",
+          "doneSignal": "用户确认实际价值（或接受现状）",
+          "deps": [
+            "1.3",
+            "2.1"
+          ]
+        }
+      ]
+    }
+  ]
+}

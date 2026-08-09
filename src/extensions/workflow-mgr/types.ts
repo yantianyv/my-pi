@@ -76,6 +76,8 @@ export interface WorkflowState {
 	milestones: Record<string, MilestoneState>;
 	/** AI 记录（wf_note）；旧 decisions 数据已丢弃（1.7 拍板，不迁移） */
 	notes: NoteRecord[];
+	/** 归档时的收尾状态描述（wf_workflow archive status 参数写入；完成/放弃/其他——归档 ≠ 完成，快照保留任务真实状态） */
+	archiveStatus?: string;
 	log: { ts: string; event: string; taskId?: string; msg?: string }[];
 }
 

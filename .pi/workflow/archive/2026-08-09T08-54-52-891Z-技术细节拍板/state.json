@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-09T08:54:52.890Z",
+  "currentTaskId": null,
+  "tasks": {
+    "0.1": {
+      "status": "done",
+      "doneAt": "2026-08-09T08:37:48.052Z"
+    },
+    "0.2": {
+      "status": "done",
+      "doneAt": "2026-08-09T08:41:51.423Z"
+    },
+    "0.3": {
+      "status": "doing",
+      "startedAt": "2026-08-09T08:41:51.423Z"
+    },
+    "1.1": {
+      "status": "todo"
+    },
+    "1.2": {
+      "status": "todo"
+    },
+    "1.3": {
+      "status": "todo"
+    },
+    "2.1": {
+      "status": "todo"
+    },
+    "2.2": {
+      "status": "todo"
+    }
+  },
+  "milestones": {},
+  "notes": [
+    {
+      "id": "n1",
+      "ts": "2026-08-09T07:15:31.617Z",
+      "content": "wf_todo 设计定稿方向（并入 workflow 插件）：①独立轻工具 wf_todo（add/check/uncheck/list/clear 等），数据独立存 .pi/workflow/todo.json，与 workflow.json 隔离——裸 todo 不触发工作流机制（零注入/无面板）②注入提示词零改动（不过度约束），靠工具描述按需发现，描述写清「wf_todo=手头步骤清单，wf_workflow=项目级流程」边界 ③可选 taskId 挂载（第一版取舍待拍板）④价值验收标准：真实长任务减少漏步/中断丢失才算有用，避免为用而用"
+    },
+    {
+      "id": "n2",
+      "ts": "2026-08-09T08:37:38.151Z",
+      "content": "wf_todo 健壮性设计结论（拍板）：放弃 Claude 哲学（对话+代码一起回滚），拥抱 pi 哲学（对话回滚、磁盘不动）——todo 存磁盘即天然与「现实」对齐、不受回滚影响，无需任何回滚同步/版本绑定机制（Claude 的失败恰因 todo 与对话层藕断丝连）；todo.json 极简 items 数组即可；唯一需要轻引导的是「AI 先做后勾、如实记录」（工具描述一句即可）；代码回滚需求不内置复刻 Claude checkpoint（成本高、误抹手动改动、且与 todo 站磁盘这边冲突），交给 git 手动"
+    },
+    {
+      "id": "n3",
+      "ts": "2026-08-09T08:41:48.745Z",
+      "content": "wf_todo 工具语义拍板：action 集 add/check/uncheck/list/clear（5 个，一个工具）；id 生成 t1/t2 自增（与 wf_note 一致）；taskId 挂载彻底不做——纯裸清单即符合需求，挂载只加复杂度无收益；三工具边界：wf_todo=手头的活（接下来）、wf_note=记住了（已发生）、wf_workflow=整个局（项目级）"
+    }
+  ],
+  "log": [
+    {
+      "ts": "2026-08-09T07:15:31.617Z",
+      "event": "note_add",
+      "taskId": "n1",
+      "msg": "wf_todo 设计定稿方向（并入 workflow 插件）：①独立轻工具 wf_todo（add/check/uncheck/list/clear 等），数据独立存 .pi/workflow/todo.json，与 workflow.json 隔离——裸 todo 不触发工作流机制（零注入/无面板）②注入提示词零改动（不过度约束），靠工具描述按需发现，描述写清「wf_todo=手头步骤清单，wf_workflow=项目级流程」边界 ③可选 taskId 挂载（第一版取舍待拍板）④价值验收标准：真实长任务减少漏步/中断丢失才算有用，避免为用而用"
+    },
+    {
+      "ts": "2026-08-09T08:37:38.151Z",
+      "event": "note_add",
+      "taskId": "n2",
+      "msg": "wf_todo 健壮性设计结论（拍板）：放弃 Claude 哲学（对话+代码一起回滚），拥抱 pi 哲学（对话回滚、磁盘不动）——todo 存磁盘即天然与「现实」对齐、不受回滚影响，无需任何回滚同步/版本绑定机制（Claude 的失败恰因 todo 与对话层藕断丝连）；todo.json 极简 items 数组即可；唯一需要轻引导的是「AI 先做后勾、如实记录」（工具描述一句即可）；代码回滚需求不内置复刻 Claude checkpoint（成本高、误抹手动改动、且与 todo 站磁盘这边冲突），交给 git 手动"
+    },
+    {
+      "ts": "2026-08-09T08:37:48.052Z",
+      "event": "task_done",
+      "taskId": "0.1",
+      "msg": "数据模型与存储"
+    },
+    {
+      "ts": "2026-08-09T08:37:48.052Z",
+      "event": "task_start",
+      "taskId": "0.2",
+      "msg": "wf_todo 工具语义"
+    },
+    {
+      "ts": "2026-08-09T08:41:48.745Z",
+      "event": "note_add",
+      "taskId": "n3",
+      "msg": "wf_todo 工具语义拍板：action 集 add/check/uncheck/list/clear（5 个，一个工具）；id 生成 t1/t2 自增（与 wf_note 一致）；taskId 挂载彻底不做——纯裸清单即符合需求，挂载只加复杂度无收益；三工具边界：wf_todo=手头的活（接下来）、wf_note=记住了（已发生）、wf_workflow=整个局（项目级）"
+    },
+    {
+      "ts": "2026-08-09T08:41:51.423Z",
+      "event": "task_done",
+      "taskId": "0.2",
+      "msg": "wf_todo 工具语义"
+    },
+    {
+      "ts": "2026-08-09T08:41:51.423Z",
+      "event": "task_start",
+      "taskId": "0.3",
+      "msg": "展示与提示词策略"
+    }
+  ],
+  "archiveStatus": "放弃：wf_todo 方案经成本评估 ROI 不足（找回路径悖论 + token 净成本 + 覆盖场景被对话记忆夹击），放弃实现"
+}

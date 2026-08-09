@@ -463,7 +463,8 @@ async function scenarioI() {
 	const base = join(dir, ".pi", "workflow", "archive");
 	check("归档目录留档（至少 workflow.json）", readdirSync(base).some((d) => readdirSync(join(base, d)).includes("workflow.json")));
 	const archState = JSON.parse(readFile(join(base, readdirSync(base)[0], "state.json")));
-	check("归档快照全部任务 done（archive=完成整个清单）", Object.values(archState.tasks).every((t) => t.status === "done"));
+	check("归档快照保留任务真实状态（不强制 done）", !Object.values(archState.tasks).every((t) => t.status === "done"));
+	check("归档快照记录 archiveStatus（未描述时为空）", "archiveStatus" in archState);
 	// 缓存清空 + 文件移走 → hasWorkflowFile false → 不再推 widget（退出用户视野）
 	const caps2 = {};
 	const ctx2 = makeCtx(dir, caps2);
@@ -550,13 +551,13 @@ async function scenarioJ() {
 	rmSync(dir, { recursive: true, force: true });
 }
 
-/* ============================== 场景 K：archive 自动标记全部完成 ============================== */
+/* ============================== 场景 K：archive 记录收尾状态（放弃场景） ============================== */
 async function scenarioK() {
-	console.log("\n场景 K：archive 归档 = 完成整个清单（自动全部 done）");
+	console.log("\n场景 K：archive 归档记录收尾状态（放弃场景，保留任务真实状态）");
 	const mod = await importBundle();
 	const pi = makePi();
 	mod.default(pi);
-	// 未完成状态：0.1 doing、0.2 todo……直接归档
+	// 未完成状态：0.1 doing、0.2 todo……直接归档（放弃场景）
 	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE, {
 		schemaVersion: 1,
 		updatedAt: new Date().toISOString(),
@@ -574,10 +575,12 @@ async function scenarioK() {
 	const ctx = makeCtx(dir);
 	await fireEvent(pi, ctx, "session_start");
 	const t = pi.tools.find((x) => x.name === "wf_workflow");
-	await t.execute("1", { action: "archive" }, undefined, undefined, ctx);
+	const r = await t.execute("1", { action: "archive", status: "放弃：方案 ROI 不足" }, undefined, undefined, ctx);
+	check("归档返回含收尾状态描述", r.content[0].text.includes("放弃：方案 ROI 不足"));
 	const base = join(dir, ".pi", "workflow", "archive");
 	const archState = JSON.parse(readFile(join(base, readdirSync(base)[0], "state.json")));
-	check("归档快照全部任务 done", Object.values(archState.tasks).every((x) => x.status === "done"));
+	check("放弃场景：任务状态原样保留（doing/todo 不被强制 done）", archState.tasks["0.1"]?.status === "doing" && archState.tasks["0.2"]?.status === "todo");
+	check("归档快照记录 archiveStatus", archState.archiveStatus === "放弃：方案 ROI 不足");
 	check("归档快照 currentTaskId null", archState.currentTaskId === null);
 	rmSync(dir, { recursive: true, force: true });
 }
