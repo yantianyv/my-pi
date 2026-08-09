@@ -36,6 +36,7 @@ import * as https from "node:https";
 import * as net from "node:net";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
+import { execFile } from "node:child_process";
 
 /** domino 的 createWindow（any 桥接，见上方 @ts-ignore 说明） */
 const createWindow = _createWindow as (html?: string) => any;
@@ -570,7 +571,79 @@ function htmlToMarkdown(html: string, baseUrl: string): { markdown: string; titl
 	return { markdown, title: stripTags(doc.title ?? "") };
 }
 
-/** 抓取页面：先直连，被拒/网络不可达时换 UA 再试，仍失败且配置了代理则经代理重试 */
+/** 系统 curl 是否可用（Windows 10+ / macOS / 多数 Linux 自带；探测结果缓存） */
+let curlAvailable: boolean | undefined;
+function hasCurl(): Promise<boolean> {
+	if (curlAvailable !== undefined) return Promise.resolve(curlAvailable);
+	return new Promise((resolve) => {
+		execFile("curl", ["--version"], { timeout: 5000, windowsHide: true }, (err) => {
+			curlAvailable = !err;
+			resolve(curlAvailable);
+		});
+	});
+}
+
+/**
+ * 用系统 curl 抓取：-f 非 2xx 报错、-L 跟随重定向（≤10 跳）、超时；有代理则走代理；
+ * 输出原始字节交 charset 检测解码。curl 的 TLS 指纹（Windows schannel / 可响应 renegotiation）
+ * 与 Node OpenSSL 不同，可绕过 GitHub 等站点对 Node TLS 指纹的 301 挑战循环。
+ */
+async function curlFetch(url: string, timeoutMs: number, outerSignal?: AbortSignal): Promise<FRes> {
+	const args = [
+		"-sS", "-f", "-L", "--max-redirs", "10",
+		"--max-time", String(Math.max(5, Math.ceil(timeoutMs / 1000))),
+		"--connect-timeout", "10",
+		"-A", UA_POOL[0],
+		"-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+	];
+	const proxy = getProxyUrl();
+	if (proxy) args.push("-x", proxy);
+	args.push("--", url); // -- 防止 URL 以 - 开头被当作选项
+	const buf = await new Promise<Buffer>((resolve, reject) => {
+		execFile(
+			"curl",
+			args,
+			{
+				timeout: timeoutMs + 3000,
+				maxBuffer: FETCH_MAX_BYTES + 1024 * 1024,
+				windowsHide: true,
+			encoding: "buffer",
+				signal: outerSignal,
+			},
+			(err, stdout, stderr) => {
+				if (err) {
+					// curl -f：HTTP 错误退出码 22，详情在 stderr（"The requested URL returned error: 4xx/5xx"）
+					const errText = stderr instanceof Buffer ? stderr.toString("utf8") : String(stderr ?? "");
+					const m = /returned error: (\d{3})/.exec(errText);
+					if (m) {
+						reject(new Error(`HTTP ${m[1]}`));
+						return;
+					}
+					reject(new Error(errText.trim() || err.message));
+					return;
+				}
+				resolve(stdout as Buffer);
+			},
+		);
+	});
+	return {
+		ok: true,
+		status: 200,
+		url,
+		headers: { get: () => null }, // 无 content-type 头，charset 由调用方从 HTML <meta> 探测
+		arrayBuffer: async () => buf,
+	};
+}
+
+/** curl 降级入口：Node 全败后的最后尝试；成功返回响应，失败抛出带上下文的错误 */
+async function curlFallback(url: string, contextMsg: string, outerSignal?: AbortSignal): Promise<FRes> {
+	if (!(await hasCurl())) throw new Error(`${contextMsg}；系统未检测到 curl，无法降级`);
+	const curlRes = await curlFetch(url, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
+	if (!(curlRes instanceof Error)) return curlRes;
+	throw new Error(`${contextMsg}；curl 降级也失败：${curlRes.message}`);
+}
+
+/** 抓取页面：先直连，被拒/网络不可达时换 UA 再试，仍失败且配置了代理则经代理重试；Node 全败后降级系统 curl */
 async function fetchPageWithFallback(url: string, outerSignal?: AbortSignal): Promise<FRes> {
 	const direct0 = await directFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
 	if (!(direct0 instanceof Error)) return direct0;
@@ -585,19 +658,21 @@ async function fetchPageWithFallback(url: string, outerSignal?: AbortSignal): Pr
 			if (proxyUrl) {
 				const proxy0 = await proxyFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
 				if (!(proxy0 instanceof Error)) return proxy0;
-				throw new Error(`直接访问失败且换 UA/经代理 ${proxyUrl} 重试仍失败：${proxy0.message}（原始错误：${direct0.message}）`);
+				return await curlFallback(url, `直接访问失败且换 UA/经代理 ${proxyUrl} 重试仍失败：${proxy0.message}（原始错误：${direct0.message}）`, outerSignal);
 			}
+			return await curlFallback(url, `直接访问失败且换 UA 重试仍失败：${direct1.message}`, outerSignal);
 		}
 		throw new Error(httpStatusHint(status1, true));
 	}
-	// 网络级被墙/不可达：直接走代理
+	// 网络级被墙/不可达：优先走代理，无代理或无代理结果则降级 curl
 	if (isWalledFailure(direct0, status0)) {
 		const proxyUrl = getProxyUrl();
 		if (proxyUrl) {
 			const proxy0 = await proxyFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
 			if (!(proxy0 instanceof Error)) return proxy0;
-			throw new Error(`直接访问失败，经代理 ${proxyUrl} 重试仍失败：${proxy0.message}（原始错误：${direct0.message}）`);
+			return await curlFallback(url, `直接访问失败，经代理 ${proxyUrl} 重试仍失败：${proxy0.message}（原始错误：${direct0.message}）`, outerSignal);
 		}
+		return await curlFallback(url, `直接访问失败：${direct0.message}（未配置代理）`, outerSignal);
 	}
 	throw direct0;
 }
