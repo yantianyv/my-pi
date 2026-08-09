@@ -41,7 +41,8 @@ export function renderBrief(state: WorkflowState, derived: Derived): string {
 		lines.push(
 			`- 当前阶段：${stage?.name ?? "?"}｜当前任务：${cur.id} ${cur.title}（${state.tasks[cur.id]?.status === "doing" ? "进行中" : "待开始"}）`,
 		);
-		lines.push(`- 用户负责：${cur.humanTasks.join("；") || "（暂无）"}`);
+		// agent 模式（纯 agent 自动驾驶）不显示人类分工（0.3 拍板）
+		if (derived.mode !== "agent") lines.push(`- 用户负责：${cur.humanTasks.join("；") || "（暂无）"}`);
 		lines.push(`- 你（AI）负责：${cur.aiTasks.join("；") || "（暂无）"}`);
 		lines.push(`- 交付物：${cur.deliverable || "（未定义）"}`);
 		lines.push(`- 完成信号：${cur.doneSignal || "（未定义）"}`);
@@ -61,13 +62,13 @@ export function renderBrief(state: WorkflowState, derived: Derived): string {
 		.join(" ");
 	if (milestones) lines.push(`- 里程碑：${milestones}`);
 
-	if (state.decisions.length) {
-		const last = state.decisions[state.decisions.length - 1];
-		lines.push(`- 最近决策：${last.topic} → ${last.choice ?? "待拍板"}`);
+	if (state.notes.length) {
+		const recent = state.notes.slice(-3).map((n) => truncate(n.content, 30));
+		lines.push(`- 最近记录：${recent.join("｜")}`);
 	}
 
 	lines.push(
-		"- 流程指令：你是流程指挥者，向用户下达当前任务的具体指令（📋 任务/🎯 目标/📌 做法/✅ 回报/🔍 验证）；任务完成后先按完成信号验证再调用 wf_done 推进；用户拍板的决策用 wf_decision 记录；卡住用 wf_block。",
+		"- 流程指令：你是流程指挥者，向用户下达当前任务的具体指令（📋 任务/🎯 目标/📌 做法/✅ 回报/🔍 验证）；任务完成后先按完成信号验证再调用 wf_switch 推进；交流中的重要结论/约束/偏好用 wf_note 记录（对用户透明）；卡住用 wf_block。",
 	);
 	return lines.join("\n");
 }
@@ -89,7 +90,7 @@ export function lightState(state: WorkflowState) {
 		currentTaskId: state.currentTaskId,
 		tasks,
 		milestones: state.milestones,
-		decisions: state.decisions.slice(-10),
+		notes: state.notes.slice(-10),
 		log: state.log.slice(-10),
 	};
 }

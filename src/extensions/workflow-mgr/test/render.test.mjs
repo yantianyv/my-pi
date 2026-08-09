@@ -172,42 +172,32 @@ async function scenarioA() {
 		check("菜单行宽 ≤ 100", over.length === 0);
 	}
 	check("未注册别名 /wfmg（只需 /workflow-config）", !pi.commands.wfmg);
-
-	// toggle 开关
+	// 子命令已删除（0.4 拍板：只留无参）——任意子命令参数一律走无参浮窗逻辑，不产生状态变更
 	const caps3 = {};
 	const ctx3 = makeCtx(dir, caps3);
-	await pi.commands["workflow-config"].handler("toggle", ctx3);
-	check("/workflow-config toggle 后移除 widget", caps3.widget?.factory === undefined);
-	const cfg = JSON.parse(readFile(join(dir, ".pi", "workflow", "config.json")));
-	check("config.json 持久化 showPanel=false", cfg.showPanel === false);
-	// 新会话（新实例）重开：应读取配置、不再推常驻 widget
-	const pi2 = makePi();
-	mod.default(pi2);
-	const caps4 = {};
-	const ctx4 = makeCtx(dir, caps4);
-	await fireEvent(pi2, ctx4, "session_start");
-	check("重启后保持面板关闭（不推 widget）", caps4.widget === undefined || caps4.widget.factory === undefined);
+	await pi.commands["workflow-config"].handler("done 0.1", ctx3);
+	check("子命令已删除：done 参数走无参浮窗（不弹子命令逻辑）", caps3.custom !== undefined);
+	const stPath = join(dir, ".pi", "workflow", "state.json");
+	const stAfter = existsSync(stPath) ? JSON.parse(readFile(stPath)) : null;
+	check("子命令不产生状态变更（0.1 仍非 done）", !stAfter || stAfter.tasks["0.1"]?.status !== "done");
 
-	// 工具流程：start → done 推进
+	// 工具流程：wf_switch 一次调用完成+推进（替代 start+done 两步）
 	const s = pi.tools.find((t) => t.name === "wf_status");
-	const start = pi.tools.find((t) => t.name === "wf_start");
-	const done = pi.tools.find((t) => t.name === "wf_done");
-	check("注册了 wf_status/wf_start/wf_done", !!s && !!start && !!done);
+	const sw = pi.tools.find((t) => t.name === "wf_switch");
+	check("注册了 wf_status/wf_switch，wf_start/wf_done 已删除", !!s && !!sw && !pi.tools.find((t) => t.name === "wf_start") && !pi.tools.find((t) => t.name === "wf_done"));
 
-	const r1 = await start.execute("1", {}, undefined, undefined, ctx);
-	check("wf_start 开始 0.1", r1.content[0].text.includes("0.1"));
-	const r2 = await done.execute("2", { taskId: "0.1" }, undefined, undefined, ctx);
-	check("wf_done 0.1 后推进到 0.2", r2.content[0].text.includes("0.2") && r2.content[0].text.includes("下一步"));
-	const r3 = await done.execute("3", { taskId: "0.2" }, undefined, undefined, ctx);
-	check("wf_done 0.2 后推进到 1.1（依赖 0.2）", r3.content[0].text.includes("1.1"));
-	// 重复 done 当前任务（1.1）→ 推进到 1.2
-	const r4 = await done.execute("4", {}, undefined, undefined, ctx);
-	check("无参 wf_done 默认当前任务并推进 1.2", r4.content[0].text.includes("1.2"));
+	const r1 = await sw.execute("1", {}, undefined, undefined, ctx);
+	check("wf_switch 无参：完成 0.1 并开始 0.2", r1.content[0].text.includes("已完成任务 0.1") && r1.content[0].text.includes("0.2"));
+	const r2 = await sw.execute("2", {}, undefined, undefined, ctx);
+	check("wf_switch 无参：完成 0.2 并开始 1.1（依赖 0.2）", r2.content[0].text.includes("已完成任务 0.2") && r2.content[0].text.includes("1.1"));
+	const r3 = await sw.execute("3", {}, undefined, undefined, ctx);
+	check("wf_switch 无参：完成 1.1 并开始 1.2", r3.content[0].text.includes("已完成任务 1.1") && r3.content[0].text.includes("1.2"));
+	const r4 = await sw.execute("4", {}, undefined, undefined, ctx);
+	check("wf_switch 无参：全部完成后提示收尾", r4.content[0].text.includes("全部任务完成"));
 	const stateFile = join(dir, ".pi", "workflow", "state.json");
 	check("state.json 已落盘", existsSync(stateFile));
 	const saved = JSON.parse(readFile(stateFile));
-	check("state.json currentTaskId=1.2", saved.currentTaskId === "1.2");
-	check("state.json 0.1/0.2 为 done", saved.tasks["0.1"]?.status === "done" && saved.tasks["0.2"]?.status === "done");
+	check("state.json 全部任务 done、currentTaskId null", saved.currentTaskId === null && Object.values(saved.tasks).every((t) => t.status === "done"));
 
 	// wf_workflow add/edit/remove
 	const wf = pi.tools.find((t) => t.name === "wf_workflow");
@@ -216,7 +206,8 @@ async function scenarioA() {
 	const add2 = await wf.execute("6", { action: "add", stageId: "stage2", title: "备份数据" }, undefined, undefined, ctx);
 	check("add 自动生成 2.2", add2.content[0].text.includes("2.2"));
 	const list = await wf.execute("7", { action: "list" }, undefined, undefined, ctx);
-	check("list 包含 6 个任务", list.content[0].text.includes("6 个任务"));
+	const m = /共 (\d+) 个阶段、(\d+) 个任务/.exec(list.content[0].text);
+	check("list 显示 3 阶段 6 任务（不依赖中文数字硬编码）", !!m && m[1] === "3" && m[2] === "6");
 	const rm = await wf.execute("8", { action: "remove", taskId: "2.2" }, undefined, undefined, ctx);
 	check("remove 删除 2.2", rm.content[0].text.includes("已删除任务 2.2"));
 	const rmStage = await wf.execute("9", { action: "remove", taskId: "2.1" }, undefined, undefined, ctx);
@@ -239,9 +230,9 @@ async function scenarioB() {
 	const s = pi.tools.find((t) => t.name === "wf_status");
 	const r = await s.execute("1", {}, undefined, undefined, ctx);
 	check("wf_status 提示工作流为空", r.content[0].text.includes("工作流为空"));
-	const start = pi.tools.find((t) => t.name === "wf_start");
-	const rs = await start.execute("2", {}, undefined, undefined, ctx);
-	check("wf_start 报无可用任务", rs.content[0].text.includes("没有可开始"));
+	const sw = pi.tools.find((t) => t.name === "wf_switch");
+	const rs = await sw.execute("2", {}, undefined, undefined, ctx);
+	check("wf_switch 空工作流报错", rs.content[0].text.includes("工作流为空"));
 	rmSync(dir, { recursive: true, force: true });
 }
 
@@ -262,7 +253,7 @@ async function scenarioC() {
 	writeFileSync(join(dir, ".pi", "workflow", "workflow.json"), JSON.stringify(wf, null, 2), "utf8");
 	writeFileSync(
 		join(dir, ".pi", "workflow", "state.json"),
-		JSON.stringify({ schemaVersion: 1, updatedAt: new Date().toISOString(), currentTaskId: "1.1", tasks: { "1.1": { status: "done", doneAt: new Date().toISOString() } }, milestones: {}, decisions: [], log: [] }, null, 2),
+		JSON.stringify({ schemaVersion: 1, updatedAt: new Date().toISOString(), currentTaskId: "1.1", tasks: { "1.1": { status: "done", doneAt: new Date().toISOString() } }, milestones: {}, notes: [], log: [] }, null, 2),
 		"utf8",
 	);
 	const ctx = makeCtx(dir);
@@ -311,7 +302,7 @@ async function scenarioE() {
 					"1.2": { status: "todo" },
 				},
 				milestones: {},
-				decisions: [],
+				notes: [],
 				log: [],
 			},
 			null,
@@ -406,7 +397,7 @@ async function scenarioH() {
 		currentTaskId: "0.1",
 		tasks: { "0.1": { status: "todo" }, "0.2": { status: "todo" }, "1.1": { status: "todo" }, "1.2": { status: "todo" } },
 		milestones: { 面板验收: { done: true }, 布局定稿: { done: false } },
-		decisions: [],
+		notes: [],
 		log: [],
 	});
 	const caps = {};
@@ -471,11 +462,323 @@ async function scenarioI() {
 	check("归档后当前区无 workflow.json", !existsSync(join(dir, ".pi", "workflow", "workflow.json")));
 	const base = join(dir, ".pi", "workflow", "archive");
 	check("归档目录留档（至少 workflow.json）", readdirSync(base).some((d) => readdirSync(join(base, d)).includes("workflow.json")));
+	const archState = JSON.parse(readFile(join(base, readdirSync(base)[0], "state.json")));
+	check("归档快照全部任务 done（archive=完成整个清单）", Object.values(archState.tasks).every((t) => t.status === "done"));
 	// 缓存清空 + 文件移走 → hasWorkflowFile false → 不再推 widget（退出用户视野）
 	const caps2 = {};
 	const ctx2 = makeCtx(dir, caps2);
 	await fireEvent(pi, ctx2, "session_start");
 	check("归档后不再推常驻 widget（退出视野）", !caps2.widget?.factory);
+	rmSync(dir, { recursive: true, force: true });
+}
+
+/* ============================== 场景 J：wf_switch 语义 ============================== */
+async function scenarioJ() {
+	console.log("\n场景 J：wf_switch 语义（显式切换/搁置/blocked 解除/报错）");
+	const mod = await importBundle();
+	const pi = makePi();
+	mod.default(pi);
+	// 自定义工作流：1.2 依赖 0.2（不依赖 1.1），使搁置/切换语义自洽
+	const wf = {
+		schemaVersion: 1,
+		stages: [
+			{
+				id: "s0",
+				name: "阶段一",
+				goal: "",
+				tasks: [
+					{ id: "0.1", title: "任务甲", desc: "", humanTasks: [], aiTasks: [], deliverable: "", doneSignal: "", deps: [] },
+					{ id: "0.2", title: "任务乙", desc: "", humanTasks: [], aiTasks: [], deliverable: "", doneSignal: "", deps: ["0.1"] },
+				],
+			},
+			{
+				id: "s1",
+				name: "阶段二",
+				goal: "",
+				tasks: [
+					{ id: "1.1", title: "任务丙", desc: "", humanTasks: [], aiTasks: [], deliverable: "", doneSignal: "", deps: ["0.2"] },
+					{ id: "1.2", title: "任务丁", desc: "", humanTasks: [], aiTasks: [], deliverable: "", doneSignal: "", deps: ["0.2"] },
+				],
+			},
+		],
+	};
+	// 状态：0.1 done、0.2 doing（当前）、1.1 blocked、1.2 todo
+	const dir = makeFixture(wf, {
+		schemaVersion: 1,
+		updatedAt: new Date().toISOString(),
+		currentTaskId: "0.2",
+		tasks: {
+			"0.1": { status: "done", doneAt: new Date().toISOString() },
+			"0.2": { status: "doing", startedAt: new Date().toISOString() },
+			"1.1": { status: "blocked", blockReason: "等数据" },
+			"1.2": { status: "todo" },
+		},
+		milestones: {},
+		notes: [],
+		log: [],
+	});
+	const ctx = makeCtx(dir);
+	const sw = pi.tools.find((t) => t.name === "wf_switch");
+
+	// 1. 显式切换到一个 blocked 任务：完成当前 0.2 + 解除 1.1 阻塞并开始（1.1 依赖 0.2，当前任务即将完成不算阻塞）
+	const r1 = await sw.execute("1", { taskId: "1.1" }, undefined, undefined, ctx);
+	check("switch 到 blocked 任务：完成 0.2 + 解除阻塞开始 1.1", r1.content[0].text.includes("已完成任务 0.2") && r1.content[0].text.includes("1.1"));
+	let saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	check("0.2 完成、1.1 doing 且 blockReason 清除", saved.tasks["0.2"]?.status === "done" && saved.tasks["1.1"]?.status === "doing" && !saved.tasks["1.1"].blockReason);
+
+	// 2. 搁置转移：complete=false 切到 1.2（依赖 0.2 已 done）→ 1.1 回 todo
+	const r2 = await sw.execute("2", { taskId: "1.2", complete: false }, undefined, undefined, ctx);
+	check("complete=false 搁置 1.1 并切到 1.2", r2.content[0].text.includes("搁置任务 1.1") && r2.content[0].text.includes("1.2"));
+	saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	check("搁置后 1.1 回 todo、currentTaskId=1.2", saved.tasks["1.1"]?.status === "todo" && saved.currentTaskId === "1.2");
+
+	// 3. 切回 1.1（依赖 0.2 done）：完成 1.2 + 开始 1.1
+	const r3 = await sw.execute("3", { taskId: "1.1" }, undefined, undefined, ctx);
+	check("切回 1.1：完成 1.2 + 开始 1.1", r3.content[0].text.includes("已完成任务 1.2") && r3.content[0].text.includes("1.1"));
+
+	// 4. 已是当前任务 / 已完成任务的报错
+	const r4 = await sw.execute("4", { taskId: "1.1" }, undefined, undefined, ctx);
+	check("switch 当前任务报错", r4.details?.kind === "error" && r4.content[0].text.includes("已是当前任务"));
+	const r5 = await sw.execute("5", { taskId: "0.1" }, undefined, undefined, ctx);
+	check("switch 已完成任务报错", r5.details?.kind === "error" && r5.content[0].text.includes("已完成"));
+
+	// 5. 无参 switch 推进到无下一个 → 全部完成收尾
+	const r6 = await sw.execute("6", {}, undefined, undefined, ctx);
+	check("无参 switch 全部完成后提示收尾", r6.content[0].text.includes("全部任务完成"));
+	saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	check("全部任务 done、currentTaskId null", saved.currentTaskId === null && Object.values(saved.tasks).every((t) => t.status === "done"));
+	rmSync(dir, { recursive: true, force: true });
+}
+
+/* ============================== 场景 K：archive 自动标记全部完成 ============================== */
+async function scenarioK() {
+	console.log("\n场景 K：archive 归档 = 完成整个清单（自动全部 done）");
+	const mod = await importBundle();
+	const pi = makePi();
+	mod.default(pi);
+	// 未完成状态：0.1 doing、0.2 todo……直接归档
+	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE, {
+		schemaVersion: 1,
+		updatedAt: new Date().toISOString(),
+		currentTaskId: "0.1",
+		tasks: {
+			"0.1": { status: "doing", startedAt: new Date().toISOString() },
+			"0.2": { status: "todo" },
+			"1.1": { status: "todo" },
+			"1.2": { status: "todo" },
+		},
+		milestones: {},
+		notes: [],
+		log: [],
+	});
+	const ctx = makeCtx(dir);
+	await fireEvent(pi, ctx, "session_start");
+	const t = pi.tools.find((x) => x.name === "wf_workflow");
+	await t.execute("1", { action: "archive" }, undefined, undefined, ctx);
+	const base = join(dir, ".pi", "workflow", "archive");
+	const archState = JSON.parse(readFile(join(base, readdirSync(base)[0], "state.json")));
+	check("归档快照全部任务 done", Object.values(archState.tasks).every((x) => x.status === "done"));
+	check("归档快照 currentTaskId null", archState.currentTaskId === null);
+	rmSync(dir, { recursive: true, force: true });
+}
+
+/* ============================== 场景 L：里程碑删除/改名 + 分工多项渲染 ============================== */
+async function scenarioL() {
+	console.log("\n场景 L：wf_milestone 删除/改名 + 分工多项渲染");
+	const mod = await importBundle();
+	const pi = makePi();
+	mod.default(pi);
+	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE, {
+		schemaVersion: 1,
+		updatedAt: new Date().toISOString(),
+		currentTaskId: "0.1",
+		tasks: {
+			"0.1": { status: "doing", startedAt: new Date().toISOString() },
+			"0.2": { status: "todo" },
+			"1.1": { status: "todo" },
+			"1.2": { status: "todo" },
+		},
+		milestones: { 开题: { done: true }, 中期: { date: "2026-05-01" } },
+		notes: [],
+		log: [],
+	});
+	const ctx = makeCtx(dir);
+	await fireEvent(pi, ctx, "session_start");
+	const ms = pi.tools.find((t) => t.name === "wf_milestone");
+
+	// 增（缺省行为）→ 改 → 改名 → 删除
+	await ms.execute("1", { name: "答辩" }, undefined, undefined, ctx);
+	await ms.execute("2", { name: "中期", done: true }, undefined, undefined, ctx);
+	const r3 = await ms.execute("3", { name: "中期", newName: "中期答辩" }, undefined, undefined, ctx);
+	check("里程碑改名（保留日期/完成态）", r3.content[0].text.includes("改名为") && r3.content[0].text.includes("中期答辩"));
+	const r4 = await ms.execute("4", { name: "开题", remove: true }, undefined, undefined, ctx);
+	check("里程碑删除", r4.content[0].text.includes("已删除"));
+	const r5 = await ms.execute("5", { name: "不存在的里程碑", remove: true }, undefined, undefined, ctx);
+	check("删除不存在里程碑报错", r5.details?.kind === "error");
+	let saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	check("删除/改名后状态正确", !saved.milestones["开题"] && !saved.milestones["中期"] && saved.milestones["中期答辩"]?.done === true && saved.milestones["答辩"]);
+
+	// 分工多项渲染：构造多项分工的任务，widget 分工行应「、」连接
+	const wfMulti = {
+		schemaVersion: 1,
+		stages: [
+			{
+				id: "s0",
+				name: "阶段一",
+				goal: "",
+				tasks: [
+					{ id: "0.1", title: "任务甲", desc: "", humanTasks: ["做甲", "做乙", "做丙"], aiTasks: ["AI 一", "AI 二"], deliverable: "d", doneSignal: "s", deps: [] },
+				],
+			},
+		],
+	};
+	const dir2 = makeFixture(wfMulti, {
+		schemaVersion: 1,
+		updatedAt: new Date().toISOString(),
+		currentTaskId: "0.1",
+		tasks: { "0.1": { status: "doing", startedAt: new Date().toISOString() } },
+		milestones: {},
+		notes: [],
+		log: [],
+	});
+	const caps = {};
+	const ctx2 = makeCtx(dir2, caps);
+	const lines = assertWidget(pi, ctx2, "分工多项 widget");
+	if (lines) {
+		check("分工行多项「、」连接", lines.some((l) => l.includes("你:") && l.includes("、")) && lines.some((l) => l.includes("AI:") && l.includes("、")));
+	}
+	rmSync(dir, { recursive: true, force: true });
+	rmSync(dir2, { recursive: true, force: true });
+}
+
+/* ============================== 场景 M：纯 agent 模式 ============================== */
+async function scenarioM() {
+	console.log("\n场景 M：纯 agent 模式（mode=agent：无分工行/无用户负责/自动驾驶语义）");
+	const mod = await importBundle();
+	const pi = makePi();
+	mod.default(pi);
+	// 工作流级 mode=agent，任务不填 humanTasks
+	const wf = {
+		schemaVersion: 1,
+		mode: "agent",
+		stages: [
+			{
+				id: "s0",
+				name: "研究",
+				goal: "",
+				tasks: [
+					{ id: "0.1", title: "调研资料", desc: "搜集资料", humanTasks: [], aiTasks: ["搜索并整理"], deliverable: "资料清单", doneSignal: "清单产出", deps: [] },
+					{ id: "0.2", title: "写报告", desc: "汇总成报告", humanTasks: [], aiTasks: ["起草报告"], deliverable: "报告.md", doneSignal: "报告完成", deps: ["0.1"] },
+				],
+			},
+		],
+	};
+	const dir = makeFixture(wf, {
+		schemaVersion: 1,
+		updatedAt: new Date().toISOString(),
+		currentTaskId: "0.1",
+		tasks: { "0.1": { status: "doing", startedAt: new Date().toISOString() }, "0.2": { status: "todo" } },
+		milestones: {},
+		notes: [],
+		log: [],
+	});
+	const ctx = makeCtx(dir);
+	await fireEvent(pi, ctx, "session_start");
+
+	// wf_status 简报无「用户负责」行
+	const st = pi.tools.find((t) => t.name === "wf_status");
+	const r = await st.execute("1", {}, undefined, undefined, ctx);
+	check("wf_status 无「用户负责」行", !r.content[0].text.includes("用户负责") && r.content[0].text.includes("AI）负责"));
+
+	// widget 渲染无「你:」行、有「AI:」行
+	const caps = {};
+	const ctx2 = makeCtx(dir, caps);
+	await fireEvent(pi, ctx2, "session_start");
+	const widget = caps.widget;
+	if (widget?.factory) {
+		const lines = widget.factory(null, themeMock).render(80);
+		check("widget 无「你:」行、有「AI:」行", !lines.some((l) => l.includes("你:")) && lines.some((l) => l.includes("AI:")));
+	} else {
+		check("widget 已推送", false);
+	}
+
+	// 自动驾驶语义：无参 wf_switch 连续推进直到全部完成
+	const sw = pi.tools.find((t) => t.name === "wf_switch");
+	await sw.execute("2", {}, undefined, undefined, ctx);
+	const r3 = await sw.execute("3", {}, undefined, undefined, ctx);
+	check("agent 模式 switch 推进到全部完成", r3.content[0].text.includes("全部任务完成"));
+	const saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	check("全部 done + currentTaskId null", saved.currentTaskId === null && Object.values(saved.tasks).every((t) => t.status === "done"));
+	rmSync(dir, { recursive: true, force: true });
+}
+
+/* ============================== 场景 N：注入条件化三态 ============================== */
+async function scenarioN() {
+	console.log("\n场景 N：注入条件化（无工作流零注入 / human-ai 指挥者 / agent 自动驾驶）");
+	const mod = await importBundle();
+	const pi = makePi();
+	mod.default(pi);
+	const fireInject = async (dir) => {
+		const ctx = makeCtx(dir);
+		await fireEvent(pi, ctx, "session_start");
+		const cb = pi.events["before_agent_start"];
+		return await cb({ systemPrompt: "BASE" }, ctx);
+	};
+
+	// 1. 无工作流（无 workflow.json）→ 零注入
+	const dir1 = mkdtempSync(join(tmpdir(), "wfmg-test-"));
+	const r1 = await fireInject(dir1);
+	check("无工作流零注入", r1.systemPrompt === undefined || !r1.systemPrompt.includes("工作流"));
+
+	// 2. human-ai 工作流 → 完整指挥者提示词
+	const dir2 = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
+	const r2 = await fireInject(dir2);
+	check("human-ai 注入完整指挥者提示词", r2.systemPrompt.includes("工作流指挥者") && r2.systemPrompt.includes("wf_switch"));
+
+	// 3. agent 工作流 → 轻量自动驾驶提示词（无「指挥者」）
+	const wfAgent = { schemaVersion: 1, mode: "agent", stages: DEFAULT_WORKFLOW_FIXTURE.stages };
+	const dir3 = makeFixture(wfAgent);
+	const r3 = await fireInject(dir3);
+	check("agent 注入自动驾驶提示词（无指挥者）", r3.systemPrompt.includes("自动驾驶执行者") && !r3.systemPrompt.includes("工作流指挥者"));
+
+	rmSync(dir1, { recursive: true, force: true });
+	rmSync(dir2, { recursive: true, force: true });
+	rmSync(dir3, { recursive: true, force: true });
+}
+
+/* ============================== 场景 O：wf_note 增删读改 ============================== */
+async function scenarioO() {
+	console.log("\n场景 O：wf_note 增删读改（AI 记录，对用户透明）");
+	const mod = await importBundle();
+	const pi = makePi();
+	mod.default(pi);
+	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
+	const ctx = makeCtx(dir);
+	await fireEvent(pi, ctx, "session_start");
+	const note = pi.tools.find((t) => t.name === "wf_note");
+	check("注册了 wf_note（wf_decision 已删除）", !!note && !pi.tools.find((t) => t.name === "wf_decision"));
+
+	// add：自动 id n1/n2
+	const r1 = await note.execute("1", { action: "add", content: "用户选择 X 方案" }, undefined, undefined, ctx);
+	check("add 自动 id n1", r1.content[0].text.includes("n1"));
+	await note.execute("2", { action: "add", content: "不要用 Redis" }, undefined, undefined, ctx);
+
+	// list
+	const r3 = await note.execute("3", { action: "list" }, undefined, undefined, ctx);
+	const lm = /共 (\d+) 条/.exec(r3.content[0].text);
+	check("list 含两条记录", !!lm && lm[1] === "2" && r3.content[0].text.includes("X 方案"));
+
+	// edit / remove
+	const r4 = await note.execute("4", { action: "edit", id: "n1", content: "用户最终选择 Y 方案" }, undefined, undefined, ctx);
+	check("edit 修改 n1", r4.content[0].text.includes("已修改 n1"));
+	const r5 = await note.execute("5", { action: "remove", id: "n2" }, undefined, undefined, ctx);
+	check("remove 删除 n2", r5.content[0].text.includes("已删除 n2"));
+	const saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	check("state notes 只剩 n1 且内容已更新", saved.notes.length === 1 && saved.notes[0].id === "n1" && saved.notes[0].content.includes("Y"));
+
+	// 报错：删除不存在
+	const r6 = await note.execute("6", { action: "remove", id: "n99" }, undefined, undefined, ctx);
+	check("删除不存在记录报错", r6.details?.kind === "error");
 	rmSync(dir, { recursive: true, force: true });
 }
 
@@ -536,6 +839,12 @@ try {
 	await scenarioG();
 	await scenarioH();
 	await scenarioI();
+	await scenarioJ();
+	await scenarioK();
+	await scenarioL();
+	await scenarioM();
+	await scenarioN();
+	await scenarioO();
 	console.log(failures === 0 ? "\n✅ 全部通过" : `\n❌ ${failures} 项失败`);
 	process.exit(failures === 0 ? 0 : 1);
 } finally {

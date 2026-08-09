@@ -14,7 +14,7 @@
  */
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, matchesKey, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import type { WorkflowState } from "./types";
+import type { MilestoneState, TaskStatus, WorkflowState } from "./types";
 import type { Derived, WorkflowStore } from "./store";
 import { nextPendingTask } from "./store";
 import { blockedList, currentTask, summaryLine, truncate } from "./brief";
@@ -35,15 +35,90 @@ export function unregisterHudRows(): void {
 	unregisterRows = null;
 }
 
-/** 常驻 widget：Box 背景区块 + 任务行/分工两行/阻塞警告/里程碑三态；进度条右对齐 */
-function renderWidget(state: WorkflowState, derived: Derived, theme: Theme) {
+/* ============================== 公共渲染层（单一来源） ============================== */
+
+/** 状态徽章：[进行中] / [已阻塞] / [待开始] */
+function badgeOf(th: Theme, status: TaskStatus): string {
+	if (status === "doing") return th.fg("success", "[进行中]");
+	if (status === "blocked") return th.fg("warning", "[已阻塞]");
+	return th.fg("dim", "[待开始]");
+}
+
+/** 进度条：12 格 ▓/░（done/total 计数由调用方拼接） */
+function progressBarText(th: Theme, done: number, total: number, bars = 12): string {
+	const filled = Math.min(bars, Math.round((done / Math.max(1, total)) * bars));
+	let s = "";
+	for (let i = 0; i < bars; i++) s += i < filled ? th.fg("accent", "▓") : th.fg("dim", "░");
+	return s;
+}
+
+/** 里程碑三态分段：✓已完成 / ▶当前目标 / ○未完成（join 分隔符由调用方决定） */
+function milestoneTexts(th: Theme, milestones: Record<string, MilestoneState>): string[] {
+	const entries = Object.entries(milestones);
+	const curIdx = entries.findIndex(([, m]) => !m.done);
+	return entries.map(([n, m], i) => {
+		if (m.done) return th.fg("success", `✓ ${n}`);
+		if (i === curIdx) return th.fg("accent", `▶ ${n}`);
+		return th.fg("dim", `○ ${n}`);
+	});
+}
+
+/**
+ * 紧凑面板行（常驻 widget 与 hud 底部行共用的单一渲染源）：
+ * 行 1 = 任务 + 阶段（┃ 分隔）+ 进度条右对齐；分工两行（截断）；阻塞警告；里程碑三态。
+ * 行内容不含外框/底色/缩进——外层组装（Box / selectedBg pad）由调用方负责。
+ */
+function compactLines(state: WorkflowState, derived: Derived, th: Theme, width: number): string[] {
 	const cur = currentTask(state, derived);
 	const curStage = cur ? derived.stageOf.get(cur.id) : null;
-	const next = nextPendingTask(state, derived);
 	const blocked = blockedList(state, derived);
 	const doneCount = derived.all.filter((t) => state.tasks[t.id]?.status === "done").length;
 	const empty = derived.all.length === 0;
+	const lines: string[] = [];
 
+	// 行 1：左侧 = 当前任务（最显眼）+ 阶段（dim）；右侧 = 进度条（右对齐）
+	let taskPart: string;
+	if (empty) {
+		taskPart = th.fg("muted", "无任务，请先让 AI 用 wf_workflow 规划");
+	} else if (cur) {
+		const st = state.tasks[cur.id]?.status ?? "todo";
+		// 状态完全由徽章承担（[进行中]/[待开始]/[已阻塞]），不加前缀标记
+		taskPart = th.fg("text", `${cur.id} ${truncate(cur.title, 32)}`) + " " + badgeOf(th, st);
+	} else {
+		const next = nextPendingTask(state, derived);
+		taskPart = next
+			? th.fg("text", `${next.id} ${truncate(next.title, 32)}`)
+			: th.fg("success", "全部任务已完成");
+	}
+	const stageDone = curStage ? curStage.tasks.filter((t) => state.tasks[t.id]?.status === "done").length : 0;
+	const stagePart = curStage ? th.fg("dim", `${curStage.name} ${stageDone}/${curStage.tasks.length}`) : "";
+	// 无当前阶段（空任务 / 全部完成）时不显示分隔符与占位符，避免「全部任务已完成  ┃  —」
+	const left = taskPart + (stagePart ? th.fg("dim", "  ┃  ") + stagePart : "");
+	const right = progressBarText(th, doneCount, derived.all.length) + th.fg("dim", ` ${doneCount}/${derived.all.length}`);
+	const pad = Math.max(2, width - visibleWidth(left) - visibleWidth(right));
+	lines.push(left + " ".repeat(pad) + right);
+
+	// 分工两行（多项「、」连接后截断 44；agent 模式无人类分工，隐藏「你:」行）
+	if (cur) {
+		if (derived.mode !== "agent")
+			lines.push(th.fg("muted", "你: ") + th.fg("text", truncate(cur.humanTasks.join("、") || "（暂无）", 44)));
+		lines.push(th.fg("muted", "AI: ") + th.fg("text", truncate(cur.aiTasks.join("、") || "（暂无）", 44)));
+	}
+
+	// 阻塞警告
+	if (blocked.length) {
+		lines.push(th.fg("warning", `阻塞 ${blocked.map((t) => `${t.id} ${truncate(t.title, 16)}`).join("；")}`));
+	}
+
+	// 里程碑行：✓已完成 / ▶当前目标 / ○未完成（无里程碑则省略整行；不带日期）
+	const ms = milestoneTexts(th, state.milestones);
+	if (ms.length) lines.push(th.fg("muted", "里程碑 ") + ms.join("   "));
+
+	return lines;
+}
+
+/** 常驻 widget：Box 背景区块 + 公共渲染行（compactLines），宽度自适应用 pi-tui visibleWidth */
+function renderWidget(state: WorkflowState, derived: Derived, theme: Theme) {
 	const container = new Container();
 	let lastWidth = 0;
 
@@ -53,84 +128,9 @@ function renderWidget(state: WorkflowState, derived: Derived, theme: Theme) {
 		// （7 个固定背景 token 中最亮的，matrix 主题 #0f2e1a），与 hud 一眼可辨
 		const box = new Box(1, 0, (t) => theme.bg("selectedBg", t));
 		const availW = Math.max(50, width - 6);
-
-		// ── 进度条（12 格）──
-		const stageDone = curStage
-			? curStage.tasks.filter((t) => state.tasks[t.id]?.status === "done").length
-			: 0;
-		const BARS = 12;
-		const filled = Math.min(BARS, Math.round((doneCount / Math.max(1, derived.all.length)) * BARS));
-		let bar = "";
-		for (let i = 0; i < BARS; i++) {
-			bar += i < filled ? theme.fg("accent", "▓") : theme.fg("dim", "░");
+		for (const line of compactLines(state, derived, theme, availW)) {
+			box.addChild(new Text(line, 1, 0));
 		}
-
-		// ── 行 1：左侧 = 当前任务（最显眼）；中间 = 阶段（dim）；右侧 = 进度条（右对齐）──
-		let taskPart: string;
-		if (empty) {
-			taskPart = theme.fg("muted", "无任务，请先让 AI 用 wf_workflow 规划");
-		} else if (cur) {
-			const st = state.tasks[cur.id]?.status ?? "todo";
-			// 状态完全由徽章承担（[进行中]/[待开始]/[已阻塞]），不加前缀标记
-			const badge =
-				st === "doing"
-					? theme.fg("success", "[进行中]")
-					: theme.fg("dim", `[${st === "blocked" ? "已阻塞" : "待开始"}]`);
-			taskPart = theme.fg("text", `${cur.id} ${truncate(cur.title, 32)}`) + " " + badge;
-		} else if (next) {
-			taskPart = theme.fg("text", `${next.id} ${truncate(next.title, 32)}`);
-		} else {
-			taskPart = theme.fg("success", "全部任务已完成");
-		}
-		const stagePart = curStage
-			? theme.fg("dim", `${curStage.name} ${stageDone}/${curStage.tasks.length}`)
-			: "";
-		// 无当前阶段（空任务 / 全部完成）时不显示分隔符与占位符，避免「全部任务已完成  ┃  —」
-		const left = taskPart + (stagePart ? theme.fg("dim", "  ┃  ") + stagePart : "");
-		const right = bar + theme.fg("dim", ` ${doneCount}/${derived.all.length}`);
-		const pad = Math.max(2, availW - visibleWidth(left) - visibleWidth(right));
-		box.addChild(new Text(left + " ".repeat(pad) + right, 1, 0));
-
-		// ── 分工两行 ──
-		if (cur) {
-			box.addChild(
-				new Text(theme.fg("muted", "你: ") + theme.fg("text", truncate(cur.humanTasks[0] ?? "", 44)), 1, 0),
-			);
-			box.addChild(
-				new Text(theme.fg("muted", "AI: ") + theme.fg("text", truncate(cur.aiTasks[0] ?? "", 44)), 1, 0),
-			);
-		}
-
-		if (blocked.length) {
-			box.addChild(
-				new Text(
-					theme.fg("warning", `阻塞 ${blocked.map((t) => `${t.id} ${truncate(t.title, 16)}`).join("；")}`),
-					1,
-					0,
-				),
-			);
-		}
-
-		// ── 里程碑行：✓已完成 / ▶当前目标 / ○未完成 三态（无里程碑则省略整行；不带日期）──
-		const msEntries = Object.entries(state.milestones);
-		if (msEntries.length) {
-			const curMsIdx = msEntries.findIndex(([, m]) => !m.done);
-			box.addChild(
-				new Text(
-					theme.fg("muted", "里程碑 ") +
-						msEntries
-							.map(([n, m], i) => {
-								if (m.done) return theme.fg("success", `✓ ${n}`);
-								if (i === curMsIdx) return theme.fg("accent", `▶ ${n}`);
-								return theme.fg("dim", `○ ${n}`);
-							})
-							.join("   "),
-					1,
-					0,
-				),
-			);
-		}
-
 		container.addChild(box);
 	};
 
@@ -156,71 +156,8 @@ function renderWidget(state: WorkflowState, derived: Derived, theme: Theme) {
  * hud 只负责把返回的行追加到 footer 底部（通用接口 __PI_HUD_API__），不加工内容。
  */
 export function renderHudRows(state: WorkflowState, derived: Derived, theme: Theme, width: number): string[] {
-	const cur = currentTask(state, derived);
-	const curStage = cur ? derived.stageOf.get(cur.id) : null;
-	const blocked = blockedList(state, derived);
-	const doneCount = derived.all.filter((t) => state.tasks[t.id]?.status === "done").length;
-	const empty = derived.all.length === 0;
-	const rows: string[] = [];
-
-	// 行 1：任务 + 阶段 + 进度条（右侧进度条右对齐，与面板一致）
-	let taskPart: string;
-	if (empty) {
-		taskPart = theme.fg("muted", "无任务，请先让 AI 用 wf_workflow 规划");
-	} else if (cur) {
-		const st = state.tasks[cur.id]?.status ?? "todo";
-		const badge =
-			st === "doing" ? theme.fg("success", "[进行中]") : theme.fg("dim", `[${st === "blocked" ? "已阻塞" : "待开始"}]`);
-		taskPart = theme.fg("text", `${cur.id} ${truncate(cur.title, 32)}`) + " " + badge;
-	} else if (nextPendingTask(state, derived)) {
-		const next = nextPendingTask(state, derived)!;
-		taskPart = theme.fg("text", `${next.id} ${truncate(next.title, 32)}`);
-	} else {
-		taskPart = theme.fg("success", "全部任务已完成");
-	}
-	const stageDone = curStage ? curStage.tasks.filter((t) => state.tasks[t.id]?.status === "done").length : 0;
-	const stagePart = curStage
-		? theme.fg("dim", `${curStage.name} ${stageDone}/${curStage.tasks.length}`)
-		: "";
-	// 无当前阶段（空任务 / 全部完成）时不显示分隔符与占位符，避免「全部任务已完成  ┃  —」
-	const BARS = 12;
-	const filled = Math.min(BARS, Math.round((doneCount / Math.max(1, derived.all.length)) * BARS));
-	let bar = "";
-	for (let i = 0; i < BARS; i++) bar += i < filled ? theme.fg("accent", "▓") : theme.fg("dim", "░");
-	const left = taskPart + (stagePart ? theme.fg("dim", "  ┃  ") + stagePart : "");
-	const right = bar + theme.fg("dim", ` ${doneCount}/${derived.all.length}`);
-	const pad = Math.max(2, width - visibleWidth(left) - visibleWidth(right));
-	rows.push(left + " ".repeat(pad) + right);
-
-	// 分工两行
-	if (cur) {
-		rows.push(theme.fg("muted", "你: ") + theme.fg("text", truncate(cur.humanTasks[0] ?? "", 44)));
-		rows.push(theme.fg("muted", "AI: ") + theme.fg("text", truncate(cur.aiTasks[0] ?? "", 44)));
-	}
-
-	// 阻塞警告
-	if (blocked.length) {
-		rows.push(theme.fg("warning", `阻塞 ${blocked.map((t) => `${t.id} ${truncate(t.title, 16)}`).join("；")}`));
-	}
-
-	// 里程碑行：✓已完成 / ▶当前目标 / ○未完成 三态（无里程碑则省略整行）
-	const msEntries = Object.entries(state.milestones);
-	if (msEntries.length) {
-		const curMsIdx = msEntries.findIndex(([, m]) => !m.done);
-		rows.push(
-			theme.fg("muted", "里程碑 ") +
-				msEntries
-					.map(([n, m], i) => {
-						if (m.done) return theme.fg("success", `✓ ${n}`);
-						if (i === curMsIdx) return theme.fg("accent", `▶ ${n}`);
-						return theme.fg("dim", `○ ${n}`);
-					})
-					.join("   "),
-		);
-	}
-
-	// 满宽铺 selectedBg 底色（与常驻面板同款）：行截断后 pad 到 width 再包背景，形成整块面板
-	return rows.map((r) => {
+	// 与常驻面板同源（compactLines），满宽铺 selectedBg 底色形成整块面板
+	return compactLines(state, derived, theme, width).map((r) => {
 		const t = truncateToWidth(r, width);
 		return theme.bg("selectedBg", t + " ".repeat(Math.max(0, width - visibleWidth(t))));
 	});
@@ -400,7 +337,7 @@ export class WfmgMenuPanelComponent {
 		];
 	}
 
-	/** 进度总览内容：当前任务 + 分工 + 进度条 + 里程碑（widget 里被精简掉的信息在这里完整呈现） */
+	/** 进度总览内容：当前任务 + 分工 + 进度条 + 里程碑（复用公共小块，布局独立：完整分工/「当前任务：」前缀） */
 	private overviewLines(): string[] {
 		const th = this.theme;
 		const state = this.store.getState();
@@ -413,38 +350,16 @@ export class WfmgMenuPanelComponent {
 		const cur = currentTask(state, derived);
 		if (cur) {
 			const st = state.tasks[cur.id]?.status ?? "todo";
-			const badge =
-				st === "doing"
-					? th.fg("success", "[进行中]")
-					: st === "blocked"
-						? th.fg("warning", "[已阻塞]")
-						: th.fg("dim", "[待开始]");
-			lines.push(th.fg("text", ` 当前任务：${cur.id} ${cur.title}`) + " " + badge);
-			lines.push(th.fg("muted", " 你: ") + th.fg("text", cur.humanTasks.join("；") || "—"));
+			lines.push(th.fg("text", ` 当前任务：${cur.id} ${cur.title}`) + " " + badgeOf(th, st));
+			if (derived.mode !== "agent") lines.push(th.fg("muted", " 你: ") + th.fg("text", cur.humanTasks.join("；") || "—"));
 			lines.push(th.fg("muted", " AI: ") + th.fg("text", cur.aiTasks.join("；") || "—"));
 		} else {
 			lines.push(th.fg("success", " 全部任务已完成"));
 		}
 		const doneCount = derived.all.filter((t) => state.tasks[t.id]?.status === "done").length;
-		const BARS = 12;
-		const filled = Math.min(BARS, Math.round((doneCount / Math.max(1, derived.all.length)) * BARS));
-		let bar = "";
-		for (let i = 0; i < BARS; i++) bar += i < filled ? th.fg("accent", "▓") : th.fg("dim", "░");
-		lines.push(` 进度：${bar} ${doneCount}/${derived.all.length}`);
-		const msEntries = Object.entries(state.milestones);
-		if (msEntries.length) {
-			const curMsIdx = msEntries.findIndex(([, m]) => !m.done);
-			lines.push(
-				th.fg("muted", " 里程碑 ") +
-					msEntries
-						.map(([n, m], i) => {
-							if (m.done) return th.fg("success", `✓ ${n}`);
-							if (i === curMsIdx) return th.fg("accent", `▶ ${n}`);
-							return th.fg("dim", `○ ${n}`);
-						})
-						.join("  "),
-			);
-		}
+		lines.push(` 进度：${progressBarText(th, doneCount, derived.all.length)} ${doneCount}/${derived.all.length}`);
+		const ms = milestoneTexts(th, state.milestones);
+		if (ms.length) lines.push(th.fg("muted", " 里程碑 ") + ms.join("  "));
 		return lines;
 	}
 
@@ -479,6 +394,6 @@ export function textPanel(state: WorkflowState, derived: Derived): string[] {
 		lines.push("");
 		lines.push(`里程碑：${msEntries.map(([n, m]) => `${n}${m.done ? "✓" : ""}`).join("  ")}`);
 	}
-	lines.push(`决策记录：${state.decisions.length} 条`);
+	lines.push(`记录：${state.notes.length} 条`);
 	return lines;
 }

@@ -1,0 +1,204 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-09T07:00:36.333Z",
+  "currentTaskId": null,
+  "tasks": {
+    "0.1": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:16:47.282Z",
+      "note": "指令集精简拍板：合并 start/done → wf_switch（搁置回 todo），archive 即完成清单（自动全标 done）；/workflow-config 命令层单开 0.4 后续讨论"
+    },
+    "0.2": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:20:39.287Z",
+      "note": "注入策略拍板：条件注入（有活动工作流才注入）+ mode 三态联动（人机协作完整版/纯 agent 轻量版/无工作流零注入）；wf_workflow 工具描述承担无工作流时的发现职责"
+    },
+    "0.3": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:22:47.617Z",
+      "note": "mode 设计定稿：工作流级 mode（缺省 human-ai，不升 schemaVersion）；agent 模式自动运行（连续 switch 直到完成 + archive 收尾，障碍时 wf_block 停下报告）；humanTasks 空数组即可表达无人；隐藏点清单（widget/hud/浮窗/brief/taskDetail）已确认"
+    },
+    "1.1": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:36:33.573Z",
+      "note": "三处渲染合一：compactLines 单一来源 + 3 小块复用；panel.ts 484→398 行；测试全绿、类型 0 报错、build 成功；用户已 install + /reload 验收 hud 接管渲染正常"
+    },
+    "1.2": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:38:02.667Z",
+      "note": "index.ts 652→31 行薄壳；tools.ts（9 工具）/commands.ts（命令）/events.ts（事件）职责单一，store 生命周期收进 store.ts getStore；build 成功、测试全绿、类型 0 报错；依赖修正：1.4 依赖 1.6、1.5 依赖 1.4"
+    },
+    "1.3": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:47:40.148Z",
+      "note": "缺口补齐：wf_milestone 支持 remove/newName（删除/改名）；面板分工多项「、」连接显示；决策删除/修正转 1.7 专门商讨；归档恢复砍掉"
+    },
+    "1.4": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:48:51.466Z",
+      "note": "mode 实现：WorkflowDef.mode 可选（缺省 human-ai）；Derived.mode；校验枚举；brief/panel 隐藏用户分工行（agent）；taskDetail 按模式；wf_workflow add 支持 mode 参数；测试场景 M 覆盖（简报/渲染/自动驾驶推进）"
+    },
+    "1.5": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:49:17.681Z",
+      "note": "条件注入实现：before_agent_start 三态（无工作流/空工作流零注入；human-ai 完整指挥者提示词；agent 轻量自动驾驶提示词）；场景 N 覆盖三态"
+    },
+    "2.1": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:58:04.959Z",
+      "note": "测试收尾：修复脆弱断言（list 阶段/任务数用正则、wf_note 条数用正则）；全量回归 15 场景（A-O）全绿；build 成功、类型 0 报错"
+    },
+    "2.2": {
+      "status": "done",
+      "doneAt": "2026-08-09T07:00:33.143Z"
+    },
+    "0.4": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:31:48.716Z",
+      "note": "命令层定稿：只留无参 /workflow-config（TUI 浮窗：显示详细信息/常驻面板开关；非 TUI 文本面板），删除全部子命令"
+    },
+    "1.6": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:43:23.938Z",
+      "note": "wf_switch 实现：无参=完成当前+自动推进（排除当前任务自身）；taskId 显式切换（依赖检查排除即将完成的当前任务）；complete=false 搁置回 todo；blocked switch 即解除；无下一个→全部完成提示收尾。删除 wf_start/wf_done；archive 自动全部 done；命令层只留无参；测试新增场景 J（switch 语义）/K（archive 自动完成）"
+    },
+    "1.7": {
+      "status": "done",
+      "doneAt": "2026-08-09T06:57:28.479Z",
+      "note": "wf_note 实现：替换 wf_decision——通用记录 {id,ts,content}，action list/add/edit/remove（自动 id n+序号）；对用户透明（无面向用户的命令/面板交互，简报显示最近 3 条）；使用准则写入工具描述与注入提示词；旧 decisions 数据丢弃不迁移；textPanel/lightState/brief 全部切换；场景 O 覆盖增删读改"
+    }
+  },
+  "milestones": {},
+  "log": [
+    {
+      "ts": "2026-08-09T05:56:18.569Z",
+      "event": "task_start",
+      "taskId": "0.1",
+      "msg": "指令集精简评估"
+    },
+    {
+      "ts": "2026-08-09T06:16:45.056Z",
+      "event": "decision",
+      "msg": "指令集精简：状态工具是否合并"
+    },
+    {
+      "ts": "2026-08-09T06:16:45.056Z",
+      "event": "decision",
+      "msg": "wf_switch 搁置转移时旧任务状态"
+    },
+    {
+      "ts": "2026-08-09T06:16:45.057Z",
+      "event": "decision",
+      "msg": "archive 收尾时的任务完成语义"
+    },
+    {
+      "ts": "2026-08-09T06:16:47.282Z",
+      "event": "task_done",
+      "taskId": "0.1",
+      "msg": "指令集精简评估"
+    },
+    {
+      "ts": "2026-08-09T06:20:37.146Z",
+      "event": "decision",
+      "msg": "提示词注入策略"
+    },
+    {
+      "ts": "2026-08-09T06:20:39.287Z",
+      "event": "task_done",
+      "taskId": "0.2",
+      "msg": "提示词注入机制决策"
+    },
+    {
+      "ts": "2026-08-09T06:22:45.283Z",
+      "event": "decision",
+      "msg": "mode 字段粒度"
+    },
+    {
+      "ts": "2026-08-09T06:22:45.284Z",
+      "event": "decision",
+      "msg": "agent 模式自动运行语义"
+    },
+    {
+      "ts": "2026-08-09T06:22:47.617Z",
+      "event": "task_done",
+      "taskId": "0.3",
+      "msg": "纯 agent 任务模式设计"
+    },
+    {
+      "ts": "2026-08-09T06:31:46.644Z",
+      "event": "decision",
+      "msg": "/workflow-config 命令层处理"
+    },
+    {
+      "ts": "2026-08-09T06:31:48.716Z",
+      "event": "task_done",
+      "taskId": "0.4",
+      "msg": "/workflow-config 命令层处理"
+    },
+    {
+      "ts": "2026-08-09T06:36:33.573Z",
+      "event": "task_done",
+      "taskId": "1.1",
+      "msg": "渲染三处重复合一"
+    },
+    {
+      "ts": "2026-08-09T06:38:02.667Z",
+      "event": "task_done",
+      "taskId": "1.2",
+      "msg": "index.ts 拆分"
+    },
+    {
+      "ts": "2026-08-09T06:43:23.938Z",
+      "event": "task_done",
+      "taskId": "1.6",
+      "msg": "wf_switch 指令集改造"
+    },
+    {
+      "ts": "2026-08-09T06:46:27.868Z",
+      "event": "decision",
+      "msg": "wf_decision 功能范围"
+    },
+    {
+      "ts": "2026-08-09T06:47:40.148Z",
+      "event": "task_done",
+      "taskId": "1.3",
+      "msg": "功能缺口补齐"
+    },
+    {
+      "ts": "2026-08-09T06:48:51.466Z",
+      "event": "task_done",
+      "taskId": "1.4",
+      "msg": "纯 agent 模式实现"
+    },
+    {
+      "ts": "2026-08-09T06:49:17.681Z",
+      "event": "task_done",
+      "taskId": "1.5",
+      "msg": "提示词注入条件化"
+    },
+    {
+      "ts": "2026-08-09T06:56:02.242Z",
+      "event": "decision",
+      "msg": "wf_decision 大改方向"
+    },
+    {
+      "ts": "2026-08-09T06:57:28.479Z",
+      "event": "task_done",
+      "taskId": "1.7",
+      "msg": "wf_decision 功能大改"
+    },
+    {
+      "ts": "2026-08-09T06:58:04.959Z",
+      "event": "task_done",
+      "taskId": "2.1",
+      "msg": "测试更新与全量回归"
+    },
+    {
+      "ts": "2026-08-09T07:00:33.143Z",
+      "event": "task_done",
+      "taskId": "2.2",
+      "msg": "文档更新与安装收尾"
+    }
+  ],
+  "notes": []
+}

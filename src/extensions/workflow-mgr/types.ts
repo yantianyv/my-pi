@@ -11,6 +11,10 @@ export const WORKFLOW_SCHEMA_VERSION = 1;
 export const STATE_SCHEMA_VERSION = 1;
 export const PANEL_SCHEMA_VERSION = 1;
 
+/** 工作流协作模式：human-ai = 人机协作（AI 指挥、人执行）；agent = 纯 agent（AI 自动驾驶，无人类分工） */
+export const WORKFLOW_MODES = ["human-ai", "agent"] as const;
+export type WorkflowMode = (typeof WORKFLOW_MODES)[number];
+
 /** 任务定义（工作流中的人机分工单元） */
 export interface TaskDef {
 	id: string;
@@ -34,6 +38,8 @@ export interface StageDef {
 /** 工作流定义（workflow.json） */
 export interface WorkflowDef {
 	schemaVersion: number;
+	/** 协作模式（0.3 拍板：工作流级，缺省 human-ai 向后兼容；agent 模式无人类分工、渲染隐藏「你:」行） */
+	mode?: WorkflowMode;
 	stages: StageDef[];
 }
 
@@ -48,13 +54,11 @@ export interface TaskState {
 	note?: string;
 }
 
-/** 用户拍板的决策记录 */
-export interface DecisionRecord {
+/** AI 记录（wf_note，对用户透明）：交流中的重要结论/约束/偏好，作为跨会话记忆 */
+export interface NoteRecord {
+	id: string;
 	ts: string;
-	topic: string;
-	options: string[];
-	choice?: string;
-	reason?: string;
+	content: string;
 }
 
 /** 里程碑（名称 → 日期/完成态） */
@@ -70,7 +74,8 @@ export interface WorkflowState {
 	currentTaskId: string | null;
 	tasks: Record<string, TaskState>;
 	milestones: Record<string, MilestoneState>;
-	decisions: DecisionRecord[];
+	/** AI 记录（wf_note）；旧 decisions 数据已丢弃（1.7 拍板，不迁移） */
+	notes: NoteRecord[];
 	log: { ts: string; event: string; taskId?: string; msg?: string }[];
 }
 

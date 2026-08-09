@@ -1,0 +1,254 @@
+{
+  "schemaVersion": 1,
+  "stages": [
+    {
+      "id": "design",
+      "name": "需求与设计确认",
+      "goal": "把四个优化方向的关键决策拍板定锚，为实现铺路",
+      "tasks": [
+        {
+          "id": "0.1",
+          "title": "指令集精简评估",
+          "desc": "评估 9 个 wf_* 工具（workflow/status/start/done/block/rollback/decision/milestone）+ /workflow-config 命令之间的功能重叠，找出可精简/合并/澄清的余地，形成报告供拍板",
+          "humanTasks": [
+            "拍板精简方向（保留现状 / 合并某项 / 删除某项）"
+          ],
+          "aiTasks": [
+            "产出指令集分析：各工具职责分层 + 重叠点矩阵（list vs status、/workflow-config 子命令 vs 工具等）",
+            "给出精简建议清单 + 推荐方案"
+          ],
+          "deliverable": "指令集评估报告（职责分层 + 重叠矩阵 + 建议清单）",
+          "doneSignal": "用户对精简方案拍板，wf_decision 已记录",
+          "deps": []
+        },
+        {
+          "id": "0.2",
+          "title": "提示词注入机制决策",
+          "desc": "before_agent_start 现在无条件注入「指挥者角色」systemPrompt，简单任务也会被引导使用工作流工具。评估「按需使用」的注入策略：无条件 / 条件注入（有活动工作流才注入）/ 完全移除 / 工作流自带开关",
+          "humanTasks": [
+            "拍板注入策略"
+          ],
+          "aiTasks": [
+            "对比四种策略（简单任务误用风险、上下文开销、工具发现性、复杂度）",
+            "给出推荐方案与影响面"
+          ],
+          "deliverable": "注入策略决策记录（含推荐 + 理由）",
+          "doneSignal": "用户拍板方案，wf_decision 已记录",
+          "deps": []
+        },
+        {
+          "id": "0.3",
+          "title": "纯 agent 任务模式设计",
+          "desc": "扩展适用范围：设计工作流级参数让 AI 决定这是人机协作还是纯 agent 任务。纯 agent 模式允许缺省 humanTasks（非必填），渲染/简报隐藏人机分工行。需设计 schema 扩展（mode 字段位置/取值/校验）与影响面（types/store/brief/panel/测试）",
+          "humanTasks": [
+            "拍板 mode 字段粒度（工作流级 / 阶段级 / 任务级）与缺省语义"
+          ],
+          "aiTasks": [
+            "给出 schema 扩展设计（字段位置、取值枚举、校验规则、向后兼容）",
+            "梳理 humanTasks 可选化影响面 + 渲染/简报隐藏点清单"
+          ],
+          "deliverable": "mode 设计文档（schema 扩展 + 影响面清单）",
+          "doneSignal": "用户拍板设计，wf_decision 已记录",
+          "deps": []
+        },
+        {
+          "id": "0.4",
+          "title": "/workflow-config 命令层处理",
+          "desc": "单开一章专门处理 /workflow-config 命令层：现状有 toggle/done/start/block 子命令 + TUI 浮窗（显示详细信息/常驻面板开关）。0.1 拍板状态工具合并为 wf_switch 后，命令层怎么办——保留 start/done 命令名（人用直观）还是同步改造？命令层功能边界（人用快捷入口 vs 浮窗交互）如何定？与 1.2 index.ts 拆出 commands.ts 联动",
+          "humanTasks": [
+            "拍板命令层方案（保留/改造/边界）"
+          ],
+          "aiTasks": [
+            "分析命令层现状（子命令 + 浮窗）与工具层映射，与 wf_switch 合并后的影响面",
+            "给出命令层处理方案与推荐"
+          ],
+          "deliverable": "",
+          "doneSignal": "用户拍板命令层方案，wf_decision 已记录",
+          "deps": [
+            "0.1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "impl",
+      "name": "代码实现",
+      "goal": "按拍板的设计实现各优化项，保持行为兼容",
+      "tasks": [
+        {
+          "id": "1.1",
+          "title": "渲染三处重复合一",
+          "desc": "panel.ts 里 renderWidget（常驻面板）/ renderHudRows（hud 底部行）/ overviewLines（浮窗总览）三处重复的渲染逻辑（任务行+进度条+分工+阻塞+里程碑），抽成单一公共渲染源，消除改一处忘另两处的风险",
+          "humanTasks": [
+            "验收三处渲染视觉一致（常驻面板 / hud 底部行 / 浮窗总览）"
+          ],
+          "aiTasks": [
+            "抽取公共渲染函数（行构造 + 面板组装两态），renderWidget/renderHudRows/overviewLines 全部走公共源",
+            "同步更新测试"
+          ],
+          "deliverable": "重构后的 panel.ts（单一渲染源，零重复）",
+          "doneSignal": "render.test.mjs 全绿 + 三处渲染输出视觉一致（人工验收）",
+          "deps": []
+        },
+        {
+          "id": "1.2",
+          "title": "index.ts 拆分",
+          "desc": "652 行 index.ts 偏重：拆分为 tools.ts（工具注册）/ commands.ts（/workflow-config 只留无参，0.4 拍板）/ events.ts（session 钩子 + hud 联动 + 注入），行为零变化（按 0.1-0.4 拍板后的最终形态拆分）",
+          "humanTasks": [
+            "/reload 后抽查功能正常"
+          ],
+          "aiTasks": [
+            "按职责拆分模块（tools/commands/events），index 只留组装",
+            "保持外部行为不变"
+          ],
+          "deliverable": "拆分后的模块结构（每个文件职责单一）",
+          "doneSignal": "build.js 打包成功 + render.test.mjs 全绿",
+          "deps": [
+            "1.1"
+          ]
+        },
+        {
+          "id": "1.3",
+          "title": "功能缺口补齐",
+          "desc": "按拍板补齐：A. wf_milestone 增强——删除（remove）/改名（newName）；C. 常驻面板分工多行显示（多项「、」连接截断）。B（决策删除/修正）已转 1.7 专门商讨，D（归档恢复）砍掉保持不可逆语义",
+          "humanTasks": [
+            "拍板补齐范围与优先级"
+          ],
+          "aiTasks": [
+            "按拍板范围逐项实现（含类型/校验/渲染）",
+            "补对应测试场景"
+          ],
+          "deliverable": "缺口实现 + 新增测试",
+          "doneSignal": "拍板范围内的缺口全部实现 + 对应测试通过",
+          "deps": [
+            "1.1",
+            "1.6"
+          ]
+        },
+        {
+          "id": "1.4",
+          "title": "纯 agent 模式实现",
+          "desc": "按 0.3 拍板设计实现 mode 字段：types.ts schema 扩展、store.ts 校验与缺省、brief.ts 简报隐藏分工行、panel.ts 渲染隐藏「你:」行、工具描述更新（纯 agent 模式下 humanTasks 非必填）",
+          "humanTasks": [
+            "验收：建一个纯 agent 工作流，确认渲染/简报无分工行"
+          ],
+          "aiTasks": [
+            "实现 mode：schema + 校验 + 缺省语义",
+            "humanTasks 可选化（校验放宽 + 类型标注）",
+            "渲染/简报隐藏分工行"
+          ],
+          "deliverable": "mode 实现（types/store/brief/panel 四处）",
+          "doneSignal": "新增纯 agent 模式测试场景通过 + 人工验收（建纯 agent 工作流渲染无「你:」行）",
+          "deps": [
+            "0.3",
+            "1.1",
+            "1.6"
+          ]
+        },
+        {
+          "id": "1.5",
+          "title": "提示词注入条件化",
+          "desc": "按 0.2 拍板方案实现注入策略（预期：有活动工作流才注入指挥者提示词；无工作流时零提示词、agent 靠工具描述按需发现）",
+          "humanTasks": [
+            "验收：无工作流时简单任务不出现工作流提示词"
+          ],
+          "aiTasks": [
+            "实现条件注入逻辑（判断工作流存在 + 有未完成任务）"
+          ],
+          "deliverable": "注入策略实现",
+          "doneSignal": "有/无工作流两态行为符合拍板方案（测试覆盖）",
+          "deps": [
+            "0.2",
+            "1.4"
+          ]
+        },
+        {
+          "id": "1.6",
+          "title": "wf_switch 指令集改造",
+          "desc": "按 0.1 拍板实现指令集改造：删除 wf_start/wf_done 工具，新增 wf_switch（无参=完成当前+自动开始下一个，无下一个则全部完成；taskId=X 显式切换；complete=false 搁置转移旧任务回 todo；blocked 任务 switch 即解除阻塞并开始）；archive 归档时自动将所有任务标 done（=完成整个清单）；删除 /workflow-config 全部子命令（0.4 拍板，仅留无参）；同步更新工具 description/promptSnippet 与测试",
+          "humanTasks": [
+            "验收：/workflow-config 无参可用、浮窗正常"
+          ],
+          "aiTasks": [
+            "实现 wf_switch（含 complete=false 搁置、blocked 解除、无参推进）",
+            "删除 wf_start/wf_done 工具注册",
+            "archive 自动全部标 done",
+            "命令层删除子命令只留无参",
+            "更新工具描述与测试"
+          ],
+          "deliverable": "",
+          "doneSignal": "render.test.mjs 全绿（旧场景改造 + 新增 switch/archive 场景）+ build.js 打包成功",
+          "deps": [
+            "1.1"
+          ]
+        },
+        {
+          "id": "1.7",
+          "title": "wf_decision 功能大改",
+          "desc": "wf_decision 功能大改（专门商讨）：用户明确需要大改决策功能，本任务先专门商讨设计（决策的语义/展示/操作/数据模型），拍板后再实现。当前 wf_decision 仅追加记录（topic/options/choice/reason），1.3 已明确不做简单删除/修正",
+          "humanTasks": [
+            "专门商讨 wf_decision 大改方向并拍板"
+          ],
+          "aiTasks": [
+            "给出 wf_decision 大改设计（语义/展示/数据模型/与工作流联动）",
+            "按拍板实现 + 测试"
+          ],
+          "deliverable": "",
+          "doneSignal": "决策功能设计拍板（wf_decision 已记录）+ 大改实现 + 测试通过",
+          "deps": [
+            "1.3"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "verify",
+      "name": "测试与收尾",
+      "goal": "全量回归验证 + 文档/安装收尾",
+      "tasks": [
+        {
+          "id": "2.1",
+          "title": "测试更新与全量回归",
+          "desc": "新增纯 agent 模式、注入条件化、渲染重构后的测试场景；修复脆弱断言（中文数字硬编码如「6 个任务」）；全量回归确保旧 9 场景 + 新增场景全绿",
+          "humanTasks": [
+            "确认测试命令跑通"
+          ],
+          "aiTasks": [
+            "补新增功能测试场景",
+            "修复脆弱断言",
+            "跑全量回归并修复问题"
+          ],
+          "deliverable": "",
+          "doneSignal": "node src/extensions/workflow-mgr/test/render.test.mjs 全部场景通过",
+          "deps": [
+            "1.1",
+            "1.2",
+            "1.3",
+            "1.4",
+            "1.5",
+            "1.6",
+            "1.7"
+          ]
+        },
+        {
+          "id": "2.2",
+          "title": "文档更新与安装收尾",
+          "desc": "更新 AGENTS.md 与 README：mode 字段说明、注入策略、指令集职责分层（若 0.1 有结论）；node build.js + install.js 重装，pi 内 /reload 实际使用验证",
+          "humanTasks": [
+            "/reload 后实际使用验证",
+            "确认文档内容"
+          ],
+          "aiTasks": [
+            "更新 AGENTS.md/README（mode、注入、指令集）",
+            "跑 build + install 重装扩展"
+          ],
+          "deliverable": "",
+          "doneSignal": "用户实际使用确认（/reload 后功能正常、文档与新行为一致）",
+          "deps": [
+            "2.1"
+          ]
+        }
+      ]
+    }
+  ]
+}

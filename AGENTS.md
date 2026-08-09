@@ -47,12 +47,15 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
     token-saver.ts    #   上下文 token 节省器：自动清洗 bash 工具的冗余输出（git/npm/tsc/pip/docker/--help）
     task-alert.ts     #   任务完成提醒：提示音 + 标题动画 + setStatus 状态推送
     workflow-mgr/     #   人机协作任务面板（多文件扩展源码：build.js 把 index.ts 入口打包成单文件 workflow-mgr.ts）
-      index.ts        #     插件主体：8 个工具（wf_workflow/status/start/done/block/rollback/decision/milestone）+ /wfmg 命令 + 事件钩子
-      store.ts        #     数据层：workflow/state/config 三 JSON 加载保存 + 派生表 + reconcile 一致性 + 依赖环检测
-      brief.ts        #     AI 简报：renderBrief（当前任务+分工+完成信号）/ summaryLine / lightState
-      panel.ts        #     展示层：常驻 widget（belowEditor）+ /wfmg 完整面板 + 非 TUI 文本回落
-      types.ts        #     TaskDef/StageDef/WorkflowState/PanelConfig 类型 + schema 常量
-      test/render.test.mjs #   渲染回归测试（esbuild bundle + mock pi/ctx；test/node_modules junction 指 pi 全局，不入库）
+      index.ts        #     插件主体（组装薄壳）：tools.ts（7 个工具 wf_workflow/status/switch/block/rollback/note/milestone）+ commands.ts（/workflow-config 只留无参）+ events.ts（session 钩子 + hud 联动 + 条件注入）+ 事件钩子
+      tools.ts       #     工具注册：wf_switch（完成+推进一步到位，complete=false 搁置）/ wf_note（AI 记录，对用户透明）/ wf_milestone（增删改）等 7 工具
+      commands.ts    #     /workflow-config 命令：只留无参（TUI 浮窗 / 非 TUI 文本面板），无子命令
+      events.ts      #     事件钩子：session_start / hud:state-change / session_shutdown / before_agent_start（三态条件注入）
+      store.ts        #     数据层：workflow/state/config 三 JSON 加载保存 + 派生表（含 mode）+ reconcile 一致性 + 依赖环检测
+      brief.ts        #     AI 简报：renderBrief（当前任务+分工+完成信号+最近记录）/ summaryLine / lightState
+      panel.ts        #     展示层：常驻 widget（belowEditor）+ /workflow-config 浮窗 + 非 TUI 文本回落（compactLines 单一渲染源）
+      types.ts        #     TaskDef/StageDef/WorkflowState(mode+notes)/PanelConfig 类型 + schema 常量
+      test/render.test.mjs #   渲染回归测试（esbuild bundle + mock pi/ctx；test/node_modules junction 指 pi 全局，不入库；15 场景 A-O）
     web-tool.ts       #   联网工具：web_search 多源搜索（bing.cn 主 + 360 备 + npm 垂类，零 key 零费用，无 AI 总结）+ web_fetch 抓网页转 markdown（正文提取 + 截断；turndown/domino/gfm 由 build.js 内联）
 static/              #   静态部署物（无需编译，install.js 直接从这装到 ~/.pi/agent/，见 README 各补丁节；仓库根目录）
   themes/matrix.json  #     黑客帝国荧光绿主题

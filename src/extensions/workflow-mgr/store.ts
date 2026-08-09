@@ -19,20 +19,23 @@ import { loadJsonConfig, saveJsonConfig } from "../shared/config";
 import {
 	PANEL_SCHEMA_VERSION,
 	STATE_SCHEMA_VERSION,
+	WORKFLOW_MODES,
 	WORKFLOW_SCHEMA_VERSION,
 	type PanelConfig,
 	type StageDef,
 	type TaskDef,
 	type TaskState,
 	type WorkflowDef,
+	type WorkflowMode,
 	type WorkflowState,
 } from "./types";
 
-/** 派生表：由工作流构建的快速索引（工作流变更后需重建） */
+/** 派生表：由工作流构建的快速索引（工作流变更后需重建）；mode 为有效协作模式（缺省 human-ai） */
 export interface Derived {
 	taskMap: Map<string, TaskDef>;
 	stageOf: Map<string, StageDef>;
 	all: TaskDef[];
+	mode: WorkflowMode;
 }
 
 /* ------------------------------ 路径与校验 ------------------------------ */
@@ -68,12 +71,13 @@ function isTaskDef(v: unknown): v is TaskDef {
 	);
 }
 
-/** workflow.json 校验：schemaVersion 匹配 + stages 结构完整 */
+/** workflow.json 校验：schemaVersion 匹配 + stages 结构完整（mode 可选，存在时必须为合法枚举） */
 export function isWorkflowDef(v: unknown): v is WorkflowDef {
 	const w = v as WorkflowDef | null;
 	return (
 		!!w &&
 		w.schemaVersion === WORKFLOW_SCHEMA_VERSION &&
+		(w.mode === undefined || (WORKFLOW_MODES as readonly string[]).includes(w.mode)) &&
 		Array.isArray(w.stages) &&
 		w.stages.every(
 			(s) =>
@@ -96,7 +100,9 @@ export function isWorkflowState(v: unknown): v is WorkflowState {
 	}
 	if (s.currentTaskId !== null && typeof s.currentTaskId !== "string") return false;
 	if (!s.milestones || typeof s.milestones !== "object") return false;
-	if (!Array.isArray(s.decisions) || !Array.isArray(s.log)) return false;
+	// notes 允许缺失（旧 v1 数据仅含 decisions）→ getState 加载后丢弃 decisions 并补空数组
+	if (s.notes !== undefined && !Array.isArray(s.notes)) return false;
+	if (!Array.isArray(s.log)) return false;
 	return true;
 }
 
@@ -118,12 +124,12 @@ export function freshState(wf: WorkflowDef): WorkflowState {
 		currentTaskId: null,
 		tasks,
 		milestones: {},
-		decisions: [],
+		notes: [],
 		log: [],
 	};
 }
 
-/** 构建派生表（工作流变更后必须重建） */
+/** 构建派生表（工作流变更后必须重建）；mode 缺省 human-ai（0.3 拍板：向后兼容） */
 export function derive(wf: WorkflowDef): Derived {
 	const taskMap = new Map<string, TaskDef>();
 	const stageOf = new Map<string, StageDef>();
@@ -131,7 +137,7 @@ export function derive(wf: WorkflowDef): Derived {
 		taskMap.set(t.id, t);
 		stageOf.set(t.id, s);
 	}
-	return { taskMap, stageOf, all: [...taskMap.values()] };
+	return { taskMap, stageOf, all: [...taskMap.values()], mode: wf.mode ?? "human-ai" };
 }
 
 /** 依赖是否全部完成 */
@@ -271,6 +277,12 @@ export class WorkflowStore {
 		if (!this.state) {
 			const wf = this.getWorkflow();
 			this.state = loadJsonConfig(statePath(this.ctx), freshState(wf), isWorkflowState);
+			// 1.7 拍板：decisions → notes 替换，旧数据直接丢弃（插件未被大规模使用，不迁移）
+			const old = (this.state as WorkflowState & { decisions?: unknown }).decisions;
+			if (old !== undefined || !Array.isArray(this.state.notes)) {
+				delete (this.state as { decisions?: unknown }).decisions;
+				if (!Array.isArray(this.state.notes)) this.state.notes = [];
+			}
 			reconcile(this.state, wf, this.getDerived());
 		}
 		return this.state;
@@ -313,10 +325,22 @@ export class WorkflowStore {
 
 	/**
 	 * 归档（wf_workflow archive 用）：把当前工作流三 JSON 移动到 archive/<时间戳>-<名称>/ 留档。
+	 * 归档 = 「完成整个清单」（0.1 拍板）：未完成任务自动标记 done，currentTaskId 清空；
 	 * 当前工作流区清空（hasWorkflowFile → false，面板自动隐藏退出视野）；数据保留可 git 审查，
 	 * 但不提供找回功能——真需要时由人手动查看 archive/ 目录。
 	 */
 	archiveAll(): void {
+		// 归档前：所有未完成任务标记 done（快照统一干净）
+		if (this.state) {
+			for (const st of Object.values(this.state.tasks)) {
+				if (st.status !== "done") {
+					st.status = "done";
+					st.doneAt = st.doneAt ?? new Date().toISOString();
+				}
+			}
+			this.state.currentTaskId = null;
+			this.commitState();
+		}
 		const base = join(dirname(workflowPath(this.ctx)), "archive");
 		const name = (this.wf?.stages[0]?.name ?? "工作流").replace(/[\\/:*?"<>|\s]+/g, "-");
 		const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -330,4 +354,16 @@ export class WorkflowStore {
 		this.state = null;
 		this.panelCfg = null;
 	}
+}
+
+/* ------------------------------ 会话级 store 访问（跨模块共享） ------------------------------ */
+
+/**
+ * 单会话 store：会话内按 cwd 缓存，cwd 变化自动重建（重建即从磁盘重载）。
+ * 由 tools/commands/events 各模块共享——index 只负责组装，不再持有 store 生命周期。
+ */
+let sessionStore: WorkflowStore | null = null;
+export function getStore(ctx: ExtensionContext): WorkflowStore {
+	if (!sessionStore || sessionStore.cwd !== ctx.cwd) sessionStore = new WorkflowStore(ctx);
+	return sessionStore;
 }
