@@ -607,7 +607,7 @@ async function curlFetch(url: string, timeoutMs: number, outerSignal?: AbortSign
 				timeout: timeoutMs + 3000,
 				maxBuffer: FETCH_MAX_BYTES + 1024 * 1024,
 				windowsHide: true,
-			encoding: "buffer",
+				encoding: "buffer",
 				signal: outerSignal,
 			},
 			(err, stdout, stderr) => {
@@ -635,46 +635,38 @@ async function curlFetch(url: string, timeoutMs: number, outerSignal?: AbortSign
 	};
 }
 
-/** curl 降级入口：Node 全败后的最后尝试；成功返回响应，失败抛出带上下文的错误 */
-async function curlFallback(url: string, contextMsg: string, outerSignal?: AbortSignal): Promise<FRes> {
-	if (!(await hasCurl())) throw new Error(`${contextMsg}；系统未检测到 curl，无法降级`);
-	const curlRes = await curlFetch(url, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
-	if (!(curlRes instanceof Error)) return curlRes;
-	throw new Error(`${contextMsg}；curl 降级也失败：${curlRes.message}`);
-}
-
-/** 抓取页面：先直连，被拒/网络不可达时换 UA 再试，仍失败且配置了代理则经代理重试；Node 全败后降级系统 curl */
+/** 抓取页面：直连（含换 UA）→ 降级一步到位（curl 自动带代理；无 curl 时退 Node CONNECT 隧道）。
+ *  curl 本身 = 代理 + 不同 TLS 指纹（schannel/可响应 renegotiation），能同时解决被墙与 301 挑战，
+ *  故 curl 可用时 Node CONNECT 隧道那一跳完全冗余，降级链压缩为 2 跳。 */
 async function fetchPageWithFallback(url: string, outerSignal?: AbortSignal): Promise<FRes> {
+	// 阶段 1：Node 直连（默认 UA；HTTP 拒绝类换 UA 重试一次）
 	const direct0 = await directFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
 	if (!(direct0 instanceof Error)) return direct0;
 	const status0 = Number(/^HTTP (\d{3})/.exec(direct0.message)?.[1] ?? 0);
-	// 服务端拒绝类：先尝试换 UA 重试
+	let directErr: Error = direct0;
 	if (status0 >= 500 || status0 === 403 || status0 === 406 || status0 === 429) {
 		const direct1 = await directFetch(url, { headers: browserHeaders(UA_POOL[1] ?? UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
 		if (!(direct1 instanceof Error)) return direct1;
 		const status1 = Number(/^HTTP (\d{3})/.exec(direct1.message)?.[1] ?? 0);
-		if (isWalledFailure(direct1, status1)) {
-			const proxyUrl = getProxyUrl();
-			if (proxyUrl) {
-				const proxy0 = await proxyFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
-				if (!(proxy0 instanceof Error)) return proxy0;
-				return await curlFallback(url, `直接访问失败且换 UA/经代理 ${proxyUrl} 重试仍失败：${proxy0.message}（原始错误：${direct0.message}）`, outerSignal);
-			}
-			return await curlFallback(url, `直接访问失败且换 UA 重试仍失败：${direct1.message}`, outerSignal);
-		}
-		throw new Error(httpStatusHint(status1, true));
+		if (!isWalledFailure(direct1, status1)) throw new Error(httpStatusHint(status1, true));
+		directErr = direct1;
+	} else if (!isWalledFailure(direct0, status0)) {
+		throw direct0; // 非墙类错误（404 等）不降级
 	}
-	// 网络级被墙/不可达：优先走代理，无代理或无代理结果则降级 curl
-	if (isWalledFailure(direct0, status0)) {
-		const proxyUrl = getProxyUrl();
-		if (proxyUrl) {
-			const proxy0 = await proxyFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
-			if (!(proxy0 instanceof Error)) return proxy0;
-			return await curlFallback(url, `直接访问失败，经代理 ${proxyUrl} 重试仍失败：${proxy0.message}（原始错误：${direct0.message}）`, outerSignal);
-		}
-		return await curlFallback(url, `直接访问失败：${direct0.message}（未配置代理）`, outerSignal);
+
+	// 阶段 2：降级一步到位——curl（自动带代理）；无 curl 才退 Node CONNECT 隧道
+	const proxyUrl = getProxyUrl();
+	if (await hasCurl()) {
+		const curlRes = await curlFetch(url, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
+		if (!(curlRes instanceof Error)) return curlRes;
+		throw new Error(`直连失败（${directErr.message}），curl 降级${proxyUrl ? `（经代理 ${proxyUrl}）` : ""}仍失败：${curlRes.message}`);
 	}
-	throw direct0;
+	if (proxyUrl) {
+		const proxy0 = await proxyFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
+		if (!(proxy0 instanceof Error)) return proxy0;
+		throw new Error(`直连失败（${directErr.message}），经代理 ${proxyUrl} 重试仍失败：${proxy0.message}`);
+	}
+	throw directErr;
 }
 
 /** 抓取 URL → markdown（校验协议 / 非 HTML 报错 / 字节上限 / 字符截断） */
