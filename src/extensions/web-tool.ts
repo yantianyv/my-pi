@@ -27,6 +27,14 @@ import { gfm } from "turndown-plugin-gfm";
 // 类型层面 any 桥接；gfm 类型见 shared/turndown-gfm.d.ts；运行时 esbuild 按真实包名解析
 import { createWindow as _createWindow } from "@mixmark-io/domino";
 import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
+import { loadJsonConfig } from "./shared/config";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as http from "node:http";
+import * as https from "node:https";
+import * as net from "node:net";
+import * as tls from "node:tls";
+import * as zlib from "node:zlib";
 
 /** domino 的 createWindow（any 桥接，见上方 @ts-ignore 说明） */
 const createWindow = _createWindow as (html?: string) => any;
@@ -67,6 +75,231 @@ function httpStatusHint(status: number, retried: boolean): string {
 	};
 	return `HTTP ${status}${reason[status] ?? ""}${retried ? "，已换请求特征重试仍失败" : ""}`;
 }
+
+// ---------------------------------------------------------------------------
+// 代理配置（被墙/网络不可达时自动经代理重试）
+// ---------------------------------------------------------------------------
+
+/** 统一响应类型（global fetch 与 Node http/https 代理路径的兼容层） */
+interface FRes {
+	ok: boolean;
+	status: number;
+	url: string;
+	headers: { get(name: string): string | null };
+	arrayBuffer(): Promise<ArrayBuffer | Uint8Array>;
+}
+
+/** 代理 URL 来源优先级：1. WEB_FETCH_PROXY 2. HTTPS_PROXY 3. ALL_PROXY 4. ~/.pi/agent/web-fetch-proxy.json 的 proxy 字段 */
+function getProxyUrl(): string | undefined {
+	const env = process.env.WEB_FETCH_PROXY || process.env.HTTPS_PROXY || process.env.ALL_PROXY;
+	if (env) return env;
+	const cfg = loadJsonConfig<{ proxy?: string }>(
+		path.join(os.homedir(), ".pi", "agent", "web-fetch-proxy.json"),
+		{},
+		(v): v is { proxy?: string } =>
+			v !== null &&
+			typeof v === "object" &&
+			((v as { proxy?: unknown }).proxy === undefined || typeof (v as { proxy?: unknown }).proxy === "string"),
+	);
+	return cfg.proxy;
+}
+
+/** 为 http/https.request 提供 createConnection：经 HTTP 代理建 CONNECT 隧道（TLS 目标再套 tls） */
+function makeProxyConnection(
+	targetUrl: string,
+	proxyUrl: string,
+): (opts: any, cb: (err: Error | null, socket?: any) => void) => undefined {
+	const target = new URL(targetUrl);
+	const proxy = new URL(proxyUrl);
+	if (proxy.protocol !== "http:") throw new Error(`仅支持 http:// 代理，收到 ${proxy.protocol}//`);
+	const targetPort = Number(target.port || (target.protocol === "https:" ? 443 : 80));
+	const proxyPort = Number(proxy.port || 80);
+	return (_opts, cb) => {
+		const socket = net.connect(proxyPort, proxy.hostname);
+		const onError = (e: Error) => {
+			socket.removeListener("data", onData);
+			cb(e);
+		};
+		socket.once("error", onError);
+		socket.once("connect", () => {
+			socket.write(`CONNECT ${target.hostname}:${targetPort} HTTP/1.1\r\nHost: ${target.hostname}:${targetPort}\r\n\r\n`);
+		});
+		let buf = "";
+		const onData = (chunk: Buffer) => {
+			buf += chunk.toString("latin1");
+			const idx = buf.indexOf("\r\n\r\n");
+			if (idx < 0) return;
+			socket.removeListener("data", onData);
+			socket.removeListener("error", onError);
+			const head = buf.slice(0, idx);
+			const m = /^HTTP\/\d+\.\d+\s+(\d+)/.exec(head);
+			if (!m || Number(m[1]) !== 200) {
+				socket.destroy();
+				cb(new Error(`代理 CONNECT 失败：${m ? `HTTP ${m[1]}` : "响应无法解析"}`));
+				return undefined;
+			}
+			if (target.protocol === "https:") {
+				const tlsSocket = tls.connect({ socket, servername: target.hostname });
+				tlsSocket.once("secureConnect", () => cb(null, tlsSocket));
+				tlsSocket.once("error", (e) => {
+					socket.removeListener("error", onError);
+					cb(e);
+				});
+			} else {
+				cb(null, socket);
+			}
+			return undefined;
+		};
+		socket.on("data", onData);
+		return undefined;
+	};
+}
+
+/** 判断失败是否属于“被墙/网络不可达”类，适合触发代理重试 */
+function isWalledFailure(e: unknown, httpStatus?: number): boolean {
+	if (httpStatus != null && httpStatus > 0) {
+		if (httpStatus === 403 || httpStatus === 451 || httpStatus === 429 || httpStatus >= 500) return true;
+	}
+	if (e instanceof Error) {
+		const name = e.name;
+		const msg = e.message.toLowerCase();
+		if (name === "AbortError" || name === "TimeoutError" || name === "TypeError") return true;
+		if (
+			msg.includes("fetch failed") ||
+			msg.includes("getaddrinfo") ||
+			msg.includes("econnrefused") ||
+			msg.includes("econnreset") ||
+			msg.includes("etimedout") ||
+			msg.includes("enotfound") ||
+			msg.includes("socket") ||
+			msg.includes("timeout") ||
+			msg.includes("network") ||
+			msg.includes("blocked") ||
+			msg.includes("reset") ||
+			msg.includes("refused") ||
+			msg.includes("unreachable")
+		) return true;
+	}
+	return false;
+}
+
+/** 创建本地超时控制器，并监听外部取消信号 */
+function makeTimeoutSignal(timeoutMs: number, outerSignal?: AbortSignal): { controller: AbortController; cleanup: () => void } {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	const onAbort = () => controller.abort();
+	outerSignal?.addEventListener("abort", onAbort);
+	const cleanup = () => {
+		clearTimeout(timer);
+		outerSignal?.removeEventListener("abort", onAbort);
+	};
+	return { controller, cleanup };
+}
+
+/** 读取响应体为 Uint8Array（兼容 global fetch 的 ArrayBuffer 与 Node http/https 的 Buffer） */
+async function resBytes(res: FRes): Promise<Uint8Array> {
+	const raw = await res.arrayBuffer();
+	return raw instanceof ArrayBuffer ? new Uint8Array(raw) : (raw as Uint8Array);
+}
+
+/** 直接 fetch（global fetch + 超时） */
+async function directFetch(url: string, init: any, timeoutMs: number, outerSignal?: AbortSignal): Promise<FRes> {
+	const { controller, cleanup } = makeTimeoutSignal(timeoutMs, outerSignal);
+	try {
+		return (await fetch(url, { ...init, signal: controller.signal })) as unknown as FRes;
+	} finally {
+		cleanup();
+	}
+}
+
+/** 底层单次请求：Node http/https + createConnection（代理隧道），返回统一 FRes（响应体已解码 gzip/br/deflate） */
+function nodeHttpRequest(
+	targetUrl: string,
+	headers: Record<string, string>,
+	createConnection: (opts: any, cb: (err: Error | null, socket?: any) => void) => undefined,
+	signal: AbortSignal,
+): Promise<FRes> {
+	return new Promise((resolve, reject) => {
+		const mod = targetUrl.startsWith("https:") ? https : http;
+		const req = mod.get(
+			targetUrl,
+			{ headers, createConnection, signal },
+			(res) => {
+				const status = res.statusCode ?? 0;
+				const chunks: Buffer[] = [];
+				res.on("data", (c: Buffer) => chunks.push(c));
+				res.on("end", () => {
+					const raw = Buffer.concat(chunks);
+					const hs = res.headers as Record<string, string | string[] | undefined>;
+					resolve({
+						ok: status >= 200 && status < 300,
+						status,
+						url: targetUrl,
+						headers: {
+							get: (name: string) => {
+								const v = hs[name.toLowerCase()];
+								return Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
+							},
+						},
+						arrayBuffer: async () => {
+							const enc = (hs["content-encoding"] ?? "").toString().toLowerCase();
+							if (enc.includes("gzip")) return zlib.gunzipSync(raw);
+							if (enc.includes("br")) return zlib.brotliDecompressSync(raw);
+							if (enc.includes("deflate")) return zlib.inflateSync(raw);
+							return raw;
+						},
+					});
+				});
+			},
+		);
+		req.on("error", reject);
+		req.end();
+	});
+}
+
+/** 经代理 fetch（内置 CONNECT 隧道，跟随重定向 + 超时） */
+async function proxyFetch(url: string, init: any, timeoutMs: number, outerSignal?: AbortSignal): Promise<FRes> {
+	const proxyUrl = getProxyUrl();
+	if (!proxyUrl) throw new Error("未配置代理");
+	const { controller, cleanup } = makeTimeoutSignal(timeoutMs, outerSignal);
+	try {
+		// 跟随重定向（最多 5 跳），每跳重建 CONNECT 隧道
+		let cur = url;
+		for (let i = 0; i <= 5; i++) {
+			const conn = makeProxyConnection(cur, proxyUrl);
+			const res = await nodeHttpRequest(cur, init.headers ?? browserHeaders(UA_POOL[0]), conn, controller.signal);
+			if (res.status >= 300 && res.status < 400) {
+				const loc = res.headers.get("location");
+				if (loc) {
+					cur = new URL(loc, cur).href;
+					continue;
+				}
+			}
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			return res;
+		}
+		throw new Error("重定向次数过多");
+	} finally {
+		cleanup();
+	}
+}
+
+/** 通用 fetch 包装：直接失败且被墙/网络不可达时，自动经代理重试一次 */
+async function fetchWithRetry(url: string, init: any, timeoutMs: number, outerSignal?: AbortSignal): Promise<FRes> {
+	const direct = await directFetch(url, init, timeoutMs, outerSignal).catch((e) => e as Error);
+	if (!(direct instanceof Error)) return direct;
+	const status = Number(/^HTTP (\d{3})/.exec(direct.message)?.[1] ?? 0);
+	if (isWalledFailure(direct, status)) {
+		const proxyUrl = getProxyUrl();
+		if (proxyUrl) {
+			const proxy = await proxyFetch(url, init, timeoutMs, outerSignal).catch((e) => e as Error);
+			if (!(proxy instanceof Error)) return proxy;
+			throw new Error(`直接访问失败，经代理 ${proxyUrl} 重试仍失败：${proxy.message}（原始错误：${direct.message}）`);
+		}
+	}
+	throw direct;
+}
+
 /** 单次搜索返回给 agent 的结果条数上限 */
 const MAX_RESULTS = 10;
 /** 搜索单源超时（毫秒） */
@@ -129,18 +362,12 @@ function decodeBody(bytes: Uint8Array, ctypeHeader: string): string {
 	return new TextDecoder(detectCharset(bytes, ctypeHeader)).decode(bytes);
 }
 
-/** GET 文本（浏览器标准请求头 / 超时），非 2xx 抛错 */
+/** GET 文本（浏览器标准请求头 / 超时），非 2xx 抛错；直接失败且被墙/网络不可达时自动经代理重试 */
 async function httpGet(url: string, timeoutMs: number): Promise<string> {
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
-	try {
-		const res = await fetch(url, { headers: browserHeaders(UA_POOL[0]), signal: controller.signal, redirect: "follow" });
-		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		const buf = await res.arrayBuffer();
-		return decodeBody(new Uint8Array(buf), res.headers.get("content-type") ?? "");
-	} finally {
-		clearTimeout(timer);
-	}
+	const res = await fetchWithRetry(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, timeoutMs);
+	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	const buf = await resBytes(res);
+	return decodeBody(buf, res.headers.get("content-type") ?? "");
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +551,38 @@ function htmlToMarkdown(html: string, baseUrl: string): { markdown: string; titl
 	return { markdown, title: stripTags(doc.title ?? "") };
 }
 
+/** 抓取页面：先直连，被拒/网络不可达时换 UA 再试，仍失败且配置了代理则经代理重试 */
+async function fetchPageWithFallback(url: string, outerSignal?: AbortSignal): Promise<FRes> {
+	const direct0 = await directFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
+	if (!(direct0 instanceof Error)) return direct0;
+	const status0 = Number(/^HTTP (\d{3})/.exec(direct0.message)?.[1] ?? 0);
+	// 服务端拒绝类：先尝试换 UA 重试
+	if (status0 >= 500 || status0 === 403 || status0 === 406 || status0 === 429) {
+		const direct1 = await directFetch(url, { headers: browserHeaders(UA_POOL[1] ?? UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
+		if (!(direct1 instanceof Error)) return direct1;
+		const status1 = Number(/^HTTP (\d{3})/.exec(direct1.message)?.[1] ?? 0);
+		if (isWalledFailure(direct1, status1)) {
+			const proxyUrl = getProxyUrl();
+			if (proxyUrl) {
+				const proxy0 = await proxyFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
+				if (!(proxy0 instanceof Error)) return proxy0;
+				throw new Error(`直接访问失败且换 UA/经代理 ${proxyUrl} 重试仍失败：${proxy0.message}（原始错误：${direct0.message}）`);
+			}
+		}
+		throw new Error(httpStatusHint(status1, true));
+	}
+	// 网络级被墙/不可达：直接走代理
+	if (isWalledFailure(direct0, status0)) {
+		const proxyUrl = getProxyUrl();
+		if (proxyUrl) {
+			const proxy0 = await proxyFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
+			if (!(proxy0 instanceof Error)) return proxy0;
+			throw new Error(`直接访问失败，经代理 ${proxyUrl} 重试仍失败：${proxy0.message}（原始错误：${direct0.message}）`);
+		}
+	}
+	throw direct0;
+}
+
 /** 抓取 URL → markdown（校验协议 / 非 HTML 报错 / 字节上限 / 字符截断） */
 async function fetchAsMarkdown(
 	url: string,
@@ -339,63 +598,34 @@ async function fetchAsMarkdown(
 	if (u.protocol !== "http:" && u.protocol !== "https:") {
 		throw new Error(`仅支持 http/https URL，收到 ${u.protocol}//`);
 	}
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-	const onAbort = () => controller.abort();
-	signal?.addEventListener("abort", onAbort);
-	// 首次默认浏览器标识；被拒（403/406/429）或服务端错误（5xx）时换备用标识重试一次；超时（AbortError）与其余 4xx 不重试
-	const doFetch = async (ua: string): Promise<Response> => {
-		const res = await fetch(u.href, {
-			headers: browserHeaders(ua),
-			signal: controller.signal,
-			redirect: "follow",
-		});
-		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		return res;
-	};
-	let res: Response;
+	let res: FRes;
 	try {
-		res = await doFetch(UA_POOL[0]);
+		res = await fetchPageWithFallback(u.href, signal);
 	} catch (e) {
-		const status = e instanceof Error ? Number(/^HTTP (\d{3})/.exec(e.message)?.[1] ?? 0) : 0;
-		if (status >= 500 || status === 429 || status === 403 || status === 406) {
-			await new Promise((r) => setTimeout(r, 400));
-			try {
-				res = await doFetch(UA_POOL[1] ?? UA_POOL[0]);
-			} catch (e2) {
-				throw new Error(httpStatusHint(status, true));
-			}
-		} else {
-			throw new Error(httpStatusHint(status, false));
-		}
+		throw new Error(e instanceof Error ? e.message : String(e));
 	}
 	const ctype = (res.headers.get("content-type") ?? "").toLowerCase();
 	if (ctype && !ctype.includes("html") && !ctype.includes("text/") && !ctype.includes("xml")) {
 		throw new Error(`非 HTML 内容（${ctype}），无法转 markdown；请改用 web_search 查摘要`);
 	}
-	const buf = await res.arrayBuffer();
+	const buf = await resBytes(res);
 	const bytes = Math.min(buf.byteLength, FETCH_MAX_BYTES);
-	const html = decodeBody(new Uint8Array(buf, 0, bytes), res.headers.get("content-type") ?? "");
-	try {
-		const { markdown, title } = htmlToMarkdown(html, u.href);
-		let out = markdown;
-		let truncated = bytes < buf.byteLength; // 字节被截断
-		if (out.length > maxChars) {
-			// 尽量在 maxChars 附近的行边界截断（太靠前的行边界就硬切）
-			let cut = out.lastIndexOf("\n", maxChars);
-			if (cut < maxChars * 0.7) cut = maxChars;
-			out = out.slice(0, cut).trimEnd();
-			truncated = true;
-		}
-		// 正文极短：可能是需登录 / JS 渲染 / 空壳页面，如实提示避免误判为抓取成功
-		if (out.trim().length < 80) {
-			out += "\n\n> ⚠️ 页面正文极短——可能需登录、JS 渲染或页面已失效，内容可信度有限，建议用 web_search 核对。";
-		}
-		return { markdown: out, title, finalUrl: res.url || u.href, bytes: buf.byteLength, truncated };
-	} finally {
-		clearTimeout(timer);
-		signal?.removeEventListener("abort", onAbort);
+	const html = decodeBody(buf.subarray(0, bytes), res.headers.get("content-type") ?? "");
+	const { markdown, title } = htmlToMarkdown(html, u.href);
+	let out = markdown;
+	let truncated = bytes < buf.byteLength; // 字节被截断
+	if (out.length > maxChars) {
+		// 尽量在 maxChars 附近的行边界截断（太靠前的行边界就硬切）
+		let cut = out.lastIndexOf("\n", maxChars);
+		if (cut < maxChars * 0.7) cut = maxChars;
+		out = out.slice(0, cut).trimEnd();
+		truncated = true;
 	}
+	// 正文极短：可能是需登录 / JS 渲染 / 空壳页面，如实提示避免误判为抓取成功
+	if (out.trim().length < 80) {
+		out += "\n\n> ⚠️ 页面正文极短——可能需登录、JS 渲染或页面已失效，内容可信度有限，建议用 web_search 核对。";
+	}
+	return { markdown: out, title, finalUrl: res.url || u.href, bytes: buf.byteLength, truncated };
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +731,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"抓取网页 URL 并自动转换为 markdown（正文提取 + 去导航广告 + 截断，节约 tokens）。"
 			+ "适合深读 web_search 找到的链接、官方文档、README。"
-			+ "被墙/反爬站点（如 GitHub 直连）会失败，此时改用 web_search 查摘要。"
+			+ "被墙/反爬站点（如 GitHub 直连）会先尝试直连 + 换 UA + 经代理重试，仍失败时改用 web_search 查摘要。"
 			+ `默认返回前 ${DEFAULT_MAX_CHARS} 字符，上限 ${MAX_CHARS_LIMIT} 字符。`,
 		promptSnippet: "抓取网页转 markdown：web_fetch(URL[, maxChars]) → 正文",
 		renderCall: (args, theme) =>
