@@ -10,6 +10,8 @@
  * 实现要点：
  *   - 子模块独立运行，不依赖 hud-core；缺失时 HUD 仅显示「⎇ 模块缺失」。
  *   - 所有 git 命令使用 `execFile` 直接调用，避免 shell 注入；路径作为独立参数传递。
+ *   - git 输出路径默认按 core.quotePath 做 C-style 转义（中文/空格等特殊字符被引号+八进制
+ *     包裹），解析时统一经 `gitUnquotePath` 解码后才用于显示与操作，否则删除/暂存会因假路径失败。
  *   - 面板使用 `ctx.ui.custom()` 的 overlay 渲染，内置 commit message 输入行。
  *   - AI 生成走 `completeSimple` 单次调用（复用 explore 的子模型选择策略），不占用主会话上下文。
  *   - 文件列表右侧通过 `git diff --numstat` 显示 +/-/binary 预览，不占用额外空间。
@@ -21,7 +23,7 @@ import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { unlink } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const execFileAsync = promisify(execFile);
@@ -115,6 +117,70 @@ export async function isGitRepo(cwd: string): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
+// git 路径引号转义解码
+// ---------------------------------------------------------------------------
+
+/**
+ * 解码 git 的 C-style 路径转义（core.quotePath 默认开启，路径含非 ASCII / 空格 /
+ * 引号等字符时整体被引号包裹、特殊字节转成 \ooo 八进制），返回真实文件名字符串。
+ * 未加引号的路径原样返回。
+ */
+export function gitUnquotePath(raw: string): string {
+	if (raw.length < 2 || raw[0] !== '"' || raw[raw.length - 1] !== '"') return raw;
+	const body = raw.slice(1, -1);
+	const bytes: number[] = [];
+	let i = 0;
+	while (i < body.length) {
+		const ch = body[i];
+		if (ch !== "\\") {
+			bytes.push(ch.codePointAt(0)!);
+			i++;
+			continue;
+		}
+		const next = body[i + 1];
+		if (next !== undefined && next >= "0" && next <= "7") {
+			// 3 位八进制字节（非 ASCII 字符的 UTF-8 编码）
+			bytes.push(parseInt(body.slice(i + 1, i + 4), 8));
+			i += 4;
+		} else {
+			const escapes: Record<string, number> = {
+				a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92,
+			};
+			const code = next !== undefined ? escapes[next] : undefined;
+			if (code !== undefined) {
+				bytes.push(code);
+				i += 2;
+			} else {
+				// 未知转义：保留反斜杠原样（git 不会输出，防御性兜底）
+				bytes.push(92);
+				i++;
+			}
+		}
+	}
+	return Buffer.from(bytes).toString("utf8");
+}
+
+/** 判断 s[i] 处的双引号是否为转义引号 `\"`（前面连续反斜杠个数为奇数）。 */
+function isEscapedQuote(s: string, i: number): boolean {
+	let backslashes = 0;
+	for (let j = i - 1; j >= 0 && s[j] === "\\"; j--) backslashes++;
+	return backslashes % 2 === 1;
+}
+
+/** 在「引号外」查找分隔符（如 status 的 ` -> ` / numstat 的 ` => `）位置，找不到返回 -1。git 输出中分隔符永远在引号包裹之外。 */
+function findSeparatorOutsideQuotes(s: string, sep: string): number {
+	let inQuote = false;
+	for (let i = 0; i <= s.length - sep.length; i++) {
+		if (s[i] === '"' && !isEscapedQuote(s, i)) {
+			inQuote = !inQuote;
+		} else if (!inQuote && s.startsWith(sep, i)) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+// ---------------------------------------------------------------------------
 // 状态解析
 // ---------------------------------------------------------------------------
 
@@ -168,12 +234,14 @@ export function parseDetailedGitStatus(stdout: string): Omit<GitDetailedStatus, 
 		const x = xy[0];
 		const y = xy[1];
 
-		let path = rest;
+		let path: string;
 		let renamedFrom: string | undefined;
-		const arrowIdx = rest.indexOf(" -> ");
+		const arrowIdx = findSeparatorOutsideQuotes(rest, " -> ");
 		if (arrowIdx !== -1) {
-			renamedFrom = rest.slice(0, arrowIdx);
-			path = rest.slice(arrowIdx + 4);
+			renamedFrom = gitUnquotePath(rest.slice(0, arrowIdx));
+			path = gitUnquotePath(rest.slice(arrowIdx + 4));
+		} else {
+			path = gitUnquotePath(rest);
 		}
 
 		let category: GitFileStatus["category"];
@@ -208,8 +276,8 @@ export function parseNumStats(stdout: string): Record<string, GitFileStat> {
 		if (!path) continue;
 		const binary = added === "-" && removed === "-";
 		// 重命名时 numstat 路径为 `old => new`（与 status 的 `old -> new` 不同），取目标路径
-		const arrowIdx = path.indexOf(" => ");
-		const realPath = arrowIdx !== -1 ? path.slice(arrowIdx + 4) : path;
+		const arrowIdx = findSeparatorOutsideQuotes(path, " => ");
+		const realPath = arrowIdx !== -1 ? gitUnquotePath(path.slice(arrowIdx + 4)) : gitUnquotePath(path);
 		result[realPath] = {
 			added: binary ? 0 : Number(added) || 0,
 			removed: binary ? 0 : Number(removed) || 0,
@@ -264,10 +332,10 @@ export async function gitDiscard(cwd: string, paths: string[]): Promise<void> {
 	await git(cwd, ["checkout", "HEAD", "--", ...paths]);
 }
 
-/** 删除未跟踪文件（路径相对于 cwd）。 */
+/** 删除未跟踪文件或目录（路径相对于 cwd；git 对未跟踪目录输出整目录条目，须递归删除）。 */
 export async function gitRemoveUntracked(cwd: string, paths: string[]): Promise<void> {
 	for (const p of paths) {
-		await unlink(resolve(cwd, p));
+		await rm(resolve(cwd, p), { recursive: true, force: true });
 	}
 }
 

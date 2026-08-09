@@ -40,6 +40,7 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       hud-balance.ts#       hud-balance：供应商余额适配器（BALANCE_ADAPTERS 注册表）
       hud-cost.ts   #       hud-cost：消耗统计 / DeepSeek 定价 / 按量付费文本 / 实时汇率
       hud-git.ts    #       hud-git：git 状态解析
+      test/         #       hud-git 路径引号解码回归测试（node src/extensions/hud/test/unquote.test.mjs）
     btw.ts        #     /btw 临时旁支问答浮层 + /btw-config 模型配置（设置持久化到 ~/.pi/agent/btw-config.json）
     btf-think.ts  #   思考折叠标签动画（Thinking... 逐帧动画，独立 UI 反馈插件）
     claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn、双击 Ctrl+C 预填 /rewind 回退

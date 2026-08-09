@@ -6,5 +6,5 @@ docs/
 # dist/ 是构建产物（build.js 生成）：每次 install 自动重建，不入库
 dist/
 
-# test 临时构建产物（render.test.mjs 的 esbuild bundle，每次测试重新生成）
-src/extensions/workflow-mgr/test/.tmp-bundle.mjs
+# test 临时构建产物（各扩展回归测试的 esbuild bundle/mock，每次测试重新生成）
+src/extensions/*/test/.tmp-*
