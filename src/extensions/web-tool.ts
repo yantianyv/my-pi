@@ -324,8 +324,11 @@ async function fetchWithRetry(url: string, init: any, timeoutMs: number, outerSi
 const MAX_RESULTS = 10;
 /** 搜索单源超时（毫秒） */
 const SEARCH_TIMEOUT_MS = 15_000;
-/** fetch 整体超时（毫秒，含抓取 + 解析转换） */
-const FETCH_TIMEOUT_MS = 20_000;
+/** 直连超时（毫秒）：被墙站点直连多为连接黑洞（挂到超时），短超时快速切降级；
+ *  正常站 1-3s 足够，5s 已偏激进，误伤时 curl 兜底仍能拿到结果（降级不算失败） */
+const DIRECT_TIMEOUT_MS = 5_000;
+/** 降级超时（毫秒，curl/代理兜底的最后手段，给足时间但不放纵） */
+const FALLBACK_TIMEOUT_MS = 12_000;
 /** fetch 抓取 body 大小上限（超出截断，防超大页面撑爆内存） */
 const FETCH_MAX_BYTES = 3 * 1024 * 1024;
 /** fetch 返回 markdown 默认最大字符数 */
@@ -592,7 +595,7 @@ async function curlFetch(url: string, timeoutMs: number, outerSignal?: AbortSign
 	const args = [
 		"-sS", "-f", "-L", "--max-redirs", "10",
 		"--max-time", String(Math.max(5, Math.ceil(timeoutMs / 1000))),
-		"--connect-timeout", "10",
+		"--connect-timeout", "5",
 		"-A", UA_POOL[0],
 		"-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 	];
@@ -635,38 +638,92 @@ async function curlFetch(url: string, timeoutMs: number, outerSignal?: AbortSign
 	};
 }
 
-/** 抓取页面：直连（含换 UA）→ 降级一步到位（curl 自动带代理；无 curl 时退 Node CONNECT 隧道）。
- *  curl 本身 = 代理 + 不同 TLS 指纹（schannel/可响应 renegotiation），能同时解决被墙与 301 挑战，
- *  故 curl 可用时 Node CONNECT 隧道那一跳完全冗余，降级链压缩为 2 跳。 */
-async function fetchPageWithFallback(url: string, outerSignal?: AbortSignal): Promise<FRes> {
-	// 阶段 1：Node 直连（默认 UA；HTTP 拒绝类换 UA 重试一次）
-	const direct0 = await directFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
-	if (!(direct0 instanceof Error)) return direct0;
-	const status0 = Number(/^HTTP (\d{3})/.exec(direct0.message)?.[1] ?? 0);
-	let directErr: Error = direct0;
-	if (status0 >= 500 || status0 === 403 || status0 === 406 || status0 === 429) {
-		const direct1 = await directFetch(url, { headers: browserHeaders(UA_POOL[1] ?? UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
-		if (!(direct1 instanceof Error)) return direct1;
-		const status1 = Number(/^HTTP (\d{3})/.exec(direct1.message)?.[1] ?? 0);
-		if (!isWalledFailure(direct1, status1)) throw new Error(httpStatusHint(status1, true));
-		directErr = direct1;
-	} else if (!isWalledFailure(direct0, status0)) {
-		throw direct0; // 非墙类错误（404 等）不降级
+/** 多信号合并：任一 aborted 即整体 aborted（用户取消 + 内部竞速指断） */
+function mergeSignals(...signals: Array<AbortSignal | undefined>): AbortSignal {
+	const c = new AbortController();
+	for (const s of signals) {
+		if (!s) continue;
+		if (s.aborted) {
+			c.abort();
+			break;
+		}
+		s.addEventListener("abort", () => c.abort(), { once: true });
 	}
+	return c.signal;
+}
 
-	// 阶段 2：降级一步到位——curl（自动带代理）；无 curl 才退 Node CONNECT 隧道
-	const proxyUrl = getProxyUrl();
-	if (await hasCurl()) {
-		const curlRes = await curlFetch(url, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
-		if (!(curlRes instanceof Error)) return curlRes;
-		throw new Error(`直连失败（${directErr.message}），curl 降级${proxyUrl ? `（经代理 ${proxyUrl}）` : ""}仍失败：${curlRes.message}`);
-	}
-	if (proxyUrl) {
-		const proxy0 = await proxyFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FETCH_TIMEOUT_MS, outerSignal).catch((e) => e as Error);
-		if (!(proxy0 instanceof Error)) return proxy0;
-		throw new Error(`直连失败（${directErr.message}），经代理 ${proxyUrl} 重试仍失败：${proxy0.message}`);
-	}
-	throw directErr;
+/** 决定性失败：资源级裁决（404/410 等非墙类 4xx），任何传输方式结果相同，竞速时无需等另一条 */
+class DecisiveError extends Error {}
+
+/** 非墙类 HTTP 错误 → DecisiveError；其余（墙类/网络类）保持普通错误 */
+function decisiveIfHttp(e: Error): Error {
+	const m = /^HTTP (\d{3})/.exec(e.message);
+	return m && !isWalledFailure(e, Number(m[1])) ? new DecisiveError(e.message) : e;
+}
+
+/** 竞速：第一个成功 resolve（带来源索引）；决定性失败立即 reject；全部失败才 reject（聚合各错误） */
+async function raceFirstSuccess<T>(promises: Promise<T>[]): Promise<{ index: number; value: T }> {
+	return new Promise((resolve, reject) => {
+		let settled = 0;
+		const errors: Error[] = [];
+		promises.forEach((p, i) => {
+			p.then(
+				(value) => resolve({ index: i, value }),
+				(e) => {
+					if (e instanceof DecisiveError) {
+						reject(e);
+						return;
+					}
+					settled++;
+					errors.push(e instanceof Error ? e : new Error(String(e)));
+					if (settled === promises.length) reject(new Error(errors.map((x) => x.message).join("；")));
+				},
+			);
+		});
+	});
+}
+
+/** 抓取页面：直连（含换 UA）与降级（curl 自动带代理 / 无 curl 退 Node CONNECT 隧道）**并行竞速**，
+ *  谁先成功用谁、另一条立即指断——被墙站点 curl 秒回，不再傻等直连连接黑洞超时；
+ *  404 等确定性错误立即判死（任何传输方式结果相同，不等另一条）。 */
+async function fetchPageWithFallback(url: string, outerSignal?: AbortSignal): Promise<FRes> {
+	const directAbort = new AbortController();
+	const fallbackAbort = new AbortController();
+	const sig = (s: AbortSignal) => mergeSignals(outerSignal, s);
+
+	// 直连分支：默认 UA；HTTP 拒绝类换 UA 重试一次；失败 throw
+	const directPath = (async (): Promise<FRes> => {
+		const d0 = await directFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, DIRECT_TIMEOUT_MS, sig(directAbort.signal)).catch((e) => e as Error);
+		if (!(d0 instanceof Error)) return d0;
+		const s0 = Number(/^HTTP (\d{3})/.exec(d0.message)?.[1] ?? 0);
+		if (s0 >= 500 || s0 === 403 || s0 === 406 || s0 === 429) {
+			const d1 = await directFetch(url, { headers: browserHeaders(UA_POOL[1] ?? UA_POOL[0]), redirect: "follow" }, DIRECT_TIMEOUT_MS, sig(directAbort.signal)).catch((e) => e as Error);
+			if (!(d1 instanceof Error)) return d1;
+			const s1 = Number(/^HTTP (\d{3})/.exec(d1.message)?.[1] ?? 0);
+			if (!isWalledFailure(d1, s1)) throw new DecisiveError(httpStatusHint(s1, true));
+		} else if (!isWalledFailure(d0, s0)) {
+			throw new DecisiveError(d0.message); // 404 等确定性错误：不等另一条
+		}
+		throw d0;
+	})();
+
+	// 降级分支：curl 一步到位（自动带代理）；无 curl 退 Node CONNECT 隧道；两者皆无 throw
+	const fallbackPath = (async (): Promise<FRes> => {
+		const proxyUrl = getProxyUrl();
+		try {
+			if (await hasCurl()) return await curlFetch(url, FALLBACK_TIMEOUT_MS, sig(fallbackAbort.signal));
+			if (proxyUrl) return await proxyFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FALLBACK_TIMEOUT_MS, sig(fallbackAbort.signal));
+			throw new Error("未配置代理且系统无 curl");
+		} catch (e) {
+			throw decisiveIfHttp(e instanceof Error ? e : new Error(String(e)));
+		}
+	})();
+
+	const { index, value } = await raceFirstSuccess([directPath, fallbackPath]);
+	// 已有一条成功：掐掉另一条在途请求，避免幽灵连接/定时器残留
+	if (index === 0) fallbackAbort.abort();
+	else directAbort.abort();
+	return value;
 }
 
 /** 抓取 URL → markdown（校验协议 / 非 HTML 报错 / 字节上限 / 字符截断） */
