@@ -7,6 +7,7 @@
  */
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
 import { Type, type Static } from "typebox";
 import {
 	cloneWorkflow,
@@ -21,7 +22,8 @@ import {
 } from "./store";
 import { lightState, renderBrief, summaryLine } from "./brief";
 import { updateWidget } from "./panel";
-import type { TaskDef, WorkflowMode } from "./types";
+import type { TaskDef, WorkflowDef, WorkflowMode } from "./types";
+import { WORKFLOW_SCHEMA_VERSION } from "./types";
 
 /* ============================== 工具参数 schema ============================== */
 
@@ -53,9 +55,9 @@ const milestoneParams = Type.Object({
 	newName: Type.Optional(Type.String({ description: "改名（name 存在时更新名称，保留日期/完成态）" })),
 });
 const workflowParams = Type.Object({
-	action: StringEnum(["list", "add", "edit", "remove", "archive", "reset"], {
+	action: StringEnum(["list", "add", "edit", "remove", "archive", "reset", "import"], {
 		description:
-			"操作类型：list 查看全量；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段；remove 删除任务；archive 归档整个工作流（收尾退出视野，数据留档）；reset 清空工作流",
+			"操作类型：list 查看全量；import 初始化一次性导入（见 wf_workflow 描述，建新工作流优先用它）；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段；remove 删除任务；archive 归档整个工作流（收尾退出视野，数据留档）；reset 清空工作流",
 	}),
 	mode: Type.Optional(
 		StringEnum(["human-ai", "agent"], {
@@ -76,6 +78,9 @@ const workflowParams = Type.Object({
 	deliverable: Type.Optional(Type.String({ description: "交付物" })),
 	doneSignal: Type.Optional(Type.String({ description: "完成信号（AI 据此验证）" })),
 	deps: Type.Optional(Type.Array(Type.String({ description: "依赖的任务 id 列表（传空数组清空）" }))),
+	path: Type.Optional(
+		Type.String({ description: "草稿 json 文件路径（仅 import 用）：初始化一次性导入，结构见工具描述中的示例" }),
+	),
 });
 
 type SwitchParams = Static<typeof switchParams>;
@@ -102,6 +107,23 @@ function taskDetail(
 
 const err = (text: string) => ({ content: [{ type: "text" as const, text }], details: { kind: "error" as const } });
 
+/** 依赖环检测（导入全图校验用）：从每个起点 DFS 沿 deps 走，回到起点即环，返回环链路 */
+function findCycle(tasks: { id: string; deps: string[] }[]): string | null {
+	const byId = new Map(tasks.map((t) => [t.id, t]));
+	for (const start of tasks) {
+		const stack: { task: { id: string; deps: string[] }; path: string[] }[] = [{ task: start, path: [start.id] }];
+		while (stack.length) {
+			const cur = stack.pop()!;
+			for (const d of cur.task.deps) {
+				const next = byId.get(d);
+				if (d === start.id) return [...cur.path, d].join(" → ");
+				if (next) stack.push({ task: next, path: [...cur.path, d] });
+			}
+		}
+	}
+	return null;
+}
+
 /** 状态/工作流变更后：落盘 + 刷新常驻 UI（供工具与命令共用） */
 export function commitAndRefresh(ctx: ExtensionContext): void {
 	const s = getStore(ctx);
@@ -118,10 +140,12 @@ export function registerTools(pi: ExtensionAPI) {
 		label: "工作流定义",
 		description:
 			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）。" +
+			"**初始化优先用 import**：新建工作流时用 write 写一份草稿 json 文件（一次性导入整份计划，远比逐条 add 省 token；add 一般只用于已有工作流的增补调整）。" +
+			"import 草稿结构：{\"mode\":\"human-ai\", \"stages\":[{\"id\":\"design\", \"name\":\"阶段名\", \"goal\":\"阶段目标\", \"tasks\":[{\"title\":\"任务标题\", \"desc\":\"目标\", \"humanTasks\":[], \"aiTasks\":[], \"deliverable\":\"\", \"doneSignal\":\"\", \"deps\":[\"0.1\"]}]}]}——id 缺省自动生成（\"<阶段序号>.<序号>\"，如 0.1/1.2），deps 可直接引用本批未来 id；当前工作流非空时拒绝导入（请先 archive/reset）。" +
 			"list 查看全量（含各任务状态）；add 新增任务（stageId 不存在自动创建阶段，id 缺省自动生成）；" +
 			"edit 修改任务任意字段（传空数组清空列表字段）；remove 删除任务（同步清理状态与空阶段）；" +
 			"archive 归档当前工作流（收尾退出视野：可带 status 描述收尾状态——完成/放弃/其他，快照保留任务真实状态，数据移入 .pi/workflow/archive/ 留档，不提供找回功能，需要时手动查看）；" +
-			"reset 清空工作流（无阶段无任务，不可逆）。规划复杂项目时先用 add 建出完整骨架，再逐步细化。",
+			"reset 清空工作流（无阶段无任务，不可逆）。",
 		promptSnippet: "workflow: create/update the human-AI collaboration workflow definition",
 		parameters: workflowParams,
 		async execute(_id, params: WorkflowParams, _signal, _onUpdate, ctx) {
@@ -152,6 +176,151 @@ export function registerTools(pi: ExtensionAPI) {
 						})
 						.join("\n\n");
 				return { content: [{ type: "text", text }], details: { kind: "workflow-list", state: lightState(state) } };
+			}
+
+			if (params.action === "import") {
+				if (!params.path) return err("wf_workflow import 需要 path（指向草稿 json 文件）");
+				if (wf.stages.length > 0 || Object.keys(state.tasks).length > 0) {
+					return err(
+						`当前工作流非空（${wf.stages.length} 个阶段、${derived.all.length} 个任务）——import 是「初始化一次性导入」，请先 archive/reset 清空；已有工作流的增补请用 add/edit`,
+					);
+				}
+				let raw: string;
+				try {
+					raw = readFileSync(params.path, "utf8");
+				} catch {
+					return err(`读取草稿文件失败：${params.path}（路径不存在或无权限）`);
+				}
+				let draft: unknown;
+				try {
+					draft = JSON.parse(raw);
+				} catch (e) {
+					const msg = String((e as Error).message ?? e);
+					let line = "?";
+					const pm = /position (\d+)/.exec(msg); // node <22：Unexpected token ... at position N
+					if (pm) line = String(raw.slice(0, Number(pm[1])).split("\n").length);
+					else {
+						const fm = /\.\.\."([\s\S]*?)" is not valid JSON/.exec(msg); // node 22+：上下文片段定位（含换行）
+						const idx = fm ? raw.indexOf(fm[1]) : -1;
+						if (idx >= 0) line = String(raw.slice(0, idx).split("\n").length);
+					}
+					return err(`草稿 JSON 解析失败（第 ${line} 行附近）：${msg}`);
+				}
+				// —— 结构校验（宽松校验 + 出错定位到阶段/任务）——
+				const errors: string[] = [];
+				if (!draft || typeof draft !== "object" || !Array.isArray((draft as { stages?: unknown }).stages)) {
+					return err("草稿结构错误：顶层需要 { stages: [...] }（阶段数组）");
+				}
+				const draftObj = draft as { mode?: unknown; stages: unknown[] };
+				const draftMode = draftObj.mode;
+				if (draftMode !== undefined && draftMode !== "human-ai" && draftMode !== "agent") errors.push("mode 仅支持 human-ai / agent");
+				const stages: {
+					id: string;
+					name: string;
+					goal: string;
+					tasks: { title: string; desc: string; humanTasks: string[]; aiTasks: string[]; deliverable: string; doneSignal: string; deps: string[] }[];
+				}[] = [];
+				for (let i = 0; i < draftObj.stages.length; i++) {
+					const s = draftObj.stages[i] as { id?: unknown; name?: unknown; goal?: unknown; tasks?: unknown };
+					const label = `第 ${i + 1} 个阶段`;
+					if (!s || typeof s !== "object") {
+						errors.push(`${label}不是对象`);
+						continue;
+					}
+					if (typeof s.name !== "string" || !s.name.trim()) errors.push(`${label}缺 name（阶段名）`);
+					if (!Array.isArray(s.tasks)) {
+						errors.push(`${label}缺 tasks 数组`);
+						continue;
+					}
+					const tasks: (typeof stages)[number]["tasks"][number][] = [];
+					for (let j = 0; j < s.tasks.length; j++) {
+						const t = s.tasks[j] as {
+							title?: unknown;
+							desc?: unknown;
+							humanTasks?: unknown;
+							aiTasks?: unknown;
+							deliverable?: unknown;
+							doneSignal?: unknown;
+							deps?: unknown;
+						};
+						const tlabel = `${label}的第 ${j + 1} 个任务`;
+						if (!t || typeof t !== "object") {
+							errors.push(`${tlabel}不是对象`);
+							continue;
+						}
+						if (typeof t.title !== "string" || !t.title.trim()) errors.push(`${tlabel}缺 title（任务标题）`);
+						if (t.deps !== undefined && (!Array.isArray(t.deps) || t.deps.some((d) => typeof d !== "string"))) {
+							errors.push(`${tlabel}的 deps 需为字符串数组`);
+						}
+						if (t.humanTasks !== undefined && !Array.isArray(t.humanTasks)) errors.push(`${tlabel}的 humanTasks 需为数组`);
+						if (t.aiTasks !== undefined && !Array.isArray(t.aiTasks)) errors.push(`${tlabel}的 aiTasks 需为数组`);
+						tasks.push({
+							title: typeof t.title === "string" ? t.title : "",
+							desc: typeof t.desc === "string" ? t.desc : "",
+							humanTasks: Array.isArray(t.humanTasks) ? t.humanTasks : [],
+							aiTasks: Array.isArray(t.aiTasks) ? t.aiTasks : [],
+							deliverable: typeof t.deliverable === "string" ? t.deliverable : "",
+							doneSignal: typeof t.doneSignal === "string" ? t.doneSignal : "",
+							deps: Array.isArray(t.deps) ? t.deps : [],
+						});
+					}
+					stages.push({
+						id: typeof s.id === "string" && s.id.trim() ? s.id : String(i),
+						name: typeof s.name === "string" && s.name.trim() ? s.name : `阶段${i + 1}`,
+						goal: typeof s.goal === "string" ? s.goal : "",
+						tasks,
+					});
+				}
+				if (errors.length) {
+					return err(
+						`草稿校验失败：\n${errors
+							.slice(0, 10)
+							.map((e) => `- ${e}`)
+							.join("\n")}${errors.length > 10 ? `\n…共 ${errors.length} 处` : ""}`,
+					);
+				}
+				// —— 构建工作流（id 按 genTaskId 规则自动生成：<阶段序号>.<序号>，deps 引用未来 id 自然匹配）——
+				const newWf: WorkflowDef = {
+					schemaVersion: WORKFLOW_SCHEMA_VERSION,
+					mode: draftMode === "agent" ? "agent" : "human-ai",
+					stages: [],
+				};
+				for (const st of stages) {
+					const stage = { id: st.id, name: st.name, goal: st.goal, tasks: [] as TaskDef[] };
+					newWf.stages.push(stage);
+					for (const t of st.tasks) {
+						stage.tasks.push({ id: genTaskId(newWf, stage), ...t });
+					}
+				}
+				// —— 全量校验：自依赖 / 依赖存在 / 依赖环（带链路）——
+				const all = newWf.stages.flatMap((x) => x.tasks);
+				const ids = new Set(all.map((t) => t.id));
+				for (const t of all) {
+					if (t.deps.includes(t.id)) errors.push(`任务 ${t.id} 不能依赖自己`);
+					for (const d of t.deps) {
+						if (!ids.has(d)) errors.push(`任务 ${t.id} 的依赖 ${d} 不存在（全部任务 id: ${[...ids].join(", ")}）`);
+					}
+				}
+				const cycle = findCycle(all);
+				if (cycle) errors.push(`依赖环：${cycle}`);
+				if (errors.length) return err(`草稿校验失败：\n${errors.join("\n")}`);
+				s.importAll(newWf);
+				updateWidget(ctx, s);
+				const cur = s.getState().currentTaskId;
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`✅ 已导入工作流：${newWf.stages.length} 个阶段、${all.length} 个任务${newWf.mode === "agent" ? "（纯 agent 模式）" : ""}\n` +
+							newWf.stages
+								.map((st) => `- ${st.name}（${st.id}）：${st.tasks.map((t) => `${t.id} ${t.title}`).join("，")}`)
+								.join("\n") +
+							`\n当前任务：${cur ? all.find((t) => t.id === cur)?.title ?? cur : "（无）"}（工作流第一步）`,
+						},
+					],
+					details: { kind: "workflow-import", state: lightState(s.getState()) },
+				};
 			}
 
 			if (params.action === "add") {

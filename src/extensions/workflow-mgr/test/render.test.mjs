@@ -785,6 +785,75 @@ async function scenarioO() {
 	rmSync(dir, { recursive: true, force: true });
 }
 
+/* ============================== 场景 Q：wf_workflow import 一次性导入 ============================== */
+async function scenarioQ() {
+	console.log("\n场景 Q：wf_workflow import 一次性导入（草稿 json → 整份工作流）");
+	const mod = await importBundle();
+	const pi = makePi();
+	mod.default(pi);
+	const dir = makeFixture({ schemaVersion: 1, stages: [] });
+	const ctx = makeCtx(dir);
+	await fireEvent(pi, ctx, "session_start");
+	const t = pi.tools.find((x) => x.name === "wf_workflow");
+
+	// 1. 成功导入：2 阶段 3 任务（批内依赖 0.2→0.1、跨阶段 1.1→0.2；mode agent）
+	const draftPath = join(dir, "draft.json");
+	writeFileSync(
+		draftPath,
+		JSON.stringify({
+			mode: "agent",
+			stages: [
+				{
+					id: "design",
+					name: "拍板",
+					goal: "定稿",
+					tasks: [{ title: "0.1 数据模型", desc: "确定结构", doneSignal: "拍板" }, { title: "0.2 工具语义", deps: ["0.1"] }],
+				},
+				{ id: "impl", name: "实现", tasks: [{ title: "1.1 数据层", deps: ["0.2"] }] },
+			],
+		}),
+	);
+	const r1 = await t.execute("1", { action: "import", path: draftPath }, undefined, undefined, ctx);
+	check("导入返回阶段/任务摘要", r1.content[0].text.includes("2 个阶段") && r1.content[0].text.includes("3 个任务") && r1.content[0].text.includes("纯 agent"));
+	const wf = JSON.parse(readFile(join(dir, ".pi", "workflow", "workflow.json")));
+	check("导入生成 workflow.json：阶段与 id 正确", wf.stages.length === 2 && wf.stages[0].tasks[0].id === "0.1" && wf.stages[1].tasks[0].id === "1.1");
+	check("导入 mode 生效", wf.mode === "agent");
+	check("批内未来 id 依赖解析正确", wf.stages[0].tasks[1].deps[0] === "0.1" && wf.stages[1].tasks[0].deps[0] === "0.2");
+	const st = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	check("导入后当前任务 = 第一步 0.1", st.currentTaskId === "0.1");
+
+	// 2. 非空拒绝：已导入（非空）后再 import → 报错
+	const r2 = await t.execute("2", { action: "import", path: draftPath }, undefined, undefined, ctx);
+	check("非空时拒绝导入", r2.details?.kind === "error" && r2.content[0].text.includes("非空"));
+
+	// 3. reset 后坏 JSON → 行号定位
+	await t.execute("3", { action: "reset" }, undefined, undefined, ctx);
+	const badPath = join(dir, "bad.json");
+	writeFileSync(badPath, '{\n  "stages": [\n    {"name": "x", "tasks": [}\n  ]\n}');
+	const r3 = await t.execute("4", { action: "import", path: badPath }, undefined, undefined, ctx);
+	check("坏 JSON 报解析失败（含行号）", r3.details?.kind === "error" && r3.content[0].text.includes("解析失败") && /\d+ 行/.test(r3.content[0].text));
+
+	// 4. 缺 title → 定位到阶段/任务
+	const missPath = join(dir, "miss.json");
+	writeFileSync(missPath, JSON.stringify({ stages: [{ name: "A", tasks: [{ title: "ok" }, { desc: "缺 title" }] }] }));
+	const r4 = await t.execute("5", { action: "import", path: missPath }, undefined, undefined, ctx);
+	check("缺 title 校验定位到任务", r4.details?.kind === "error" && r4.content[0].text.includes("第 1 个阶段的第 2 个任务缺 title"));
+
+	// 5. 依赖不存在 → 报可用 id
+	const depPath = join(dir, "dep.json");
+	writeFileSync(depPath, JSON.stringify({ stages: [{ name: "A", tasks: [{ title: "x", deps: ["9.9"] }] }] }));
+	const r5 = await t.execute("6", { action: "import", path: depPath }, undefined, undefined, ctx);
+	check("依赖不存在报错（含可用 id）", r5.details?.kind === "error" && r5.content[0].text.includes("9.9") && r5.content[0].text.includes("0.1"));
+
+	// 6. 依赖环 → 带链路
+	const cycPath = join(dir, "cyc.json");
+	writeFileSync(cycPath, JSON.stringify({ stages: [{ name: "A", tasks: [{ title: "a", deps: ["0.2"] }, { title: "b", deps: ["0.1"] }] }] }));
+	const r6 = await t.execute("7", { action: "import", path: cycPath }, undefined, undefined, ctx);
+	check("依赖环报错带链路", r6.details?.kind === "error" && r6.content[0].text.includes("0.1 → 0.2"));
+
+	rmSync(dir, { recursive: true, force: true });
+}
+
 /* ============================== 工具：bundle + 加载 ============================== */
 let bundleMod = null;
 async function importBundle() {
@@ -848,6 +917,7 @@ try {
 	await scenarioM();
 	await scenarioN();
 	await scenarioO();
+	await scenarioQ();
 	console.log(failures === 0 ? "\n✅ 全部通过" : `\n❌ ${failures} 项失败`);
 	process.exit(failures === 0 ? 0 : 1);
 } finally {

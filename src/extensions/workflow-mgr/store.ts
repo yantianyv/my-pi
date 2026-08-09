@@ -324,6 +324,21 @@ export class WorkflowStore {
 	}
 
 	/**
+	 * 整体导入（wf_workflow import 用）：用草稿构建的工作流定义整体替换 + 状态重建。
+	 * 初始化一次性导入：当前工作流非空时工具层拒绝（安全策略），此处直接替换。
+	 */
+	importAll(wf: WorkflowDef): void {
+		this.wf = cloneWorkflow(wf);
+		this.derived = null;
+		this.state = freshState(this.wf);
+		if (this.wf.stages.length > 0 && this.wf.stages[0].tasks.length > 0) {
+			this.state.currentTaskId = this.wf.stages[0].tasks[0].id;
+		}
+		this.commitWorkflow();
+		this.commitState();
+	}
+
+	/**
 	 * 归档（wf_workflow archive 用）：把当前工作流三 JSON 移动到 archive/<时间戳>-<名称>/ 留档。
 	 * 归档 ≠ 完成（可能是放弃/暂停/换方案）：不再强制标 done，快照保留任务真实状态，
 	 * 收尾状态经 status 字符串记录（archiveStatus 字段）供追溯；当前工作流区清空

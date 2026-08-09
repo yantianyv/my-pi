@@ -47,8 +47,8 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
     token-saver.ts    #   上下文 token 节省器：自动清洗 bash 工具的冗余输出（git/npm/tsc/pip/docker/--help）
     task-alert.ts     #   任务完成提醒：提示音 + 标题动画 + setStatus 状态推送
     workflow-mgr/     #   人机协作任务面板（多文件扩展源码：build.js 把 index.ts 入口打包成单文件 workflow-mgr.ts）
-      index.ts        #     插件主体（组装薄壳）：tools.ts（7 个工具 wf_workflow/status/switch/block/rollback/note/milestone）+ commands.ts（/workflow-config 只留无参）+ events.ts（session 钩子 + hud 联动 + 条件注入）+ 事件钩子
-      tools.ts       #     工具注册：wf_switch（完成+推进一步到位，complete=false 搁置）/ wf_note（AI 记录，对用户透明）/ wf_milestone（增删改）等 7 工具
+      index.ts        #     插件主体（组装薄壳）：tools.ts（7 个工具 wf_workflow/status/switch/block/rollback/note/milestone，含 import 一次性导入）+ commands.ts（/workflow-config 只留无参）+ events.ts（session 钩子 + hud 联动 + 条件注入）+ 事件钩子
+      tools.ts       #     工具注册：wf_switch（完成+推进一步到位，complete=false 搁置）/ wf_note（AI 记录，对用户透明）/ wf_milestone（增删改）等 7 工具；wf_workflow import 初始化一次性导入（草稿 json，id 自动生成 + 全图环检测带链路，非空拒绝）
       commands.ts    #     /workflow-config 命令：只留无参（TUI 浮窗 / 非 TUI 文本面板），无子命令
       events.ts      #     事件钩子：session_start / hud:state-change / session_shutdown / before_agent_start（三态条件注入）
       store.ts        #     数据层：workflow/state/config 三 JSON 加载保存 + 派生表（含 mode）+ reconcile 一致性 + 依赖环检测
