@@ -58,7 +58,7 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       types.ts        #     TaskDef/StageDef/WorkflowState(mode+notes)/PanelConfig 类型 + schema 常量
       test/render.test.mjs #   渲染回归测试（esbuild bundle + mock pi/ctx；test/node_modules junction 指 pi 全局，不入库；15 场景 A-O）
       test/stale-ctx.test.mjs#  stale ctx 回归测试：session 替换后 getStore 不崩（固化 cwd）+ cwd 变化重建
-    web-tool.ts       #   联网工具：web_search 多源搜索（bing.cn 主 + 360 备 + npm 垂类，零 key 零费用，无 AI 总结）+ web_fetch 抓网页转 markdown（正文提取 + 截断；turndown/domino/gfm 由 build.js 内联）
+    web-tool.ts       #   联网工具：web_search 多源搜索（bing.cn 主 + 360 备 + npm 垂类，零 key 零费用，无 AI 总结）+ web_fetch 抓网页转 markdown（正文提取 + 截断；turndown/domino/gfm 由 build.js 内联）+ /web-tool-config 代理设置面板（被墙自动重试）
 static/              #   静态部署物（无需编译，install.js 直接从这装到 ~/.pi/agent/，见 README 各补丁节；仓库根目录）
   themes/matrix.json  #     黑客帝国荧光绿主题
   sounds/task_complete.wav  #     任务完成提示音

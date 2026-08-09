@@ -162,7 +162,7 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
   - **通用网页**：cn.bing.com RSS 为主 + 360 搜索 HTML 备用，自动降级——bing 免费接口限流特征（连续请求后只回 1 条 item）命中即换 360（实测 360 稳定、`data-mdurl` 带真实 URL）；源顺序在文件顶部可调；
   - **npm 垂类**（`source: "npm"`）：npm registry JSON API 查包名/版本/描述/主页；pypi.org 搜索页有 Client Challenge 反爬，Python 包走默认网页搜索（如 `site:pypi.org/project/`）；
 - **`web_fetch` 抓取转 markdown**：`url` + 可选 `maxChars`（默认 12000、上限 60000）；HTML 经 domino 解析 → 启发式选正文容器（article/main/常见内容 class，回退 body）→ turndown(+gfm) 转 markdown（表格/代码块/列表/引用）→ 相对链接补全为绝对 → 压缩空行/截断；非 HTML（PDF 等）与抓不到的站点如实报错并提示改用搜索；
-- **被墙自动代理重试**：直连失败（网络不可达/超时/403/429/5xx 等）时自动经代理重试一次，**代理仍失败才认定失败**并同时给出原始+代理两个错误；代理来源优先级：环境变量 `WEB_FETCH_PROXY` > `HTTPS_PROXY` > `ALL_PROXY` > `~/.pi/agent/web-fetch-proxy.json` 的 `proxy` 字段（如 `{"proxy":"http://127.0.0.1:7890"}`）；仅支持 `http://` 代理（Clash/V2Ray 等本地代理的常见形态），实现用 Node 内置 net/tls 手写 CONNECT 隧道，**零新增 npm 依赖**；web_search 的搜索请求同样享受该降级；
+- **被墙自动代理重试**：直连失败（网络不可达/超时/403/429/5xx 等）时自动经代理重试一次，**代理仍失败才认定失败**并同时给出原始+代理两个错误；代理由 **`/web-tool-config`** 命令设置——无参数打开设置面板输入 `http://` 地址（Enter 保存 / Esc 取消 / 清空回车 = 清除），或 `/web-tool-config <url>` 直接设置、`/web-tool-config off` 清除、`show` 查看；设置持久化到 `~/.pi/agent/web-fetch-proxy.json`（**不读环境变量**，避免系统 HTTPS_PROXY 意外生效）；仅支持 `http://` 代理（Clash/V2Ray 等本地代理的常见形态），实现用 Node 内置 net/tls 手写 CONNECT 隧道，**零新增 npm 依赖**；web_search 的搜索请求同样享受该降级；
 - **token 节约**：正文提取 + 截断，实测 100KB HTML 页面 → 约 800 字符 markdown；turndown/domino/gfm 由 build.js（esbuild）内联进单文件产物，运行时零外部依赖（build.js external 白名单只留 `@earendil-works/*` 与 `typebox`）；
 - **可调配置**：文件顶部「可调配置」区（源顺序、结果数、超时、字节/字符上限），改后 `node install.js` 重装生效。
 

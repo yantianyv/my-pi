@@ -19,7 +19,7 @@
  * 抓不到的站点（GitHub 等被墙、反爬挑战页）如实报错，提示改用 web_search 查摘要。
  */
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
@@ -27,7 +27,8 @@ import { gfm } from "turndown-plugin-gfm";
 // 类型层面 any 桥接；gfm 类型见 shared/turndown-gfm.d.ts；运行时 esbuild 按真实包名解析
 import { createWindow as _createWindow } from "@mixmark-io/domino";
 import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
-import { loadJsonConfig } from "./shared/config";
+import { loadJsonConfig, saveJsonConfig } from "./shared/config";
+import { renderInputWithCursor } from "./shared/ui";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as http from "node:http";
@@ -89,19 +90,37 @@ interface FRes {
 	arrayBuffer(): Promise<ArrayBuffer | Uint8Array>;
 }
 
-/** 代理 URL 来源优先级：1. WEB_FETCH_PROXY 2. HTTPS_PROXY 3. ALL_PROXY 4. ~/.pi/agent/web-fetch-proxy.json 的 proxy 字段 */
-function getProxyUrl(): string | undefined {
-	const env = process.env.WEB_FETCH_PROXY || process.env.HTTPS_PROXY || process.env.ALL_PROXY;
-	if (env) return env;
-	const cfg = loadJsonConfig<{ proxy?: string }>(
-		path.join(os.homedir(), ".pi", "agent", "web-fetch-proxy.json"),
-		{},
-		(v): v is { proxy?: string } =>
-			v !== null &&
-			typeof v === "object" &&
-			((v as { proxy?: unknown }).proxy === undefined || typeof (v as { proxy?: unknown }).proxy === "string"),
+/** web-tool 代理设置持久化文件（/web-tool-config 写入，reload 后恢复；不读环境变量） */
+const PROXY_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "web-fetch-proxy.json");
+
+/** 代理配置校验：{ proxy?: string }（空串 = 未设置） */
+function isProxyConfig(v: unknown): v is { proxy?: string } {
+	return (
+		v !== null &&
+		typeof v === "object" &&
+		((v as { proxy?: unknown }).proxy === undefined || typeof (v as { proxy?: unknown }).proxy === "string")
 	);
-	return cfg.proxy;
+}
+
+/** 当前代理地址（/web-tool-config 设置，持久化到 PROXY_CONFIG_FILE；空/未设置 = 不走代理） */
+function getProxyUrl(): string | undefined {
+	const p = loadJsonConfig<{ proxy?: string }>(PROXY_CONFIG_FILE, {}, isProxyConfig).proxy?.trim();
+	return p || undefined;
+}
+
+/** 保存/清除代理设置（空串 = 清除，恢复直连） */
+function setProxySetting(value: string): void {
+	saveJsonConfig(PROXY_CONFIG_FILE, { proxy: value.trim() });
+}
+
+/** 代理地址合法性：http:// 协议 + 非空主机（仅支持 HTTP 代理，Clash/V2Ray 等本地代理常见形态） */
+function validateProxy(v: string): boolean {
+	try {
+		const u = new URL(v);
+		return u.protocol === "http:" && u.hostname.length > 0;
+	} catch {
+		return false;
+	}
 }
 
 /** 为 http/https.request 提供 createConnection：经 HTTP 代理建 CONNECT 隧道（TLS 目标再套 tls） */
@@ -657,6 +676,151 @@ function formatSearchResults(results: SearchResult[], source: string): string {
 	return lines.join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// /web-tool-config 设置面板（代理地址输入）
+// ---------------------------------------------------------------------------
+
+/** 返回文本显示宽度达到 targetW 时的字符索引（输入框水平滚动窗口定位用） */
+function charIndexAtWidth(text: string, targetW: number): number {
+	let w = 0;
+	for (let i = 0; i < text.length; i++) {
+		const chW = visibleWidth(text[i]!);
+		if (w + chW > targetW) return i;
+		w += chW;
+	}
+	return text.length;
+}
+
+/** 从 startChar 起按显示宽度截取最多 maxW 宽的文本（不截断字符） */
+function sliceByWidth(text: string, startChar: number, maxW: number): string {
+	let out = "";
+	let w = 0;
+	for (let i = startChar; i < text.length; i++) {
+		const chW = visibleWidth(text[i]!);
+		if (w + chW > maxW) break;
+		out += text[i];
+		w += chW;
+	}
+	return out;
+}
+
+/**
+ * /web-tool-config 设置面板：输入代理地址（Enter 保存 / Esc 取消 / 清空回车 = 清除代理）。
+ * 手写输入框（与 ModelSelectOverlay 同款：水平滚动 + 光标反显），非法地址回车时不关闭面板、提示修改。
+ */
+class ProxyConfigOverlay {
+	focused = true;
+
+	private tui: TUI;
+	private theme: Theme;
+	private done: (result: string | null) => void;
+	private value = "";
+	private cursor = 0;
+	private error = "";
+
+	constructor(tui: TUI, theme: Theme, current: string, done: (result: string | null) => void) {
+		this.tui = tui;
+		this.theme = theme;
+		this.done = done;
+		this.value = current;
+		this.cursor = current.length;
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape")) {
+			this.done(null);
+			return;
+		}
+		if (matchesKey(data, "return")) {
+			const v = this.value.trim();
+			if (v && !validateProxy(v)) {
+				this.error = `非法代理地址「${v}」，需 http://host:port 形式`;
+				this.tui.requestRender();
+				return;
+			}
+			this.done(v);
+			return;
+		}
+		if (matchesKey(data, "backspace")) {
+			if (this.cursor > 0) {
+				this.value = this.value.slice(0, this.cursor - 1) + this.value.slice(this.cursor);
+				this.cursor--;
+				this.tui.requestRender();
+			}
+			return;
+		}
+		if (matchesKey(data, "left")) {
+			this.cursor = Math.max(0, this.cursor - 1);
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "right")) {
+			this.cursor = Math.min(this.value.length, this.cursor + 1);
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "home")) {
+			this.cursor = 0;
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "end")) {
+			this.cursor = this.value.length;
+			this.tui.requestRender();
+			return;
+		}
+		// 可打印字符：插入光标处
+		if (data.length === 1 && data.charCodeAt(0) >= 32) {
+			this.value = this.value.slice(0, this.cursor) + data + this.value.slice(this.cursor);
+			this.cursor++;
+			this.tui.requestRender();
+		}
+	}
+
+	render(width: number): string[] {
+		const th = this.theme;
+		const innerW = Math.max(1, width - 2);
+		const border = (s: string) => th.fg("border", s);
+		const row = (content: string) => border("│") + truncateToWidth(content, innerW, "…", true) + border("│");
+		const lines: string[] = [];
+
+		const titleStr = ` ${th.fg("accent", "⚙️ web-tool 代理设置")} `;
+		lines.push(border(`╭${titleStr}${"─".repeat(Math.max(0, innerW - visibleWidth(titleStr)))}╮`));
+
+		// 当前配置状态
+		const current = getProxyUrl();
+		lines.push(row(` ${th.fg("dim", "当前代理：")}${current ? current : "未设置（直连，被墙时无法自动重试）"}`));
+
+		// 输入框：水平滚动窗口跟随光标（❯ 前缀占 4 个显示宽度），不截断内容
+		const inputW = Math.max(8, innerW - 3);
+		const full = this.value;
+		const totalW = visibleWidth(full);
+		let startChar = 0;
+		if (totalW > inputW) {
+			const cursorW = visibleWidth(full.slice(0, this.cursor));
+			startChar = charIndexAtWidth(full, Math.max(0, cursorW - Math.floor(inputW * 0.6)));
+		}
+		const windowText = sliceByWidth(full, startChar, inputW);
+		const cursorInWindow = Math.min(Math.max(0, this.cursor - startChar), windowText.length);
+		let inputDisplay = windowText;
+		if (this.focused) inputDisplay = renderInputWithCursor(inputDisplay, cursorInWindow);
+		lines.push(row(` ${th.fg("accent", "❯")} ${inputDisplay}`));
+
+		// 错误提示或操作提示
+		if (this.error) {
+			lines.push(row(th.fg("warning", ` ⚠ ${this.error}`)));
+		} else {
+			lines.push(row(th.fg("dim", ` 输入 http:// 地址回车保存 · 清空回车 = 清除代理 · Esc 取消`)));
+		}
+
+		lines.push(border(`╰${"─".repeat(innerW)}╯`));
+		return lines;
+	}
+
+	invalidate(): void {}
+	dispose(): void {}
+}
+
 export default function (pi: ExtensionAPI) {
 	// reload / session 替换前清掉 TTL 定时器（旧 ctx 已失效，到期回调会抛 stale 错误）
 	pi.on("session_shutdown", async () => clearStatusTimers());
@@ -777,6 +941,60 @@ export default function (pi: ExtensionAPI) {
 					details: { error: msg },
 				};
 			}
+		},
+	});
+
+	// ---- /web-tool-config：配置 web_fetch/web_search 被墙自动重试用的代理地址 ----
+	pi.registerCommand("web-tool-config", {
+		description:
+			"配置 web_fetch/web_search 被墙自动重试的代理：无参数打开设置面板输入 http:// 代理地址；`/web-tool-config <url>` 直接设置；`/web-tool-config off` 清除",
+		handler: async (args, ctx) => {
+			const arg = (args ?? "").trim();
+
+			// 带参数：直接设置 / 清除 / 查看
+			if (arg) {
+				if (arg === "off" || arg === "clear" || arg === "none") {
+					setProxySetting("");
+					ctx.ui.notify("已清除代理设置，web_fetch/web_search 恢复直连", "info");
+					return;
+				}
+				if (arg === "show" || arg === "status" || arg === "?") {
+					ctx.ui.notify(`当前代理：${getProxyUrl() ?? "未设置"}`, "info");
+					return;
+				}
+				if (!validateProxy(arg)) {
+					ctx.ui.notify(`非法代理地址「${arg}」，需 http://host:port 形式（如 http://127.0.0.1:7890）`, "warning");
+					return;
+				}
+				setProxySetting(arg);
+				ctx.ui.notify(`代理已设为 ${arg}（被墙时自动经此重试）`, "info");
+				return;
+			}
+
+			// 无参数：打开设置面板（非 TUI 回落为文本提示）
+			if (!ctx.hasUI) {
+				ctx.ui.notify(
+					`当前代理：${getProxyUrl() ?? "未设置"}。用法：/web-tool-config（面板）、/web-tool-config <url> 直接设置、/web-tool-config off 清除`,
+					"info",
+				);
+				return;
+			}
+			const result = await ctx.ui.custom<string | null>(
+				(tui, theme, _kb, done) => new ProxyConfigOverlay(tui, theme, getProxyUrl() ?? "", done),
+				{
+					overlay: true,
+					overlayOptions: {
+						anchor: "right-center",
+						width: "62%",
+						minWidth: 60,
+						maxHeight: "90%",
+						margin: { right: 1 },
+					},
+				},
+			);
+			if (result === null) return; // 取消
+			setProxySetting(result);
+			ctx.ui.notify(result ? `代理已设为 ${result}（被墙时自动经此重试）` : "已清除代理设置，web_fetch/web_search 恢复直连", "info");
 		},
 	});
 }
