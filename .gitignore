@@ -8,3 +8,4 @@ dist/
 
 # test 临时构建产物（各扩展回归测试的 esbuild bundle/mock，每次测试重新生成）
 src/extensions/*/test/.tmp-*
+src/extensions/*/test/.dbg-*

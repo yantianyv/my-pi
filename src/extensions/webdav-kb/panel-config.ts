@@ -1,0 +1,421 @@
+/**
+ * webdav-kb / panel-config.ts — /kb-config 的 TUI 单页表单面板
+ *
+ * 一页显示全部输入框：每个字段一行（焦点行 = 输入框 + 光标，非焦点行 = 显示值
+ * 掩码），↑↓ 移动焦点、直接打字即改即存（防丢失）、Enter 移到下一项、
+ * Esc 关闭。底部动作行（测试连通 / 立即同步 / 修改 vault 口令 / 锁定 vault）
+ * Enter 直接执行。无二级页面。
+ *
+ * vault 字段语义：焦点时直接输入口令，Enter 后——未启用 → 启用并解锁；
+ * 已启用未解锁 → 尝试解锁；已解锁时输入 = 修改口令（覆盖 setup，提示迁移）。
+ */
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { renderInputWithCursor } from "../shared/ui";
+import { loadConfig, saveConfig, isConfigured, defaultMirrorDir, agentConfigDir, type KbConfig } from "./store";
+import { syncAll } from "./sync";
+import { WebDavClient } from "./client";
+import { createVault, unlockVault, lockVault, isUnlocked } from "./crypto";
+
+// ---------------------------------------------------------------------------
+// 字段与动作定义
+// ---------------------------------------------------------------------------
+
+type FieldKey = "baseUrl" | "username" | "password" | "proxyUrl" | "mirrorDir" | "vault";
+type ActionKey = "test" | "sync" | "vault-change" | "vault-lock";
+
+interface Field {
+	key: FieldKey;
+	label: string;
+	/** 显示值（非焦点行，掩码后） */
+	display(cfg: KbConfig): string;
+	/** 编辑初始值 */
+	seed(cfg: KbConfig): string;
+	/** 保存：输入 → 写回 cfg（vault 不在此处理，走 Enter 语义） */
+	apply(cfg: KbConfig, value: string): void;
+	/** 焦点时是否掩码（密码类） */
+	maskOnFocus?: boolean;
+}
+
+const FIELDS: Field[] = [
+	{
+		key: "baseUrl",
+		label: "WebDAV 地址",
+		display: (c) => c.baseUrl || "（未设置）",
+		seed: (c) => c.baseUrl ?? "https://dav.123pan.com/dav",
+		apply: (c, v) => (c.baseUrl = v.trim() || undefined),
+	},
+	{
+		key: "username",
+		label: "用户名",
+		display: (c) => c.username || "（未设置）",
+		seed: (c) => c.username ?? "",
+		apply: (c, v) => (c.username = v.trim() || undefined),
+	},
+	{
+		key: "password",
+		label: "密码",
+		display: (c) => {
+			const p = c.password;
+			if (!p) return "（未设置）";
+			return p.length <= 4 ? "●●●●" : `${p.slice(0, 2)}${"●".repeat(Math.max(4, p.length - 4))}`;
+		},
+		seed: (c) => c.password ?? "",
+		apply: (c, v) => (c.password = v || undefined),
+		maskOnFocus: true,
+	},
+	{
+		key: "proxyUrl",
+		label: "HTTP 代理",
+		display: (c) => c.proxyUrl || "（直连）",
+		seed: (c) => c.proxyUrl ?? "",
+		apply: (c, v) => (c.proxyUrl = v.trim() || undefined),
+	},
+	{
+		key: "mirrorDir",
+		label: "镜像目录",
+		display: (c) => c.mirrorDir || defaultMirrorDir(agentConfigDir()),
+		seed: (c) => c.mirrorDir ?? defaultMirrorDir(agentConfigDir()),
+		apply: (c, v) => (c.mirrorDir = v.trim() || undefined),
+	},
+	{
+		key: "vault",
+		label: "vault 口令",
+		display: (c) =>
+			c.vault ? (isUnlocked() ? "🔓 已解锁" : "🔒 未解锁") : "（未启用）",
+		seed: () => "",
+		apply: () => {}, // vault 不即时保存，Enter 时处理
+		maskOnFocus: true,
+	},
+];
+
+interface Action {
+	key: ActionKey;
+	label: string;
+	visible(cfg: KbConfig): boolean;
+}
+
+const ACTIONS: Action[] = [
+	{ key: "test", label: "① 测试连通", visible: () => true },
+	{ key: "sync", label: "② 立即同步", visible: () => true },
+	{ key: "vault-change", label: "③ 修改 vault 口令", visible: (c) => Boolean(c.vault) },
+	{ key: "vault-lock", label: "④ 锁定 vault", visible: () => isUnlocked() },
+];
+
+// ---------------------------------------------------------------------------
+// 面板组件（单页表单）
+// ---------------------------------------------------------------------------
+
+export class KbConfigOverlay {
+	focused = true;
+
+	private tui: TUI;
+	private theme: Theme;
+	private done: (result: string | null) => void;
+	private cfg: KbConfig;
+
+	/** 每个字段的编辑缓冲（含光标） */
+	private bufs: Record<FieldKey, string> = {} as Record<FieldKey, string>;
+	private cursors: Record<FieldKey, number> = {} as Record<FieldKey, number>;
+	/** 焦点索引：0..fields-1 字段，之后是可见动作 */
+	private focus = 0;
+	/** 正在执行的动作标签 */
+	private working: string | null = null;
+	/** 最近一次结果提示 */
+	private result: string | null = null;
+
+	constructor(tui: TUI, theme: Theme, cfg: KbConfig, done: (result: string | null) => void) {
+		this.tui = tui;
+		this.theme = theme;
+		this.cfg = { ...cfg, vault: cfg.vault ? { ...cfg.vault } : undefined };
+		this.done = done;
+		for (const f of FIELDS) {
+			const seed = f.seed(this.cfg);
+			this.bufs[f.key] = seed;
+			this.cursors[f.key] = seed.length;
+		}
+	}
+
+	// ---- 焦点与可见项 ----
+
+	private visibleActions(): Action[] {
+		return ACTIONS.filter((a) => a.visible(this.cfg));
+	}
+
+	/** 当前焦点指向什么 */
+	private currentTarget(): { kind: "field"; field: Field } | { kind: "action"; action: Action } | null {
+		if (this.focus < FIELDS.length) return { kind: "field", field: FIELDS[this.focus] };
+		const acts = this.visibleActions();
+		const idx = this.focus - FIELDS.length;
+		const action = acts[idx];
+		return action ? { kind: "action", action } : null;
+	}
+
+	private totalTargets(): number {
+		return FIELDS.length + this.visibleActions().length;
+	}
+
+	private clampFocus(): void {
+		this.focus = Math.max(0, Math.min(this.focus, this.totalTargets() - 1));
+	}
+
+	// ---- 键盘 ----
+
+	handleInput(data: string): void {
+		if (this.working) return; // 动作执行中忽略输入
+		if (matchesKey(data, "escape")) {
+			this.done(null);
+			return;
+		}
+		// 终端粘贴：pi 以 bracketed paste（\x1b[200~…\x1b[201~）整段送入；
+		// 非 \x1b 开头的多字符文本也视为粘贴（部分终端不包标记直接送整段）
+		if (data.includes("\x1b[200~") || (data.length > 1 && !data.startsWith("\x1b"))) {
+			this.insertPaste(data);
+			return;
+		}
+		if (matchesKey(data, "return")) {
+			this.handleEnter();
+			return;
+		}
+		if (matchesKey(data, "up")) {
+			if (this.focus > 0) {
+				this.focus--;
+				this.tui.requestRender();
+			}
+			return;
+		}
+		if (matchesKey(data, "down")) {
+			if (this.focus < this.totalTargets() - 1) {
+				this.focus++;
+				this.tui.requestRender();
+			}
+			return;
+		}
+		const target = this.currentTarget();
+		if (!target || target.kind !== "field") return;
+		const f = target.field;
+		const buf = this.bufs[f.key];
+		const cur = this.cursors[f.key];
+		if (matchesKey(data, "backspace")) {
+			if (cur > 0) {
+				this.bufs[f.key] = buf.slice(0, cur - 1) + buf.slice(cur);
+				this.cursors[f.key] = cur - 1;
+				this.saveField(f);
+			}
+			return;
+		}
+		if (matchesKey(data, "left")) {
+			this.cursors[f.key] = Math.max(0, cur - 1);
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "right")) {
+			this.cursors[f.key] = Math.min(buf.length, cur + 1);
+			this.tui.requestRender();
+			return;
+		}
+		// 可打印字符 → 插入当前字段缓冲
+		if (data.length === 1 && data >= " ") {
+			this.bufs[f.key] = buf.slice(0, cur) + data + buf.slice(cur);
+			this.cursors[f.key] = cur + 1;
+			this.saveField(f);
+		}
+	}
+
+	/** 粘贴文本：剥 bracketed paste 标记，整体插入当前字段（换行压成空格） */
+	private insertPaste(raw: string): void {
+		const target = this.currentTarget();
+		if (!target || target.kind !== "field") return;
+		const text = raw
+			.replace(/\x1b\[200~/g, "")
+			.replace(/\x1b\[201~/g, "")
+			.replace(/\r\n?/g, " ")
+			.replace(/\n/g, " ");
+		if (!text) return;
+		const f = target.field;
+		const cur = this.cursors[f.key];
+		this.bufs[f.key] = this.bufs[f.key].slice(0, cur) + text + this.bufs[f.key].slice(cur);
+		this.cursors[f.key] = cur + text.length;
+		this.saveField(f);
+	}
+
+	private handleEnter(): void {
+		const target = this.currentTarget();
+		if (!target) return;
+		if (target.kind === "field") {
+			const f = target.field;
+			if (f.key === "vault") {
+				this.handleVaultEnter();
+			}
+			// 字段上 Enter = 移到下一项
+			if (this.focus < this.totalTargets() - 1) {
+				this.focus++;
+			}
+			this.tui.requestRender();
+			return;
+		}
+		this.runAction(target.action.key);
+	}
+
+	/** vault 字段 Enter：输入口令 → 启用/解锁/修改 */
+	private handleVaultEnter(): void {
+		const pass = this.bufs.vault.trim();
+		if (!pass) return;
+		if (!this.cfg.vault) {
+			const setup = createVault(pass);
+			this.cfg.vault = setup;
+			saveConfig(agentConfigDir(), this.cfg);
+			unlockVault(pass, setup);
+			this.result = "🔓 vault 已启用并解锁";
+		} else if (isUnlocked()) {
+			// 已解锁：视为修改口令（覆盖 setup；存量密文需手动迁移）
+			const setup = createVault(pass);
+			this.cfg.vault = setup;
+			saveConfig(agentConfigDir(), this.cfg);
+			unlockVault(pass, setup);
+			this.result = "🔓 vault 口令已更新（存量密文需手动迁移）";
+		} else if (unlockVault(pass, this.cfg.vault)) {
+			this.result = "🔓 vault 已解锁";
+		} else {
+			this.result = "口令错误，仍锁定";
+		}
+		this.bufs.vault = "";
+		this.cursors.vault = 0;
+	}
+
+	/** 字段变更即时保存（vault 除外） */
+	private saveField(f: Field): void {
+		if (f.key === "vault") {
+			this.tui.requestRender();
+			return;
+		}
+		f.apply(this.cfg, this.bufs[f.key]);
+		saveConfig(agentConfigDir(), this.cfg);
+		this.tui.requestRender();
+	}
+
+	// ---- 动作 ----
+
+	private runAction(key: ActionKey): void {
+		switch (key) {
+			case "test":
+				this.working = "测试连通…";
+				void this.testConnection();
+				return;
+			case "sync":
+				this.working = "同步中…";
+				void this.runSync();
+				return;
+			case "vault-change": {
+				// 输入新口令 → Enter 覆盖（与已解锁时 vault 行输入语义一致，这里只是把焦点放过去）
+				if (this.focus >= FIELDS.length) this.focus = FIELDS.length - 1; // vault 字段
+				this.bufs.vault = "";
+				this.cursors.vault = 0;
+				this.result = "输入新口令后按 Enter（存量密文需手动迁移）";
+				this.tui.requestRender();
+				return;
+			}
+			case "vault-lock":
+				lockVault();
+				this.result = "🔒 vault 已锁定";
+				this.tui.requestRender();
+				return;
+		}
+	}
+
+	private async testConnection(): Promise<void> {
+		try {
+			if (!isConfigured(this.cfg)) throw new Error("未设置 WebDAV 地址或账号");
+			const client = new WebDavClient(this.cfg.baseUrl!, this.cfg.username!, this.cfg.password!, {
+				proxyUrl: this.cfg.proxyUrl,
+				timeoutMs: 10_000,
+			});
+			await client.ping();
+			this.result = "✅ 连通正常，凭据有效";
+		} catch (e) {
+			this.result = `❌ 连通失败：${e instanceof Error ? e.message : String(e)}`;
+		}
+		this.working = null;
+		this.tui.requestRender();
+	}
+
+	private async runSync(): Promise<void> {
+		try {
+			if (!isConfigured(this.cfg)) throw new Error("未设置 WebDAV 地址或账号");
+			const mirrorDir = this.cfg.mirrorDir?.trim() || defaultMirrorDir(agentConfigDir());
+			const stats = await syncAll(this.cfg, mirrorDir, {
+				onProgress: (label) => {
+					this.working = label;
+					this.tui.requestRender();
+				},
+			});
+			const parts = [`↓${stats.downloaded} ↑${stats.uploaded} ×${stats.deleted} ⚠${stats.conflicts}`];
+			if (stats.errors.length) parts.push(`失败 ${stats.errors.length}`);
+			this.result = `同步完成：${parts.join("，")}`;
+		} catch (e) {
+			this.result = `同步失败：${e instanceof Error ? e.message : String(e)}`;
+		}
+		this.working = null;
+		this.tui.requestRender();
+	}
+
+	// ---- 渲染 ----
+
+	render(width: number): string[] {
+		const t = this.theme;
+		const innerW = Math.max(30, width - 2);
+		const pad = (s: string) => truncateToWidth(s, innerW, "", true);
+		const border = (edge: string) => t.fg("border", t.bold(`${edge}${"─".repeat(innerW)}${edge}`));
+		const lines: string[] = [border("╭")];
+		lines.push(t.fg("accent", t.bold(`│ ${pad("⚙ 知识库配置（↑↓ 选择 · 直接输入即改）")}`)));
+		lines.push(t.fg("border", `│ ${"─".repeat(innerW)}`));
+
+		// 字段：焦点行 = 输入框 + 光标；非焦点 = 显示值
+		FIELDS.forEach((f, i) => {
+			const focused = i === this.focus;
+			const labelW = 10;
+			const label = f.label.padEnd(labelW, " ");
+			let value: string;
+			if (focused) {
+				// 焦点行：明文缓冲 + 光标（密码/vault 掩码）
+				const raw = this.bufs[f.key];
+				const disp = f.maskOnFocus ? "●".repeat(raw.length) : raw;
+				if (raw.length === 0 && f.key === "vault") {
+					value = "（输入口令…）";
+				} else {
+					const inputW = innerW - labelW - 2;
+					const visible = truncateToWidth(disp, inputW);
+					const curInWindow = Math.min(this.cursors[f.key], visible.length);
+					value = renderInputWithCursor(visible, curInWindow);
+				}
+			} else {
+				value = f.display(this.cfg);
+			}
+			const row = `${label} ${value}`;
+			const rowPadded = pad(row);
+			lines.push(focused ? `│ \x1b[7m${truncateToWidth(row, innerW, "", true)}\x1b[27m` : `│ ${t.fg("text", rowPadded)}`);
+		});
+
+		// 动作行
+		lines.push(t.fg("border", `│ ${"─".repeat(innerW)}`));
+		this.visibleActions().forEach((a, i) => {
+			const focused = FIELDS.length + i === this.focus;
+			const row = ` ${a.label}`;
+			lines.push(focused ? `│ \x1b[7m${truncateToWidth(row, innerW, "", true)}\x1b[27m` : `│ ${t.fg("accent", pad(row))}`);
+		});
+
+		// 状态行
+		lines.push(t.fg("border", `│ ${"─".repeat(innerW)}`));
+		const status = this.working ?? this.result ?? (isConfigured(this.cfg) ? "✓ 已配置（改动即时保存）" : "⚠ 未配置完整");
+		const statusColor = this.working ? "accent" : this.result?.startsWith("❌") ? "error" : this.result?.startsWith("⚠") ? "warning" : "dim";
+		lines.push(t.fg(statusColor as "accent", `│ ${pad(" " + status)}`));
+
+		lines.push(border("╰"));
+		const hint = `↑↓ 选择 · 直接输入即改 · Enter 下一项/执行 · Esc 关闭`;
+		lines.push(t.fg("dim", `${" ".repeat(Math.max(0, (width - visibleWidth(hint)) / 2))}${hint}`));
+		return lines;
+	}
+
+	invalidate(): void {}
+	dispose(): void {}
+}
