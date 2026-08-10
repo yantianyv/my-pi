@@ -164,6 +164,12 @@ export class KbConfigOverlay {
 	handleInput(data: string): void {
 		if (this.working) return; // 动作执行中忽略输入
 		if (matchesKey(data, "escape")) {
+			// vault 口令已输入未按 Enter：先警告（第一次 Esc），再按一次 Esc 才放弃（防误丢，不卡死）
+			if (this.bufs.vault && this.result !== "⚠ vault 口令未按 Enter 保存，再按 Esc 放弃") {
+				this.result = "⚠ vault 口令未按 Enter 保存，再按 Esc 放弃";
+				this.tui.requestRender();
+				return;
+			}
 			this.done(null);
 			return;
 		}
@@ -381,7 +387,7 @@ export class KbConfigOverlay {
 				const raw = this.bufs[f.key];
 				const disp = f.maskOnFocus ? "●".repeat(raw.length) : raw;
 				if (raw.length === 0 && f.key === "vault") {
-					value = "（输入口令…）";
+					value = "（输入口令，按 Enter 启用）";
 				} else {
 					const inputW = innerW - labelW - 2;
 					const visible = truncateToWidth(disp, inputW);
@@ -390,6 +396,10 @@ export class KbConfigOverlay {
 				}
 			} else {
 				value = f.display(this.cfg);
+				// vault 已输入但未按 Enter（未保存）→ 警告提示，防丢失
+				if (f.key === "vault" && this.bufs.vault) {
+					value = "⚠ 未确认（回到本行按 Enter 启用）";
+				}
 			}
 			const row = `${label} ${value}`;
 			const rowPadded = pad(row);

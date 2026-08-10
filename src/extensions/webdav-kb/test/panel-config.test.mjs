@@ -215,6 +215,19 @@ try {
 	check("旧口令失效", !mod.unlockVault("vault-pass-123", cfg6.vault));
 	check("新口令可解锁", mod.unlockVault("new-pass-456", cfg6.vault));
 
+	// ---- UX：vault 输入未 Enter → 失焦警告 + Esc 防误丢 ----
+	let closed = false;
+	const overlay3 = new KbConfigOverlay(fakeTui, themeMock, { baseUrl: "", username: "", password: "" }, () => { closed = true; });
+	while (overlay3.focus < 5) overlay3.handleInput("\x1b[B"); // 到 vault
+	for (const ch of "half-pass") overlay3.handleInput(ch);
+	overlay3.handleInput("\x1b[B"); // 失焦到动作区
+	check("未确认口令显示警告", overlay3.render(80).some((l) => l.includes("未确认")));
+	overlay3.handleInput("\x1b[A"); // 回 vault 行
+	overlay3.handleInput("\x1b"); // Esc 第一次
+	check("Esc 第一次不关闭（提示再按）", !closed && overlay3.result?.includes("再按 Esc"));
+	overlay3.handleInput("\x1b"); // Esc 第二次
+	check("Esc 第二次关闭", closed);
+
 	// ---- Esc 关闭 ----
 	overlay.handleInput("\x1b");
 	check("Esc 关闭回调 null", doneResult === null);
