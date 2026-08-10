@@ -271,8 +271,8 @@ export default async function (pi: ExtensionAPI) {
 	function describeBalance(): string {
 		const b = balance;
 		if (b.loading) return "余额：查询中…";
-		if (b.moduleMissing) return "余额：hud-balance 子模块缺失（未安装完整 hud/）";
-		if (b.unsupported) return `余额：${b.providerId ?? "?"} 未适配（已适配: ${Object.keys(balanceMod?.BALANCE_ADAPTERS ?? {}).join(", ")}）`;
+		if (b.moduleMissing) return "余额：余额模块未加载";
+		if (b.unsupported) return `余额：${b.providerId ?? "?"} 暂不支持余额查询`;
 		if (b.error) return `余额：获取失败（${b.error}）`;
 		if (b.data) {
 			const amount = formatAmount(b.data.amount);
@@ -404,7 +404,7 @@ export default async function (pi: ExtensionAPI) {
 
 			const renderGitLine = (): string => {
 				// hud-git 子模块缺失：明确提示，而非误导性的「⎇ -」（后者会被误认为非 git 仓库）
-				if (!gitMod) return theme.fg("warning", "⎇ 模块缺失");
+				if (!gitMod) return theme.fg("warning", "⎇ -");
 				if (!gitStats) return theme.fg("dim", "⎇ -");
 				const g = gitStats;
 				const badge = theme.fg("accent", `⎇ ${g.branch ?? "HEAD"}`);
@@ -650,7 +650,7 @@ export default async function (pi: ExtensionAPI) {
 				return;
 			}
 			if (!gitMod) {
-				ctx.ui.notify("hud-git 子模块缺失，无法打开 Git 面板", "error");
+				ctx.ui.notify("Git 模块未加载，无法打开面板", "error");
 				return;
 			}
 			if (!(await gitMod.isGitRepo(ctx.cwd))) {

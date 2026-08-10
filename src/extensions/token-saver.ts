@@ -65,7 +65,7 @@ function saveOriginal(command: string, text: string): string {
 }
 
 function makeHint(filepath: string): string {
-	return `\n\n[token-saver] 为节省 token，输出已被精简处理。完整原始输出已保存：${filepath}`;
+	return `\n\n[输出已精简] 为节省 token，输出被压缩处理。完整原始输出已保存：${filepath}`;
 }
 
 // --- Git ---

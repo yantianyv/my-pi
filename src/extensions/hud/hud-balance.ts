@@ -223,7 +223,7 @@ const kimiCodingAdapter: BalanceAdapter = {
 		const auth = await ctx.modelRegistry.getProviderAuth("kimi-coding");
 		// API key 登录：auth.apiKey；OAuth 登录：auth.headers.Authorization = "Bearer <token>"
 		const key = auth?.auth.apiKey ?? auth?.auth.headers?.Authorization?.replace(/^Bearer\s+/i, "");
-		if (!key) throw new Error("未配置 API key 或 OAuth（请设置 KIMI_API_KEY 环境变量或执行 /login kimi-coding）");
+		if (!key) throw new Error("未配置 API key 或 OAuth（请完成认证或执行 /login）");
 
 		const res = await fetch(`${KIMI_CODING_BASE_URL}/usages`, {
 			headers: {

@@ -271,7 +271,7 @@ export default function (pi: ExtensionAPI) {
 		label: "探索子代理",
 		description:
 			"派出一个或多个只读子代理并行探索代码库并返回报告。每个子代理拥有 read/ls/grep/find 工具，会自主决定阅读哪些文件，你只负责分配任务。" +
-			"适合：了解陌生模块结构、定位功能实现、梳理调用链等——比主 agent 逐文件 read 更省上下文、更快、更便宜（子代理默认用廉价模型）。" +
+			"适合：了解陌生模块结构、定位功能实现、梳理调用链等——比主 agent 逐文件 read 更省上下文、更快、更便宜。" +
 			"任务描述要具体可回答；多个相互独立的任务一次派出。子代理不能修改文件。",
 		promptSnippet: "explore: 派只读子代理并行探索代码库并返回报告（省主上下文）",
 		promptGuidelines: [

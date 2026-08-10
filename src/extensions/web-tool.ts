@@ -952,9 +952,8 @@ export default function (pi: ExtensionAPI) {
 		name: "web_search",
 		label: "联网搜索",
 		description:
-			"搜索互联网（多源：bing.cn 主 + 360 备 + npm 垂类，零费用零 API key，无 AI 总结）。"
-			+ "返回标题 + URL + 摘要列表；需要深读某条结果时用 web_fetch 抓取该 URL。"
-			+ "查 npm 包用 source=\"npm\"。pypi 搜索页有反爬，查 Python 包请走默认网页搜索（如 site:pypi.org/project/）。",
+			"搜索互联网，返回标题 + URL + 摘要列表。需要深读某条结果时用 web_fetch 抓取该 URL。"
+			+ "查 npm 包用 source=\"npm\"。Python 包请走默认网页搜索（如 site:pypi.org/project/）。",
 		promptSnippet: "搜索互联网：web_search(查询词[, source]) → 标题+URL+摘要列表",
 		renderCall: (args, theme) => {
 			const query = typeof args?.query === "string" ? args.query.trim() : "";
@@ -1018,8 +1017,7 @@ export default function (pi: ExtensionAPI) {
 		label: "抓取网页",
 		description:
 			"抓取网页 URL 并自动转换为 markdown（正文提取 + 去导航广告 + 截断，节约 tokens）。"
-			+ "适合深读 web_search 找到的链接、官方文档、README。"
-			+ "被墙/反爬站点（如 GitHub 直连）会先尝试直连 + 换 UA + 经代理重试，仍失败时改用 web_search 查摘要。"
+			+ "适合深读 web_search 找到的链接、官方文档、README。抓取失败时改用 web_search 查摘要。"
 			+ `默认返回前 ${DEFAULT_MAX_CHARS} 字符，上限 ${MAX_CHARS_LIMIT} 字符。`,
 		promptSnippet: "抓取网页转 markdown：web_fetch(URL[, maxChars]) → 正文",
 		renderCall: (args, theme) =>

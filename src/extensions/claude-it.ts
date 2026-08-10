@@ -96,7 +96,7 @@ function buildInitPrompt(mode: "create" | "merge" | "overwrite"): string {
 			`当前目录已存在 ${CONTEXT_FILE}，但用户要求完全重写：通读现有内容了解项目后，从零生成一份全新的 ${CONTEXT_FILE} 覆盖它。`,
 	};
 	return [
-		`分析当前代码库并生成上下文文件 ${CONTEXT_FILE}（对齐 Claude Code /init 的行为）。`,
+		`分析当前代码库并生成/更新上下文文件 ${CONTEXT_FILE}。`,
 		"",
 		modeInstructions[mode],
 		"",
