@@ -171,7 +171,12 @@ export class NoteIndex {
 					}
 					const prev = this.docs.get(plain);
 					if (prev && prev.updatedMs === st.mtimeMs) continue;
-					const text = this.decryptor(plain);
+					let text: string | null = null;
+					try {
+						text = this.decryptor(plain); // 未解锁时抛错 → 视为 null，跳过加密区（与设计语义一致）
+					} catch {
+						text = null;
+					}
 					if (text !== null) this.docs.set(plain, this.buildDoc(plain, text, st.mtimeMs));
 					continue;
 				}
@@ -311,7 +316,11 @@ export class NoteIndex {
 	private snippet(doc: IndexedDoc, qTerms: string[]): string {
 		let body: string | null = null;
 		if (doc.path.startsWith("/vault/") && this.decryptor) {
-			body = this.decryptor(doc.path); // vault 明文在内存，从解密钩子取
+			try {
+				body = this.decryptor(doc.path); // vault 明文在内存，从解密钩子取；未解锁抛错 → 无 snippet
+			} catch {
+				body = null;
+			}
 		} else {
 			body = readLocal(this.mirrorDir, doc.path);
 		}
