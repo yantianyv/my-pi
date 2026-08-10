@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 1,
+  "mode": "human-ai",
+  "stages": [
+    {
+      "id": "0",
+      "name": "引擎层",
+      "goal": "WebDAV 存储/同步/检索/加密四大基础模块，零依赖纯 TS",
+      "tasks": [
+        {
+          "id": "0.1",
+          "title": "WebDAV 客户端",
+          "desc": "零依赖 WebDAV 客户端（fetch 实现）：PROPFIND 递归列目录（etag/lastmod/size）、GET 下载、PUT 上传、MKCOL、DELETE、MOVE；Basic 认证；超时与重试；复用 web-tool 的直连/代理竞速降级模式",
+          "humanTasks": [],
+          "aiTasks": [
+            "实现 client.ts（PROPFIND/GET/PUT/MKCOL/DELETE/MOVE + 认证 + 重试）",
+            "复用 src/extensions/web-tool.ts 的代理竞速模式",
+            "本地 mock WebDAV 服务器单测验证"
+          ],
+          "deliverable": "src/extensions/webdav-kb/client.ts",
+          "doneSignal": "mock 服务器上 list/get/put/mkcol/delete 全通过；npx typescript -p src/config/tsconfig.json 0 报错",
+          "deps": []
+        },
+        {
+          "id": "0.2",
+          "title": "本地镜像与增量同步",
+          "desc": "~/.pi/agent/kb/ 本地镜像 + 增量同步：启动后台同步、etag/lastmod 比对拉取变更、删除同步、last-write-wins + .conflict-时间戳 冲突副本；同步状态经 setStatus 推送",
+          "humanTasks": [],
+          "aiTasks": [
+            "实现 sync.ts（镜像缓存 + 增量同步 + 冲突处理）",
+            "实现配置存储（WebDAV 地址/凭据/镜像路径）",
+            "setStatus 推送同步状态"
+          ],
+          "deliverable": "src/extensions/webdav-kb/sync.ts + 配置存储",
+          "doneSignal": "模拟远端新增/修改/删除后本地同步一致；冲突产生冲突副本不丢数据",
+          "deps": [
+            "0.1"
+          ]
+        },
+        {
+          "id": "0.3",
+          "title": "全文检索",
+          "desc": "本地索引：md 解析（frontmatter+正文）、中文 bigram + 英文分词、BM25 排序、索引持久化到本地缓存；检索结果含路径/标题/命中片段/分数",
+          "humanTasks": [],
+          "aiTasks": [
+            "实现 search.ts（索引构建 + BM25 检索 + frontmatter 解析）",
+            "索引增量更新（跟随同步）"
+          ],
+          "deliverable": "src/extensions/webdav-kb/search.ts",
+          "doneSignal": "对示例笔记库搜索中文/英文关键词返回正确排序片段；索引重建幂等",
+          "deps": [
+            "0.1"
+          ]
+        },
+        {
+          "id": "0.4",
+          "title": "可选加密",
+          "desc": "口令派生密钥（PBKDF2-SHA256）+ AES-256-GCM；vault/ 目录级整目录加密；加密文件 .enc（魔数头+salt+nonce）；口令仅存内存；解密失败明确报错",
+          "humanTasks": [],
+          "aiTasks": [
+            "实现 crypto.ts（Node crypto 零依赖）",
+            "同步层支持 vault/ 密文传输、本地解密后建索引",
+            "/kb-config 增加口令设置"
+          ],
+          "deliverable": "src/extensions/webdav-kb/crypto.ts",
+          "doneSignal": "口令加解密往返一致；无口令时 vault 文件无法解密且索引不泄内容；口令仅存内存",
+          "deps": [
+            "0.1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1",
+      "name": "AI 工具层",
+      "goal": "把引擎暴露给 AI：零注入 pull 式工具集 + 协议帮助入口",
+      "tasks": [
+        {
+          "id": "1.1",
+          "title": "kb 工具集",
+          "desc": "注册 kb_help/kb_search/kb_read/kb_write/kb_append/kb_list 工具：help 参数返回使用守则（读网盘根 PROTOCOL.md）；搜索读本地镜像；写操作同步到远端；写入前查重；frontmatter 校验",
+          "humanTasks": [
+            "拍板工具名/参数形态（指令层设计由用户主导）"
+          ],
+          "aiTasks": [
+            "实现 tools.ts（6 个工具 + help 参数模式）",
+            "工具描述精简、引导首次用时 kb_help"
+          ],
+          "deliverable": "src/extensions/webdav-kb/tools.ts",
+          "doneSignal": "pi 内调用各工具：搜索/读/写/列表/help 均按协议工作；写入带完整 frontmatter",
+          "deps": [
+            "0.1",
+            "0.2",
+            "0.3"
+          ]
+        },
+        {
+          "id": "1.2",
+          "title": "配置命令",
+          "desc": "/kb-config：WebDAV 地址/凭据/加密口令/同步开关；TUI 浮窗 + 非 TUI 文本面板；连通性测试",
+          "humanTasks": [
+            "提供 123 云盘 WebDAV 地址与凭据（或先用 mock）"
+          ],
+          "aiTasks": [
+            "实现 commands.ts（/kb-config 配置面板）",
+            "配置校验与连通性测试"
+          ],
+          "deliverable": "src/extensions/webdav-kb/commands.ts",
+          "doneSignal": "/kb-config 可完整配置并测试连通",
+          "deps": [
+            "0.1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "name": "面板层",
+      "goal": "/kb 人类查询引用入口：搜索+预览+插入引用",
+      "tasks": [
+        {
+          "id": "2.1",
+          "title": "/kb 面板",
+          "desc": "可搜索浮窗：模糊搜索笔记 → md 预览 → 插入引用（笔记路径/摘录进输入框）；复用 shared/model-select.ts 浮层模式；非 TUI 文本回落",
+          "humanTasks": [
+            "验收面板交互"
+          ],
+          "aiTasks": [
+            "实现 panel.ts（搜索+预览+插入引用）",
+            "接入 /kb 命令"
+          ],
+          "deliverable": "src/extensions/webdav-kb/panel.ts",
+          "doneSignal": "/kb 内完成 搜索→预览→插入引用 全流程；非 TUI 下可用",
+          "deps": [
+            "1.1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "name": "协议初稿",
+      "goal": "AI 使用守则 PROTOCOL.md 初稿，用户在此基础上亲自迭代",
+      "tasks": [
+        {
+          "id": "3.1",
+          "title": "PROTOCOL.md 初稿",
+          "desc": "网盘根 PROTOCOL.md 使用守则：何时存/命名与 frontmatter 规范/写入前查重/何时更新旧笔记/检索策略/命名空间说明（notes|references|scratch|memory 占位|vault）；AI 可提议改进、用户审批；不注入上下文，AI 经 kb_help 读取",
+          "humanTasks": [
+            "审阅并迭代协议措辞（指令层由用户亲自设计）"
+          ],
+          "aiTasks": [
+            "撰写 PROTOCOL.md 初稿并上传网盘根",
+            "kb_help 返回协议内容"
+          ],
+          "deliverable": "网盘根 PROTOCOL.md + kb_help 返回",
+          "doneSignal": "协议覆盖：触发/写入规范/维护/检索；kb_help 可返回完整协议",
+          "deps": [
+            "1.1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4",
+      "name": "构建与验收",
+      "goal": "打包、安装、端到端实测",
+      "tasks": [
+        {
+          "id": "4.1",
+          "title": "构建集成",
+          "desc": "src/build.js 增加 webdav-kb 入口；tsc 全扩展类型检查 0 报错；node install.js 安装；/reload 生效",
+          "humanTasks": [],
+          "aiTasks": [
+            "适配 build.js 与 tsconfig",
+            "安装到 ~/.pi/agent/ 并验证加载"
+          ],
+          "deliverable": "dist/extensions/webdav-kb.ts + 安装成功",
+          "doneSignal": "install 后 pi /reload 无报错，工具可见",
+          "deps": [
+            "1.1",
+            "2.1",
+            "3.1"
+          ]
+        },
+        {
+          "id": "4.2",
+          "title": "端到端实测",
+          "desc": "真实 123 云盘 WebDAV 全流程：配置→首次同步→AI 自发写入→搜索命中→人类面板引用→换设备/模拟缓存丢失重建",
+          "humanTasks": [
+            "提供 123 云盘 WebDAV 账号（或批准本地 mock 验收）",
+            "验收全流程操作"
+          ],
+          "aiTasks": [
+            "按实测结果修复缺陷"
+          ],
+          "deliverable": "实测报告 + 缺陷修复",
+          "doneSignal": "真实环境全流程通过；同步/检索/加密/面板均符合设计",
+          "deps": [
+            "4.1"
+          ]
+        }
+      ]
+    }
+  ]
+}
