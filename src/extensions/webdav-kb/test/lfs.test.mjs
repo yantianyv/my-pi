@@ -164,9 +164,9 @@ try {
 	mkdirSync(vaultDir, { recursive: true });
 	writeFileSync(join(vaultDir, "秘密笔记.md.enc"), "encrypted-bytes");
 	r = await tool("kb_list").execute("19b", {}, undefined, undefined, ctx);
-	check("kb_list vault 显示明文路径", r.content[0].text.includes("/vault/秘密笔记.md") && !r.content[0].text.includes(".enc"), r.content[0].text.slice(0, 120));
+	check("kb_list vault 显示明文路径", r.content[0].text.includes("秘密笔记.md") && !r.content[0].text.includes(".enc"), r.content[0].text.slice(0, 120));
 	r = await tool("kb_list").execute("19c", { path: "/vault" }, undefined, undefined, ctx);
-	check("kb_list /vault 过滤用明文路径", r.content[0].text.includes("/vault/秘密笔记.md"), r.content[0].text.slice(0, 120));
+	check("kb_list /vault 过滤用明文路径", r.content[0].text.includes("秘密笔记.md"), r.content[0].text.slice(0, 120));
 
 	// ---- kb_move：移动/重命名（镜像+远端+账本三方一致）+ 旧结构 3 段源可迁 ----
 	await tool("kb_write").execute("21", { path: "/notes/技术笔记/WebDAV/旧位置.md", content: "---\ntitle: 移动测试\ntags: [webdav]\n---\n内容", overwrite: true }, undefined, undefined, ctx);

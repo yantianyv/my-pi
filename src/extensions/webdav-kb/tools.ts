@@ -341,17 +341,21 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				return text(`/lfs/ 是 LFS 大文件区，不在知识库目录中。请用 kb_lslfs 查看。`, {});
 			}
 			const filtered = base ? all.filter((f) => f.path.startsWith(base + "/")) : all;
-			const shown = filtered.slice(0, LIST_MAX);
-			if (shown.length === 0) {
+			if (filtered.length === 0) {
 				return text(
 					`${base || "/"} 下暂无内容${base ? "" : "（首次使用请先 /kb-sync 同步远端）"}。`,
 					{ count: 0 },
 				);
 			}
-			const lines = shown.map((f) => (f.isDir ? `📁 ${f.path}` : `📄 ${f.path}`));
-			if (filtered.length > LIST_MAX) lines.push(`…（还有 ${filtered.length - LIST_MAX} 项未显示）`);
-			lines.push(`\n共 ${shown.length} 项。需要内容请 kb_read。`);
-			return text(lines.join("\n"), { count: shown.length });
+			// 树形渲染：路径组件只显示一次（缩进表层级，无装饰制表符），省 token；截断按渲染行数
+			const roots = buildTree([...filtered].sort((a, b) => a.path.localeCompare(b.path)));
+			let lines = renderTree(roots);
+			if (lines.length > LIST_MAX) {
+				lines = lines.slice(0, LIST_MAX);
+				lines.push(`…（还有更多未显示，可 kb_list(path) 缩小范围）`);
+			}
+			lines.push(`\n共 ${filtered.length} 项。需要内容请 kb_read（路径按上述目录层级拼接）。`);
+			return text(lines.join("\n"), { count: filtered.length });
 		},
 	});
 
@@ -811,6 +815,41 @@ export function registerKbTools(pi: ExtensionAPI): void {
 // ---------------------------------------------------------------------------
 // 内部工具
 // ---------------------------------------------------------------------------
+
+interface TreeItem {
+	name: string;
+	isDir: boolean;
+	children: TreeItem[];
+}
+
+/** 路径列表 → 树（路径组件去重：父目录只出现一次） */
+function buildTree(items: { path: string; isDir: boolean }[]): TreeItem[] {
+	const roots: TreeItem[] = [];
+	for (const it of items) {
+		const segs = it.path.split("/").filter(Boolean);
+		let level = roots;
+		for (let i = 0; i < segs.length; i++) {
+			let node = level.find((n) => n.name === segs[i]);
+			if (!node) {
+				node = { name: segs[i], isDir: i < segs.length - 1 || it.isDir, children: [] };
+				level.push(node);
+			}
+			level = node.children;
+		}
+	}
+	return roots;
+}
+
+/** 树 → 行（缩进 2 空格/层；📁 目录 / 📄 文件；路径组件不重复，省 token） */
+function renderTree(nodes: TreeItem[], depth = 0): string[] {
+	const out: string[] = [];
+	const pad = "  ".repeat(depth);
+	for (const n of nodes) {
+		out.push(`${pad}${n.isDir ? "📁" : "📄"} ${n.name}`);
+		if (n.children.length > 0) out.push(...renderTree(n.children, depth + 1));
+	}
+	return out;
+}
 
 /** 校验命名空间合法 + 后缀合法（不查段数：用于 kb_move 源路径等旧结构读取场景） */
 function validateNs(p: string): string | null {
