@@ -115,7 +115,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		name: "kb_search",
 		label: "检索知识库",
 		description:
-			"本地全文检索知识库（中文 bigram + 英文分词，BM25 排序），返回 路径/标题/命中片段/分数。"
+			"本地全文检索知识库，返回 路径/标题/命中片段/分数。"
 			+ "命中后按需 kb_read 读全文。namespace 可限定（/notes /references /scratch /vault）。"
 			+ "vault 未解锁时加密区内容不可见。",
 		promptSnippet: "检索知识库：kb_search(查询词[, limit][, namespace]) → 片段列表",
@@ -477,7 +477,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		name: "kb_lslfs",
 		label: "列出 LFS 大文件",
 		description:
-			"列出 LFS 大文件区（/lfs/）的文件（路径/大小/时间）。基于元数据缓存（1 小时有效，AI 上传后即时更新）；"
+			"列出 LFS 大文件区（/lfs/）的文件（路径/大小/时间）。基于元数据缓存（1 小时有效）；"
 			+ "跨设备刚上传的文件可能未同步，可加 force:true 强制从远端刷新。",
 		promptSnippet: "列 LFS：kb_lslfs([路径][, force]) → 文件列表",
 		parameters: Type.Object({
@@ -619,7 +619,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		label: "删除笔记",
 		description:
 			"删除一篇笔记（本地镜像 + 远端 + 账本三方一致，vault 自动删密文）。"
-			+ "必须传 confirm:true 才执行（防误删）；操作记入 .kb-delete-log 审计。"
+			+ "必须传 confirm:true 才执行（防误删）。"
 			+ "LFS（/lfs/）删除请用 WebDAV 客户端。",
 		promptSnippet: "删除笔记：kb_delete(路径, confirm:true) → 已删除",
 		parameters: Type.Object({

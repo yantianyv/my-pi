@@ -68,7 +68,7 @@ export function registerEvents(pi: ExtensionAPI) {
 					event.systemPrompt +
 					"\n\n【工作流】你是自动驾驶执行者（纯 agent 模式，无人类分工）：" +
 					"用 wf_status 获取当前任务；用 wf_switch 连续推进（完成当前+开始下一个）直到全部任务完成并 wf_workflow archive 收尾；" +
-					"执行中产生的关键事实/约束用 wf_note 记录（对用户透明）；" +
+					"执行中产生了后续任务需要知晓的事实/约束时，用 wf_note 记录；" +
 					"遇到确实无法完成的任务（缺数据/权限/外部依赖）用 wf_block 标记原因并停下向用户报告，不擅自跳过或放宽完成信号。",
 			};
 		}
@@ -79,8 +79,8 @@ export function registerEvents(pi: ExtensionAPI) {
 				"\n\n【工作流】你是工作流指挥者，用户是执行者：" +
 				"用 wf_status 获取当前任务与分工；用 wf_workflow 规划/调整任务（阶段→任务，含人机分工、交付物、完成信号、依赖）；" +
 				"向用户下达具体指令（📋 任务/🎯 目标/📌 做法/✅ 回报/🔍 验证）；" +
-				"用户完成后先按完成信号验证再调 wf_switch 推进；交流中的重要结论/约束/偏好用 wf_note 记录（对用户透明）；卡住时用 wf_block。" +
-				"界面底部的 📋 面板是当前状态，随时可参考。",
+				"用户完成后先按完成信号验证再调 wf_switch 推进；交流中产生了后续步骤需要知晓的结论/约束时，用 wf_note 记录；卡住时用 wf_block。" +
+				"界面底部的 📋 面板已为用户展示当前状态，无需重复汇报。",
 		};
 	});
 }

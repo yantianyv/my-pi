@@ -54,7 +54,7 @@ export interface TaskState {
 	note?: string;
 }
 
-/** AI 记录（wf_note，对用户透明）：交流中的重要结论/约束/偏好，作为跨会话记忆 */
+/** AI 记录（wf_note）：工作流内的决策记录（当前步骤产生、后续步骤需要知晓的信息） */
 export interface NoteRecord {
 	id: string;
 	ts: string;

@@ -652,16 +652,16 @@ export function registerTools(pi: ExtensionAPI) {
 		},
 	});
 
-	/* ---------- 工具：wf_note（AI 记录，对用户透明） ---------- */
+	/* ---------- 工具：wf_note（AI 记录） ---------- */
 	pi.registerTool({
 		name: "wf_note",
 		label: "记录",
 		description:
-			"AI 的记录工具（对用户透明，无需用户操作）：把交流中的重要结论/约束/偏好记下来，作为跨会话持久记忆。\n" +
+			"AI 的记录工具：在工作流中，用于记录后续步骤需要用到的信息。每进入新的步骤，应当主动使用list动作查看已有记录，并及时remove不再用得到的记录。\n" +
 			"使用准则：用户明确拍板的选择、硬约束（如「不要用 X」）、需要后续遵守的重要结论 → 记；\n" +
 			"对话琐碎细节、任务字段已覆盖的内容（分工/交付物/完成信号）→ 不记。\n" +
 			"action：add 追加（自动 id+时间戳）/ list 查看全部 / edit 修改（按 id）/ remove 删除（按 id）。",
-		promptSnippet: "record important conclusions/constraints (transparent to the user)",
+		promptSnippet: "记录当前步骤产生、后续步骤需要知晓的信息",
 		parameters: noteParams,
 		async execute(_id, params: NoteParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);

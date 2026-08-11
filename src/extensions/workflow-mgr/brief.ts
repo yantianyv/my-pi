@@ -68,7 +68,7 @@ export function renderBrief(state: WorkflowState, derived: Derived): string {
 	}
 
 	lines.push(
-		"- 流程指令：你是流程指挥者，向用户下达当前任务的具体指令（📋 任务/🎯 目标/📌 做法/✅ 回报/🔍 验证）；任务完成后先按完成信号验证再调用 wf_switch 推进；交流中的重要结论/约束/偏好用 wf_note 记录（对用户透明）；卡住用 wf_block。",
+		"- 流程指令：你是流程指挥者，向用户下达当前任务的具体指令（📋 任务/🎯 目标/📌 做法/✅ 回报/🔍 验证）；任务完成后先按完成信号验证再调用 wf_switch 推进；交流中产生了后续步骤需要知晓的结论/约束时，用 wf_note 记录；卡住用 wf_block。",
 	);
 	return lines.join("\n");
 }
