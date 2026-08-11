@@ -77,8 +77,35 @@ try {
 	check("索引跳过非 md / 隐藏 / 冲突副本", idx.paths().length === 4, JSON.stringify(idx.paths()));
 	check("索引含中文文件名", idx.paths().includes("/notes/中文检索示例.md"));
 
+	// ---- 新格式：csv/json/yaml 等纯文本可索引（表格表头加权） ----
+	w("/data/城市列表.csv", "城市,省份,人口\n杭州,浙江,1200万\n成都,四川,2100万\n");
+	w("/data/汇率快照.json", '{"usd_cny": 7.25, "updated": "2026-01-01"}\n');
+	w("/notes/配置示例.yaml", "server:\n  host: localhost\n  port: 8080\n");
+	idx.refresh();
+	check("csv 可索引", idx.paths().includes("/data/城市列表.csv"));
+	check("json 可索引", idx.paths().includes("/data/汇率快照.json"));
+	check("yaml 可索引", idx.paths().includes("/notes/配置示例.yaml"));
+	let r = idx.search("人口");
+	check("csv 正文检索", r.some((x) => x.path === "/data/城市列表.csv"), JSON.stringify(r.map((x) => x.path)));
+	r = idx.search("省份");
+	check("csv 表头作标题加权", r.length >= 1 && r[0].path === "/data/城市列表.csv" && r[0].title.includes("省份"), JSON.stringify(r.map((x) => [x.path, x.score, x.title])));
+	r = idx.search("usd_cny");
+	check("json 检索", r.some((x) => x.path === "/data/汇率快照.json"), JSON.stringify(r.map((x) => x.path)));
+	r = idx.search("8080");
+	check("yaml 检索", r.some((x) => x.path === "/notes/配置示例.yaml"), JSON.stringify(r.map((x) => x.path)));
+	r = idx.search("城市", { namespace: "/data" });
+	check("csv 正文命中片段含表头", r.length >= 1 && r[0].snippet.includes("城市"), JSON.stringify(r.map((x) => x.snippet)));
+
+	// ---- 回归：yaml 以 --- 文档标记开头不被误剥 frontmatter（开头块内容仍可检索） ----
+	w("/notes/文档标记.yaml", "---\nname: 示例服务\n---\nport: 9090\n");
+	idx.refresh();
+	r = idx.search("示例服务");
+	check("yaml --- 文档标记不剥正文", r.some((x) => x.path === "/notes/文档标记.yaml"), JSON.stringify(r.map((x) => x.path)));
+	r = idx.search("9090");
+	check("yaml --- 文档标记后正文可检索", r.some((x) => x.path === "/notes/文档标记.yaml"), JSON.stringify(r.map((x) => x.path)));
+
 	// ---- 英文检索 ----
-	let r = idx.search("propfind");
+	r = idx.search("propfind");
 	check("英文检索命中", r.length >= 1 && r[0].path === "/notes/webdav.md", JSON.stringify(r.map((x) => x.path)));
 	check("英文检索含片段", r[0].snippet.includes("PROPFIND"), r[0].snippet);
 

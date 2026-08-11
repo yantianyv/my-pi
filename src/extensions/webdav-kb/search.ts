@@ -15,6 +15,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { FM_PARSE_EXT, TABLE_EXT, TEXT_EXT } from "./formats";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -24,8 +25,10 @@ import * as path from "node:path";
 const SNIPPET_RADIUS = 100;
 /** 默认返回结果条数 */
 const DEFAULT_LIMIT = 8;
-/** 参与索引的文件后缀（其余跳过，避免二进制污染） */
-const INDEXED_EXT = new Set([".md", ".markdown", ".txt"]);
+/** 参与索引的文件后缀（清单一处维护，见 formats.ts） */
+const INDEXED_EXT: ReadonlySet<string> = new Set(TEXT_EXT);
+/** 表头作标题时的最大长度（超长表头截断，防单行撑爆索引） */
+const HEADER_TITLE_MAX = 200;
 /** 标题词权重（计入 tf 时翻的倍数） */
 const TITLE_WEIGHT = 2;
 
@@ -204,7 +207,17 @@ export class NoteIndex {
 	}
 
 	private buildDoc(rel: string, raw: string, mtimeMs: number): IndexedDoc {
-		const { title, tags, body } = parseFrontmatter(raw);
+		const ext = path.extname(rel).toLowerCase();
+		// frontmatter 只按格式解析：yaml 等数据格式允许以 --- 文档标记开头，盲解析会把开头块误剥出正文
+		const meta = FM_PARSE_EXT.has(ext) ? parseFrontmatter(raw) : { title: "", tags: [] as string[], body: raw };
+		let title = meta.title;
+		const tags = meta.tags;
+		const body = meta.body;
+		// 表格类：无 frontmatter 时用首行表头作标题（检索加权；对 csv/tsv 表头即列名，命中列名比命中文件名更有意义）
+		if (!title && TABLE_EXT.has(ext)) {
+			const head = raw.split(/\r?\n/, 1)[0]?.trim() ?? "";
+			if (head) title = head.slice(0, HEADER_TITLE_MAX);
+		}
 		const terms = tokenize(`${title} ${title} ${tags.join(" ")} ${body}`);
 		const tf: Record<string, number> = {};
 		let len = 0;

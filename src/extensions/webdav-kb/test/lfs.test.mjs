@@ -206,7 +206,7 @@ try {
 	// ---- kb_write 大内容拒绝（md 上限 50MB，构造字符串用 Buffer 生成快） ----
 	const bigContent = "a".repeat(50 * 1024 * 1024 + 1);
 	r = await tool("kb_write").execute("20", { path: "/notes/技术笔记/WebDAV/容量测试/huge.md", content: bigContent }, undefined, undefined, ctx);
-	check("kb_write 超大内容拒绝", r.content[0].text.includes("超过 md 笔记上限"), r.content[0].text.slice(0, 80));
+	check("kb_write 超大内容拒绝", r.content[0].text.includes("超过文本笔记上限"), r.content[0].text.slice(0, 80));
 
 	// ---- syncAll：/lfs/ 只刷元数据不下载 ----
 	const cfg = { baseUrl: dav.baseUrl, username: "test-user", password: "test-pass", mirrorDir };

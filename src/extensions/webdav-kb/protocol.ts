@@ -37,12 +37,19 @@ export const DEFAULT_PROTOCOL = `# 知识库使用守则（webdav-kb）
 ## 四、写入规范
 - 新建前必须先 kb_search 查重；有类似笔记 → 更新旧笔记，不重复建
 - 文件名：短横线连接的主题词，如 /notes/tsc-build-gotcha.md（中文主题也可）
-- 每个文件必须带 frontmatter：
+- 支持的文本格式（纯文本可全文检索，kb_search 按内容命中）：
+  - 文档类：.md / .markdown（知识库原生，**必须带 frontmatter**）、.txt（自由文本，不强制）
+  - 表格类：.csv / .tsv（首行表头即列名，检索时表头加权；读全文时表头在最前）
+  - 数据/配置类：.json / .jsonl / .yaml / .yml / .toml（结构即信息，全文可检索）
+  - 标记文档：.html / .xml（网页原文存档等）
+  - 其余纯文本（rst/org/tex/ini/log 等）暂不索引：小文件转成上述格式，大文件存 LFS
+- 文档类（.md/.markdown）必须带 frontmatter：
   ---
   title: 一句话标题
   tags: [标签1, 标签2]
   ---
   正文从这里开始
+- 表格/数据格式**不需要 frontmatter**（文件名即标题；csv/tsv 检索时表头加权），直接写内容即可
 - 已存在文件写覆盖需 overwrite:true；补充内容优先 kb_append
 - 归错类 > 不归：拿不准放 /scratch，想清楚再移
 
@@ -56,7 +63,7 @@ export const DEFAULT_PROTOCOL = `# 知识库使用守则（webdav-kb）
 - 知识/观点（论文、书、报告、讲义、新闻）→ 知识文献/
 - 行为约束（法规、办法、条例、章程、合同）→ 规范文书/
 - 操作指导（教程、手册、指南、说明书、流程）→ 操作指南/
-- 数据查询（名录、通讯录、统计、数据）→ 数据名录/
+- 数据查询（名录、通讯录、统计、数据）→ 数据名录/（csv/tsv 表格多归此类）
 - 填写/套用（表单、模板、票据、凭证、证件）→ 表单模板/（文档本身是待使用的载体：填写/套用/备查，区别于操作指南的说明文字）
 - 非文本（图、音、视、设计稿）→ 素材资源/（本体存 /lfs/）
 
@@ -97,7 +104,7 @@ export const DEFAULT_PROTOCOL = `# 知识库使用守则（webdav-kb）
 - 上传/下载目标已存在需显式 overwrite:true；单文件上限 1GB
 - md 笔记引用 lfs 文件用纯路径文本（如「附件：lfs/xxx.png」），不要用图片链接（人类环境该文件不在本地会失效）
 - 人类管理 lfs：直接用 WebDAV 客户端挂载同一目录（它就是网盘）
-- 敏感大文件请勿放 lfs（不加密）；md 笔记上限 50MB（kb_write 会拒绝更大内容）
+- 敏感大文件请勿放 lfs（不加密）；文本笔记上限 50MB（kb_write 会拒绝更大内容）
 
 ## 九、vault 加密区
 - 写 /vault/ 下内容需已解锁（/kb-config 输入口令）；未解锁写入会报错

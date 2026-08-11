@@ -31,6 +31,7 @@ import {
 	isLfsCacheFresh,
 } from "./lfs";
 import { mirrorPath } from "./store";
+import { DOC_EXT, TEXT_EXT } from "./formats";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -38,8 +39,8 @@ import { mirrorPath } from "./store";
 
 /** 写入允许的顶层命名空间（/memory 已废弃：知识库只存知识，不承担记忆功能） */
 const ALLOWED_NAMESPACES = ["/notes", "/references", "/scratch", "/vault"] as const;
-/** 写入允许的文件后缀 */
-const VALID_EXT = [".md", ".markdown", ".txt"] as const;
+/** 文本笔记最大字节数（防伪装上传大文件；正常笔记远小于此，专指异常场景） */
+const NOTE_MAX_BYTES = 50 * 1024 * 1024;
 /** kb_read 全文上限（超出截断并提示） */
 const READ_MAX_CHARS = 30_000;
 /** kb_list 返回上限（防超大目录撑爆上下文） */
@@ -49,8 +50,6 @@ const SEARCH_LIMIT = 8;
 const SEARCH_LIMIT_MAX = 20;
 /** 搜索片段最大长度（结果里再加说明） */
 const SNIPPET_MAX = 240;
-/** md 文本最大字节数（防伪装上传大文件；正常笔记远小于此，专指异常场景） */
-const MD_MAX_BYTES = 50 * 1024 * 1024;
 /** LFS 单文件最大字节数（超过需 force 强制；force 参数不在工具说明中显示，仅警告揭示） */
 const LFS_MAX_BYTES = 1024 * 1024 * 1024;
 /** kb_lslfs 返回条数上限 */
@@ -216,9 +215,9 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		label: "写入笔记",
 		description:
 			"写入/覆盖一篇笔记（相对路径，必须位于 /notes /references /scratch /vault 之一，"
-			+ `.md/.markdown/.txt 后缀；vault 下自动加密）。`
+			+ ".md/.markdown/.txt/.csv/.tsv/.json/.jsonl/.yaml/.yml/.toml/.html/.xml 后缀；vault 下自动加密）。"
 			+ "已存在文件需显式 overwrite:true；补充内容用 kb_append。"
-			+ "内容须以 frontmatter（title/tags）开头，否则会被拒绝。",
+			+ "md/markdown 内容须以 frontmatter（title/tags）开头，否则会被拒绝；表格/数据格式无需 frontmatter（文件名即标题）。",
 		promptSnippet: "写笔记：kb_write(路径, 内容[, overwrite]) → 已写入",
 		parameters: Type.Object({
 			path: Type.String({ description: "笔记相对路径，如 /notes/webdav-踩坑.md" }),
@@ -231,19 +230,22 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
 			const p = validateWritablePath(params.path);
 			if (p) return text(p, {});
-			// md 大小硬限制：防伪装上传大文件（正常笔记远小于 50MB）；放最前，大内容直接拒
+			// 文本大小硬限制：防伪装上传大文件（正常笔记远小于 50MB）；放最前，大内容直接拒
 			const contentBytes = Buffer.byteLength(params.content, "utf8");
-			if (contentBytes > MD_MAX_BYTES) {
+			if (contentBytes > NOTE_MAX_BYTES) {
 				return text(
-					`内容 ${formatSize(contentBytes)} 超过 md 笔记上限 ${formatSize(MD_MAX_BYTES)}——笔记不应如此大。`
+					`内容 ${formatSize(contentBytes)} 超过文本笔记上限 ${formatSize(NOTE_MAX_BYTES)}——笔记不应如此大。`
 						+ `大文件请用 kb_upload 上传到 LFS（/lfs/）。`,
 					{ size: contentBytes },
 				);
 			}
-			if (!hasFrontmatter(params.content)) {
+			// frontmatter 仅文档格式（md/markdown）强制：表格/数据格式加工会破坏内容（csv 首行是表头、json 以 { 开头）
+			const ext = "." + params.path.split(".").pop()?.toLowerCase();
+			if (DOC_EXT.has(ext) && !hasFrontmatter(params.content)) {
 				return text(
-					"内容缺少 frontmatter。每个笔记必须以下格式开头：\n"
-						+ "---\ntitle: 一句话标题\ntags: [标签1, 标签2]\n---\n正文…",
+					"md 文档缺少 frontmatter。每个 md 笔记必须以下格式开头：\n"
+						+ "---\ntitle: 一句话标题\ntags: [标签1, 标签2]\n---\n正文…\n"
+						+ "（表格/数据格式如 csv/json/yaml 不需要 frontmatter，直接写内容即可）",
 					{},
 				);
 			}
@@ -513,8 +515,9 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		name: "kb_import",
 		label: "批量导入本地目录",
 		description:
-			"把本地目录批量导入知识库（迁移场景）：递归扫描 sourceDir（相对工作目录）下所有 .md/.markdown/.txt，"
-			+ `目标 = ${"namespace"} + 原目录结构（自动生成 frontmatter：title=文件名、tags 空；已有 frontmatter 保留）。`
+			"把本地目录批量导入知识库（迁移场景）：递归扫描 sourceDir（相对工作目录）下的文本文件"
+			+ "（.md/.markdown/.txt/.csv/.tsv/.json/.jsonl/.yaml/.yml/.toml/.html/.xml），"
+			+ `目标 = ${"namespace"} + 原目录结构（md 自动生成 frontmatter：title=文件名、tags 空；已有 frontmatter 保留；表格/数据格式原样导入不加工）。`
 			+ "同名已存在默认跳过，mode=\"overwrite\" 则覆盖。非文本文件与超限文件跳过并在结果中列出（大文件用 kb_upload）。"
 			+ "vault 目标自动加密。",
 		promptSnippet: "批量导入：kb_import(源目录, 命名空间[, mode]) → 导入摘要",
@@ -558,13 +561,16 @@ export function registerKbTools(pi: ExtensionAPI): void {
 					if (ent.isDirectory()) walk(abs, rel);
 					else if (ent.isFile() && /\.[a-z0-9]+$/i.test(ent.name)) {
 						const ext = ent.name.split(".").pop()?.toLowerCase();
-						if ((VALID_EXT as readonly string[]).includes("." + ext)) files.push({ abs, rel });
+						if ((TEXT_EXT as readonly string[]).includes("." + ext)) files.push({ abs, rel });
 					}
 				}
 			};
 			walk(root, "");
 			if (files.length === 0) {
-				return text(`目录下没有可导入的文本文件（.md/.markdown/.txt）：${params.sourceDir}`, { count: 0 });
+				return text(
+					`目录下没有可导入的文本文件（.md/.markdown/.txt/.csv/.tsv/.json/.jsonl/.yaml/.yml/.toml/.html/.xml）：${params.sourceDir}`,
+					{ count: 0 },
+				);
 			}
 			const stats = { imported: 0, skipped: 0, failed: 0 };
 			const skippedList: string[] = [];
@@ -578,14 +584,15 @@ export function registerKbTools(pi: ExtensionAPI): void {
 					const f = files[i];
 					try {
 						const stat = fs.statSync(f.abs);
-						if (stat.size > MD_MAX_BYTES) {
-							skippedList.push(`${f.rel}（${formatSize(stat.size)}，超 md 上限，请用 kb_upload）`);
+						if (stat.size > NOTE_MAX_BYTES) {
+							skippedList.push(`${f.rel}（${formatSize(stat.size)}，超文本笔记上限，请用 kb_upload）`);
 							stats.skipped++;
 							continue;
 						}
 						let raw = fs.readFileSync(f.abs, "utf8");
-						// 自动 frontmatter（没有则补，title=文件名、tags 空）
-						if (!/^---\r?\n/.test(raw)) {
+						// 自动 frontmatter 仅文档格式（md/markdown）：表格/数据格式加工会破坏内容（csv 首行表头、json 以 { 开头），原样导入
+						const ext = "." + f.rel.split(".").pop()?.toLowerCase();
+						if (DOC_EXT.has(ext) && !/^---\r?\n/.test(raw)) {
 							const title = f.rel.split("/").pop()?.replace(/\.[^.]+$/, "") ?? f.rel;
 							raw = `---\ntitle: ${title}\ntags: []\n---\n` + raw;
 						}
@@ -860,8 +867,8 @@ function validateNs(p: string): string | null {
 		return `路径必须位于以下命名空间之一：${ALLOWED_NAMESPACES.join(" ")}（当前：${p}）。`;
 	}
 	const ext = "." + p.split(".").pop()?.toLowerCase();
-	if (!(VALID_EXT as readonly string[]).includes(ext)) {
-		return `文件后缀必须为 ${VALID_EXT.join(" / ")}（当前：${p}）。`;
+	if (!(TEXT_EXT as readonly string[]).includes(ext)) {
+		return `文件后缀必须为 ${TEXT_EXT.join(" / ")}（当前：${p}）。`;
 	}
 	return null;
 }
@@ -879,8 +886,8 @@ function validateWritablePath(p: string): string | null {
 		return `路径必须分层：/命名空间/用途/自由层级/文件名（命名空间/用途下不直接放文件，当前：${p}）。`;
 	}
 	const ext = "." + p.split(".").pop()?.toLowerCase();
-	if (!(VALID_EXT as readonly string[]).includes(ext)) {
-		return `文件后缀必须为 ${VALID_EXT.join(" / ")}（当前：${p}）。`;
+	if (!(TEXT_EXT as readonly string[]).includes(ext)) {
+		return `文件后缀必须为 ${TEXT_EXT.join(" / ")}（当前：${p}）。`;
 	}
 	return null;
 }
