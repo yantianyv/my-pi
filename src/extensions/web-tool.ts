@@ -2,14 +2,22 @@
  * web-tool: 联网搜索 + 网页抓取转 markdown（给 agent 用的 web_search / web_fetch 两个工具）
  *
  * 多源搜索，零 API key 零费用（彻底去除对 kimi-coding 的依赖）：
- * - 通用网页：cn.bing.com RSS（主）+ 360 搜索 HTML（备），自动降级；
+ * - 通用网页：cn.bing.com RSS + 360 搜索 HTML 双源并行，结果**逐条评分合并**：
+ *   标题/URL/摘要按权重计分 + 完整查询短语命中强加成，跨源去重（URL 规范化 /
+ *   标题归一化）后按分数降序取前 15 条——两个源的高质量条目都能入选，bing 泛化
+ *   查询（地名+机构被吞长尾词）混入的低相关条目自然沉底；
  * - 垂类包：npm registry JSON API（source: "npm"）；pypi.org 搜索页有 Client
  *   Challenge 反爬（实测 curl 只回挑战页），不做垂类源，Python 包让 agent 走
  *   普通网页搜索查；
- * - bing 免费接口限流特征：连续请求后只回 1 条 item，<2 条即视为被限流自动
- *   降级 360（实测 360 稳定、data-mdurl 带真实 URL、res-desc 带摘要）；
+ * - bing 免费接口限流特征：连续请求后只回 1 条 item（实测 360 稳定、data-mdurl
+ *   带真实 URL、res-desc 带摘要）；限流占位条目评分低，合并时自动被筛掉；
  * - 不依赖服务端 AI 总结：直接返回 标题+URL+摘要 列表由主 agent 自行判断，
  *   需要深读时用 web_fetch 抓取——成本从 kimi 时代每次 2 万+ token 降到 0。
+ *
+ * 差评降权（动态黑名单）：AI 发现低质量结果（内容与标题不符/灌水/死链）时调用
+ * web_dislike 对域名记差评，持久化到 ~/.pi/agent/web-search-blacklist.json（跨会话）；
+ * 搜索评分时按差评次数降权（×DECAY^count），累计到阈值直接滤除——无需维护域名白名单，
+ * 降权对象由 AI 使用中自然沉淀。
  *
  * fetch：抓取 URL → @mixmark-io/domino 解析 DOM → 选正文容器（article/main/body）
  * → turndown(+gfm 表格) 转 markdown → 压缩空行/截断。turndown 与其依赖 domino、
@@ -93,6 +101,59 @@ interface FRes {
 
 /** web-tool 代理设置持久化文件（/web-tool-config 写入，reload 后恢复；不读环境变量） */
 const PROXY_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "web-fetch-proxy.json");
+
+/** 搜索结果差评（动态黑名单）持久化文件（web_dislike 写入，跨会话生效；/web-tool-config 面板查看，Delete 清空） */
+const DISLIKE_FILE = path.join(os.homedir(), ".pi", "agent", "web-search-blacklist.json");
+
+/** 差评数据结构：{ 域名: { count: 差评次数, reasons: 差评原因追踪 } } */
+function isDislikeData(v: unknown): v is Record<string, { count: number; reasons: string[] }> {
+	if (v === null || typeof v !== "object") return false;
+	return Object.values(v as Record<string, unknown>).every((d) => {
+		if (d === null || typeof d !== "object") return false;
+		const o = d as { count?: unknown; reasons?: unknown };
+		return typeof o.count === "number" && Array.isArray(o.reasons) && o.reasons.every((r) => typeof r === "string");
+	});
+}
+
+/** 读取差评数据（文件缺失/损坏返回空表） */
+function loadDislikeData(): Record<string, { count: number; reasons: string[] }> {
+	return loadJsonConfig<Record<string, { count: number; reasons: string[] }>>(DISLIKE_FILE, {}, isDislikeData);
+}
+
+/** 保存差评数据 */
+function saveDislikeData(data: Record<string, { count: number; reasons: string[] }>): void {
+	saveJsonConfig(DISLIKE_FILE, data);
+}
+
+/** 从域名或结果 URL 提取差评键（去 www.；URL 则取 hostname） */
+function dislikeKey(input: string): string {
+	const s = input.trim();
+	try {
+		if (/^https?:\/\//i.test(s)) return new URL(s).hostname.replace(/^www\./i, "").toLowerCase();
+	} catch { /* 非法 URL 按域名处理 */ }
+	return s.replace(/^www\./i, "").toLowerCase().replace(/[\/?#].*$/, "");
+}
+
+/** 结果的 hostname（降权匹配用） */
+function hostnameOf(url: string): string {
+	try {
+		return new URL(url).hostname;
+	} catch {
+		return "";
+	}
+}
+
+/** 差评降权系数：按 hostname 与差评域名的后缀匹配取最大差评次数（差评 blog.csdn.net 同样作用于
+ *  sub.blog.csdn.net）；达到封禁阈值返回 0（滤除） */
+function dislikePenalty(host: string, data: Record<string, { count: number; reasons: string[] }>): number {
+	const key = host.replace(/^www\./i, "").toLowerCase();
+	let maxCount = 0;
+	for (const domain of Object.keys(data)) {
+		if (key === domain || key.endsWith("." + domain)) maxCount = Math.max(maxCount, data[domain]!.count);
+	}
+	if (maxCount >= DISLIKE_BAN_THRESHOLD) return 0;
+	return Math.pow(DISLIKE_DECAY, maxCount);
+}
 
 /** 代理配置校验：{ proxy?: string }（空串 = 未设置） */
 function isProxyConfig(v: unknown): v is { proxy?: string } {
@@ -320,8 +381,12 @@ async function fetchWithRetry(url: string, init: any, timeoutMs: number, outerSi
 	throw direct;
 }
 
-/** 单次搜索返回给 agent 的结果条数上限 */
-const MAX_RESULTS = 10;
+/** 单次搜索返回给 agent 的结果条数上限（多源合并去重后取分数最高的这么多条） */
+const MAX_RESULTS = 15;
+/** 差评降权衰减系数：score × DISLIKE_DECAY^count（1 次 ×0.6，2 次 ×0.36，3 次 ×0.22…） */
+const DISLIKE_DECAY = 0.6;
+/** 差评累计达到该次数：直接滤除该域名条目（评分归 0，不再出现在结果中） */
+const DISLIKE_BAN_THRESHOLD = 5;
 /** 搜索单源超时（毫秒） */
 const SEARCH_TIMEOUT_MS = 15_000;
 /** 直连超时（毫秒）：被墙站点直连多为连接黑洞（挂到超时），短超时快速切降级；
@@ -346,6 +411,8 @@ interface SearchResult {
 	title: string;
 	url: string;
 	snippet: string;
+	/** 来源标识（bing/so360/npm），合并搜索结果时标注用 */
+	src?: string;
 }
 
 function decodeHtml(s: string): string {
@@ -469,55 +536,144 @@ async function searchNpm(query: string): Promise<SearchResult[]> {
 	return results;
 }
 
-/** 提取查询中的有效特征词（≥2 字且非中文停用词），用于结果相关度评估 */
+/** 提取查询中的有效特征词：按空白/标点切分，保留 ≥2 字且非停用词（中英停用词都滤；
+ *  中文长词组如「陕西师范大学」整体保留作强信号词，英文词按整词匹配防子串误报） */
 function queryKeywords(q: string): string[] {
-	const stops = new Set(["的", "了", "和", "与", "或", "在", "是", "有", "等", "及", "为", "中", "以", "之", "于"]);
-	return q.split(/[\s,，。、;；:：]+/).filter((w) => w.length >= 2 && !stops.has(w));
+	const stops = new Set([
+		"的", "了", "和", "与", "或", "在", "是", "有", "等", "及", "为", "中", "以", "之", "于",
+		"a", "an", "the", "of", "to", "in", "on", "for", "and", "or", "with", "at", "by", "from",
+		"vs", "is", "are", "was", "were", "be", "do", "does", "how", "what", "why", "when", "where",
+	]);
+	return q.split(/[\s,，。、;；:：]+/).filter((w) => w.length >= 2 && !stops.has(w.toLowerCase()));
 }
 
-/** 按查询特征词在结果标题/URL/摘要中的命中率衡量结果相关度（0~1） */
-function relevance(results: SearchResult[], keywords: string[]): number {
-	if (!keywords.length || !results.length) return 0;
-	let hits = 0;
-	for (const r of results) {
-		const hay = `${r.title} ${r.url} ${r.snippet}`;
-		if (keywords.some((k) => hay.includes(k))) hits++;
+/** 关键词命中判定：纯 ASCII 关键词需词边界（防子串误报，如搜 cat 误中 concatenate）；
+ *  含中文等非 ASCII 的关键词用子串匹配（中文无词边界概念） */
+function containsKeyword(hay: string, kw: string): boolean {
+	const lower = hay.toLowerCase();
+	const k = kw.toLowerCase();
+	if (!lower.includes(k)) return false;
+	if (/^[\x20-\x7e]+$/.test(k)) {
+		const esc = k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		return new RegExp(`(^|[^a-z0-9])${esc}($|[^a-z0-9])`).test(lower);
 	}
-	return hits / results.length;
+	return true;
 }
 
-/** 通用网页搜索：双源并行 + 按查询特征词命中率择优。根因：cn.bing.com（中国版）查询理解会把「地名+机构名」组合（如“陕西师范大学”）降级成地域搜索丢弃长尾词（已实测：含“陕西师范大学”的查询全泛化成“陕西省”，无关词数；裸请求/参数/编码均无法影响）；360 对这类中文查询正常。命中率高者胜，同分默认 bing（英文/短查询 bing 更稳） */
-async function searchWeb(query: string): Promise<{ results: SearchResult[]; source: string }> {
+/** 评分用 URL 文本：只取 hostname+pathname（query 参数常是搜索词的 echo——如限流占位页
+ *  ?q=查询词——不是页面真实内容信号，不应计入相关度） */
+function urlTextForScoring(url: string): string {
+	try {
+		const u = new URL(url);
+		return `${u.hostname}${u.pathname}`;
+	} catch {
+		return url;
+	}
+}
+
+/** 单条结果相关度评分（0 起，无上限；标题/URL/摘要按权重逐词计分 + 强信号加成）：
+ *  - 标题命中 30/词、URL 命中 12/词（仅 hostname+pathname）、摘要命中 8/词——标题是最强相关信号，URL 次之；
+ *  - 完整查询短语（去空白）命中任一字段 +40：bing 把「地名+机构」泛化成地域搜索时，
+ *    只有真正相关的结果才含完整短语，泛化结果分低自然沉底；
+ *  - 标题覆盖全部关键词 +15（多关键词查询的强相关信号） */
+function scoreResult(r: SearchResult, keywords: string[], query: string): number {
+	const urlText = urlTextForScoring(r.url);
+	const titleHits = keywords.filter((k) => containsKeyword(r.title, k)).length;
+	const urlHits = keywords.filter((k) => containsKeyword(urlText, k)).length;
+	const snipHits = keywords.filter((k) => containsKeyword(r.snippet, k)).length;
+	let score = titleHits * 30 + urlHits * 12 + snipHits * 8;
+	if (keywords.length > 1) {
+		const phrase = query.toLowerCase().replace(/\s+/g, "");
+		const hay = `${r.title} ${r.snippet} ${urlText}`.toLowerCase().replace(/\s+/g, "");
+		if (phrase && hay.includes(phrase)) score += 40;
+		if (titleHits === keywords.length) score += 15;
+	}
+	return score;
+}
+
+/** URL 规范化去重键：去掉跟踪参数（utm 系列/fbclid/gclid/ref/source/spm 等）、www.、尾部斜杠、协议，保留有意义的 query */
+function urlDedupKey(url: string): string {
+	try {
+		const u = new URL(url);
+		for (const p of [...u.searchParams.keys()]) {
+			if (/^(utm_|fbclid|gclid|yclid|igshid|ref|source|spm|from|traceid)/i.test(p)) u.searchParams.delete(p);
+		}
+		const host = u.hostname.replace(/^www\./i, "").toLowerCase();
+		return `${host}${u.pathname.replace(/\/+$/, "").toLowerCase()}${u.search}`;
+	} catch {
+		return url.toLowerCase();
+	}
+}
+
+/** 标题归一化去重键：去空白/标点/大小写，用于不同 URL 转发同一文章的近似去重 */
+function titleDedupKey(title: string): string {
+	return title.toLowerCase().replace(/[\s\p{P}]+/gu, "");
+}
+
+/** 多源结果合并：逐条评分 → 差评降权（动态黑名单）→ 分数降序（同分按源内原排位，搜索引擎自身排序作 tie-breaker）→
+ *  跨源去重（URL 规范化相同 / 标题归一化相同即重复）→ 取前 MAX_RESULTS。
+ *  旧「整源择优」只留一个源，且命中率按比例算——bing 泛化时结果多反而凑出高命中率；
+ *  条目级评分让两个源的高质量条目都能浮上来，零命中（score 0）的垃圾条目沉底被滤掉 */
+function mergeRankResults(sources: Array<{ src: string; results: SearchResult[] }>, query: string): SearchResult[] {
 	const keywords = queryKeywords(query);
+	const dislike = loadDislikeData(); // 读一次差评表，供全批降权
+	const scored = sources.flatMap(({ src, results }) =>
+		results.map((r, i) => {
+			let score = scoreResult(r, keywords, query);
+			if (score > 0) score = Math.round(score * dislikePenalty(hostnameOf(r.url), dislike));
+			return { r: { ...r, src } as SearchResult, score, rank: i };
+		}),
+	);
+	scored.sort((a, b) => b.score - a.score || a.rank - b.rank);
+	const seenUrls = new Set<string>();
+	const seenTitles = new Set<string>();
+	const out: SearchResult[] = [];
+	for (const item of scored) {
+		if (item.score <= 0) break; // 已降序，其后都是零命中条目
+		const urlKey = urlDedupKey(item.r.url);
+		const titleKey = titleDedupKey(item.r.title);
+		if (seenUrls.has(urlKey) || seenTitles.has(titleKey)) continue;
+		seenUrls.add(urlKey);
+		seenTitles.add(titleKey);
+		out.push(item.r);
+		if (out.length >= MAX_RESULTS) break;
+	}
+	return out;
+}
+
+/** 通用网页搜索：双源并行 → 条目级评分合并 → 去重取前 MAX_RESULTS。
+ *  根因（历史）：cn.bing.com（中国版）查询理解会把「地名+机构名」组合（如“陕西师范大学”）
+ *  降级成地域搜索丢弃长尾词（已实测：含“陕西师范大学”的查询全泛化成“陕西省”；裸请求/参数/
+ *  编码均无法影响），360 对这类中文查询正常；限流时 bing 只回 1 条占位。合并评分下这些
+ *  低相关条目分数低自然被滤掉，无需再特判限流/泛化 */
+async function searchWeb(query: string): Promise<{ results: SearchResult[]; source: string }> {
 	const attempts = await Promise.allSettled([
 		searchBing(query).then((results) => ({ src: "bing" as const, results })),
 		searchSo360(query).then((results) => ({ src: "so360" as const, results })),
 	]);
-	let best: { src: "bing" | "so360"; results: SearchResult[] } | null = null;
-	let bestScore = -1;
+	const sources: Array<{ src: string; results: SearchResult[] }> = [];
 	const errors: string[] = [];
 	for (const a of attempts) {
 		if (a.status === "rejected") {
 			errors.push(`${a.reason instanceof Error ? a.reason.message : String(a.reason)}`);
 			continue;
 		}
-		const { src, results } = a.value;
-		if (!results.length) {
-			errors.push(`${src}: 无结果`);
+		if (!a.value.results.length) {
+			errors.push(`${a.value.src}: 无结果`);
 			continue;
 		}
-		if (src === "bing" && results.length < 2) {
-			errors.push("bing: 被限流（<2 条）");
-			continue;
-		}
-		const score = relevance(results, keywords);
-		if (score > bestScore) {
-			bestScore = score;
-			best = { src, results };
-		}
+		sources.push(a.value);
 	}
-	if (best) return { results: best.results.slice(0, MAX_RESULTS), source: best.src };
-	throw new Error(`所有搜索源失败：${errors.join("；")}`);
+	if (!sources.length) throw new Error(`所有搜索源失败：${errors.join("；")}`);
+	const results = mergeRankResults(sources, query);
+	if (!results.length) {
+		const detail = errors.length ? errors.join("；") : "结果均不相关（关键词过泛或查询有误）";
+		throw new Error(`所有搜索源失败：${detail}`);
+	}
+	return {
+		results,
+		source: sources.length > 1 ? sources.map((s) => s.src).join("+") : sources[0]!.src,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -788,14 +944,32 @@ function renderToolCall(icon: string, arg: string | undefined, theme: Theme, fal
 	return new Text(text, 0, 0);
 }
 
+/** 结果展示：按来源分组（组标题行 [bing]/[so360]），组内保持分数降序，序号全局连续；
+ *  来源标注只在混合源需要区分时出现（组标题），单源不分组也无来源——省 token */
 function formatSearchResults(results: SearchResult[], source: string): string {
-	const lines = [`共 ${results.length} 条结果（来源：${source}）：`];
-	results.forEach((r, i) => {
-		const snippet = r.snippet.length > SNIPPET_MAX_CHARS ? `${r.snippet.slice(0, SNIPPET_MAX_CHARS)}…` : r.snippet;
-		lines.push(`${i + 1}. ${r.title}`);
-		lines.push(`   ${r.url}`);
-		if (snippet) lines.push(`   ${snippet}`);
-	});
+	// 分组：保持源首次出现顺序（全局数组已按分数降序，故组序即组内最高分降序）
+	const groups: Array<{ src: string; items: SearchResult[] }> = [];
+	const groupMap = new Map<string, SearchResult[]>();
+	for (const r of results) {
+		const key = r.src ?? source;
+		if (!groupMap.has(key)) {
+			groupMap.set(key, []);
+			groups.push({ src: key, items: groupMap.get(key)! });
+		}
+		groupMap.get(key)!.push(r);
+	}
+	const lines = [`共 ${results.length} 条结果：`];
+	let index = 0;
+	for (const g of groups) {
+		if (groups.length > 1) lines.push(`[${g.src}]`);
+		for (const r of g.items) {
+			index++;
+			const snippet = r.snippet.length > SNIPPET_MAX_CHARS ? `${r.snippet.slice(0, SNIPPET_MAX_CHARS)}…` : r.snippet;
+			lines.push(`${index}. ${r.title}`);
+			lines.push(`   ${r.url}`);
+			if (snippet) lines.push(`   ${snippet}`);
+		}
+	}
 	lines.push("", "需要深读某条结果时，用 web_fetch 抓取对应 URL 转为 markdown。");
 	return lines.join("\n");
 }
@@ -841,6 +1015,10 @@ class ProxyConfigOverlay {
 	private value = "";
 	private cursor = 0;
 	private error = "";
+	private statusMsg = ""; // 操作反馈（如「已删除差评：blog.csdn.net」）
+	// 焦点模型：input = 代理输入框；dislike = 差评列表（↑↓ 选择、Delete 删除选中项）——Tab/方向键在两区自由切换
+	private focus: "input" | "dislike" = "input";
+	private selected = 0;
 
 	constructor(tui: TUI, theme: Theme, current: string, done: (result: string | null) => void) {
 		this.tui = tui;
@@ -850,9 +1028,82 @@ class ProxyConfigOverlay {
 		this.cursor = current.length;
 	}
 
+	/** 差评键按次数降序（与面板显示一致，selected 索引基于此序） */
+	private sortedDislikeKeys(data: Record<string, { count: number; reasons: string[] }>): string[] {
+		return Object.keys(data).sort((a, b) => data[b]!.count - data[a]!.count);
+	}
+
 	handleInput(data: string): void {
+		// Esc：任意焦点态都关闭面板
 		if (matchesKey(data, "escape")) {
 			this.done(null);
+			return;
+		}
+
+		// ---- 差评列表焦点：↑↓ 选择（到顶/到底自然回输入框）、Enter/Tab 回输入框、Delete/Backspace 删除选中项 ----
+		if (this.focus === "dislike") {
+			const keys = this.sortedDislikeKeys(loadDislikeData());
+			if (matchesKey(data, "up")) {
+				if (this.selected === 0) {
+					this.focus = "input"; // 顶部再按 ↑：自然出口
+					this.tui.requestRender();
+					return;
+				}
+				this.selected--;
+				this.tui.requestRender();
+				return;
+			}
+			if (matchesKey(data, "down")) {
+				if (this.selected === keys.length - 1) {
+					this.focus = "input"; // 底部再按 ↓：自然出口
+					this.tui.requestRender();
+					return;
+				}
+				this.selected++;
+				this.tui.requestRender();
+				return;
+			}
+			if (matchesKey(data, "tab") || matchesKey(data, "enter")) {
+				this.focus = "input";
+				this.tui.requestRender();
+				return;
+			}
+			// d / Backspace：删除选中项（单条精细管理）
+			if (data === "d" || data === "D" || matchesKey(data, "backspace")) {
+				const key = keys[this.selected];
+				if (key) {
+					const d = loadDislikeData();
+					delete d[key];
+					saveDislikeData(d);
+					this.statusMsg = `✅ 已删除差评：${key}`;
+					this.selected = Math.max(0, Math.min(this.selected, keys.length - 2));
+					if (!Object.keys(d).length) this.focus = "input"; // 删空了自动回输入框
+					this.tui.requestRender();
+				}
+				return;
+			}
+			// Delete：清空全部差评（差评区焦点下的明确操作，不与输入框语义混淆）
+			if (matchesKey(data, "delete")) {
+				const d = loadDislikeData();
+				const n = Object.keys(d).length;
+				if (n) {
+					saveDislikeData({});
+					this.statusMsg = `✅ 已清空全部搜索差评（共 ${n} 个域名）`;
+					this.focus = "input";
+					this.tui.requestRender();
+				}
+				return;
+			}
+			return; // 列表焦点下其余按键忽略
+		}
+
+		// ---- 输入框焦点：Tab/方向键切到差评区；其余为代理编辑（Delete 无操作，避免与差评区语义混淆） ----
+		if (matchesKey(data, "tab") || matchesKey(data, "up") || matchesKey(data, "down")) {
+			if (Object.keys(loadDislikeData()).length) {
+				this.focus = "dislike";
+				this.selected = 0;
+				this.tui.requestRender();
+			}
 			return;
 		}
 		if (matchesKey(data, "return")) {
@@ -908,12 +1159,30 @@ class ProxyConfigOverlay {
 		const row = (content: string) => border("│") + truncateToWidth(content, innerW, "…", true) + border("│");
 		const lines: string[] = [];
 
-		const titleStr = ` ${th.fg("accent", "⚙️ web-tool 代理设置")} `;
+		const titleStr = ` ${th.fg("accent", "⚙️ web-tool 配置")} `;
 		lines.push(border(`╭${titleStr}${"─".repeat(Math.max(0, innerW - visibleWidth(titleStr)))}╮`));
 
-		// 当前配置状态
-		const current = getProxyUrl();
-		lines.push(row(` ${th.fg("dim", "当前代理：")}${current ? current : "未设置（直连，被墙时无法自动重试）"}`));
+		// 搜索差评（拉黑管理，面板唯一入口）：↑↓/Tab 切换焦点、列表焦点下 Delete 删除选中项、输入框焦点下 Delete 清空全部；不显示 reason（那是给 AI 追踪的，人看只会添乱）
+		const dislike = loadDislikeData();
+		const dislikeKeys = this.sortedDislikeKeys(dislike);
+		if (dislikeKeys.length) {
+			lines.push(row(` ${th.fg("warning", "🔨 搜索差评")} ${th.fg("dim", `(${dislikeKeys.length} 个)`)}`));
+			for (let i = 0; i < dislikeKeys.length; i++) {
+				const k = dislikeKeys[i]!;
+				const rec = dislike[k]!;
+				const state =
+					rec.count >= DISLIKE_BAN_THRESHOLD
+						? th.fg("warning", "已滤除")
+						: th.fg("dim", `降权×${Math.pow(DISLIKE_DECAY, rec.count).toFixed(2)}`);
+				let text = `   ${k} ${th.fg("accent", `×${rec.count}`)} ${state}`;
+				if (this.focus === "dislike" && i === this.selected) text = `\x1b[7m${text}\x1b[27m`; // 选中项反显
+				lines.push(row(text));
+			}
+		} else {
+			lines.push(row(` ${th.fg("dim", "🔨 搜索差评：无记录")}`));
+		}
+		if (this.statusMsg) lines.push(row(` ${th.fg("accent", this.statusMsg)}`));
+		lines.push(border(`├${"─".repeat(innerW)}┤`)); // 差评区与代理输入区分隔
 
 		// 输入框：水平滚动窗口跟随光标（❯ 前缀占 4 个显示宽度），不截断内容
 		const inputW = Math.max(8, innerW - 3);
@@ -927,14 +1196,16 @@ class ProxyConfigOverlay {
 		const windowText = sliceByWidth(full, startChar, inputW);
 		const cursorInWindow = Math.min(Math.max(0, this.cursor - startChar), windowText.length);
 		let inputDisplay = windowText;
-		if (this.focused) inputDisplay = renderInputWithCursor(inputDisplay, cursorInWindow);
+		if (this.focus === "input") inputDisplay = renderInputWithCursor(inputDisplay, cursorInWindow); // 光标只在输入框焦点时显示
 		lines.push(row(` ${th.fg("accent", "❯")} ${inputDisplay}`));
 
-		// 错误提示或操作提示
+		// 错误提示或操作提示（按焦点态区分，只列按键动作不解释）
 		if (this.error) {
 			lines.push(row(th.fg("warning", ` ⚠ ${this.error}`)));
+		} else if (this.focus === "dislike") {
+			lines.push(row(th.fg("dim", ` ↑↓ 选择 · d 删除 · Del 清空 · Esc 取消`)));
 		} else {
-			lines.push(row(th.fg("dim", ` 输入 http:// 地址回车保存 · 清空回车 = 清除代理 · Esc 取消`)));
+			lines.push(row(th.fg("dim", ` 回车保存 · 清空回车 = 清除代理 · Esc 取消`)));
 		}
 
 		lines.push(border(`╰${"─".repeat(innerW)}╯`));
@@ -953,7 +1224,8 @@ export default function (pi: ExtensionAPI) {
 		label: "联网搜索",
 		description:
 			"搜索互联网，返回标题 + URL + 摘要列表。需要深读某条结果时用 web_fetch 抓取该 URL。"
-			+ "查 npm 包用 source=\"npm\"。Python 包请走默认网页搜索（如 site:pypi.org/project/）。",
+			+ "查 npm 包用 source=\"npm\"。Python 包请走默认网页搜索（如 site:pypi.org/project/）。"
+			+ "发现低质量结果（内容与标题不符/灌水/死链）时，可调用 web_dislike 对其域名记差评，累计差评会降权该域名。",
 		promptSnippet: "搜索互联网：web_search(查询词[, source]) → 标题+URL+摘要列表",
 		renderCall: (args, theme) => {
 			const query = typeof args?.query === "string" ? args.query.trim() : "";
@@ -970,7 +1242,7 @@ export default function (pi: ExtensionAPI) {
 			source: Type.Optional(
 				Type.Union(
 					[
-						Type.Literal("web", { description: "通用网页搜索（bing.cn 主 + 360 备，自动降级）" }),
+						Type.Literal("web", { description: "通用网页搜索（bing + 360 双源合并，条目级评分排序）" }),
 						Type.Literal("npm", { description: "npm 包搜索（npm registry JSON API）" }),
 					],
 					{ description: "搜索源类型，默认 web" },
@@ -1066,10 +1338,60 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ---- /web-tool-config：配置 web_fetch/web_search 被墙自动重试用的代理地址 ----
+	// ---- web_dislike：搜索结果差评（动态黑名单，持久化降权） ----
+	pi.registerTool({
+		name: "web_dislike",
+		label: "搜索差评",
+		description:
+			"给搜索结果中的低质量域名记差评（持久化到本地，跨会话生效）：累计差评会使该域名在后续搜索结果中降权"
+			+ "（排名靠后，x0.6/次），差评累计 5 次直接滤除。用于深读某条结果后发现内容与标题不符/灌水/死链时，"
+			+ "对其所在域名记差评。用 /web-tool-config 面板查看、Delete 键清空。",
+		promptSnippet: "搜索差评：web_dislike(域名/URL[, reason]) → 累计差评降权该域名",
+		renderCall: (args, theme) => {
+			const domains = Array.isArray(args?.domains) ? (args.domains as string[]).slice(0, 3).join(", ") : "";
+			return renderToolCall("👎", domains || undefined, theme, "web_dislike");
+		},
+		parameters: Type.Object({
+			domains: Type.Array(Type.String({ description: "要差评的域名（如 blog.csdn.net）或结果 URL（自动提取域名）" })),
+			reason: Type.Optional(Type.String({ description: "差评原因（如：内容与标题不符 / 灌水 / 死链），仅用于追踪" })),
+		}),
+
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			if (signal?.aborted) {
+				return { content: [{ type: "text", text: "已取消" }], details: {} };
+			}
+			const data = loadDislikeData();
+			const added: Array<{ key: string; count: number }> = [];
+			for (const d of params.domains ?? []) {
+				const key = dislikeKey(d);
+				if (!key) continue;
+				const rec = data[key] ?? { count: 0, reasons: [] as string[] };
+				rec.count++;
+				if (params.reason && !rec.reasons.includes(params.reason)) rec.reasons.push(params.reason);
+				data[key] = rec;
+				added.push({ key, count: rec.count });
+			}
+			if (added.length) saveDislikeData(data);
+			const detail = added.length
+				? added.map((a) => `${a.key}×${a.count}`).join("、")
+				: "没有有效的域名/URL";
+			const hint =
+				added.some((a) => a.count >= DISLIKE_BAN_THRESHOLD)
+					? "；已达封禁阈值，该域名条目将被滤除"
+					: added.length
+						? "；后续搜索该域名将按次数降权（/web-tool-config 面板可查看）"
+						: "";
+			return {
+				content: [{ type: "text", text: `已差评：${detail}${hint}` }],
+				details: { disliked: added.map((a) => a.key), counts: Object.fromEntries(added.map((a) => [a.key, a.count])) },
+			};
+		},
+	});
+
+	// ---- /web-tool-config：配置 web_fetch/web_search 被墙自动重试的代理地址；搜索差评管理在面板内（Delete 清空） ----
 	pi.registerCommand("web-tool-config", {
 		description:
-			"配置 web_fetch/web_search 被墙自动重试的代理：无参数打开设置面板输入 http:// 代理地址；`/web-tool-config <url>` 直接设置；`/web-tool-config off` 清除",
+			"配置 web_fetch/web_search 被墙自动重试的代理：无参数打开设置面板输入 http:// 代理地址（面板内同时展示搜索差评列表，Delete 键清空）；`/web-tool-config <url>` 直接设置；`/web-tool-config off` 清除",
 		handler: async (args, ctx) => {
 			const arg = (args ?? "").trim();
 
@@ -1107,8 +1429,8 @@ export default function (pi: ExtensionAPI) {
 					overlay: true,
 					overlayOptions: {
 						anchor: "right-center",
-						width: "62%",
-						minWidth: 60,
+						width: "46%",
+						minWidth: 44,
 						maxHeight: "90%",
 						margin: { right: 1 },
 					},

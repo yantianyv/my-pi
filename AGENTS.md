@@ -58,7 +58,7 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       types.ts        #     TaskDef/StageDef/WorkflowState(mode+notes)/PanelConfig 类型 + schema 常量
       test/render.test.mjs #   渲染回归测试（esbuild bundle + mock pi/ctx；test/node_modules junction 指 pi 全局，不入库；15 场景 A-O）
       test/stale-ctx.test.mjs#  stale ctx 回归测试：session 替换后 getStore 不崩（固化 cwd）+ cwd 变化重建
-    web-tool.ts       #   联网工具：web_search 多源搜索（bing.cn 主 + 360 备 + npm 垂类，零 key 零费用，无 AI 总结）+ web_fetch 抓网页转 markdown（正文提取 + 截断；turndown/domino/gfm 由 build.js 内联）+ /web-tool-config 代理设置面板；直连与降级（系统 curl 自动带代理 / 无 curl 退 Node CONNECT 隧道）并行竞速，谁先成功用谁、404 等确定性错误立即判死
+    web-tool.ts       #   联网工具：web_search 多源搜索（bing + 360 双源并行，结果逐条评分合并去重取前 15：标题/URL/摘要权重计分 + 完整短语命中加成，评分 0 滤除；npm 垂类，零 key 零费用，无 AI 总结）+ web_dislike 差评降权（AI 对低质量域名记差评，持久化黑名单跨会话生效，×0.6/次、5 次滤除）+ web_fetch 抓网页转 markdown（正文提取 + 截断；turndown/domino/gfm 由 build.js 内联）+ /web-tool-config 代理设置面板（含 blacklist 差评查看/清空）；直连与降级（系统 curl 自动带代理 / 无 curl 退 Node CONNECT 隧道）并行竞速，谁先成功用谁、404 等确定性错误立即判死
     webdav-kb/        #   知识库（WebDAV 云网盘）：14 个 kb_* 工具（help/search/read/write/append/list/upload/download/lslfs/move/delete/status/sync/import）+ /kb /kb-config /kb-sync 命令；本地镜像 + 增量同步（etag/mtime 比对、冲突 .conflict- 副本）+ vault 加密区 + LFS 大文件区；分类层级守则：/命名空间/用途/自由层级（用途=文档功能六值判定硬约束，自由层级 AI 管理软约束，见 PROTOCOL.md「五、分类层级」）
 static/              #   静态部署物（无需编译，install.js 直接从这装到 ~/.pi/agent/，见 README 各补丁节；仓库根目录）
   themes/matrix.json  #     黑客帝国荧光绿主题
