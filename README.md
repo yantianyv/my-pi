@@ -30,7 +30,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `patches/` | 三个 pi 补丁：tui 滚动冻结 / ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装） | `~/.pi/agent/skills/` |
-| `models.json` | OpenRouter 路由配置模板：provider 级 `compat.openRouterRouting`（对所有 OpenRouter 模型生效；已在则深度合并，保留手改的其他 provider） | `~/.pi/agent/models.json` |
+| `models.json` | 模型配置模板：OpenRouter 路由（provider 级 `compat.openRouterRouting`）+ 火山方舟 Coding Plan 自定义供应商（见下；已在则深度合并，保留手改的其他 provider） | `~/.pi/agent/models.json` |
 
 ## OpenRouter 路由策略（models.json）
 
@@ -50,6 +50,24 @@ node install.js --dry-run # 先预览要做什么，不修改
 - **改策略**：直接改 `providers.openrouter.compat.openRouterRouting` 即可，全局生效。若只想个别模型不同，可用 `modelOverrides` 按模型 `id` 覆盖（id 须是目录里真实存在者）。
 - **与认证无关**：路由配置不触碰 `auth.json` 的 API key，改完 `/reload`（或重启 pi）即生效，**无需重新登录**。
 - **合并语义**：`install.js` 对已存在的 `~/.pi/agent/models.json` 做深度合并——模板里没写的键、你手改的其他 provider 都保留，模板里有的键以仓库为准（只增不删）。
+
+## 火山引擎 Coding Plan（models.json 自定义供应商）
+
+pi 内置供应商无火山引擎（volcengine/ark/doubao），模板通过 pi 官方自定义 provider 机制添加 `volcengine-coding`：
+
+```jsonc
+"volcengine-coding": {
+  "baseUrl": "https://ark.cn-beijing.volces.com/api/coding/v3",  // OpenAI 兼容端点（勿用 /api/v3 按量计费端点）
+  "api": "openai-completions",
+  "apiKey": "$VOLCENGINE_CODING_API_KEY",
+  "compat": { "supportsDeveloperRole": false },
+  "models": [ { "id": "ark-code-latest", ... }, ... ]
+}
+```
+
+- **配置 key**：设环境变量 `VOLCENGINE_CODING_API_KEY`（Coding Plan 专属 key，前缀 `sk-sp-`），或在 pi 里 `/login volcengine-coding` 输入。
+- **模型**：`ark-code-latest`（auto 选优）+ 常用具体模型（doubao-seed-2.0-code / deepseek-v3.2 / glm-5.1 / kimi-k2.6 / minimax-m2.7），列表随官方更新可自行增删。
+- **额度**：订阅制（5h 滑动窗口 + 周 + 月三级），额度在火山控制台「开通管理」页查看（Coding Plan 无 key 直查余额接口）。
 
 ## 3 行 HUD（src/extensions/hud/）
 

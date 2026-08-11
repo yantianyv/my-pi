@@ -9,6 +9,22 @@
           "allow_fallbacks": true
         }
       }
+    },
+    "volcengine-coding": {
+      "baseUrl": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "api": "openai-completions",
+      "apiKey": "$VOLCENGINE_CODING_API_KEY",
+      "compat": {
+        "supportsDeveloperRole": false
+      },
+      "models": [
+        { "id": "ark-code-latest", "name": "Ark Code Auto", "contextWindow": 256000 },
+        { "id": "doubao-seed-2.0-code", "name": "Doubao Seed 2.0 Code", "contextWindow": 256000 },
+        { "id": "deepseek-v3.2", "name": "DeepSeek V3.2", "contextWindow": 256000 },
+        { "id": "glm-5.1", "name": "GLM 5.1", "contextWindow": 256000 },
+        { "id": "kimi-k2.6", "name": "Kimi K2.6", "contextWindow": 256000 },
+        { "id": "minimax-m2.7", "name": "MiniMax M2.7", "contextWindow": 256000 }
+      ]
     }
   }
 }
