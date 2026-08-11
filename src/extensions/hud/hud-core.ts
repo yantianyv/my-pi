@@ -155,10 +155,24 @@ export default async function (pi: ExtensionAPI) {
 		"workflow-mgr": { color: "accent", priority: 72 }, // 人机协作任务面板摘要（workflow-mgr）
 		"model-switch": { color: "accent", priority: 70 }, // 模型切换
 	};
+	/** 检测 ctx 是否仍有效：session 替换 / reload 后旧 ctx 的所有 getter 都会抛 stale 错误。 */
+	function ctxAlive(ctx: ExtensionContext): boolean {
+		try {
+			void ctx.cwd;
+			return true;
+		} catch {
+			return false;
+		}
+	}
 	/** 短时状态推送 + TTL 自动清除（hud 内部自用；各扩展的 TTL 由扩展自己管）。 */
 	const statusClearTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	function pushStatus(ctx: ExtensionContext, key: string, text: string, ttlMs: number) {
-		ctx.ui.setStatus(key, text);
+		try {
+			ctx.ui.setStatus(key, text);
+		} catch {
+			// 旧 ctx 已失效（reload / session 替换后异步续跑才推状态），放弃推送避免 uncaughtException
+			return;
+		}
 		const old = statusClearTimers.get(key);
 		if (old) clearTimeout(old);
 		statusClearTimers.set(
@@ -189,6 +203,8 @@ export default async function (pi: ExtensionAPI) {
 
 	/** 拉取当前供应商的余额（含节流与并发保护）。 */
 	async function refreshBalance(ctx: ExtensionContext) {
+		// session 替换 / reload 后定时器与异步续跑仍持旧 ctx，直接放弃（新 session_start 会重新安装）
+		if (!ctxAlive(ctx)) return;
 		const provider = ctx.model?.provider;
 		if (inflight) return;
 		if (!balanceMod) {
@@ -247,6 +263,7 @@ export default async function (pi: ExtensionAPI) {
 
 	/** 采集当前 git 状态（分支 + 暂存/工作区/未跟踪文件数）。 */
 	async function refreshGitStats(ctx: ExtensionContext) {
+		if (!ctxAlive(ctx)) return; // 同 refreshBalance：旧 ctx 异步续跑直接放弃
 		if (!gitMod) return; // hud-git 子模块缺失：恒显示「⎇ -」
 		if (gitInflight) return;
 		gitInflight = true;
@@ -305,6 +322,7 @@ export default async function (pi: ExtensionAPI) {
 			let inputBuffer = "";
 			let bashModeHint = false;
 			const unsubInput = ctx.ui.onTerminalInput((data) => {
+				if (!ctxAlive(ctx)) return; // ctx 失效后的残留输入事件直接忽略
 				if (data === "\r" || data === "\n") {
 					inputBuffer = ""; // 回车提交
 				} else if (data === "\x7f" || data === "\b") {
@@ -461,6 +479,8 @@ export default async function (pi: ExtensionAPI) {
 				},
 				invalidate() {},
 				render(width: number): string[] {
+					// ctx 失效（session 替换 / reload）后新 footer 安装前的过渡帧：空渲染避免拖垮 TUI
+					if (!ctxAlive(ctx)) return [];
 					const model = ctx.model;
 
 					// ---- 行 1：git 状态 + 项目名 + 动态区 ----
