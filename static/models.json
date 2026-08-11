@@ -19,11 +19,8 @@
       },
       "models": [
         { "id": "ark-code-latest", "name": "Ark Code Auto", "contextWindow": 256000 },
-        { "id": "doubao-seed-2.0-code", "name": "Doubao Seed 2.0 Code", "contextWindow": 256000 },
-        { "id": "deepseek-v3.2", "name": "DeepSeek V3.2", "contextWindow": 256000 },
-        { "id": "glm-5.1", "name": "GLM 5.1", "contextWindow": 256000 },
-        { "id": "kimi-k2.6", "name": "Kimi K2.6", "contextWindow": 256000 },
-        { "id": "minimax-m2.7", "name": "MiniMax M2.7", "contextWindow": 256000 }
+        { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "reasoning": true, "contextWindow": 1048576 },
+        { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "reasoning": true, "contextWindow": 1048576 }
       ]
     }
   }
