@@ -327,8 +327,57 @@ export function isDeepSeekPeakHour(ts: number): boolean {
 	return DEEPSEEK_PEAK_HOURS.some(([start, end]) => hour >= start && hour < end);
 }
 
+// ---------------------------------------------------------------------------
+// MiMo Token Plan 夜间优惠（北京时间 0:00-8:00，0.8x 消耗系数）
+// 来源：https://mimo.mi.com/docs/zh-CN/tokenplan/Token Plan/subscription
+// ---------------------------------------------------------------------------
+
+const MIMO_OFFPEAK_HOURS: [number, number] = [0, 8]; // 北京时间 0:00-8:00
+
+/** 当前是否处于 MiMo Token Plan 夜间优惠时段（北京时间 0:00-8:00）。 */
+export function isMimoOffpeakHour(ts: number): boolean {
+	const hour = new Date(ts + 8 * 3_600_000).getUTCHours(); // 北京时间 = UTC+8
+	return hour >= MIMO_OFFPEAK_HOURS[0] && hour < MIMO_OFFPEAK_HOURS[1];
+}
+
 function deepseekModelKey(modelId: string): string {
 	return modelId.toLowerCase().includes("pro") ? "deepseek-v4-pro" : "deepseek-v4-flash";
+}
+
+// ---------------------------------------------------------------------------
+// MiMo 按量付费人民币定价（元 / 百万 tokens）
+// 来源：https://mimo.mi.com/
+//   mimo-v2.5-pro ：缓存命中 ¥0.025，缓存未命中 ¥3，输出 ¥6
+//   mimo-v2.5-pro-ultraspeed ：缓存命中 ¥0.075，缓存未命中 ¥9，输出 ¥18
+//   mimo-v2.5 ：缓存命中 ¥0.02，缓存未命中 ¥1，输出 ¥2
+// ---------------------------------------------------------------------------
+
+interface MimoPrice {
+	cacheHit: number; // 缓存命中输入（元/百万 tokens）
+	cacheMiss: number; // 缓存未命中输入
+	output: number; // 输出
+}
+
+const MIMO_PRICES: Record<string, MimoPrice> = {
+	"mimo-v2.5-pro": { cacheHit: 0.025, cacheMiss: 3, output: 6 },
+	"mimo-v2.5-pro-ultraspeed": { cacheHit: 0.075, cacheMiss: 9, output: 18 },
+	"mimo-v2.5": { cacheHit: 0.02, cacheMiss: 1, output: 2 },
+};
+
+function mimoModelKey(modelId: string): string {
+	const id = modelId.toLowerCase();
+	if (id.includes("ultraspeed")) return "mimo-v2.5-pro-ultraspeed";
+	if (id.includes("pro")) return "mimo-v2.5-pro";
+	return "mimo-v2.5";
+}
+
+/**
+ * MiMo 消耗成本（人民币元），按官方定价直算。
+ * 与 DeepSeek 同理，不走 pi 的 USD 成本、不依赖汇率。
+ */
+function mimoCostCny(u: AssistantMessage["usage"], modelId: string): number {
+	const p = MIMO_PRICES[mimoModelKey(modelId)] ?? MIMO_PRICES["mimo-v2.5"];
+	return (p.cacheMiss * u.input + p.cacheHit * u.cacheRead + p.output * u.output) / 1_000_000;
 }
 
 /**
@@ -349,6 +398,7 @@ function deepseekCostCny(u: AssistantMessage["usage"], modelId: string, ts: numb
  */
 function msgCost(m: AssistantMessage): MsgCost {
 	if (m.provider === "deepseek") return { cny: deepseekCostCny(m.usage, m.model, m.timestamp) };
+	if (m.provider === "xiaomi") return { cny: mimoCostCny(m.usage, m.model) };
 	return { usd: m.usage.cost.total };
 }
 
@@ -356,14 +406,29 @@ function msgCost(m: AssistantMessage): MsgCost {
  * 按量付费消耗统计，按会话供应商选择口径：
  * - DeepSeek：恒显示 ¥/min + ¥累计（官方人民币价，不依赖汇率）
  * - 其余：有汇率显示 ¥/min + ¥累计（USD × 汇率）；无汇率显示 $/min + $累计（原始货币）
+ *
+ * 速率颜色阈值：
+ *   < 0.01 ¥/min (或 < $0.002/min) → 绿色（低消耗）
+ *   0.01~0.1 ¥/min (或 $0.002~0.02/min) → 橙色（中等）
+ *   > 0.1 ¥/min (或 > $0.02/min) → 红色（高消耗）
  */
+function rateColor(perMin: number, isCny: boolean): string {
+	// 阈值：人民币 / 美元
+	const low = isCny ? 0.01 : 0.002;
+	const high = isCny ? 0.1 : 0.02;
+	if (perMin < low) return "success"; // 绿
+	if (perMin < high) return "warning"; // 橙
+	return "error"; // 红
+}
+
 export function meteredRateText(ctx: ExtensionContext, now: number): RateTextPart[] | null {
 	const t = sumSessionUsage(ctx);
 	if (t.turns === 0) return null;
-	if (ctx.model?.provider === "deepseek") {
+	// 人民币直算供应商：DeepSeek、MiMo
+	if (ctx.model?.provider === "deepseek" || ctx.model?.provider === "xiaomi") {
 		const perMinCny = computeRate(now).cny ?? 0; // cny/min（costEvents 的 cny 轨）
 		return [
-			{ text: `¥${perMinCny.toFixed(3)}/min`, color: "muted" },
+			{ text: `¥${perMinCny.toFixed(3)}/min`, color: rateColor(perMinCny, true) },
 			{ text: `¥${t.costTotalCny.toFixed(2)}`, color: "dim" },
 		];
 	}
@@ -372,13 +437,14 @@ export function meteredRateText(ctx: ExtensionContext, now: number): RateTextPar
 	const totalUsd = t.costTotalUsd;
 	const rate = usdCnyRate;
 	if (rate !== null && rate > 0) {
+		const perMinCny = perMinUsd * rate;
 		return [
-			{ text: `¥${(perMinUsd * rate).toFixed(3)}/min`, color: "muted" },
+			{ text: `¥${perMinCny.toFixed(3)}/min`, color: rateColor(perMinCny, true) },
 			{ text: `¥${(totalUsd * rate).toFixed(2)}`, color: "dim" },
 		];
 	}
 	return [
-		{ text: `$${perMinUsd.toFixed(3)}/min`, color: "muted" },
+		{ text: `$${perMinUsd.toFixed(3)}/min`, color: rateColor(perMinUsd, false) },
 		{ text: `$${totalUsd.toFixed(2)}`, color: "dim" },
 	];
 }

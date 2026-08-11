@@ -3,7 +3,7 @@
  *
  * 职责：
  * - 统一 BalanceData/BalanceAdapter 接口，按供应商逐一适配（按量充值余额 vs 订阅 plan 余量 vs 订阅+加油包）
- * - 已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi-token-plan-cn / openrouter
+ * - 已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter
  * - 消耗统计文本（rateText）复用 hud-cost 的按量付费实现（¥/min 或 $/min）
  *
  * 注意：本模块不注册任何 pi API，仅导出接口与注册表，由入口模块驱动。
@@ -404,6 +404,25 @@ const xiaomiTokenPlanCnAdapter: BalanceAdapter = {
 };
 
 /**
+ * Xiaomi MiMo 按量付费 CN：按量付费，无公开余额 API，显示控制台链接。
+ * 与 Token Plan 共享同一平台，使用 usage 页面。
+ */
+const xiaomiMeteredCnAdapter: BalanceAdapter = {
+	providerId: "xiaomi",
+	label: "MiMo 按量付费",
+	// 按量付费：¥/min + 累计（统一 RMB 计价）
+	rateText: meteredRateText,
+	async fetch(_ctx) {
+		return {
+			status: "ok",
+			amount: "余额查询",
+			detail: "https://platform.xiaomimimo.com/console/balance",
+			hideLabel: true,
+		};
+	},
+};
+
+/**
  * OpenRouter：美元充值账户。
  * 官方接口 GET https://openrouter.ai/api/v1/credits（Bearer 认证，需 management key），
  * 返回 total_credits（累计购买）与 total_usage（累计消耗），当前余额 ≈ total_credits - total_usage。
@@ -497,6 +516,7 @@ const openrouterAdapter: BalanceAdapter = {
 /** 已适配的供应商注册表。新增供应商在这里追加一个 adapter 即可。 */
 export const BALANCE_ADAPTERS: Record<string, BalanceAdapter> = {
 	[deepseekAdapter.providerId]: deepseekAdapter,
+	[xiaomiMeteredCnAdapter.providerId]: xiaomiMeteredCnAdapter,
 	[kimiCodingAdapter.providerId]: kimiCodingAdapter,
 	[moonshotaiAdapter.providerId]: moonshotaiAdapter,
 	[moonshotaiCnAdapter.providerId]: moonshotaiCnAdapter,

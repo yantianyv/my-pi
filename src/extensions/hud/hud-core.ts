@@ -22,7 +22,7 @@
  *   不同供应商计费方式差异很大（按量充值余额 vs 订阅 plan 余量 vs 订阅+加油包余额），
  *   无法用通用模板，因此按供应商逐一适配（见 hud-balance.ts）。
  *   适配器统一返回 BalanceData，未适配的供应商显示占位提示。
- *   目前已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi-token-plan-cn / openrouter
+ *   目前已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter
  *
  * 命令：
  *   /balance  立即刷新余额并通知
@@ -377,7 +377,7 @@ export default async function (pi: ExtensionAPI) {
 				const label = theme.fg("dim", "余额");
 				if (b.loading) return `${label} 查询中…`;
 				if (b.moduleMissing) return `${label} ${theme.fg("warning", "模块缺失")}`;
-				if (b.unsupported) return `${label} ${b.providerId ?? "?"} 未适配（余额/plan 查询）`;
+				if (b.unsupported) return `${label} ${b.providerId ?? "?"} 未适配`;
 				if (b.error) return `${label} 获取失败（${b.error}）`;
 				if (b.data) {
 					const color = b.data.status === "ok" ? "success" : b.data.status === "warning" ? "warning" : "error";
@@ -573,29 +573,37 @@ export default async function (pi: ExtensionAPI) {
 						: `${padLeft(theme.fg("warning", "用量 模块缺失"), RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo("", RIGHT_SEG2)}`;
 
 					// ---- 行 3：账户（余额 / plan）+ 消耗统计 ----
-					// DeepSeek 峰谷徽章（计费相关 → 行 3，挂在余额行末尾）：官方高峰时段（北京时间 9:00-12:00 /
-					// 14:00-18:00），仅显示当前状态——高峰 = warning 橙黄提醒、低峰 = success 绿。纯时段判断，
-					// 与计价开关 DEEPSEEK_PEAK_PRICING 无关：无论计价是否生效都如实反映时段，供用户安排使用。
-					const peakTag =
-						model?.provider === "deepseek" && costMod
-							? (() => {
-									const isPeak = costMod.isDeepSeekPeakHour(Date.now());
-									return `${theme.fg("dim", " ・ ")}${theme.fg(isPeak ? "warning" : "success", isPeak ? "高峰" : "低峰")}`;
-								})()
-							: "";
+					// 峰谷徽章（计费相关 → 行 3，挂在余额行末尾）：
+					// - DeepSeek：官方高峰时段（北京时间 9:00-12:00 / 14:00-18:00），高峰 = warning 橙黄、低峰 = success 绿
+					// - MiMo Token Plan：夜间优惠时段（北京时间 0:00-8:00），低峰 = success 绿（0.8x 消耗）、高峰 = 正常
+					// 纯时段判断，与计价开关无关：无论计价是否生效都如实反映时段，供用户安排使用。
+					const peakTag = (() => {
+						if (model?.provider === "deepseek" && costMod) {
+							const isPeak = costMod.isDeepSeekPeakHour(Date.now());
+							return `${theme.fg("dim", " ・ ")}${theme.fg(isPeak ? "warning" : "success", isPeak ? "高峰" : "低峰")}`;
+						}
+						if (model?.provider === "xiaomi-token-plan-cn" && costMod) {
+							const isOffpeak = costMod.isMimoOffpeakHour(Date.now());
+							return `${theme.fg("dim", " ・ ")}${theme.fg(isOffpeak ? "success" : "warning", isOffpeak ? "夜间优惠" : "高峰")}`;
+						}
+						return "";
+					})();
 					const left3 = renderBalanceLine() + peakTag;
-					// 消耗统计按 provider 单独适配（adapter.rateText）
+					// 消耗统计按 provider 单独适配（adapter.rateText）；
+					// 适配器缺失/未定义 rateText 时兑底用通用按量付费统计（USD 轨，有汇率显 ¥、无汇率显 $）
 					const adapter =
 						ctx.model?.provider && balanceMod ? balanceMod.BALANCE_ADAPTERS[ctx.model.provider] : undefined;
-					const rateText = adapter?.rateText
-						? (adapter.rateText(ctx, Date.now()) ?? [])
+					const rateFn = adapter?.rateText ?? costMod?.meteredRateText;
+					const rateText = rateFn
+						? (rateFn(ctx, Date.now()) ?? [])
 								.map((p) => theme.fg((p.color ?? "muted") as never, p.text))
 								.join(" ")
 						: "";
 					const timeText = balance.fetchedAt ? theme.fg("dim", fmtTime(balance.fetchedAt)) : "";
-					const right3 = timeText
-						? `${padLeft(rateText, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(timeText, RIGHT_TOTAL - RIGHT_SEG1 - 3)}`
-						: padLeft(rateText, RIGHT_TOTAL);
+					const right3 =
+						timeText || rateText
+							? `${padLeft(rateText, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(timeText, RIGHT_TOTAL - RIGHT_SEG1 - 3)}`
+							: "";
 
 					const line1 = layout(left1, right1, width);
 					const line2 = layout(left2, right2, width);
