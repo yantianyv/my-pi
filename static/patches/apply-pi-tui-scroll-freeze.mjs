@@ -217,6 +217,33 @@ const IM_PATCHES = [
             this.ui.requestRender(true);
         });`,
 	},
+	{
+		name: "navigateTree 命令 ctx 强制全量渲染",
+		old: `                    if (result.cancelled) {
+                        return { cancelled: true };
+                    }
+                    this.chatContainer.clear();
+                    this.renderInitialMessages();`,
+		new: `                    if (result.cancelled) {
+                        return { cancelled: true };
+                    }
+                    this.chatContainer.clear();
+                    this.renderInitialMessages();
+                    // PATCH(scroll-freeze): navigateTree（/rewind 等）重排整段对话，
+                    // 必须强制整屏重绘，否则钳制路径冻结视口上方旧内容，新旧硬拼接错乱。
+                    this.ui.requestRender(true);`,
+	},
+	{
+		name: "tree selector 导航强制全量渲染",
+		old: `                    // Update UI
+                    this.chatContainer.clear();
+                    this.renderInitialMessages();`,
+		new: `                    // Update UI
+                    this.chatContainer.clear();
+                    this.renderInitialMessages();
+                    // PATCH(scroll-freeze): tree selector 导航同样重排整段对话，强制整屏重绘
+                    this.ui.requestRender(true);`,
+	},
 ];
 
 function findTuiMainScreenJs() {
