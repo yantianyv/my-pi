@@ -115,6 +115,12 @@ export const DEFAULT_PROTOCOL = `# 知识库使用守则（webdav-kb）
 - /kb <词>      面板/文本检索 + 插入引用
 - /kb-config    配置 WebDAV、vault 口令、连通测试
 - /kb-sync      手动同步
+
+## 十一、历史版本区（/.history/）
+- 所有文件的改动（覆盖/追加）与删除自动留档：副本存 /.history/，目录结构与根一致，文件名加 _yymmddhhmmss 后缀；同秒重名叠加 _hash 后缀，_hash 也重名说明是同一份内容，跳过
+- 自身不递归：/.history 与 /lfs/ 下的文件不备份
+- .history 不参与 kb_list/kb_search（内容浏览不透明）；恢复用 WebDAV 客户端取回副本（vault 历史为密文 .enc，拷回 /vault/ 对应路径后经 kb 工具解密）
+- 历史副本随同步上传远端（先本地留档，下次同步补传）
 `;
 
 /** 首次同步时引导写入的提示（放在 PROTOCOL.md 前可让用户一眼看到版本说明） */

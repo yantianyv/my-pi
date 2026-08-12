@@ -27,6 +27,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `btw.ts` — `/btw` 临时旁支问答：侧栏单轮问答，不写入会话历史（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `token-saver.ts` — 上下文 token 节省器：自动清洗 bash 工具冗余输出（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `patches/` | 三个 pi 补丁：tui 滚动冻结 / ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装） | `~/.pi/agent/skills/` |
@@ -211,6 +212,20 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **命令**：`/workflow-config` 轻量功能浮窗（居中浮窗：显示详细信息/常驻面板开关，↑↓ 选择 Enter 执行 Esc 关闭；详细信息页任意键返回）——**只留无参**（0.4 拍板：人无需管理工作流，管理是 AI 的事）；
 - **AI 角色注入（条件注入，0.2 拍板）**：`before_agent_start` 按三态把指南追加进 systemPrompt（不进对话、不膨胀会话文件）：无工作流/空工作流 → **零注入**（简单任务不被引导，AI 靠工具描述按需发现）；`human-ai` → 完整指挥者角色（下达指令格式 📋任务/🎯目标/📌做法/✅回报/🔍验证、完成信号验证后 `wf_switch`、重要结论用 `wf_note` 记录）；`agent` → 轻量自动驾驶执行者（连续 `wf_switch` 直到完成并 archive，障碍 `wf_block` 停下报告）；
 - **渲染回归测试**：`node src/extensions/workflow-mgr/test/render.test.mjs`（test/ 下 node_modules junction 指向 pi 全局包；esbuild bundle 扩展 + mock pi/ctx → 15 场景 A-O：三态渲染断言、工具流程、switch 语义、mode、注入三态、wf_note 增删读改、archive 自动完成）。
+
+## 知识库（src/extensions/webdav-kb/）
+
+给 AI 用的云网盘（WebDAV 驱动）：AI 自发沉淀有用的东西（技术笔记、踩坑记录、参考资料摘录），需要时自发检索；本地镜像离线可用，人类用 `/kb` 面板查询引用。14 个 `kb_*` 工具 + `/kb`（检索/引用）、`/kb-config`（WebDAV/vault 口令配置）、`/kb-sync`（手动同步）三个命令。
+
+- **四命名空间**：`/notes`（永久知识）/ `/references`（文档摘录，markitdown 产出）/ `/scratch`（临时草稿，可随时清理）/ `/vault`（加密区：需口令解锁、口令只存内存、密文仅 kb 工具可读写，口令忘了=数据永久丢失）；路径必须分层 `/命名空间/用途/自由层级/文件名`（至少 4 段，禁止命名空间/用途下放裸文件）；
+- **分类层级守则（PROTOCOL.md）**：`/references` 第 2 层按文档功能**六值判定**（知识文献/规范文书/操作指南/数据名录/表单模板/素材资源，互斥判整体体裁），`/notes` 按知识主题类判定（技术笔记/研究笔记/方法总结/工作职业/生活管理/兴趣创作）；自由层级由 AI 管理（<3 个文件并入相近层、长期 <2 个文件的层并入、层级名禁项目名/来源形态/编号前缀）。守则本体 = 网盘根 `PROTOCOL.md`（跨设备同步、用户可直接编辑迭代，`kb_help` 优先读它、缺失回退内嵌默认版 protocol.ts）；`PROTOCOL.md` 对 `kb_list`/`kb_status` **不透明**（守则走 `kb_help` 专用通道，不混入内容浏览，`kb_search` 保留索引作兜底旁路）；
+- **本地镜像 + 增量同步**：所有读操作（搜索/面板/AI 工具）打在本地镜像（毫秒级、离线可用）；同步账本 `.kb-sync.json` 记录 etag + 本地 mtime 快照，增量比对——远端 etag 变+本地未动→下载、本地 mtime 变+远端未动→上传、远端删+本地未动→删本地、本地删+远端未动→删远端、两侧都变→**冲突**（保留远端为权威，本地版存 `.conflict-<时间戳>` 副本、仅本地不回传）；上传前自动补齐远端父目录（MKCOL 链，123 云盘对并发 MKCOL 敏感、串行+重试最稳）；**同步后自动清理本地镜像空目录**（`.kb-` 隐藏项与镜像根保留）；AI 写入（`kb_write`/`kb_append`）本地原子落盘 + 立即 PUT 远端，离线失败留账本下次同步补传；
+- **全文检索**：零依赖零向量（中文 bigram 滑动窗口 + 英文分词 + BM25），增量索引持久化 `.kb-index.json`（按 mtime 只重读变更文件）；纯文本多格式（md/txt/csv/tsv/json/jsonl/yaml/yml/toml/html/xml），csv/tsv 表头加权、frontmatter 仅 md 强制；vault 未解锁时加密区内容不可见（密文仅内存索引）；
+- **vault 加密区**：口令只存内存，密文落盘 `.enc` 后缀，读写经解密/加密（列表/检索按明文路径对齐）；未解锁写入报错；
+- **LFS 大文件区（/lfs/）**：附加真网盘，任何类型文件、不随知识库同步、不参与检索、不加密；`kb_upload`/`kb_download`/`kb_lslfs` 独立工具，单文件上限 1GB；md 笔记引用 lfs 用纯路径文本（如「附件：lfs/xxx.png」）；人类直接用 WebDAV 客户端挂载管理；
+- **`/.history` 历史副本区**：所有文件的改动（覆盖/追加）与删除自动留档——副本存 `/.history/`、目录结构与根一致、文件名加 `_yymmddhhmmss` 后缀；同秒重名叠加 `_hash`（sha1 前 8 位），`_hash` 也重名说明是同一份内容直接跳过；**自身不递归**（`/.history` 与 `/lfs/` 下文件不备份）；`.history` 不参与 `kb_list`/`kb_search`（内容浏览不透明），恢复用 WebDAV 客户端取回副本（vault 历史为密文 `.enc`，拷回 `/vault/` 对应路径后经 kb 工具解密）；备份先落本地、账本登记、**下次同步补传远端**（延迟一轮）；`kb_move` 不备份（内容未变、只是路径变化，目标被删时仍会留档）；
+- **工具清单**：`kb_help`（守则，topic 按节筛选）/ `kb_search`（全文检索，namespace 限定）/ `kb_read`（读全文）/ `kb_write`（写/覆盖，需 overwrite:true，文本上限 50MB）/ `kb_append`（追加）/ `kb_list`（目录树，路径可不带前导 `/`）/ `kb_upload` `kb_download` `kb_lslfs`（LFS）/ `kb_move`（移动/重命名，镜像+远端+账本三方一致、vault 透明搬移）/ `kb_delete`（删除，需 confirm:true，先留 `.history` 副本再删）/ `kb_status`（同步状态）/ `kb_sync`（手动同步）/ `kb_import`（本地目录批量导入，导入后按守则重新归位）；
+- **测试**：`node src/extensions/webdav-kb/test/sync.test.mjs`（esbuild bundle + mock DAV：增量同步全场景 + `.history` 留档/命名/去重/不递归 + 空目录清理 + PROTOCOL 过滤）、`tools.test.mjs`/`search.test.mjs`/`client.test.mjs`/`crypto.test.mjs`/`panel-config.test.mjs`/`commands.test.mjs`/`lfs.test.mjs`/`panel.test.mjs`；`live-*` 为真实网盘联调脚本（不自动跑）。
 
 ## pi-tui 滚动冻结补丁（patches/）
 

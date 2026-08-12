@@ -338,7 +338,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 					const plain = decryptPath(f.path);
 					return plain ? { path: plain, isDir: false } : f;
 				});
-			const base = params.path ? params.path.replace(/\/+$/, "") : "";
+			const base = params.path ? "/" + params.path.replace(/^\/+|\/+$/g, "") : "";
 			if (base.startsWith("/lfs")) {
 				return text(`/lfs/ 是 LFS 大文件区，不在知识库目录中。请用 kb_lslfs 查看。`, {});
 			}

@@ -158,7 +158,7 @@ export class NoteIndex {
 				const rel = `${relPrefix}/${ent.name}`;
 				const full = path.join(dir, ent.name);
 				if (ent.isDirectory()) {
-					if (rel.startsWith("/lfs")) continue; // LFS 大文件区不索引
+					if (rel.startsWith("/lfs") || rel === "/.history" || rel.startsWith("/.history/")) continue; // LFS/历史副本区不索引
 					walk(full, rel);
 					continue;
 				}

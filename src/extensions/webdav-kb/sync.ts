@@ -19,6 +19,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { WebDavClient, DavError } from "./client";
 import {
 	KbConfig,
@@ -314,9 +315,16 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 	});
 
 	// 6) 删除：远端删本地文件；本地删远端文件（不删远端目录，目录由服务器自管）
+	// 远端已删（delLocal）：本地是最后的副本 → 先留 .history 历史再删，防远端误删
 	for (const p of delLocal) {
 		try {
-			fs.unlinkSync(safeLocal(mirrorDir, p));
+			const abs = safeLocal(mirrorDir, p);
+			try {
+				backupToHistory(mirrorDir, p, new Uint8Array(fs.readFileSync(abs)));
+			} catch {
+				/* 备份失败不阻塞删除 */
+			}
+			fs.unlinkSync(abs);
 			delete ledger.files[p];
 			stats.deleted++;
 		} catch (e) {
@@ -332,6 +340,9 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 			stats.errors.push(`删除远端 ${p}: ${e instanceof Error ? e.message : String(e)}`);
 		}
 	}
+
+	// 6.5) 清理本地镜像空目录（删文件后的残留；.kb- 与镜像根保留）
+	pruneEmptyDirs(mirrorDir);
 
 	// 7) 账本落盘
 	ledger.syncedAt = new Date().toISOString();
@@ -371,6 +382,14 @@ export async function putNote(
 	opts: { signal?: AbortSignal } = {},
 ): Promise<string | null> {
 	const abs = safeLocal(mirrorDir, relPath);
+	// 覆盖（本地已有旧版）→ 先留 .history 历史副本（备份失败不阻塞写入）
+	if (fs.existsSync(abs)) {
+		try {
+			backupToHistory(mirrorDir, relPath, new Uint8Array(fs.readFileSync(abs)));
+		} catch {
+			/* 忽略 */
+		}
+	}
 	fs.mkdirSync(path.dirname(abs), { recursive: true });
 	const tmp = abs + ".kb-tmp";
 	fs.writeFileSync(tmp, content);
@@ -430,6 +449,7 @@ export function listNotes(mirrorDir: string): { path: string; isDir: boolean }[]
 		for (const ent of entries) {
 			if (ent.name.startsWith(".kb-") || ent.name.includes(".conflict-")) continue;
 			const rel = `${relPrefix}/${ent.name}`;
+			if (rel === "/.history" || rel === "/PROTOCOL.md") continue; // 历史区/守则：内容浏览不透明（守则走 kb_help，历史走 WebDAV 客户端）
 			const full = path.join(dir, ent.name);
 			if (ent.isDirectory()) {
 				out.push({ path: rel, isDir: true });
@@ -441,6 +461,82 @@ export function listNotes(mirrorDir: string): { path: string; isDir: boolean }[]
 	};
 	walk(mirrorDir, "");
 	return out;
+}
+
+// ---------------------------------------------------------------------------
+// .history 历史副本区：所有文件改动/删除的留档（/.history/，与根结构一致）
+// ---------------------------------------------------------------------------
+
+/** 历史副本区路径判断（/.history 及子树；备份与浏览/检索都排除它） */
+export function isHistoryPath(rel: string): boolean {
+	return rel === "/.history" || rel.startsWith("/.history/");
+}
+
+/** 时间戳后缀（yymmddhhmmss，本地时间） */
+function historyStamp(): string {
+	const d = new Date();
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${p(d.getFullYear() % 100)}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/** 内容哈希（sha1 前 8 位十六进制；同秒同内容判重用） */
+function contentHash(bytes: Uint8Array): string {
+	return createHash("sha1").update(bytes).digest("hex").slice(0, 8);
+}
+
+/**
+ * 留历史副本：把 bytes 写入 /.history/<原路径>_yymmddhhmmss[.ext]（目录结构与根一致）。
+ * 同秒重名 → 叠加 _hash 后缀；hash 也重名 → 同一份内容，跳过（返回 null）。
+ * 自身不递归：/.history 与 /lfs/ 下的文件不备份。返回历史副本相对路径；跳过返回 null。
+ */
+export function backupToHistory(mirrorDir: string, relPath: string, bytes: Uint8Array): string | null {
+	if (isHistoryPath(relPath) || isLfsPath(relPath)) return null;
+	const histRel = "/.history" + relPath; // /notes/a.md → /.history/notes/a.md
+	const dir = path.dirname(histRel);
+	const name = path.basename(histRel);
+	const stamp = historyStamp();
+	const withStamp = name.replace(/(\.[^.]*)?$/, `_${stamp}$1`); // 扩展名前插后缀：a.md → a_250812102030.md
+	let target = `${dir}/${withStamp}`;
+	if (fs.existsSync(safeLocal(mirrorDir, target))) {
+		const hash = contentHash(bytes);
+		target = `${dir}/${withStamp.replace(/(\.[^.]*)?$/, `_${hash}$1`)}`;
+		if (fs.existsSync(safeLocal(mirrorDir, target))) return null; // 同秒同内容：同一份，跳过
+	}
+	const abs = safeLocal(mirrorDir, target);
+	fs.mkdirSync(path.dirname(abs), { recursive: true });
+	fs.writeFileSync(abs, bytes);
+	// 账本登记（无 etag → 下次同步自动补传）
+	const ledger = loadLedger(mirrorDir);
+	ledger.files[target] = { size: bytes.byteLength, localMtime: fs.statSync(abs).mtimeMs };
+	saveLedger(mirrorDir, ledger);
+	return target;
+}
+
+/** 清理本地镜像空目录（删文件后的残留；.kb- 隐藏项与镜像根保留） */
+function pruneEmptyDirs(mirrorDir: string): void {
+	const walk = (dir: string): boolean => {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return false;
+		}
+		for (const ent of entries) {
+			if (!ent.isDirectory() || ent.name.startsWith(".kb-")) continue;
+			const abs = path.join(dir, ent.name);
+			if (walk(abs)) {
+				try {
+					fs.rmdirSync(abs);
+				} catch {
+					/* 目录非空/占用：忽略 */
+				}
+			}
+		}
+		return fs
+			.readdirSync(dir, { withFileTypes: true })
+			.filter((e) => !e.name.startsWith(".kb-")).length === 0;
+	};
+	walk(mirrorDir);
 }
 
 // ---------------------------------------------------------------------------

@@ -3,12 +3,13 @@
  * webdav-kb / sync.ts 增量同步单元测试（共享 mock DAV + esbuild bundle）
  *
  * 覆盖：首次全量下载、无变化幂等、远端改/删、本地新建/改/删、冲突（保留远端 +
- * 本地 .conflict 副本且不回传）、父目录自动创建、账本跨实例持久化、离线写入兜底补传。
+ * 本地 .conflict 副本且不回传）、父目录自动创建、账本跨实例持久化、离线写入兜底补传、
+ * .history 历史副本（远端删除留档/命名规则/不自我递归）、空目录清理、PROTOCOL 过滤。
  *
  * 用法：node src/extensions/webdav-kb/test/sync.test.mjs（仓库根目录执行）
  */
 import { build } from "esbuild";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -31,7 +32,7 @@ const PASS = "test-pass";
 
 const tmp = mkdtempSync(join(tmpdir(), "kb-sync-test-"));
 const dav = await startMockDav();
-let syncAll, putNote, readNote, listNotes, loadLedger;
+let syncAll, putNote, readNote, listNotes, loadLedger, backupToHistory;
 try {
 	// bundle sync.ts（连带 client/store 内联）
 	const outfile = join(tmp, "sync.mjs");
@@ -51,6 +52,7 @@ try {
 	readNote = m.readNote;
 	listNotes = m.listNotes;
 	loadLedger = m.loadLedger;
+	backupToHistory = m.backupToHistory;
 
 	const mirrorDir = join(tmp, "mirror");
 	const cfg = { baseUrl: dav.baseUrl, username: USER, password: PASS };
@@ -85,7 +87,8 @@ try {
 	mkdirSync(local("/deep/x"), { recursive: true });
 	writeFileSync(local("/deep/x/new.md"), "# 本地新建\n");
 	s = await syncAll(cfg, mirrorDir);
-	check("本地新建上传", s.uploaded === 1 && s.errors.length === 0, JSON.stringify(s));
+	// uploaded>=1：新建文件 + 上轮远端删除留档的 .history 副本补传（延迟一轮同步）
+	check("本地新建上传", s.uploaded >= 1 && s.errors.length === 0, JSON.stringify(s));
 	check("远端父目录已创建", dav.store.has(dav.prefix + "/deep/x"));
 	check("远端内容正确", dav.store.get(dav.prefix + "/deep/x/new.md").data.toString() === "# 本地新建\n");
 
@@ -134,6 +137,34 @@ try {
 	const listing = listNotes(mirrorDir);
 	check("listNotes 含文件与目录", listing.some((f) => f.path === "/notes/offline.md") && listing.some((f) => f.path === "/notes" && f.isDir), JSON.stringify(listing));
 	check("listNotes 跳过账本与冲突副本", !listing.some((f) => f.path.includes(".conflict-") || f.path.includes(".kb-")), JSON.stringify(listing));
+
+	// ---- 13) .history 历史副本：远端删除留档（结构镜像根、内容为旧版、已补传远端） ----
+	const histFiles = readdirSync(local("/.history/refs")).filter((f) => f.startsWith("c_"));
+	check("远端删除留 .history 副本", histFiles.length >= 1, JSON.stringify(histFiles));
+	check("历史副本内容为旧版", histFiles.every((f) => readFileSync(local("/.history/refs/" + f), "utf8") === "# C\n引用 C\n"));
+	check("历史副本已上传远端", histFiles.length >= 1 && dav.store.has(dav.prefix + "/.history/refs/" + histFiles[0]));
+
+	// ---- 14) 历史备份命名：_yymmddhhmmss 后缀 / 同秒重名 _hash / 同秒同内容跳过 / 不自我递归 ----
+	// backupToHistory 为同步函数，三连调用同时间戳（yymmddhhmmss 12 位）
+	const enc = (s) => new TextEncoder().encode(s);
+	const h1 = backupToHistory(mirrorDir, "/notes/a.md", enc("# A\n第一版\n"));
+	check("备份路径带时间戳后缀且结构镜像根", h1 !== null && /^\/\.history\/notes\/a_\d{12}\.md$/.test(h1), String(h1));
+	const h2 = backupToHistory(mirrorDir, "/notes/a.md", enc("# A\n第二版\n"));
+	check("同秒不同内容 → 叠加 _hash", h2 !== null && h2 !== h1 && /^\/\.history\/notes\/a_\d{12}_[0-9a-f]{8}\.md$/.test(h2), String(h2));
+	const h3 = backupToHistory(mirrorDir, "/notes/a.md", enc("# A\n第二版\n"));
+	check("同秒同内容 → 跳过", h3 === null, String(h3));
+	check("history 不自我递归", backupToHistory(mirrorDir, "/.history/notes/a.md", enc("x")) === null);
+	check("LFS 不备份", backupToHistory(mirrorDir, "/lfs/x.bin", enc("x")) === null);
+
+	// ---- 15) 空目录清理 + 列表过滤（.history / PROTOCOL.md 对内容浏览不透明） ----
+	mkdirSync(local("/scratch/空目录"), { recursive: true });
+	writeFileSync(local("/PROTOCOL.md"), "# 守则\n");
+	s = await syncAll(cfg, mirrorDir);
+	check("空目录被清理", !existsSync(local("/scratch/空目录")) && !existsSync(local("/scratch")));
+	const listing2 = listNotes(mirrorDir);
+	check("listNotes 跳过 .history 与 PROTOCOL", !listing2.some((f) => f.path.startsWith("/.history") || f.path === "/PROTOCOL.md"), JSON.stringify(listing2));
+	// PROTOCOL.md 仍可被 kb_help 读取（readNote 不经 listNotes）
+	check("PROTOCOL.md 仍可直读", readNote(mirrorDir, "/PROTOCOL.md") === "# 守则\n");
 } finally {
 	dav.close();
 	rmSync(tmp, { recursive: true, force: true });
