@@ -10,7 +10,7 @@
  * 用法：node src/extensions/webdav-kb/test/tools.test.mjs（仓库根目录执行）
  */
 import { build } from "esbuild";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, statSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, statSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -161,6 +161,9 @@ try {
 	check("kb_write 已存在需 overwrite", r.content[0].text.includes("overwrite"), r.content[0].text.slice(0, 80));
 	r = await tool("kb_write").execute("11", { path: "/notes/webdav分类/坑记录/webdav-坑.md", content: newNote.replace("123 云盘", "坚果云"), overwrite: true }, undefined, undefined, ctx);
 	check("kb_write overwrite:true 覆盖", r.content[0].text.includes("已写入"), r.content[0].text.slice(0, 60));
+	// 覆盖前已留 .history 副本（putNote 覆盖路径）
+	const ovHist = readdirSync(join(mirrorDir, ".history", "notes", "webdav分类", "坑记录")).filter((f) => f.startsWith("webdav-坑_"));
+	check("kb_write 覆盖留 .history 副本", ovHist.length >= 1 && readFileSync(join(mirrorDir, ".history", "notes", "webdav分类", "坑记录", ovHist[0]), "utf8").includes("123 云盘"), JSON.stringify(ovHist));
 
 	// ---- kb_append ----
 	r = await tool("kb_append").execute("12", { path: "/notes/webdav分类/坑记录/webdav-坑.md", content: "补充：不要用 PUT 传大文件。" }, undefined, undefined, ctx);
@@ -171,6 +174,11 @@ try {
 	// ---- kb_list ----
 	r = await tool("kb_list").execute("14", {}, undefined, undefined, ctx);
 	check("kb_list 列出目录", r.content[0].text.includes("📁 notes") && r.content[0].text.includes("📄 webdav-坑.md"), r.content[0].text.slice(0, 80));
+	// 路径归一化：不带前导 / 可查；纯 / 视为根
+	r = await tool("kb_list").execute("14b", { path: "notes" }, undefined, undefined, ctx);
+	check("kb_list 不带前导 / 可查", r.content[0].text.includes("📄 webdav-坑.md"), r.content[0].text.slice(0, 80));
+	r = await tool("kb_list").execute("14c", { path: "/" }, undefined, undefined, ctx);
+	check("kb_list 传 / 显示全部", r.content[0].text.includes("📁 notes") && r.content[0].text.includes("共 "), r.content[0].text.slice(0, 80));
 
 	// ---- vault 透明读写（解锁后） ----
 	const cryptoMod = await import(pathToFileURL(outfile).href); // 同 bundle：createVault/unlockVault 可用
@@ -191,6 +199,12 @@ try {
 	check("vault .enc 已落盘", existsSync(join(mirrorDir, "vault", "密分类", "测试", "密.md.enc")));
 	r = await tool("kb_read").execute("17", { path: "/vault/密分类/测试/密.md" }, undefined, undefined, ctx);
 	check("解锁后读 vault 解密", r.content[0].text.includes("勿外传"), r.content[0].text.slice(0, 60));
+	// vault 覆盖 → .history 留密文副本（保持加密边界，不泄明文）
+	r = await tool("kb_write").execute("17b", { path: "/vault/密分类/测试/密.md", content: "---\ntitle: 密\ntags: []\n---\n机密内容：v2。\n", overwrite: true }, undefined, undefined, ctx);
+	check("vault 覆盖成功", r.content[0].text.includes("已写入"), r.content[0].text.slice(0, 60));
+	const vHist = readdirSync(join(mirrorDir, ".history", "vault", "密分类", "测试")).filter((f) => f.startsWith("密.md_") && f.endsWith(".enc"));
+	check("vault 覆盖留密文副本", vHist.length >= 1, JSON.stringify(vHist));
+	check("vault 历史不含明文", !readFileSync(join(mirrorDir, ".history", "vault", "密分类", "测试", vHist[0]), "utf8").includes("机密内容"));
 
 	// ---- vault 锁定后读报错 ----
 	cryptoMod.lockVault();
@@ -245,6 +259,11 @@ try {
 	check("kb_delete 远端删", !dav.store.has(dav.prefix + "/notes/长文分类/测试/长文.md"));
 	check("kb_delete 审计日志", existsSync(join(mirrorDir, ".kb-delete-log")));
 	check("kb_delete 账本清条目", !JSON.parse(readFileSync(join(mirrorDir, ".kb-sync.json"), "utf8")).files["/notes/长文分类/测试/长文.md"]);
+	// 删除前已留 .history 历史副本（结构镜像根 + 时间戳后缀）
+	const delHist = existsSync(join(mirrorDir, ".history", "notes", "长文分类", "测试"))
+		? readdirSync(join(mirrorDir, ".history", "notes", "长文分类", "测试")).filter((f) => f.startsWith("长文_"))
+		: [];
+	check("kb_delete 留 .history 副本", delHist.length >= 1, JSON.stringify(delHist));
 	// lfs 删除引导
 	r = await tool("kb_delete").execute("28", { path: "/lfs/x.png", confirm: true }, undefined, undefined, ctx);
 	check("kb_delete lfs 引导", r.content[0].text.includes("WebDAV"), r.content[0].text.slice(0, 60));

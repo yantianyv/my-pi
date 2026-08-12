@@ -17,7 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { setStatusWithTTL } from "../shared/status";
 import { loadConfig, isConfigured, defaultMirrorDir, agentConfigDir } from "./store";
-import { readNote, readNoteBytes, listNotes, ensureRemoteDirs, loadLedger, saveLedger, syncAll } from "./sync";
+import { readNote, readNoteBytes, listNotes, ensureRemoteDirs, loadLedger, saveLedger, syncAll, backupToHistory } from "./sync";
 import { getIndex } from "./search";
 import { vaultPutNote, vaultReadNote, isUnlocked, isVaultPath, encryptPath, decryptPath } from "./crypto";
 import { DEFAULT_PROTOCOL } from "./protocol";
@@ -338,7 +338,9 @@ export function registerKbTools(pi: ExtensionAPI): void {
 					const plain = decryptPath(f.path);
 					return plain ? { path: plain, isDir: false } : f;
 				});
-			const base = params.path ? "/" + params.path.replace(/^\/+|\/+$/g, "") : "";
+			// 路径归一化：补前导斜杠（支持 "scratch" 与 "/scratch" 两种写法）；纯斜杠视为根
+			const raw = params.path ? params.path.replace(/^\/+|\/+$/g, "") : "";
+			const base = raw ? "/" + raw : "";
 			if (base.startsWith("/lfs")) {
 				return text(`/lfs/ 是 LFS 大文件区，不在知识库目录中。请用 kb_lslfs 查看。`, {});
 			}
@@ -648,6 +650,13 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			// 目标 = 明文路径（vault 落盘为 .enc，见 crypto）
 			const rel = isVaultPath(params.path) ? encryptPath(params.path) : params.path;
 			try {
+				// 删除前留 .history 历史副本（原字节；vault 为密文，保持加密边界）；备份失败不阻塞删除
+				try {
+					const oldBytes = readNoteBytes(mirror, rel);
+					if (oldBytes) backupToHistory(mirror, rel, oldBytes);
+				} catch {
+					/* 忽略：备份失败仍继续删除 */
+				}
 				const client = new WebDavClient(cfg.baseUrl!, cfg.username!, cfg.password!, { proxyUrl: cfg.proxyUrl });
 				await client.delete(rel); // 远端删（幂等：不存在也返回成功）
 				const ledger = loadLedger(mirror);
