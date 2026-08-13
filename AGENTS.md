@@ -34,6 +34,9 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
   extensions/       #   扩展源码（产物 dist/extensions/ 由 build.js 生成）
     shared/         #     共享模块：只被扩展 import，不直接部署；build.js 内联进各产物
       model-select.ts #       可搜索模型选择器（ModelSelectOverlay）+ 模型工具函数（btw / explore 共用）
+      ui.ts         #       通用面板组件原语：createBoxRenderer（浮层边框渲染）/ editInput（输入编辑键统一，
+                      #       含 paste 粘贴）/ renderScrollingInput（水平滚动输入框）/ renderInputWithCursor；
+                      #       ModelSelect / ProxyConfig / Btw 等所有 overlay 统一接入
     hud/            #     3 行 HUD（多文件扩展源码：build.js 把 index.ts 入口打包成单文件 hud.ts）
       index.ts      #       入口薄壳：re-export hud-core（pi 加载约定）
       hud-core.ts   #       核心：渲染 + 生命周期 + 命令；开启时置 globalThis.__PI_HUD_ACTIVE__（dispose 时清），workflow-mgr 据此接管底部行；子模块动态加载，缺失时降级显示

@@ -13,8 +13,8 @@
  */
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import { renderScrollingInput } from "./ui";
+import { matchesKey, type TUI } from "@earendil-works/pi-tui";
+import { createBoxRenderer, editInput, renderScrollingInput } from "./ui";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnyModel = Model<any>;
@@ -177,24 +177,6 @@ export class ModelSelectOverlay {
 			if (item) this.done(item.value);
 			return;
 		}
-		if (matchesKey(data, "backspace")) {
-			if (this.queryCursor > 0) {
-				this.query = this.query.slice(0, this.queryCursor - 1) + this.query.slice(this.queryCursor);
-				this.queryCursor--;
-				this.applyFilter();
-			}
-			return;
-		}
-		if (matchesKey(data, "left")) {
-			this.queryCursor = Math.max(0, this.queryCursor - 1);
-			this.tui.requestRender();
-			return;
-		}
-		if (matchesKey(data, "right")) {
-			this.queryCursor = Math.min(this.query.length, this.queryCursor + 1);
-			this.tui.requestRender();
-			return;
-		}
 		if (matchesKey(data, "up")) {
 			if (this.selectedIndex > 0) {
 				this.selectedIndex--;
@@ -211,10 +193,11 @@ export class ModelSelectOverlay {
 			}
 			return;
 		}
-		// 可打印字符：插入搜索词并实时过滤
-		if (data.length === 1 && data.charCodeAt(0) >= 32) {
-			this.query = this.query.slice(0, this.queryCursor) + data + this.query.slice(this.queryCursor);
-			this.queryCursor++;
+		// 编辑键（backspace/left/right/home/end/可打印字符/粘贴）统一走 shared/ui editInput
+		const r = editInput(this.query, this.queryCursor, data);
+		if (r !== "skip") {
+			this.query = r.text;
+			this.queryCursor = r.cursor;
 			this.applyFilter();
 		}
 	}
@@ -222,13 +205,12 @@ export class ModelSelectOverlay {
 	render(width: number): string[] {
 		const th = this.theme;
 		const innerW = Math.max(1, width - 2);
-		const border = (s: string) => th.fg("border", s);
-		const row = (content: string) => border("│") + truncateToWidth(content, innerW, "…", true) + border("│");
+		const { row, topBorder, bottomBorder } = createBoxRenderer(th, innerW);
 		const lines: string[] = [];
 
 		// 顶部边框 + 标题
 		const titleStr = ` ${th.fg("accent", `🔍 ${this.title}`)} `;
-		lines.push(border(`╭${titleStr}${"─".repeat(Math.max(0, innerW - visibleWidth(titleStr)))}╮`));
+		lines.push(topBorder(titleStr));
 
 		// 搜索框：水平滚动窗口跟随光标（❯ 前缀占 4 个显示宽度），不截断内容
 		const { display: inputDisplay } = renderScrollingInput(this.query, this.queryCursor, innerW, {
@@ -254,7 +236,7 @@ export class ModelSelectOverlay {
 		const currentItem = this.filtered[this.selectedIndex];
 		const status = currentItem ? `${this.filtered.length} 个匹配` : "无匹配（Esc 取消）";
 		lines.push(row(th.fg("dim", `${status} · ↑↓ 选择 · Enter 确认 · Esc 取消`)));
-		lines.push(border(`╰${"─".repeat(innerW)}╯`));
+		lines.push(bottomBorder());
 		return lines;
 	}
 

@@ -9,9 +9,9 @@
  *
  * 注意：本模块不注册任何 pi API，仅导出组件类，由入口实例化。
  */
-import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { matchesKey, type TUI } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { renderScrollingInput } from "../shared/ui";
+import { createBoxRenderer, editInput, renderScrollingInput } from "../shared/ui";
 import { BTW_MAX_ROWS, BTW_MAX_QUESTION_LINES, BTW_MAX_INPUT_LENGTH } from "./config";
 import { renderAnswer, wrapText } from "./render";
 
@@ -181,27 +181,11 @@ export class BtwOverlay {
 				else this.tui.requestRender();
 				return;
 			}
-			if (matchesKey(data, "backspace")) {
-				if (this.inputCursor > 0) {
-					this.inputText = this.inputText.slice(0, this.inputCursor - 1) + this.inputText.slice(this.inputCursor);
-					this.inputCursor--;
-					this.tui.requestRender();
-				}
-				return;
-			}
-			if (matchesKey(data, "left")) {
-				this.inputCursor = Math.max(0, this.inputCursor - 1);
-				this.tui.requestRender();
-				return;
-			}
-			if (matchesKey(data, "right")) {
-				this.inputCursor = Math.min(this.inputText.length, this.inputCursor + 1);
-				this.tui.requestRender();
-				return;
-			}
-			if (data.length === 1 && data.charCodeAt(0) >= 32 && this.inputText.length < BTW_MAX_INPUT_LENGTH) {
-				this.inputText = this.inputText.slice(0, this.inputCursor) + data + this.inputText.slice(this.inputCursor);
-				this.inputCursor++;
+			// 编辑键（backspace/left/right/home/end/粘贴）统一走 shared/ui editInput
+			const r = editInput(this.inputText, this.inputCursor, data, { maxLength: BTW_MAX_INPUT_LENGTH });
+			if (r !== "skip") {
+				this.inputText = r.text;
+				this.inputCursor = r.cursor;
 				this.tui.requestRender();
 			}
 			return;
@@ -236,15 +220,13 @@ export class BtwOverlay {
 	render(width: number): string[] {
 		const th = this.theme;
 		const innerW = Math.max(1, width - 2);
-		const border = (s: string) => th.fg("border", s);
-		const row = (content: string) => border("│") + truncateToWidth(content, innerW, "...", true) + border("│");
+		const { row, topBorder, bottomBorder } = createBoxRenderer(th, innerW);
 		const blank = () => row("");
 		const lines: string[] = [];
 
 		// 顶部边框 + 标题（含实际使用模型，随 ask / 故障转移更新）
 		const titleStr = ` ${th.fg("accent", "💬 btw")}${this.modelLabel ? `${th.fg("dim", " · ")}${th.fg("dim", this.modelLabel)}` : ""} `;
-		const titleW = visibleWidth(titleStr);
-		lines.push(border(`╭${titleStr}${"─".repeat(Math.max(0, innerW - titleW))}╮`));
+		lines.push(topBorder(titleStr));
 
 		// 对话内容区：历史问答对 + 当前问答，统一成行供滚动
 		const contentWidth = innerW - 2;
@@ -304,7 +286,7 @@ export class BtwOverlay {
 		}
 
 		// 底部边框
-		lines.push(border(`╰${"─".repeat(innerW)}╯`));
+		lines.push(bottomBorder());
 		return lines;
 	}
 
