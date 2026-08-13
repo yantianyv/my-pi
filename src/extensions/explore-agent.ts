@@ -53,10 +53,10 @@ const EXPLORE_MODEL_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "explo
 /** 默认设置：auto = 优先 PREFERRED_MODELS，不可用则选最便宜可用模型 */
 const EXPLORE_DEFAULT_MODEL = "auto";
 
-/** 单次最多并行派出的子代理数（超出部分截断并在结果里说明） */
-const MAX_TASKS = 6;
-/** 子代理并发数 */
-const CONCURRENCY = 3;
+/** 单次最多并行派出的子代理数：2~16（schema minItems=2 保底下限，超出 16 截断并在结果里说明） */
+const MAX_TASKS = 16;
+/** 子代理最大并行数 */
+const CONCURRENCY = 4;
 /** 单个子代理最多多少轮（一轮 = 一次 LLM 调用 + 其工具调用） */
 const MAX_TURNS = 12;
 /** 单个子代理超时 */
@@ -281,8 +281,8 @@ export default function (pi: ExtensionAPI) {
 		],
 		parameters: Type.Object({
 			tasks: Type.Array(Type.String(), {
-				description: `分配给子代理的探索任务列表，每个任务派一个子代理，一次最多 ${MAX_TASKS} 个`,
-				minItems: 1,
+				description: `分配给子代理的探索任务列表，每个任务派一个子代理，2~${MAX_TASKS} 个（至少 2 个保证并行度，超出 ${MAX_TASKS} 截断）`,
+				minItems: 2,
 			}),
 		}),
 		executionMode: "parallel",
