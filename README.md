@@ -174,7 +174,7 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **截断保护**：超长输出截断后保存到 `~/.pi/agent/tmp/` 并附文件路径，需要时可 read 查看全文；
 - **节省量反馈**：经官方 `ctx.ui.setStatus("token-saver", "✂ 省 Xk")` 通道推送，HUD 行 1 动态区显示（见上「短反馈」槽位），hud 缺席时回落原生 footer。
 
-## 联网工具（src/extensions/web-tool.ts）
+## 联网工具（src/extensions/web-tool/）
 
 注册 `web_search`（多源搜索）与 `web_fetch`（抓网页转 markdown）两个自定义工具：agent 查实时信息（GitHub issue、文档、新闻、价格）时搜索，需要深读时抓取，全部**零 API key 零费用**（不依赖 kimi 订阅）。
 
@@ -187,7 +187,7 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **差评降权（动态黑名单）**：`web_dislike(domains, reason?)` 工具——AI 深读某条结果发现内容与标题不符/灌水/死链时对其域名记差评，持久化到 `~/.pi/agent/web-search-blacklist.json`（跨会话生效，**无需维护域名白名单**，降权对象由使用中自然沉淀）；搜索评分按差评次数降权（`×0.6/次`），累计 5 次直接滤除该域名条目（子域名同样受降权，父域不受）；`/web-tool-config blacklist` 查看（累计次数/降权系数/原因）、`blacklist clear` 清空；
 - **可调配置**：文件顶部「可调配置」区（源顺序、结果数、超时、字节/字符上限、差评降权系数/封禁阈值），改后 `node install.js` 重装生效。
 
-## 临时旁支问答（src/extensions/btw.ts）
+## 临时旁支问答（src/extensions/btw/）
 
 对齐 Claude Code 的 `/btw`：主任务进行中想顺便问个小事（如「刚才为什么选这个方案」「改了哪些关键文件」），直接 `/btw <问题>` 在右侧浮层里得到回答，不打断当前任务、不污染主会话。
 
