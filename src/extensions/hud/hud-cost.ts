@@ -296,8 +296,14 @@ export function getTokenRate(now: number): number | null {
 // ---------------------------------------------------------------------------
 // DeepSeek 官方人民币定价（元 / 百万 tokens）
 // 来源：https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
-//   deepseek-v4-flash：缓存命中 ¥0.02，缓存未命中 ¥1，输出 ¥2
-//   deepseek-v4-pro ：缓存命中 ¥0.025，缓存未命中 ¥3，输出 ¥6
+// 峰谷定价（2026-08-17 00:00 北京时间生效，官方公告）：DEEPSEEK_PRICES 存「空闲时段」价，
+//   高峰时段 = 空闲 × 2（高峰时段 = 北京时间每日 9:00-12:00 / 14:00-18:00）：
+//   deepseek-v4-flash：缓存命中 ¥0.05，缓存未命中 ¥1.5，输出 ¥4.5（高峰 0.10 / 3.0 / 9.0）
+//   deepseek-v4-pro ：缓存命中 ¥0.15，缓存未命中 ¥4.5，输出 ¥13.5（高峰 0.30 / 9.0 / 27.0）
+// 生效前的旧价（DEEPSEEK_PRICES_OLD，平时基准）：flash 0.02 / 1 / 2；pro 0.025 / 3 / 6。
+//   旧价同样带峰谷：以旧代码实现为准（DEEPSEEK_PEAK_PRICING 开关 + 高峰 ×2）。
+// 生效切换由 DEEPSEEK_PRICE_EFFECTIVE_TS 按消息时间戳自动判定（历史消息按当时价格核算）；
+//   若官方推迟/调整生效，改时间戳或置 null 回退旧价即可，无需改表。
 // 扣费规则：扣减费用 = token 消耗量 × 模型单价（命中/未命中/输出分别计价）。
 // ---------------------------------------------------------------------------
 
@@ -307,24 +313,42 @@ interface DeepSeekPrice {
 	output: number; // 输出
 }
 
+/** 新峰谷定价（空闲时段基准价；高峰 = ×2）。 */
 const DEEPSEEK_PRICES: Record<string, DeepSeekPrice> = {
+	"deepseek-v4-flash": { cacheHit: 0.05, cacheMiss: 1.5, output: 4.5 },
+	"deepseek-v4-pro": { cacheHit: 0.15, cacheMiss: 4.5, output: 13.5 },
+};
+
+/** 生效前旧价（平时基准；高峰 ×2，与旧代码峰谷实现一致）。 */
+const DEEPSEEK_PRICES_OLD: Record<string, DeepSeekPrice> = {
 	"deepseek-v4-flash": { cacheHit: 0.02, cacheMiss: 1, output: 2 },
 	"deepseek-v4-pro": { cacheHit: 0.025, cacheMiss: 3, output: 6 },
 };
 
-// 峰谷定价：官方公布的「高峰时段价格 = 平时 2 倍」方案（北京时间每日 9:00-12:00 / 14:00-18:00）。
-// 正式生效前保持 false（避免高估），官方通知上线后改为 true。
-// 时段判断（isDeepSeekPeakHour）与计费开关独立：无论计价是否生效，都如实反映当前所处时段，供 HUD 展示提醒。
-const DEEPSEEK_PEAK_PRICING = false;
+/** 峰谷定价生效时刻：2026-08-17 00:00 北京时间 = 2026-08-16 16:00 UTC；置 null 则永不生效（回退旧价）。 */
+const DEEPSEEK_PRICE_EFFECTIVE_TS: number | null = Date.UTC(2026, 7, 16, 16, 0, 0);
+// 峰谷计价总开关（旧代码实现，保留不删）：官方已公布峰谷方案，旧价与新价同按高峰 ×2 计费。
+const DEEPSEEK_PEAK_PRICING = true;
+// 时段判断（isDeepSeekPeakHour）与价格切换独立：无论新价是否生效，都如实反映当前所处时段，供 HUD 展示提醒。
 const DEEPSEEK_PEAK_HOURS: Array<[number, number]> = [
 	[9, 12],
 	[14, 18],
 ];
 
-/** 当前是否处于 DeepSeek 官方高峰时段（北京时间；纯时段判断，与计价开关 DEEPSEEK_PEAK_PRICING 无关）。 */
+/** 当前是否处于 DeepSeek 官方高峰时段（北京时间；纯时段判断，与价格切换 DEEPSEEK_PRICE_EFFECTIVE_TS 无关）。 */
 export function isDeepSeekPeakHour(ts: number): boolean {
 	const hour = new Date(ts + 8 * 3_600_000).getUTCHours(); // 北京时间 = UTC+8
 	return DEEPSEEK_PEAK_HOURS.some(([start, end]) => hour >= start && hour < end);
+}
+
+/**
+ * 距 DeepSeek 新峰谷价生效的剩余毫秒；已生效（或时间戳为 null 未启用）返回 null。
+ * 供 HUD 在旧价期间显示涨价倒计时（与高峰/低峰时段标签共存）；生效后不再显示。
+ */
+export function deepseekPriceCountdownMs(now: number): number | null {
+	if (DEEPSEEK_PRICE_EFFECTIVE_TS == null) return null;
+	const remain = DEEPSEEK_PRICE_EFFECTIVE_TS - now;
+	return remain > 0 ? remain : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +410,10 @@ function mimoCostCny(u: AssistantMessage["usage"], modelId: string): number {
  * 映射，因此直接用 token 数 × 官方单价即可，不走 pi 的 USD 成本、不依赖汇率。
  */
 function deepseekCostCny(u: AssistantMessage["usage"], modelId: string, ts: number): number {
-	const p = DEEPSEEK_PRICES[deepseekModelKey(modelId)] ?? DEEPSEEK_PRICES["deepseek-v4-flash"];
+	// 按消息时间戳选择价格表：生效前旧价、生效后新价；两档价均带峰谷（高峰 ×2，空闲 ×1，以旧代码实现为准）
+	const effective = DEEPSEEK_PRICE_EFFECTIVE_TS != null && ts >= DEEPSEEK_PRICE_EFFECTIVE_TS;
+	const table = effective ? DEEPSEEK_PRICES : DEEPSEEK_PRICES_OLD;
+	const p = table[deepseekModelKey(modelId)] ?? table["deepseek-v4-flash"];
 	const peak = DEEPSEEK_PEAK_PRICING && isDeepSeekPeakHour(ts) ? 2 : 1;
 	return ((p.cacheMiss * u.input + p.cacheHit * u.cacheRead + p.output * u.output) * peak) / 1_000_000;
 }
