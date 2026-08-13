@@ -3,7 +3,7 @@
  *
  * 职责：
  * - 统一 BalanceData/BalanceAdapter 接口，按供应商逐一适配（按量充值余额 vs 订阅 plan 余量 vs 订阅+加油包）
- * - 已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter
+ * - 已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding
  * - 消耗统计文本（rateText）复用 hud-cost 的按量付费实现（¥/min 或 $/min）
  *
  * 注意：本模块不注册任何 pi API，仅导出接口与注册表，由入口模块驱动。
@@ -33,6 +33,13 @@ export interface BalanceQuota {
 	currency?: string;
 }
 
+export interface BalanceLink {
+	/** 跳转目标 URL */
+	url: string;
+	/** 超链接显示文本（缺省用「点击跳转官方查询页面」，渲染层兜底） */
+	text?: string;
+}
+
 export interface BalanceData {
 	status: BalanceStatus;
 	/** 主金额，如 "CNY 110.00" */
@@ -45,6 +52,11 @@ export interface BalanceData {
 	showAmountWithQuotas?: boolean;
 	/** 隐藏左侧 "余额" 标签（用于只显示链接等场景） */
 	hideLabel?: boolean;
+	/**
+	 * 查询链接：无公开余额 API 的供应商（订阅 plan 等）贴控制台查询页。
+	 * 渲染层用 OSC 8 超链接短文本展示（避免长 URL 显示不全），完整 URL 走 /balance notify。
+	 */
+	link?: BalanceLink;
 }
 
 export interface BalanceAdapter {
@@ -397,8 +409,8 @@ const xiaomiTokenPlanCnAdapter: BalanceAdapter = {
 		return {
 			status: "ok",
 			amount: "余量查询",
-			detail: "https://platform.xiaomimimo.com/console/plan-manage",
 			hideLabel: true,
+			link: { url: "https://platform.xiaomimimo.com/console/plan-manage" },
 		};
 	},
 };
@@ -416,8 +428,32 @@ const xiaomiMeteredCnAdapter: BalanceAdapter = {
 		return {
 			status: "ok",
 			amount: "余额查询",
-			detail: "https://platform.xiaomimimo.com/console/balance",
 			hideLabel: true,
+			link: { url: "https://platform.xiaomimimo.com/console/balance" },
+		};
+	},
+};
+
+/**
+ * Volcengine Ark Coding（火山方舟 Coding）：订阅制，无公开余额 API，显示控制台查询链接。
+ */
+const volcengineCodingAdapter: BalanceAdapter = {
+	providerId: "volcengine-coding",
+	label: "火山方舟 Coding",
+	// 订阅制且无等效单价：展示会话 token 消耗
+	rateText(ctx, _now) {
+		const t = sumSessionUsage(ctx);
+		if (t.turns === 0) return null;
+		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
+	},
+	async fetch(_ctx) {
+		return {
+			status: "ok",
+			amount: "余量查询",
+			hideLabel: true,
+			link: {
+				url: "https://console.volcengine.com/ark/region:cn-beijing/subscription/coding-plan",
+			},
 		};
 	},
 };
@@ -522,4 +558,5 @@ export const BALANCE_ADAPTERS: Record<string, BalanceAdapter> = {
 	[moonshotaiCnAdapter.providerId]: moonshotaiCnAdapter,
 	[xiaomiTokenPlanCnAdapter.providerId]: xiaomiTokenPlanCnAdapter,
 	[openrouterAdapter.providerId]: openrouterAdapter,
+	[volcengineCodingAdapter.providerId]: volcengineCodingAdapter,
 };

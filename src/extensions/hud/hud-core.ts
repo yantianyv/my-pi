@@ -22,7 +22,7 @@
  *   不同供应商计费方式差异很大（按量充值余额 vs 订阅 plan 余量 vs 订阅+加油包余额），
  *   无法用通用模板，因此按供应商逐一适配（见 hud-balance.ts）。
  *   适配器统一返回 BalanceData，未适配的供应商显示占位提示。
- *   目前已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter
+ *   目前已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding
  *
  * 命令：
  *   /balance  立即刷新余额并通知
@@ -36,7 +36,7 @@
  * hud 只 append 到 footer 底部；注册方经 notifyExtraRowsUpdate 请求重绘（零耦合，无 import）。
  */
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { getCapabilities, hyperlink, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -75,6 +75,11 @@ const THINKING_LABEL: Record<string, string> = {
 	xhigh: "xhigh",
 	max: "max",
 };
+
+/** 查询链接缺省显示文本（adapter 未指定 BalanceLink.text 时） */
+const DEFAULT_LINK_TEXT = `${process.platform === "darwin" ? "按住⌘" : "按住Ctrl"}点击此处跳转官方查询页面`;
+/** 终端是否支持 OSC 8 超链接 */
+const HYPERLINK_SUPPORTED = getCapabilities().hyperlinks;
 
 /**
  * 通用「额外底部行」接口：workflow-mgr 等扩展经全局 __PI_HUD_API__.registerExtraRows 注册
@@ -294,7 +299,9 @@ export default async function (pi: ExtensionAPI) {
 		if (b.data) {
 			const amount = formatAmount(b.data.amount);
 			const prefix = b.data.hideLabel ? "" : "余额：";
-			return `${prefix}${amount}${b.data.detail ? `（${b.data.detail}）` : ""}`;
+			// 查询链接型（无余额 API）：notify 纯文本里给出完整 URL 供复制（HUD 行只显示超链接短文本）
+			const tail = b.data.link ? `（${b.data.link.url}）` : b.data.detail ? `（${b.data.detail}）` : "";
+			return `${prefix}${amount}${tail}`;
 		}
 		return "余额：-";
 	}
@@ -413,9 +420,19 @@ export default async function (pi: ExtensionAPI) {
 					// 币种友好显示：CNY → ¥、USD → $（货币缩写统一转符号）
 					const amountText = formatAmount(b.data.amount);
 					const amount = theme.fg(color, amountText);
-					const detail = b.data.detail ? ` ${theme.fg("dim", b.data.detail)}` : "";
+					// 查询链接：OSC 8 超链接短文本（dim 灰色低调）。下划线来源：Windows Terminal 对 OSC 8
+					// 链接强制默认下划线（平时虚线/hover 实线），应用侧 SGR（24 / 4:0 等）均无法改变——
+					// 这是终端渲染层的硬限制。插件不叠加任何手动下划线，让终端用其默认（最低调）样式。
+					const linkText = b.data.link?.text ?? DEFAULT_LINK_TEXT;
+					const linkLabel = `🔗 ${linkText}`;
+					const linkPart = b.data.link
+						? HYPERLINK_SUPPORTED
+							? hyperlink(theme.fg("dim", linkLabel), b.data.link.url)
+							: theme.fg("dim", linkLabel)
+						: "";
+					const detail = !b.data.link && b.data.detail ? ` ${theme.fg("dim", b.data.detail)}` : "";
 					const prefix = b.data.hideLabel ? "" : `${label} `;
-					return `${prefix}${amount}${detail}`;
+					return `${prefix}${amount}${linkPart ? ` ${linkPart}` : ""}${detail}`;
 				}
 				return `${label} -`;
 			};
