@@ -303,10 +303,11 @@ export class WfmgMenuPanelComponent {
 
 	render(width: number): string[] {
 		const th = this.theme;
-		// 浮窗边框：内容行 pad 到 innerW，左右包 │；顶/底横线 ┌─┐└┘（borderMuted 暗色）
-		const innerW = Math.max(30, width - 4);
+		// 浮窗边框：innerW = width-2（与其他面板一致）；内容行 pad 到 innerW-2（左右各留 1 空格内边距），
+		// 边框与行同宽 = width——此前 innerW = width-4 导致边框比行窄 2 字符不齐
+		const innerW = Math.max(30, width - 2);
 		const b = (s: string) => th.fg("borderMuted", s);
-		const pad = (s: string) => s + " ".repeat(Math.max(0, innerW - visibleWidth(s)));
+		const pad = (s: string) => s + " ".repeat(Math.max(0, innerW - 2 - visibleWidth(s)));
 		const titles: Record<MenuMode, string> = { menu: "工作流面板", overview: "进度总览" };
 
 		const content: string[] = [];
