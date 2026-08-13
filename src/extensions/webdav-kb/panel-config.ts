@@ -10,8 +10,8 @@
  * 已启用未解锁 → 尝试解锁；已解锁时输入 = 修改口令（覆盖 setup，提示迁移）。
  */
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import { renderInputWithCursor } from "../shared/ui";
+import { matchesKey, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import { createBoxRenderer, editInput, renderInputWithCursor } from "../shared/ui";
 import { loadConfig, saveConfig, isConfigured, defaultMirrorDir, agentConfigDir, type KbConfig } from "./store";
 import { syncAll } from "./sync";
 import { WebDavClient } from "./client";
@@ -173,12 +173,6 @@ export class KbConfigOverlay {
 			this.done(null);
 			return;
 		}
-		// 终端粘贴：pi 以 bracketed paste（\x1b[200~…\x1b[201~）整段送入；
-		// 非 \x1b 开头的多字符文本也视为粘贴（部分终端不包标记直接送整段）
-		if (data.includes("\x1b[200~") || (data.length > 1 && !data.startsWith("\x1b"))) {
-			this.insertPaste(data);
-			return;
-		}
 		if (matchesKey(data, "return")) {
 			this.handleEnter();
 			return;
@@ -200,49 +194,15 @@ export class KbConfigOverlay {
 		const target = this.currentTarget();
 		if (!target || target.kind !== "field") return;
 		const f = target.field;
-		const buf = this.bufs[f.key];
-		const cur = this.cursors[f.key];
-		if (matchesKey(data, "backspace")) {
-			if (cur > 0) {
-				this.bufs[f.key] = buf.slice(0, cur - 1) + buf.slice(cur);
-				this.cursors[f.key] = cur - 1;
-				this.saveField(f);
-			}
-			return;
-		}
-		if (matchesKey(data, "left")) {
-			this.cursors[f.key] = Math.max(0, cur - 1);
+		// 编辑键（粘贴/backspace/left/right/home/end/delete/ctrl+u/可打印）统一走 shared/ui editInput
+		const before = this.bufs[f.key];
+		const r = editInput(before, this.cursors[f.key], data);
+		if (r !== "skip") {
+			this.bufs[f.key] = r.text;
+			this.cursors[f.key] = r.cursor;
+			if (r.text !== before) this.saveField(f); // 内容变化才持久化
 			this.tui.requestRender();
-			return;
 		}
-		if (matchesKey(data, "right")) {
-			this.cursors[f.key] = Math.min(buf.length, cur + 1);
-			this.tui.requestRender();
-			return;
-		}
-		// 可打印字符 → 插入当前字段缓冲
-		if (data.length === 1 && data >= " ") {
-			this.bufs[f.key] = buf.slice(0, cur) + data + buf.slice(cur);
-			this.cursors[f.key] = cur + 1;
-			this.saveField(f);
-		}
-	}
-
-	/** 粘贴文本：剥 bracketed paste 标记，整体插入当前字段（换行压成空格） */
-	private insertPaste(raw: string): void {
-		const target = this.currentTarget();
-		if (!target || target.kind !== "field") return;
-		const text = raw
-			.replace(/\x1b\[200~/g, "")
-			.replace(/\x1b\[201~/g, "")
-			.replace(/\r\n?/g, " ")
-			.replace(/\n/g, " ");
-		if (!text) return;
-		const f = target.field;
-		const cur = this.cursors[f.key];
-		this.bufs[f.key] = this.bufs[f.key].slice(0, cur) + text + this.bufs[f.key].slice(cur);
-		this.cursors[f.key] = cur + text.length;
-		this.saveField(f);
 	}
 
 	private handleEnter(): void {
@@ -370,11 +330,10 @@ export class KbConfigOverlay {
 	render(width: number): string[] {
 		const t = this.theme;
 		const innerW = Math.max(30, width - 2);
-		const pad = (s: string) => truncateToWidth(s, innerW, "", true);
-		const border = (edge: string) => t.fg("border", t.bold(`${edge}${"─".repeat(innerW)}${edge}`));
-		const lines: string[] = [border("╭")];
-		lines.push(t.fg("accent", t.bold(`│ ${pad("⚙ 知识库配置（↑↓ 选择 · 直接输入即改）")}`)));
-		lines.push(t.fg("border", `│ ${"─".repeat(innerW)}`));
+		const { row, topBorder, bottomBorder, divider } = createBoxRenderer(t, innerW);
+		const lines: string[] = [topBorder()];
+		lines.push(row(t.fg("accent", t.bold(" ⚙ 知识库配置（↑↓ 选择 · 直接输入即改）"))));
+		lines.push(divider());
 
 		// 字段：焦点行 = 输入框 + 光标；非焦点 = 显示值
 		FIELDS.forEach((f, i) => {
@@ -401,28 +360,27 @@ export class KbConfigOverlay {
 					value = "⚠ 未确认（回到本行按 Enter 启用）";
 				}
 			}
-			const row = `${label} ${value}`;
-			const rowPadded = pad(row);
-			lines.push(focused ? `│ \x1b[7m${truncateToWidth(row, innerW, "", true)}\x1b[27m` : `│ ${t.fg("text", rowPadded)}`);
+			const fieldRow = `${label} ${value}`;
+			lines.push(focused ? row(`\x1b[7m${fieldRow}\x1b[27m`) : row(t.fg("text", fieldRow)));
 		});
 
 		// 动作行
-		lines.push(t.fg("border", `│ ${"─".repeat(innerW)}`));
+		lines.push(divider());
 		this.visibleActions().forEach((a, i) => {
 			const focused = FIELDS.length + i === this.focus;
-			const row = ` ${a.label}`;
-			lines.push(focused ? `│ \x1b[7m${truncateToWidth(row, innerW, "", true)}\x1b[27m` : `│ ${t.fg("accent", pad(row))}`);
+			const actRow = ` ${a.label}`;
+			lines.push(focused ? row(`\x1b[7m${actRow}\x1b[27m`) : row(t.fg("accent", actRow)));
 		});
 
 		// 状态行
-		lines.push(t.fg("border", `│ ${"─".repeat(innerW)}`));
+		lines.push(divider());
 		const status = this.working ?? this.result ?? (isConfigured(this.cfg) ? "✓ 已配置（改动即时保存）" : "⚠ 未配置完整");
 		const statusColor = this.working ? "accent" : this.result?.startsWith("❌") ? "error" : this.result?.startsWith("⚠") ? "warning" : "dim";
-		lines.push(t.fg(statusColor as "accent", `│ ${pad(" " + status)}`));
+		lines.push(row(t.fg(statusColor as "accent", ` ${status}`)));
 
-		lines.push(border("╰"));
 		const hint = `↑↓ 选择 · 直接输入即改 · Enter 下一项/执行 · Esc 关闭`;
-		lines.push(t.fg("dim", `${" ".repeat(Math.max(0, (width - visibleWidth(hint)) / 2))}${hint}`));
+		lines.push(row(t.fg("dim", hint)));
+		lines.push(bottomBorder());
 		return lines;
 	}
 

@@ -10,14 +10,12 @@
  * 直接 kb_read 读全文。非 TUI 回落：/kb <查询词> 直接输出文本结果列表。
  */
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth, Text, type TUI } from "@earendil-works/pi-tui";
-import { renderInputWithCursor } from "../shared/ui";
+import { matchesKey, Text, type TUI } from "@earendil-works/pi-tui";
+import { createBoxRenderer, editInput, renderScrollingInput } from "../shared/ui";
 import { loadConfig, defaultMirrorDir, agentConfigDir } from "./store";
 import { getIndex, type SearchResult } from "./search";
 import { vaultReadNote } from "./crypto";
 
-/** 搜索框可见宽度（字符） */
-const INPUT_MAX_W = 48;
 /** 列表一次最多展示的结果数 */
 const SEARCH_LIMIT = 15;
 /** 预览一次最多展示的行数 */
@@ -109,20 +107,6 @@ export class KbOverlay {
 			this.handlePreviewInput(data);
 			return;
 		}
-		// 终端粘贴（bracketed paste 整段）或多字符文本 → 插入搜索框
-		if (data.includes("\x1b[200~") || (data.length > 1 && !data.startsWith("\x1b"))) {
-			const text = data
-				.replace(/\x1b\[200~/g, "")
-				.replace(/\x1b\[201~/g, "")
-				.replace(/\r\n?/g, " ")
-				.replace(/\n/g, " ");
-			if (text) {
-				this.query = this.query.slice(0, this.queryCursor) + text + this.query.slice(this.queryCursor);
-				this.queryCursor += text.length;
-				this.applyFilter();
-			}
-			return;
-		}
 		if (matchesKey(data, "escape")) {
 			this.done(null);
 			return;
@@ -130,24 +114,6 @@ export class KbOverlay {
 		if (matchesKey(data, "return")) {
 			const item = this.results[this.selectedIndex];
 			if (item) this.openPreview(item.path, item.title);
-			return;
-		}
-		if (matchesKey(data, "backspace")) {
-			if (this.queryCursor > 0) {
-				this.query = this.query.slice(0, this.queryCursor - 1) + this.query.slice(this.queryCursor);
-				this.queryCursor--;
-				this.applyFilter();
-			}
-			return;
-		}
-		if (matchesKey(data, "left")) {
-			this.queryCursor = Math.max(0, this.queryCursor - 1);
-			this.tui.requestRender();
-			return;
-		}
-		if (matchesKey(data, "right")) {
-			this.queryCursor = Math.min(this.query.length, this.queryCursor + 1);
-			this.tui.requestRender();
 			return;
 		}
 		if (matchesKey(data, "up")) {
@@ -166,10 +132,11 @@ export class KbOverlay {
 			}
 			return;
 		}
-		// 可打印字符 → 插入并实时检索
-		if (data.length === 1 && data >= " ") {
-			this.query = this.query.slice(0, this.queryCursor) + data + this.query.slice(this.queryCursor);
-			this.queryCursor++;
+		// 编辑键（粘贴/backspace/left/right/home/end/delete/ctrl+u/可打印）统一走 shared/ui editInput
+		const r = editInput(this.query, this.queryCursor, data);
+		if (r !== "skip") {
+			this.query = r.text;
+			this.queryCursor = r.cursor;
 			this.applyFilter();
 		}
 	}
@@ -220,23 +187,21 @@ export class KbOverlay {
 	private renderSearch(width: number): string[] {
 		const t = this.theme;
 		const innerW = Math.max(20, width - 2);
-		const border = (edge: string) => t.fg("border", t.bold(`${edge}${"─".repeat(innerW)}${edge}`));
-		const lines: string[] = [border("╭")];
-		// 显示宽度补白（CJK 按 2 列计，不能直接用 padEnd）
-		const pad = (s: string) => truncateToWidth(s, innerW, "", true);
+		const { row, topBorder, bottomBorder } = createBoxRenderer(t, innerW);
+		const lines: string[] = [topBorder()];
 
-		// 搜索框（水平滚动窗口）
-		const inputDisplay = truncateToWidth(this.query, INPUT_MAX_W);
-		const cursorInWindow = Math.min(this.queryCursor, inputDisplay.length);
-		const inputLine = `❯ ${renderInputWithCursor(inputDisplay, cursorInWindow)}`;
-		lines.push(t.fg("dim", `│ ${inputLine}${" ".repeat(Math.max(0, innerW - visibleWidth(inputLine)))}`));
+		// 搜索框（水平滚动窗口，与其他面板一致）
+		const { display: inputDisplay } = renderScrollingInput(this.query, this.queryCursor, innerW, {
+			showCursor: true,
+		});
+		lines.push(row(` ${t.fg("accent", "❯")} ${inputDisplay}`));
 
 		// 结果列表
 		const rows = this.getListRows();
 		if (this.query.trim() === "") {
-			lines.push(t.fg("dim", `│ ${pad(" 输入关键词检索知识库（webdav 云盘本地镜像）")}`));
+			lines.push(row(t.fg("dim", "  输入关键词检索知识库（webdav 云盘本地镜像）")));
 		} else if (this.results.length === 0) {
-			lines.push(t.fg("warning", `│ ${pad(" 无匹配结果")}`));
+			lines.push(row(t.fg("warning", "  无匹配结果")));
 		}
 		for (let i = 0; i < Math.min(rows, this.results.length); i++) {
 			const idx = this.scrollOffset + i;
@@ -244,54 +209,51 @@ export class KbOverlay {
 			if (!r) break;
 			const selected = idx === this.selectedIndex;
 			const tag = r.tags.length > 0 ? `  [${r.tags.slice(0, 2).join(", ")}]` : "";
-			const row = truncateToWidth(` ${r.path}${tag}`, innerW);
-			const titleRow = truncateToWidth(`   ${r.title}`, innerW);
+			const rowText = ` ${r.path}${tag}`;
+			const titleRow = `   ${r.title}`;
 			if (selected) {
-				const sel = (s: string) => "\x1b[7m" + truncateToWidth(s, innerW, "", true) + "\x1b[27m";
-				lines.push(`│ ${sel(row)}`);
-				lines.push(`│ ${sel(titleRow)}`);
+				lines.push(row(`\x1b[7m${rowText}\x1b[27m`));
+				lines.push(row(`\x1b[7m${titleRow}\x1b[27m`));
 			} else {
-				lines.push(`│ ${t.fg("accent", truncateToWidth(row, innerW, "", true))}`);
-				lines.push(`│ ${t.fg("dim", truncateToWidth(titleRow, innerW, "", true))}`);
+				lines.push(row(t.fg("accent", rowText)));
+				lines.push(row(t.fg("dim", titleRow)));
 			}
 		}
 
-		// 底部提示
+		// 底部提示（框内，与其他面板一致）
 		const hint =
 			this.query.trim() === ""
 				? "输入即搜 · Enter 预览"
 				: `${this.results.length} 个结果 · ↑↓ 选择 · Enter 预览 · Esc 关闭`;
-		lines.push(border("╰"));
-		lines.push(t.fg("dim", `${" ".repeat(Math.max(0, (width - visibleWidth(hint)) / 2))}${hint}`));
+		lines.push(row(t.fg("dim", hint)));
+		lines.push(bottomBorder());
 		return lines;
 	}
 
 	private renderPreview(width: number): string[] {
 		const t = this.theme;
 		const innerW = Math.max(20, width - 2);
-		const border = (edge: string) => t.fg("border", t.bold(`${edge}${"─".repeat(innerW)}${edge}`));
-		// 显示宽度补白（CJK 按 2 列计）
-		const pad = (s: string) => truncateToWidth(s, innerW, "", true);
-		const lines: string[] = [border("╭")];
-		lines.push(t.bold(t.fg("accent", `│ ${pad(this.previewPath ?? "")}`)));
-		lines.push(t.fg("dim", `│ ${pad(`  ${this.previewTitle}`)}`));
+		const { row, topBorder, bottomBorder } = createBoxRenderer(t, innerW);
+		const lines: string[] = [topBorder()];
+		lines.push(row(t.bold(t.fg("accent", ` ${this.previewPath ?? ""}`))));
+		lines.push(row(t.fg("dim", `  ${this.previewTitle}`)));
 
 		const rows = this.getListRows();
 		if (this.previewError) {
-			lines.push(t.fg("warning", `│ ${pad("  " + this.previewError)}`));
+			lines.push(row(t.fg("warning", `  ${this.previewError}`)));
 		} else {
 			const maxOffset = Math.max(0, this.previewLines.length - rows);
 			const off = Math.min(this.previewOffset, maxOffset);
 			for (let i = 0; i < rows; i++) {
 				const src = this.previewLines[off + i];
 				const line = src === undefined ? "" : src.replace(/\t/g, "  ");
-				lines.push(`│ ${pad(line)}`);
+				lines.push(row(line));
 			}
 		}
 
-		lines.push(border("╰"));
 		const hint = `Enter 插入引用 · ↑↓ 滚动 · Esc 返回列表`;
-		lines.push(t.fg("dim", `${" ".repeat(Math.max(0, (width - visibleWidth(hint)) / 2))}${hint}`));
+		lines.push(row(t.fg("dim", hint)));
+		lines.push(bottomBorder());
 		return lines;
 	}
 

@@ -18,6 +18,7 @@ import type { MilestoneState, TaskStatus, WorkflowState } from "./types";
 import type { Derived, WorkflowStore } from "./store";
 import { nextPendingTask } from "./store";
 import { blockedList, currentTask, summaryLine, truncate } from "./brief";
+import { createBoxRenderer } from "../shared/ui";
 
 /** hud 的通用「额外底部行」接口（hud-core 暴露全局 __PI_HUD_API__，零 import 契约） */
 interface HudExtraRowsApi {
@@ -329,11 +330,12 @@ export class WfmgMenuPanelComponent {
 			content.push(pad(th.fg("dim", " 按任意键返回菜单")));
 		}
 
-		// 包边框
+		// 包边框（createBoxRenderer 统一圆角；borderMuted 暗色保持浮窗低调）
+		const { topBorder, bottomBorder } = createBoxRenderer(th, innerW, { color: "borderMuted" });
 		return [
-			b("┌" + "─".repeat(innerW) + "┐"),
+			topBorder(),
 			...content.map((l) => b("│ ") + l + b(" │")),
-			b("└" + "─".repeat(innerW) + "┘"),
+			bottomBorder(),
 		];
 	}
 

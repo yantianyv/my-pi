@@ -20,6 +20,7 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth, visibleWidth, parseKey } from "@earendil-works/pi-tui";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { editInput } from "../shared/ui";
 import type { Message, Model } from "@earendil-works/pi-ai";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -741,29 +742,11 @@ class GitPanel {
 			void this.doCommit(msg);
 			return;
 		}
-		if (matchesKey(data, Key.left)) {
-			this.cursor = Math.max(0, this.cursor - 1);
-		} else if (matchesKey(data, Key.right)) {
-			this.cursor = Math.min(this.commitMsg.length, this.cursor + 1);
-		} else if (matchesKey(data, Key.home)) {
-			this.cursor = 0;
-		} else if (matchesKey(data, Key.end)) {
-			this.cursor = this.commitMsg.length;
-		} else if (matchesKey(data, Key.backspace)) {
-			if (this.cursor > 0) {
-				this.commitMsg = this.commitMsg.slice(0, this.cursor - 1) + this.commitMsg.slice(this.cursor);
-				this.cursor--;
-			}
-		} else if (matchesKey(data, Key.delete)) {
-			if (this.cursor < this.commitMsg.length) {
-				this.commitMsg = this.commitMsg.slice(0, this.cursor) + this.commitMsg.slice(this.cursor + 1);
-			}
-		} else if (matchesKey(data, Key.ctrl("u"))) {
-			this.commitMsg = "";
-			this.cursor = 0;
-		} else if (key.length === 1 && key.charCodeAt(0) >= 32) {
-			this.commitMsg = this.commitMsg.slice(0, this.cursor) + key + this.commitMsg.slice(this.cursor);
-			this.cursor++;
+		// 编辑键（left/right/home/end/backspace/delete/ctrl+u/可打印字符/粘贴）统一走 shared/ui editInput
+		const r = editInput(this.commitMsg, this.cursor, data);
+		if (r !== "skip") {
+			this.commitMsg = r.text;
+			this.cursor = r.cursor;
 		}
 		this.invalidate();
 		this.requestRender();
@@ -798,7 +781,7 @@ class GitPanel {
 		const behind = this.status?.behind ?? 0;
 		const branchInfo = `⎇ ${branch}${ahead ? ` ↑${ahead}` : ""}${behind ? ` ↓${behind}` : ""}`;
 		const title = th.fg("accent", th.bold(" Git 面板 ")) + th.fg("dim", `  ${branchInfo}`);
-		lines.push(th.fg("border", "┌") + title + th.fg("border", "─".repeat(Math.max(0, width - visibleWidth(title) - 2)) + "┐"));
+		lines.push(th.fg("border", "╭") + title + th.fg("border", "─".repeat(Math.max(0, width - visibleWidth(title) - 2)) + "╮"));
 
 		// 文件列表
 		if (!this.status) {
@@ -851,7 +834,7 @@ class GitPanel {
 		}
 
 		// 底部边框
-		lines.push(th.fg("border", "└") + th.fg("border", "─".repeat(width - 2)) + th.fg("border", "┘"));
+		lines.push(th.fg("border", "╰") + th.fg("border", "─".repeat(width - 2)) + th.fg("border", "╯"));
 
 		// 截断每行到精确宽度
 		const result = lines.map((l) => truncateToWidth(l, width));

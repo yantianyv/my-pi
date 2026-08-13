@@ -13,7 +13,7 @@
  * - editInput / pasteText：输入框编辑键统一（backspace/left/right/home/end/插入/粘贴），
  *   吸收 KbOverlay 的 bracketed paste 精华，弃 5 处逐字重复的手感不一实现
  */
-import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
 /** 在输入框可见窗口文本上叠加反显光标：CURSOR_MARKER 标记 + 当前字符反白 */
@@ -92,10 +92,16 @@ export interface BoxRenderer {
 /**
  * 创建浮层边框渲染器：统一 ╭╮│╰╯ 单行边框 + "…" 截断。
  * 此前 ModelSelect / ProxyConfig / Btw 各自手写 border/row（截断字符 "…" 与 "..." 不一），
- * webdav 系列甚至无右边界（`│内容` 不闭合）——统一为全封闭 + 单 "…"。
+ * webdav 系列甚至无右边界（`│内容` 不闭合）——统一为全封闭 + 单 "…"；
+ * color 可换 borderMuted（workflow-mgr 暗色浮窗用）。
  */
-export function createBoxRenderer(theme: Theme, innerW: number): BoxRenderer {
-	const border = (s: string) => theme.fg("border", s);
+export function createBoxRenderer(
+	theme: Theme,
+	innerW: number,
+	opts?: { color?: "border" | "borderMuted" },
+): BoxRenderer {
+	const color = opts?.color ?? "border";
+	const border = (s: string) => theme.fg(color, s);
 	const row = (content: string) => border("│") + truncateToWidth(content, innerW, "…", true) + border("│");
 	const topBorder = (title?: string) => {
 		const t = title ?? "";
@@ -126,9 +132,10 @@ export function pasteText(data: string): string | null {
 export type EditInputResult = { text: string; cursor: number } | "skip";
 
 /**
- * 统一输入框编辑键处理：backspace / left / right / home / end / 可打印字符插入 / 粘贴。
+ * 统一输入框编辑键处理：backspace / left / right / home / end / delete（光标处删）/ ctrl+u（清空）/
+ * 可打印字符插入 / 粘贴。
  * 命中编辑键返回新的 { text, cursor }（backspace 在光标 0 时也返回原值，表示「已消费」）；
- * 非编辑键（escape/enter/tab/↑↓/delete 等）返回 "skip"，由调用方继续处理特异键。
+ * 非编辑键（escape/enter/tab/↑↓ 等）返回 "skip"，由调用方继续处理特异键。
  */
 export function editInput(
 	text: string,
@@ -146,6 +153,15 @@ export function editInput(
 			return { text: text.slice(0, cursor - 1) + text.slice(cursor), cursor: cursor - 1 };
 		}
 		return { text, cursor };
+	}
+	if (matchesKey(data, "delete")) {
+		if (cursor < text.length) {
+			return { text: text.slice(0, cursor) + text.slice(cursor + 1), cursor };
+		}
+		return { text, cursor };
+	}
+	if (matchesKey(data, Key.ctrl("u"))) {
+		return { text: "", cursor: 0 };
 	}
 	if (matchesKey(data, "left")) {
 		return { text, cursor: Math.max(0, cursor - 1) };
