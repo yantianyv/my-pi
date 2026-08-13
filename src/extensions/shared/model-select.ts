@@ -14,7 +14,7 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import { renderInputWithCursor } from "./ui";
+import { renderScrollingInput } from "./ui";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnyModel = Model<any>;
@@ -86,28 +86,7 @@ export function findConfiguredModel(ctx: ExtensionContext, setting: string): Any
 }
 
 /** 返回文本显示宽度达到 targetW 时的字符索引（供输入框水平滚动窗口定位） */
-export function charIndexAtWidth(text: string, targetW: number): number {
-	let w = 0;
-	for (let i = 0; i < text.length; i++) {
-		const chW = visibleWidth(text[i]!);
-		if (w + chW > targetW) return i;
-		w += chW;
-	}
-	return text.length;
-}
-
-/** 从 startChar 起按显示宽度截取最多 maxW 宽的文本（不截断字符） */
-export function sliceByWidth(text: string, startChar: number, maxW: number): string {
-	let out = "";
-	let w = 0;
-	for (let i = startChar; i < text.length; i++) {
-		const chW = visibleWidth(text[i]!);
-		if (w + chW > maxW) break;
-		out += text[i];
-		w += chW;
-	}
-	return out;
-}
+// 已移至 shared/ui.ts（charIndexAtWidth / sliceByWidth 与 renderScrollingInput 聚合），此处不再重复定义
 
 export interface ModelSelectItem {
 	/** 显示文本（纯文本，无 ANSI） */
@@ -252,20 +231,9 @@ export class ModelSelectOverlay {
 		lines.push(border(`╭${titleStr}${"─".repeat(Math.max(0, innerW - visibleWidth(titleStr)))}╮`));
 
 		// 搜索框：水平滚动窗口跟随光标（❯ 前缀占 4 个显示宽度），不截断内容
-		const inputW = Math.max(8, innerW - 3);
-		const full = this.query;
-		const totalW = visibleWidth(full);
-		let startChar = 0;
-		if (totalW > inputW) {
-			const cursorW = visibleWidth(full.slice(0, this.queryCursor));
-			startChar = charIndexAtWidth(full, Math.max(0, cursorW - Math.floor(inputW * 0.6)));
-		}
-		const windowText = sliceByWidth(full, startChar, inputW);
-		const cursorInWindow = Math.min(Math.max(0, this.queryCursor - startChar), windowText.length);
-		let inputDisplay = windowText;
-		if (this.focused) {
-			inputDisplay = renderInputWithCursor(inputDisplay, cursorInWindow);
-		}
+		const { display: inputDisplay } = renderScrollingInput(this.query, this.queryCursor, innerW, {
+			showCursor: this.focused,
+		});
 		lines.push(row(` ${th.fg("accent", "❯")} ${inputDisplay}`));
 
 		// 列表：滚动窗口 + 当前项 ✓ 标记 + 选中项反显

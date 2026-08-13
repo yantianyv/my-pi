@@ -11,8 +11,7 @@
  */
 import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { charIndexAtWidth, sliceByWidth } from "../shared/model-select";
-import { renderInputWithCursor } from "../shared/ui";
+import { renderScrollingInput } from "../shared/ui";
 import { BTW_MAX_ROWS, BTW_MAX_QUESTION_LINES, BTW_MAX_INPUT_LENGTH } from "./config";
 import { renderAnswer, wrapText } from "./render";
 
@@ -280,22 +279,10 @@ export class BtwOverlay {
 		// 输入模式：输入行 + 提示；浏览模式：状态行 + 提示
 		if (this.mode === "input") {
 			// 输入框用水平滚动窗口跟随光标（❯ 前缀占 4 个显示宽度），不截断内容
-			const inputW = Math.max(8, innerW - 5);
-			const full = this.inputText;
-			const totalW = visibleWidth(full);
-			let startChar = 0;
-			if (totalW > inputW) {
-				// 光标在窗口 60% 处：窗口起点 = 光标前留 60% 宽度的位置
-				const cursorW = visibleWidth(full.slice(0, this.inputCursor));
-				startChar = charIndexAtWidth(full, Math.max(0, cursorW - Math.floor(inputW * 0.6)));
-			}
-			const windowText = sliceByWidth(full, startChar, inputW);
-			const cursorInWindow = Math.min(Math.max(0, this.inputCursor - startChar), windowText.length);
-
-			let inputDisplay = windowText;
-			if (this.focused) {
-				inputDisplay = renderInputWithCursor(inputDisplay, cursorInWindow);
-			}
+			const { display: inputDisplay } = renderScrollingInput(this.inputText, this.inputCursor, innerW, {
+				inputOffset: 5, // btw 输入行 ❯ 后多一个空格（其余浮层为 3）
+				showCursor: this.focused,
+			});
 			lines.push(row(` ${th.fg("accent", "❯")} ${inputDisplay}`));
 			lines.push(row(th.fg("dim", "Enter 发送 · Esc 取消")));
 		} else {

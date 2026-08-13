@@ -10,33 +10,9 @@
  */
 import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { renderInputWithCursor } from "../shared/ui";
+import { renderScrollingInput } from "../shared/ui";
 import { loadDislikeData, saveDislikeData, DISLIKE_DECAY, DISLIKE_BAN_THRESHOLD } from "./dislike";
 import { validateProxy } from "./http";
-
-/** 返回文本显示宽度达到 targetW 时的字符索引（输入框水平滚动窗口定位用） */
-function charIndexAtWidth(text: string, targetW: number): number {
-	let w = 0;
-	for (let i = 0; i < text.length; i++) {
-		const chW = visibleWidth(text[i]!);
-		if (w + chW > targetW) return i;
-		w += chW;
-	}
-	return text.length;
-}
-
-/** 从 startChar 起按显示宽度截取最多 maxW 宽的文本（不截断字符） */
-function sliceByWidth(text: string, startChar: number, maxW: number): string {
-	let out = "";
-	let w = 0;
-	for (let i = startChar; i < text.length; i++) {
-		const chW = visibleWidth(text[i]!);
-		if (w + chW > maxW) break;
-		out += text[i];
-		w += chW;
-	}
-	return out;
-}
 
 /**
  * /web-tool-config 设置面板：输入代理地址（Enter 保存 / Esc 取消 / 清空回车 = 清除代理）。
@@ -220,19 +196,10 @@ export class ProxyConfigOverlay {
 		if (this.statusMsg) lines.push(row(` ${th.fg("accent", this.statusMsg)}`));
 		lines.push(border(`├${"─".repeat(innerW)}┤`)); // 差评区与代理输入区分隔
 
-		// 输入框：水平滚动窗口跟随光标（❯ 前缀占 4 个显示宽度），不截断内容
-		const inputW = Math.max(8, innerW - 3);
-		const full = this.value;
-		const totalW = visibleWidth(full);
-		let startChar = 0;
-		if (totalW > inputW) {
-			const cursorW = visibleWidth(full.slice(0, this.cursor));
-			startChar = charIndexAtWidth(full, Math.max(0, cursorW - Math.floor(inputW * 0.6)));
-		}
-		const windowText = sliceByWidth(full, startChar, inputW);
-		const cursorInWindow = Math.min(Math.max(0, this.cursor - startChar), windowText.length);
-		let inputDisplay = windowText;
-		if (this.focus === "input") inputDisplay = renderInputWithCursor(inputDisplay, cursorInWindow); // 光标只在输入框焦点时显示
+		// 输入框：水平滚动窗口跟随光标（❯ 前缀占 4 个显示宽度），不截断内容；光标只在输入框焦点时显示
+		const { display: inputDisplay } = renderScrollingInput(this.value, this.cursor, innerW, {
+			showCursor: this.focus === "input",
+		});
 		lines.push(row(` ${th.fg("accent", "❯")} ${inputDisplay}`));
 
 		// 错误提示或操作提示（按焦点态区分，只列按键动作不解释）
