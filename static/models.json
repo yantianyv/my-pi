@@ -22,6 +22,55 @@
         { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "reasoning": true, "contextWindow": 1048576 },
         { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "reasoning": true, "contextWindow": 1048576 }
       ]
+    },
+    "sensenova": {
+      "baseUrl": "https://token.sensenova.cn/v1",
+      "api": "openai-completions",
+      "apiKey": "$SENSENOVA_API_KEY",
+      "compat": {
+        "supportsDeveloperRole": false
+      },
+      "models": [
+        {
+          "id": "sensenova-6.8-flash-lite",
+          "name": "SenseNova 6.8 Flash Lite",
+          "contextWindow": 262144,
+          "maxTokens": 65536,
+          "input": ["text", "image"]
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "reasoning": true,
+          "contextWindow": 1048576,
+          "maxTokens": 65536,
+          "thinkingLevelMap": {
+            "off": "high",
+            "minimal": "high",
+            "low": "high",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "high",
+            "max": "high"
+          }
+        },
+        {
+          "id": "glm-5.2",
+          "name": "GLM-5.2",
+          "reasoning": true,
+          "contextWindow": 1048576,
+          "maxTokens": 131072,
+          "thinkingLevelMap": {
+            "off": "high",
+            "minimal": "high",
+            "low": "high",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "high",
+            "max": "high"
+          }
+        }
+      ]
     }
   }
 }

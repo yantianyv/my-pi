@@ -3,7 +3,7 @@
  *
  * 职责：
  * - 统一 BalanceData/BalanceAdapter 接口，按供应商逐一适配（按量充值余额 vs 订阅 plan 余量 vs 订阅+加油包）
- * - 已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding
+ * - 已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding / sensenova
  * - 消耗统计文本（rateText）复用 hud-cost 的按量付费实现（¥/min 或 $/min）
  *
  * 注意：本模块不注册任何 pi API，仅导出接口与注册表，由入口模块驱动。
@@ -549,6 +549,33 @@ const openrouterAdapter: BalanceAdapter = {
 	},
 };
 
+/**
+ * SenseNova Token Plan CN：免费公测，按请求次数限制（每5小时滚动窗口），无公开余额 API，显示控制台链接。
+ * 可接入 Chat Completions 的模型（据官方 2026-08 文档）：
+ *   - sensenova-6.8-flash-lite：262144 上下文 / 65536 输出，1500 次/5h，支持 text+image 输入
+ *   - deepseek-v4-flash：1M 上下文 / 65536 输出，500 次/5h，支持 reasoning
+ *   - glm-5.2：1M 上下文 / 131072 输出，500 次/5h，支持 reasoning
+ * 注意：sensenova-u1-fast 使用独立的 /v1/images/generations 端点，不属 openai-completions，未在此列出。
+ */
+const sensenovaAdapter: BalanceAdapter = {
+	providerId: "sensenova",
+	label: "SenseNova Token Plan",
+	// 免费公测：展示会话 token 消耗
+	rateText(ctx, _now) {
+		const t = sumSessionUsage(ctx);
+		if (t.turns === 0) return null;
+		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
+	},
+	async fetch(_ctx) {
+		return {
+			status: "ok",
+			amount: "余量查询",
+			hideLabel: true,
+			link: { url: "https://platform.sensenova.cn/token-plan" },
+		};
+	},
+};
+
 /** 已适配的供应商注册表。新增供应商在这里追加一个 adapter 即可。 */
 export const BALANCE_ADAPTERS: Record<string, BalanceAdapter> = {
 	[deepseekAdapter.providerId]: deepseekAdapter,
@@ -559,4 +586,5 @@ export const BALANCE_ADAPTERS: Record<string, BalanceAdapter> = {
 	[xiaomiTokenPlanCnAdapter.providerId]: xiaomiTokenPlanCnAdapter,
 	[openrouterAdapter.providerId]: openrouterAdapter,
 	[volcengineCodingAdapter.providerId]: volcengineCodingAdapter,
+	[sensenovaAdapter.providerId]: sensenovaAdapter,
 };
