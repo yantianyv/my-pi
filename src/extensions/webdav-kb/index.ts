@@ -39,11 +39,18 @@ export {
 let syncInFlight: Promise<void> | null = null;
 /** 后台同步启动延迟（ms）：reload 后先让 UI 就绪，再发起远端遍历/下载，避免抢占网络与磁盘 */
 const SYNC_DELAY_MS = 3_000;
+/** 只读模式下隐藏的写工具（kb_sync 保留：随 cfg.readOnly 自适应为仅下载） */
+const WRITE_TOOLS = new Set(["kb_write", "kb_append", "kb_upload", "kb_import", "kb_delete", "kb_move"]);
 
 /** session_start：后台增量同步 + vault 解锁询问 + 解密钩子接线 */
-async function onSessionStart(_event: unknown, ctx: ExtensionContext): Promise<void> {
+async function onSessionStart(pi: ExtensionAPI, _event: unknown, ctx: ExtensionContext): Promise<void> {
 	const cfg = loadConfig(agentConfigDir());
 	if (!isConfigured(cfg)) return; // 未配置：工具会给引导
+
+	// 只读模式：会话开始时一次性隐藏写工具（会话内不再变动，不动 prompt cache）
+	if (cfg.readOnly) {
+		pi.setActiveTools(pi.getActiveTools().filter((n) => !WRITE_TOOLS.has(n)));
+	}
 	const mirrorDir = cfg.mirrorDir?.trim() || defaultMirrorDir(agentConfigDir());
 
 	// vault：配置了加密区则先尝试静默自动解锁（持久化密钥），失败再弹窗询问
@@ -101,6 +108,7 @@ async function runBackgroundSync(ctx: ExtensionContext, cfg: ReturnType<typeof l
 
 /** 首次使用引导：镜像缺 PROTOCOL.md 时写入默认守则（本地 + 上传网盘根），失败静默 */
 function ensureProtocol(cfg: ReturnType<typeof loadConfig>, mirrorDir: string): void {
+	if (cfg.readOnly) return; // 只读模式：不产生无法上传的本地写入
 	if (readNote(mirrorDir, "/PROTOCOL.md") !== null) return;
 	const content = PROTOCOL_HEADER + DEFAULT_PROTOCOL;
 	try {
@@ -130,7 +138,7 @@ async function promptVaultUnlock(ctx: ExtensionContext, cfg: ReturnType<typeof l
 export default function (pi: ExtensionAPI): void {
 	// reload / session 替换前清 TTL 定时器（旧 ctx 失效，到期回调会抛 stale）
 	pi.on("session_shutdown", () => clearStatusTimers());
-	pi.on("session_start", onSessionStart);
+	pi.on("session_start", (event, ctx) => onSessionStart(pi, event, ctx));
 	registerKbTools(pi);
 	registerKbCommands(pi);
 	registerKbPanel(pi);

@@ -250,6 +250,13 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 		if (!remote.has(p) && !ledger.files[p]) toUpload.push(p);
 	}
 
+	// 只读模式：不上传、不删远端——本地删除改为重新下载（远端为准），本地新建/修改留在本地
+	if (cfg.readOnly) {
+		toDownload.push(...delRemote);
+		delRemote.length = 0;
+		toUpload.length = 0;
+	}
+
 	// 3) 下载（并发）
 	await mapLimit(toDownload, DOWNLOAD_CONCURRENCY, async (p) => {
 		if (signal?.aborted) return;

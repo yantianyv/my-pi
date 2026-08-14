@@ -22,7 +22,7 @@ import { createVault, unlockVault, lockVault, isUnlocked, storeVaultKey, persist
 // ---------------------------------------------------------------------------
 
 type FieldKey = "baseUrl" | "username" | "password" | "proxyUrl" | "mirrorDir" | "vault";
-type ActionKey = "test" | "sync" | "vault-change" | "vault-lock" | "vault-remember" | "vault-remember-off";
+type ActionKey = "test" | "sync" | "vault-change" | "vault-lock" | "vault-remember" | "vault-remember-off" | "readonly" | "readonly-off";
 
 interface Field {
 	key: FieldKey;
@@ -102,6 +102,8 @@ const ACTIONS: Action[] = [
 	{ key: "vault-remember", label: "④ 记住口令：关", visible: (c) => Boolean(c.vault) && !c.persistVault },
 	{ key: "vault-remember-off", label: "④ 记住口令：开", visible: (c) => Boolean(c.vault) && Boolean(c.persistVault) },
 	{ key: "vault-lock", label: "⑤ 锁定 vault", visible: () => isUnlocked() },
+	{ key: "readonly", label: "⑥ 只读模式：关", visible: (c) => !c.readOnly },
+	{ key: "readonly-off", label: "⑥ 只读模式：开", visible: (c) => Boolean(c.readOnly) },
 ];
 
 // ---------------------------------------------------------------------------
@@ -306,6 +308,14 @@ export class KbConfigOverlay {
 					this.result = "✅ 已取消记住口令，磁盘+内存密钥已清除";
 				}
 				saveConfig(agentConfigDir(), this.cfg);
+				this.tui.requestRender();
+				return;
+			}
+			case "readonly":
+			case "readonly-off": {
+				this.cfg.readOnly = key === "readonly" ? true : undefined;
+				saveConfig(agentConfigDir(), this.cfg);
+				this.result = `✅ 只读模式已${key === "readonly" ? "开启" : "关闭"}（下次会话生效）`;
 				this.tui.requestRender();
 				return;
 			}

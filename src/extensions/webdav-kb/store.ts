@@ -32,6 +32,8 @@ export interface KbConfig {
 	persistVault?: boolean;
 	/** 持久化的派生密钥 base64（配合 persistVault 使用，lockVault 时清除） */
 	vaultKey?: string;
+	/** 只读模式：隐藏写工具、同步仅下载（面板切换，下次会话生效） */
+	readOnly?: boolean;
 }
 
 const isKbConfig = (v: unknown): v is KbConfig => {
@@ -50,7 +52,8 @@ const isKbConfig = (v: unknown): v is KbConfig => {
 				typeof c.vault.salt === "string" &&
 				typeof c.vault.check === "string")) &&
 			(c.persistVault === undefined || typeof c.persistVault === "boolean") &&
-			(c.vaultKey === undefined || typeof c.vaultKey === "string")
+			(c.vaultKey === undefined || typeof c.vaultKey === "string") &&
+			(c.readOnly === undefined || typeof c.readOnly === "boolean")
 	);
 };
 

@@ -794,9 +794,9 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		name: "kb_sync",
 		label: "手动同步知识库",
 		description:
-			"手动增量同步知识库（下载/上传/删除/冲突，远端与本地镜像与账本三方一致）。"
-			+ "通常无需主动调用（会话启动已自动同步）；用于：首次配置后、离线写入后补传、"
-			+ "守则/目录结构变更后同步远端。",
+			"手动增量同步知识库（远端与本地镜像对齐，同步方向随配置自适应）。"
+			+ "通常无需主动调用（会话启动已自动同步）；用于：首次配置后、手动刷新镜像、"
+			+ "配置变更后同步。",
 		promptSnippet: "同步：kb_sync() → 同步摘要",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
