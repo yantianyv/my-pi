@@ -16,7 +16,7 @@ import { setStatusWithTTL, clearStatusTimers } from "../shared/status";
 import { loadConfig, isConfigured, defaultMirrorDir, agentConfigDir } from "./store";
 import { syncAll, putNote, readNote } from "./sync";
 import { getIndex } from "./search";
-import { unlockVault, isUnlocked, vaultReadNote, VaultAuthError } from "./crypto";
+import { unlockVault, unlockVaultWithKey, isUnlocked, vaultReadNote, VaultAuthError } from "./crypto";
 import { registerKbTools } from "./tools";
 import { registerKbCommands } from "./commands";
 import { registerKbPanel } from "./panel";
@@ -46,9 +46,13 @@ async function onSessionStart(_event: unknown, ctx: ExtensionContext): Promise<v
 	if (!isConfigured(cfg)) return; // 未配置：工具会给引导
 	const mirrorDir = cfg.mirrorDir?.trim() || defaultMirrorDir(agentConfigDir());
 
-	// vault：配置了加密区则询问口令解锁。fire-and-forget（不 await）——弹窗不阻塞 reload 完成
-	if (cfg.vault && !isUnlocked() && ctx.hasUI) {
-		void promptVaultUnlock(ctx, cfg);
+	// vault：配置了加密区则先尝试静默自动解锁（持久化密钥），失败再弹窗询问
+	if (cfg.vault && !isUnlocked()) {
+		if (cfg.vaultKey && unlockVaultWithKey(cfg.vaultKey, cfg.vault)) {
+			// 自动解锁成功，无需弹窗
+		} else if (ctx.hasUI) {
+			void promptVaultUnlock(ctx, cfg);
+		}
 	}
 
 	// search 解密钩子（vault 解锁后可检索密文区，未解锁自动跳过）

@@ -28,6 +28,10 @@ export interface KbConfig {
 	mirrorDir?: string;
 	/** vault 加密区设置（见 crypto.ts）：口令校验用的 salt + 密文 check 块，不含口令本身 */
 	vault?: { salt: string; check: string };
+	/** 启动时自动解锁 vault（派生密钥持久化到磁盘，仅本机可用） */
+	persistVault?: boolean;
+	/** 持久化的派生密钥 base64（配合 persistVault 使用，lockVault 时清除） */
+	vaultKey?: string;
 }
 
 const isKbConfig = (v: unknown): v is KbConfig => {
@@ -44,7 +48,9 @@ const isKbConfig = (v: unknown): v is KbConfig => {
 			(typeof c.vault === "object" &&
 				c.vault !== null &&
 				typeof c.vault.salt === "string" &&
-				typeof c.vault.check === "string"))
+				typeof c.vault.check === "string")) &&
+			(c.persistVault === undefined || typeof c.persistVault === "boolean") &&
+			(c.vaultKey === undefined || typeof c.vaultKey === "string")
 	);
 };
 

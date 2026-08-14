@@ -15,14 +15,14 @@ import { createBoxRenderer, editInput, renderInputWithCursor } from "../shared/u
 import { loadConfig, saveConfig, isConfigured, defaultMirrorDir, agentConfigDir, type KbConfig } from "./store";
 import { syncAll } from "./sync";
 import { WebDavClient } from "./client";
-import { createVault, unlockVault, lockVault, isUnlocked } from "./crypto";
+import { createVault, unlockVault, lockVault, isUnlocked, storeVaultKey, persistCurrentKey } from "./crypto";
 
 // ---------------------------------------------------------------------------
 // 字段与动作定义
 // ---------------------------------------------------------------------------
 
 type FieldKey = "baseUrl" | "username" | "password" | "proxyUrl" | "mirrorDir" | "vault";
-type ActionKey = "test" | "sync" | "vault-change" | "vault-lock";
+type ActionKey = "test" | "sync" | "vault-change" | "vault-lock" | "vault-remember" | "vault-remember-off";
 
 interface Field {
 	key: FieldKey;
@@ -99,7 +99,9 @@ const ACTIONS: Action[] = [
 	{ key: "test", label: "① 测试连通", visible: () => true },
 	{ key: "sync", label: "② 立即同步", visible: () => true },
 	{ key: "vault-change", label: "③ 修改 vault 口令", visible: (c) => Boolean(c.vault) },
-	{ key: "vault-lock", label: "④ 锁定 vault", visible: () => isUnlocked() },
+	{ key: "vault-remember", label: "④ 记住口令：关", visible: (c) => Boolean(c.vault) && !c.persistVault },
+	{ key: "vault-remember-off", label: "④ 记住口令：开", visible: (c) => Boolean(c.vault) && Boolean(c.persistVault) },
+	{ key: "vault-lock", label: "⑤ 锁定 vault", visible: () => isUnlocked() },
 ];
 
 // ---------------------------------------------------------------------------
@@ -231,19 +233,25 @@ export class KbConfigOverlay {
 			const setup = createVault(pass);
 			this.cfg.vault = setup;
 			saveConfig(agentConfigDir(), this.cfg);
-			unlockVault(pass, setup);
-			this.result = "🔓 vault 已启用并解锁";
+			const key = unlockVault(pass, setup, this.cfg.persistVault);
+			if (key && this.cfg.persistVault) storeVaultKey(key, this.cfg);
+			this.result = "🔓 vault 已启用并解锁" + (this.cfg.persistVault ? "（口令已持久化）" : "");
 		} else if (isUnlocked()) {
 			// 已解锁：视为修改口令（覆盖 setup；存量密文需手动迁移）
 			const setup = createVault(pass);
 			this.cfg.vault = setup;
 			saveConfig(agentConfigDir(), this.cfg);
-			unlockVault(pass, setup);
-			this.result = "🔓 vault 口令已更新（存量密文需手动迁移）";
-		} else if (unlockVault(pass, this.cfg.vault)) {
-			this.result = "🔓 vault 已解锁";
+			const key = unlockVault(pass, setup, this.cfg.persistVault);
+			if (key && this.cfg.persistVault) storeVaultKey(key, this.cfg);
+			this.result = "🔓 vault 口令已更新" + (this.cfg.persistVault ? "（口令已持久化）" : "（存量密文需手动迁移）");
 		} else {
-			this.result = "口令错误，仍锁定";
+			const key = unlockVault(pass, this.cfg.vault, this.cfg.persistVault);
+			if (key) {
+				if (this.cfg.persistVault) storeVaultKey(key, this.cfg);
+				this.result = "🔓 vault 已解锁";
+			} else {
+				this.result = "口令错误，仍锁定";
+			}
 		}
 		this.bufs.vault = "";
 		this.cursors.vault = 0;
@@ -281,11 +289,26 @@ export class KbConfigOverlay {
 				this.tui.requestRender();
 				return;
 			}
-			case "vault-lock":
-				lockVault();
-				this.result = "🔒 vault 已锁定";
+			case "vault-remember":
+			case "vault-remember-off": {
+				const on = key === "vault-remember";
+				this.cfg.persistVault = on ? true : undefined;
+				if (on) {
+					if (isUnlocked()) {
+						persistCurrentKey(this.cfg);
+						this.result = "✅ 已记住口令（当前及下次启动自动解锁）";
+					} else {
+						this.result = "✅ 已记住口令，解锁后自动保存密钥";
+					}
+				} else {
+					this.cfg.vaultKey = undefined;
+					lockVault(agentConfigDir());
+					this.result = "✅ 已取消记住口令，磁盘+内存密钥已清除";
+				}
+				saveConfig(agentConfigDir(), this.cfg);
 				this.tui.requestRender();
 				return;
+			}
 		}
 	}
 

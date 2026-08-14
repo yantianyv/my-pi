@@ -4,7 +4,7 @@
  * /kb-config 交互式配置（TUI 用 ui.select/ui.input 对话框流；非 TUI 文本面板）：
  *   - 设置 WebDAV 地址 / 用户名 / 密码 / 代理 / 镜像目录
  *   - vault 口令：启用/修改（createVault 生成 salt+check，口令只存内存立即解锁）、
- *     解锁 / 锁定
+ *     解锁 / 锁定 / 记住口令（面板动作开关）
  *   - 连通性测试（ping 根目录）
  * 也支持带参直设：/kb-config url <url> / user / pass / proxy / mirror / vault / vault-unlock / vault-lock / test
  *
@@ -15,7 +15,7 @@ import { setStatusWithTTL } from "../shared/status";
 import { loadConfig, saveConfig, isConfigured, defaultMirrorDir, agentConfigDir } from "./store";
 import { syncAll } from "./sync";
 import { WebDavClient } from "./client";
-import { createVault, unlockVault, isUnlocked, lockVault } from "./crypto";
+import { createVault, unlockVault, isUnlocked, lockVault, storeVaultKey } from "./crypto";
 import { KbConfigOverlay } from "./panel-config";
 
 // ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ function configSummary(cfg: Cfg, unlocked: boolean): string {
 		`账号：${cfg.username || "（未设置）"} ／ 密码：${maskPassword(cfg.password)}`,
 		`代理：${cfg.proxyUrl || "（直连）"}`,
 		`镜像目录：${mirror}`,
-		`vault 加密区：${cfg.vault ? (unlocked ? "🔓 已解锁" : "🔒 已启用，未解锁") : "（未启用）"}`,
+		`vault 加密区：${cfg.vault ? (unlocked ? "🔓 已解锁" : "🔒 已启用，未解锁") + (cfg.persistVault ? "（口令已记忆）" : "") : "（未启用）"}`,
 	].join("\n");
 }
 
@@ -52,6 +52,7 @@ function usageText(): string {
 		"/kb-config vault <口令>         启用/修改 vault 加密区口令",
 		"/kb-config vault-unlock <口令>  解锁 vault",
 		"/kb-config vault-lock           锁定 vault",
+		"/kb-config test                 连通性测试",
 		"/kb-config test                 连通性测试",
 		"/kb-sync                        手动增量同步",
 	].join("\n");
@@ -156,15 +157,19 @@ async function handleSubcommand(arg: string, cfg: Cfg, ctx: ExtensionCommandCont
 				ctx.ui.notify("用法：/kb-config vault-unlock <口令>", "warning");
 				return;
 			}
-			if (cfg.vault && unlockVault(value, cfg.vault)) {
-				ctx.ui.notify("🔓 vault 已解锁", "info");
-			} else {
-				ctx.ui.notify("口令错误，vault 保持锁定", "error");
+			if (cfg.vault) {
+				const key = unlockVault(value, cfg.vault, cfg.persistVault);
+				if (key) {
+					if (cfg.persistVault) storeVaultKey(key, cfg);
+					ctx.ui.notify("🔓 vault 已解锁", "info");
+				} else {
+					ctx.ui.notify("口令错误，vault 保持锁定", "error");
+				}
 			}
 			return;
 		case "vault-lock":
-			lockVault();
-			ctx.ui.notify("🔒 vault 已锁定（内存密钥已清除）", "info");
+			lockVault(agentConfigDir());
+			ctx.ui.notify("🔒 vault 已锁定（内存+磁盘密钥已清除）", "info");
 			return;
 		case "test":
 			await testConnection(cfg, ctx);
@@ -184,8 +189,9 @@ function setupVault(cfg: Cfg, pass: string, ctx: ExtensionCommandContext): void 
 	}
 	const setup = createVault(pass);
 	saveConfig(agentConfigDir(), { ...cfg, vault: setup });
-	unlockVault(pass, setup); // 立即生效（口令只存内存）
-	ctx.ui.notify("🔓 vault 已启用并解锁（口令仅存内存，记得口令即可在任意设备解密）", "info");
+	const key = unlockVault(pass, setup, cfg.persistVault);
+	if (key && cfg.persistVault) storeVaultKey(key, cfg);
+	ctx.ui.notify("🔓 vault 已启用并解锁" + (cfg.persistVault ? "（口令已持久化，下次启动自动解锁）" : "（口令仅存内存）"), "info");
 }
 
 /** 连通性测试：ping 根目录 */
@@ -296,13 +302,18 @@ async function interactiveMenu(cfg: Cfg, ctx: ExtensionCommandContext): Promise<
 			}
 			const op = await ctx.ui.select("vault 状态", isUnlocked() ? ["锁定", "重新解锁"] : ["解锁", "取消"]);
 			if (op === "锁定") {
-				lockVault();
+				lockVault(agentConfigDir());
 				ctx.ui.notify("🔒 vault 已锁定", "info");
 			} else if (op === "解锁") {
 				const pass = await ctx.ui.input("vault 口令");
 				if (!pass) return;
-				if (unlockVault(pass, cfg.vault)) ctx.ui.notify("🔓 vault 已解锁", "info");
-				else ctx.ui.notify("口令错误", "error");
+				const key = unlockVault(pass, cfg.vault, cfg.persistVault);
+				if (key) {
+					if (cfg.persistVault) storeVaultKey(key, cfg);
+					ctx.ui.notify("🔓 vault 已解锁", "info");
+				} else {
+					ctx.ui.notify("口令错误", "error");
+				}
 			}
 			return;
 		}

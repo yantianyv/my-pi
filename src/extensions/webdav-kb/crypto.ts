@@ -4,7 +4,8 @@
  * 方案：口令 + 随机 salt → scrypt 派生 256 位密钥 → AES-256-GCM 加密。
  * 文件格式：[MAGIC "KBE1"(4B)][nonce(12B)][authTag(16B)][ciphertext]。
  * 每次加密用随机 nonce（GCM 随机 96 位 nonce 复用概率可忽略），密钥只在解锁时
- * 派生一次、存于模块内存——口令不落盘、密钥不落盘，只要记得口令即可在任何设备解密。
+ * 派生一次、存于模块内存。可选开启「记住口令」：派生密钥会写入本地配置
+ * `kb-config.json` 供下次启动自动解锁，关闭记忆时自动清除。
  *
  * 目录策略（按目录分而非按文件）：/vault/ 下所有文件整目录加密，其余命名空间明文。
  * 落盘/传输的永远是密文：镜像里是 xxx.md.enc（sync 层无感知地把它当普通文件同步），
@@ -16,6 +17,7 @@
  */
 import * as crypto from "node:crypto";
 import { KbConfig, putNote, readNoteBytes } from "./sync";
+import { loadConfig, saveConfig, agentConfigDir } from "./store";
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -53,9 +55,46 @@ export function isUnlocked(): boolean {
 	return currentKey !== null;
 }
 
-/** 锁定（清空内存密钥）。返回原锁定状态（供调用方判断是否需要清理 UI） */
-export function lockVault(): void {
+/** 锁定（清空内存密钥）。configDir 非空时同时清除磁盘持久化密钥 */
+export function lockVault(configDir?: string): void {
 	currentKey = null;
+	if (configDir) {
+		try {
+			const cfg = loadConfig(configDir);
+			if (cfg.vaultKey || cfg.persistVault) {
+				cfg.vaultKey = undefined;
+				cfg.persistVault = undefined;
+				saveConfig(configDir, cfg);
+			}
+		} catch { /* 静默 */ }
+	}
+}
+
+/** 持久化派生密钥到配置文件（供下次启动自动解锁） */
+export function storeVaultKey(key: Buffer, cfg: KbConfig): void {
+	try {
+		cfg.vaultKey = key.toString("base64");
+		cfg.persistVault = true;
+		saveConfig(agentConfigDir(), cfg);
+	} catch { /* 静默 */ }
+}
+
+/** 从配置加载已持久化的密钥（启动时自动解锁用） */
+export function loadVaultKey(cfg: KbConfig): Buffer | null {
+	if (!cfg.vaultKey) return null;
+	try {
+		const key = Buffer.from(cfg.vaultKey, "base64");
+		return key.length === 32 ? key : null;
+	} catch {
+		return null;
+	}
+}
+
+/** 把当前内存密钥持久化到配置（vault 已解锁且 persistVault=true 时调用） */
+export function persistCurrentKey(cfg: KbConfig): void {
+	if (currentKey && cfg.persistVault) {
+		storeVaultKey(currentKey, cfg);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +106,8 @@ export interface VaultSetup {
 	salt: string;
 	/** 已知明文的密文 check 块（base64）——解锁口令校验用 */
 	check: string;
+	/** 派生密钥 base64（供 persistVault 选项持久化，可选） */
+	key?: string;
 }
 
 /** 创建 vault 设置（首次启用时调用）：随机 salt + 派生密钥加密 check 块 */
@@ -77,13 +118,34 @@ export function createVault(passphrase: string): VaultSetup {
 	return {
 		salt: salt.toString("base64"),
 		check: Buffer.from(check).toString("base64"),
+		key: key.toString("base64"),
 	};
 }
 
-/** 尝试解锁：口令能解密 check 块即解锁成功；失败返回 false（不置密钥） */
-export function unlockVault(passphrase: string, setup: VaultSetup): boolean {
+/** 尝试解锁：口令能解密 check 块即解锁成功；失败返回 null（不置密钥）。persistVault=true 时派生密钥写盘供下次自动解锁 */
+export function unlockVault(passphrase: string, setup: VaultSetup, persistVault?: boolean): Buffer | null {
 	try {
 		const key = deriveKey(passphrase, Buffer.from(setup.salt, "base64"));
+		const check = aesGcmDecrypt(key, Buffer.from(setup.check, "base64"));
+		if (check.toString("utf8") !== CHECK_PLAINTEXT) return null;
+		currentKey = key;
+		if (persistVault) {
+			const cfg = loadConfig(agentConfigDir());
+			cfg.vaultKey = key.toString("base64");
+			cfg.persistVault = true;
+			saveConfig(agentConfigDir(), cfg);
+		}
+		return key;
+	} catch {
+		return null;
+	}
+}
+
+/** 直接用已存密钥解锁（自动解锁场景，不需口令） */
+export function unlockVaultWithKey(keyBase64: string, setup: VaultSetup): boolean {
+	try {
+		const key = Buffer.from(keyBase64, "base64");
+		if (key.length !== 32) return false;
 		const check = aesGcmDecrypt(key, Buffer.from(setup.check, "base64"));
 		if (check.toString("utf8") !== CHECK_PLAINTEXT) return false;
 		currentKey = key;
