@@ -22,7 +22,7 @@
  *   不同供应商计费方式差异很大（按量充值余额 vs 订阅 plan 余量 vs 订阅+加油包余额），
  *   无法用通用模板，因此按供应商逐一适配（见 hud-balance.ts）。
  *   适配器统一返回 BalanceData，未适配的供应商显示占位提示。
- *   目前已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding
+ *   目前已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding / sensenova / opencode-go
  *
  * 命令：
  *   /balance  立即刷新余额并通知
@@ -426,7 +426,8 @@ export default async function (pi: ExtensionAPI) {
 								const val = q.currency
 									? `${costMod?.currencySymbol(q.currency) ?? `${q.currency} `}${q.used.toFixed(2)}/${q.limit.toFixed(2)}`
 									: theme.fg(c, `${p}%`);
-								return `${gauge(q.used, q.limit)} ${theme.fg("dim", q.label)} ${q.currency ? theme.fg(c, val) : val}`;
+								const resetText = q.reset ? ` ${theme.fg("dim", `· ${q.reset}`)}` : "";
+								return `${gauge(q.used, q.limit)} ${theme.fg("dim", q.label)} ${q.currency ? theme.fg(c, val) : val}${resetText}`;
 							})
 							.join(` ${theme.fg("dim", "·")} `);
 						const parts = [label, amountPart, qText].filter(Boolean);

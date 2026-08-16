@@ -3,7 +3,7 @@
  *
  * 职责：
  * - 统一 BalanceData/BalanceAdapter 接口，按供应商逐一适配（按量充值余额 vs 订阅 plan 余量 vs 订阅+加油包）
- * - 已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding / sensenova
+ * - 已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding / sensenova / opencode-go
  * - 消耗统计文本（rateText）复用 hud-cost 的按量付费实现（¥/min 或 $/min）
  *
  * 注意：本模块不注册任何 pi API，仅导出接口与注册表，由入口模块驱动。
@@ -31,6 +31,8 @@ export interface BalanceQuota {
 	limit: number;
 	/** 币种（如 "USD"）：有值则进度条旁显示金额用量 `Key USD 0.1/1.0`，缺省显示百分比 */
 	currency?: string;
+	/** 额度窗口重置倒计时（可选），如 "2时34分"、"3天" */
+	reset?: string;
 }
 
 export interface BalanceLink {
@@ -576,6 +578,105 @@ const sensenovaAdapter: BalanceAdapter = {
 	},
 };
 
+/**
+ * OpenCode Go：订阅制，三层滚动额度（5h $12 / 每周 $30 / 每月 $60）。
+ * 官方未写入文档的接口：GET https://opencode.ai/zen/go/v1/usage（Bearer API key），
+ * 返回 rolling / weekly / monthly 的 percent 与 resetsAt。
+ * 来源：https://github.com/farion1231/cc-switch/issues/6433
+ */
+const GO_USAGE_LIMITS = { rolling: 12, weekly: 30, monthly: 60 }; // USD
+
+interface GoUsageWindow {
+	status: "ok" | "warning" | "error";
+	percent: number;
+	resetsAt: string;
+}
+
+interface GoUsagePayload {
+	usage: {
+		rolling: GoUsageWindow;
+		weekly: GoUsageWindow;
+		monthly: GoUsageWindow;
+	};
+}
+
+/** 将剩余毫秒格式化为紧凑倒计时（<1分 / Xm / XhYm / X天Yh）。 */
+function formatGoReset(ms: number): string {
+	if (ms <= 0) return "已重置";
+	const m = Math.floor(ms / 60_000);
+	if (m < 1) return "<1分";
+	if (m < 60) return `${m}分`;
+	const h = Math.floor(m / 60);
+	const rm = m % 60;
+	if (h < 24) return rm ? `${h}时${rm}分` : `${h}时`;
+	const d = Math.floor(h / 24);
+	const rh = h % 24;
+	return rh ? `${d}天${rh}时` : `${d}天`;
+}
+
+const opencodeGoAdapter: BalanceAdapter = {
+	providerId: "opencode-go",
+	label: "OpenCode Go",
+	// 订阅制：不显示 ¥/min，展示本会话的 token 消耗
+	rateText(ctx, _now) {
+		const t = sumSessionUsage(ctx);
+		if (t.turns === 0) return null;
+		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
+	},
+	async fetch(ctx) {
+		const auth = await ctx.modelRegistry.getProviderAuth("opencode-go");
+		const key = auth?.auth.apiKey ?? auth?.auth.headers?.Authorization?.replace(/^Bearer\s+/i, "");
+		if (!key) throw new Error("未配置 API key（请先执行 /connect 添加 OpenCode Go）");
+
+		const res = await fetch("https://opencode.ai/zen/go/v1/usage", {
+			headers: { Authorization: `Bearer ${key}` },
+			signal: AbortSignal.timeout(10_000),
+		});
+		if (!res.ok) {
+			const text = await res.text().catch(() => "");
+			throw new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
+		}
+
+		const data = (await res.json()) as GoUsagePayload;
+		const now = Date.now();
+		const windows = [
+			{ key: "rolling" as const, label: "5h", limit: GO_USAGE_LIMITS.rolling, w: data.usage.rolling },
+			{ key: "weekly" as const, label: "周", limit: GO_USAGE_LIMITS.weekly, w: data.usage.weekly },
+			{ key: "monthly" as const, label: "月", limit: GO_USAGE_LIMITS.monthly, w: data.usage.monthly },
+		];
+
+		// 整体状态：任一窗口耗尽/报错 → error；任一窗口 ≥80% → warning
+		let status: BalanceStatus = "ok";
+		for (const { w, limit } of windows) {
+			const usedUsd = (w.percent / 100) * limit;
+			if (w.status === "error" || usedUsd >= limit) {
+				status = "error";
+				break;
+			}
+			if (w.percent >= 80) status = "warning";
+		}
+
+		const quotas: BalanceQuota[] = windows.map(({ label, limit, w }) => ({
+			label,
+			used: (w.percent / 100) * limit,
+			limit,
+			currency: "USD",
+			reset: formatGoReset(Date.parse(w.resetsAt) - now),
+		}));
+
+		const detail = windows
+			.map(({ label, w }) => `${label} ${w.percent}%（${formatGoReset(Date.parse(w.resetsAt) - now)}）`)
+			.join(" · ");
+
+		return {
+			status,
+			amount: "OpenCode Go",
+			detail,
+			quotas,
+		};
+	},
+};
+
 /** 已适配的供应商注册表。新增供应商在这里追加一个 adapter 即可。 */
 export const BALANCE_ADAPTERS: Record<string, BalanceAdapter> = {
 	[deepseekAdapter.providerId]: deepseekAdapter,
@@ -587,4 +688,5 @@ export const BALANCE_ADAPTERS: Record<string, BalanceAdapter> = {
 	[openrouterAdapter.providerId]: openrouterAdapter,
 	[volcengineCodingAdapter.providerId]: volcengineCodingAdapter,
 	[sensenovaAdapter.providerId]: sensenovaAdapter,
+	[opencodeGoAdapter.providerId]: opencodeGoAdapter,
 };
