@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 /**
- * pi 一键配置安装脚本
+ * pi 一键环境安装脚本（交互式向导）
  *
- * 安装到 pi 全局配置目录（扩展产物来自 build.js 生成的 dist/，静态资源直接从仓库 static/ 装，无需编译）：
+ * 新设备拿到本仓库后，一条命令即可完成「pi 本体 + 定制配置」的完整部署：
+ *   1. 检测 node 版本（pi 要求 ≥22.19.0，过低仅警告不阻塞）
+ *   2. 检测 pi 本体（@earendil-works/pi-coding-agent），缺失则自动 npm i -g
+ *   3. 检测构建依赖 esbuild，缺失则自动 npm install（src/ 下）
+ *   4. 自动构建扩展产物（src/build.js → dist/extensions/）
+ *   5. 安装配置到 ~/.pi/agent/（扩展/主题/提示音/skills/models.json/settings）
+ *
+ * 安装到 pi 全局配置目录：
  *   dist/extensions/   → ~/.pi/agent/extensions/  （扩展产物，零耦合单文件）
  *   static/themes/     → ~/.pi/agent/themes/      （主题）
  *   static/sounds/     → ~/.pi/agent/sounds/      （提示音）
@@ -11,8 +18,10 @@
  * 并把 settings.json 的 theme 设为本项目主题。
  *
  * 用法：
- *   node install.js          安装
- *   node install.js --dry-run  试运行（只显示将要做什么，不修改）
+ *   node install.js               交互式安装（每一步询问确认，默认 yes）
+ *   node install.js -y            非交互安装（全部默认 yes，一路到底；非 TTY 环境自动等价）
+ *   node install.js --dry-run     试运行（预览，不询问、不修改任何文件）
+ *   node install.js --skip-build  跳过自动构建
  */
 const fs = require("fs");
 const path = require("path");
@@ -36,34 +45,99 @@ const SOUNDS_DST = path.join(PI_AGENT, "sounds");
 const SKILLS_DST = path.join(PI_AGENT, "skills");
 
 const THEME_NAME = "matrix"; // 默认启用的主题（对应 static/themes/matrix.json）
+const PI_PACKAGE = "@earendil-works/pi-coding-agent"; // pi 本体包名
+const NODE_MIN = "22.19.0"; // pi 要求的最低 node 版本（package.json engines）
 
 const dryRun = process.argv.includes("--dry-run") || process.argv.includes("-n");
 const skipBuild = process.argv.includes("--skip-build");
+const nonInteractive = process.argv.includes("-y") || process.argv.includes("--yes");
 const log = (...m) => console.log((dryRun ? "[DRY-RUN] " : "") + m.join(" "));
 
 const SRC_DIR = path.join(ROOT, "src");
 const ESBUILD_DIR = path.join(SRC_DIR, "node_modules", "esbuild");
 
-/** 确保构建依赖已安装：src/node_modules/esbuild 缺失（克隆后首次）时自动 npm install
- *  - 交互终端（TTY）且未传 -y：询问确认后再装
- *  - 非交互（agent/CI 调用）或传了 -y：直接装（无人值守）；dry-run 只提示 */
+/** 统一确认：非交互（-y / 非 TTY）/ dry-run 直接返回默认值；否则 readline 询问。 */
+function confirm(question, { defaultYes = true } = {}) {
+	if (nonInteractive || dryRun || !process.stdin.isTTY) return Promise.resolve(defaultYes);
+	return new Promise((resolve) => {
+		const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+		rl.question(question, (answer) => {
+			rl.close();
+			const a = answer.trim().toLowerCase();
+			resolve(defaultYes ? !a.startsWith("n") : a.startsWith("y"));
+		});
+	});
+}
+
+/** 检测 node 版本是否满足 pi 要求（过低仅返回 ok:false 供警告，不阻塞安装）。 */
+function checkNode() {
+	const want = NODE_MIN.split(".").map(Number);
+	const got = process.versions.node.split(".").map(Number);
+	for (let i = 0; i < want.length; i++) {
+		const g = got[i] ?? 0;
+		if (g > want[i]) break;
+		if (g < want[i]) return { ok: false, version: process.versions.node };
+	}
+	return { ok: true, version: process.versions.node };
+}
+
+/** 探测 pi 全局安装根目录（含 @earendil-works/pi-coding-agent 的 node_modules 根）。 */
+function findPiGlobalRoot() {
+	// 优先 npm root -g（覆盖 Windows/macOS/Linux 的 npm 默认全局目录）
+	try {
+		const root = execSync("npm root -g", { encoding: "utf8", windowsHide: true }).trim();
+		if (root && fs.existsSync(path.join(root, "@earendil-works", "pi-coding-agent"))) return root;
+	} catch {}
+	// 兜底：常见全局目录（pnpm / nvm-global / brew / 系统 npm）
+	const candidates = [
+		process.env.APPDATA ? path.join(process.env.APPDATA, "npm", "node_modules") : null, // Windows
+		path.join(os.homedir(), ".npm-global", "node_modules"), // nvm 常见全局前缀
+		"/usr/local/lib/node_modules", // macOS / brew
+		"/usr/lib/node_modules", // Linux 系统 npm
+	];
+	for (const c of candidates) {
+		if (c && fs.existsSync(path.join(c, "@earendil-works", "pi-coding-agent"))) return c;
+	}
+	return null;
+}
+
+/** 安装 pi 本体（npm i -g）；dry-run 只预览。 */
+function installPi() {
+	log(`安装 pi 本体：npm install -g ${PI_PACKAGE}`);
+	if (dryRun) return;
+	try {
+		execSync(`npm install -g ${PI_PACKAGE}`, { stdio: "inherit" });
+	} catch {
+		console.error(`\npi 本体安装失败（需要网络）。请手动执行 npm i -g ${PI_PACKAGE} 后重新运行 install.js。`);
+		process.exit(1);
+	}
+}
+
+/** 检测 pi 本体是否已全局安装；缺失则交互确认后自动安装（-y / 非 TTY 自动装）。 */
+async function ensurePi() {
+	if (findPiGlobalRoot()) return;
+	log(`未检测到 pi 本体（${PI_PACKAGE}）`);
+	if (!(await confirm("  是否自动安装 pi 本体？（Y/n）"))) {
+		console.error(`已取消。请手动执行 npm i -g ${PI_PACKAGE} 后重新运行 install.js。`);
+		process.exit(1);
+	}
+	installPi();
+	if (!dryRun && !findPiGlobalRoot()) {
+		console.error("安装后仍检测不到 pi，请确认 npm 全局目录在 PATH 中后重新运行 install.js。");
+		process.exit(1);
+	}
+}
+
+/** 确保构建依赖已安装：src/node_modules/esbuild 缺失（克隆后首次）时交互确认后自动 npm install。 */
 async function ensureDeps() {
 	if (fs.existsSync(ESBUILD_DIR)) return;
 	log("未找到 esbuild（构建依赖）");
-	if (dryRun) return; // 试运行不执行
-	const yes = process.argv.includes("-y") || process.argv.includes("--yes");
-	if (!yes && process.stdin.isTTY) {
-		const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-		const answer = await new Promise((resolve) => {
-			rl.question("  是否自动执行 npm install 拉取构建依赖（esbuild）？（Y/n） ", resolve);
-		});
-		rl.close();
-		if (answer.trim().toLowerCase().startsWith("n")) {
-			console.error("已取消。请手动执行 cd src && npm install 后重新运行 install.js。");
-			process.exit(1);
-		}
+	if (!(await confirm("  是否自动执行 npm install 拉取构建依赖（esbuild）？（Y/n）"))) {
+		console.error("已取消。请手动执行 cd src && npm install 后重新运行 install.js。");
+		process.exit(1);
 	}
 	log("自动执行 npm install（src/ 下）…");
+	if (dryRun) return;
 	try {
 		execSync("npm install", { cwd: SRC_DIR, stdio: "inherit" });
 	} catch {
@@ -72,7 +146,7 @@ async function ensureDeps() {
 	}
 }
 
-/** 自动构建：install 前先跑 build.js（dry-run 只预览不构建；--skip-build 显式跳过） */
+/** 自动构建：install 前先跑 build.js（dry-run 只预览不构建）。 */
 function autoBuild() {
 	if (!fs.existsSync(BUILD_SCRIPT)) {
 		console.error(`错误: 未找到构建脚本 ${BUILD_SCRIPT}`);
@@ -186,26 +260,6 @@ function applySettings() {
 	}
 }
 
-/** 探测 pi 全局安装根目录（含 @earendil-works/pi-coding-agent 的 node_modules 根）。 */
-function findPiGlobalRoot() {
-	// 优先 npm root -g（覆盖 Windows/macOS/Linux 的 npm 默认全局目录）
-	try {
-		const root = execSync("npm root -g", { encoding: "utf8", windowsHide: true }).trim();
-		if (root && fs.existsSync(path.join(root, "@earendil-works", "pi-coding-agent"))) return root;
-	} catch {}
-	// 兜底：常见全局目录（pnpm / nvm-global / brew / 系统 npm）
-	const candidates = [
-		process.env.APPDATA ? path.join(process.env.APPDATA, "npm", "node_modules") : null, // Windows
-		path.join(os.homedir(), ".npm-global", "node_modules"), // nvm 常见全局前缀
-		"/usr/local/lib/node_modules", // macOS / brew
-		"/usr/lib/node_modules", // Linux 系统 npm
-	];
-	for (const c of candidates) {
-		if (c && fs.existsSync(path.join(c, "@earendil-works", "pi-coding-agent"))) return c;
-	}
-	return null;
-}
-
 /** 用模板生成 tsconfig.json（paths 指向探测到的 pi 全局目录），换机器/pi 升级后重跑即可。 */
 function generateTsconfig() {
 	const templatePath = path.join(ROOT, "src", "config", "tsconfig.template.json");
@@ -226,13 +280,29 @@ function generateTsconfig() {
 }
 
 async function main() {
-	console.log(`pi 一键配置安装 → ${PI_AGENT}\n`);
-	// 默认自动构建（dry-run / --skip-build 跳过）；构建失败即退出
+	console.log(`pi 一键环境安装 → ${PI_AGENT}\n`);
+
+	// 0. 环境检测报告（非交互，只展示）
+	const node = checkNode();
+	console.log(`检测环境：`);
+	console.log(`  node ${node.version} ${node.ok ? "✓" : `✗（pi 要求 ≥ ${NODE_MIN}，建议先升级 node 再启动 pi）`}`);
+	const piRootBefore = findPiGlobalRoot();
+	console.log(`  pi 本体 ${piRootBefore ? `✓ ${piRootBefore}` : `✗ 未安装（${PI_PACKAGE}）`}`);
+	console.log(`  构建依赖 esbuild ${fs.existsSync(ESBUILD_DIR) ? "✓" : "✗ 未安装"}`);
+	console.log("");
+
+	// 1. pi 本体：缺失则交互确认后自动安装
+	await ensurePi();
+
+	// 2. 构建：--skip-build 跳过，否则交互确认后执行
 	if (!skipBuild) {
 		await ensureDeps();
-		autoBuild();
+		if (await confirm("是否自动构建扩展产物？（Y/n）")) {
+			autoBuild();
+		}
 	}
-	// 构建后 dist 应已生成；仍缺失时：dry-run 给出预期说明，正式安装报错退出
+
+	// 3. 构建后 dist 应已生成；仍缺失时：dry-run 给出预期说明，正式安装报错退出
 	if (!fs.existsSync(DIST) || !fs.existsSync(path.join(DIST, "extensions"))) {
 		if (dryRun) {
 			console.log("dist 产物缺失——正式安装时会先自动执行 build.js 生成后再安装。\n");
@@ -245,6 +315,12 @@ async function main() {
 		console.error(`错误: 找不到默认主题 ${THEME_NAME}.json（${THEMES_SRC}）`);
 		process.exit(1);
 	}
+
+	// 4. 安装配置：交互确认后执行
+	if (!(await confirm("确认安装配置到 ~/.pi/agent/？（Y/n）"))) {
+		console.error("已取消安装。");
+		process.exit(1);
+	}
 	copyDir(THEMES_SRC, THEMES_DST);
 	copyDir(EXT_SRC, EXT_DST);
 	copyDir(SOUNDS_SRC, SOUNDS_DST, [".wav"]);
@@ -252,7 +328,15 @@ async function main() {
 	applySettings();
 	installModelsJson();
 	generateTsconfig();
-	console.log(dryRun ? "\n试运行完成（未做任何修改），去掉 --dry-run 正式安装。" : "\n安装完成。在 pi 里执行 /reload 或重启后生效。");
+
+	if (dryRun) {
+		console.log("\n试运行完成（未做任何修改），去掉 --dry-run 正式安装。");
+		return;
+	}
+	console.log("\n安装完成。在 pi 里执行 /reload 或重启后生效。");
+	console.log("\n下一步：");
+	console.log("  · 配置模型：启动 pi 后 /login <provider> 添加认证，或 export API_KEY 环境变量（key 支持 $ENV 语法）");
+	console.log("  · 启动：pi");
 }
 
 main().catch((err) => {
