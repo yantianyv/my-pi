@@ -166,7 +166,7 @@ async function scenarioA() {
 	const menuLines = menuComp?.render(100);
 	check("/workflow-config 菜单浮窗渲染", !!menuLines);
 	if (menuLines) {
-		check("浮窗有边框（┌┐└┘）", menuLines[0].includes("┌") && menuLines[0].includes("┐") && menuLines[menuLines.length - 1].includes("└") && menuLines[menuLines.length - 1].includes("┘"));
+		check("浮窗有边框（╭╮╰╯）", menuLines[0].includes("╭") && menuLines[0].includes("╮") && menuLines[menuLines.length - 1].includes("╰") && menuLines[menuLines.length - 1].includes("╯"));
 		check("菜单收纳 2 项功能", menuLines.some((l) => l.includes("显示详细信息")) && menuLines.some((l) => l.includes("常驻面板")));
 		const over = menuLines.map((l) => visibleWidth(l)).filter((w) => w > 100);
 		check("菜单行宽 ≤ 100", over.length === 0);

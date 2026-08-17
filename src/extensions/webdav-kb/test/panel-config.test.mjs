@@ -196,15 +196,16 @@ try {
 	check("立即同步完成", overlay2.result?.includes("同步完成"), overlay2.result ?? "");
 	check("同步下载到镜像", readFileSync(join(mirrorDir, "notes", "x.md"), "utf8").includes("内容"));
 
-	// ---- 动作：vault-lock ----
-	overlay2.handleInput("\x1b[B"); // 修改口令
-	overlay2.handleInput("\x1b[B"); // 锁定 vault
+	// ---- 动作：vault-lock（按 action key 语义定位：动作区加项不再漂移） ----
+	let lockGuard = 0;
+	while (overlay2.currentTarget()?.action?.key !== "vault-lock" && lockGuard++ < 10) overlay2.handleInput("\x1b[B");
 	overlay2.handleInput("\r");
 	check("vault-lock 锁定", !mod.isUnlocked());
 
 	// ---- 修改口令：vault 已解锁时输入新口令 Enter = 覆盖 ----
 	mod.unlockVault("vault-pass-123", JSON.parse(readFileSync(cfgFile, "utf8")).vault); // 先解锁
-	overlay2.handleInput("\x1b[A"); // 回修改口令
+	let changeGuard = 0;
+	while (overlay2.currentTarget()?.action?.key !== "vault-change" && changeGuard++ < 10) overlay2.handleInput("\x1b[A");
 	overlay2.handleInput("\r"); // 焦点移到 vault 字段并提示
 	check("修改口令焦点回 vault 字段", overlay2.focus === 5, String(overlay2.focus));
 	for (const ch of "new-pass-456") overlay2.handleInput(ch);
@@ -214,6 +215,20 @@ try {
 	mod.lockVault();
 	check("旧口令失效", !mod.unlockVault("vault-pass-123", cfg6.vault));
 	check("新口令可解锁", mod.unlockVault("new-pass-456", cfg6.vault));
+
+	// ---- 修改口令二次确认：有存量密文时第一次 Enter 只警告不执行，同口令再 Enter 才确认 ----
+	mkdirSync(join(mirrorDir, "vault"), { recursive: true });
+	writeFileSync(join(mirrorDir, "vault", "secret.md.enc"), "fake-cipher");
+	while (overlay2.focus > 5) overlay2.handleInput("\x1b[A"); // 回 vault 字段（字段 Enter 后焦点自动下移）
+	for (const ch of "third-pass-789") overlay2.handleInput(ch);
+	overlay2.handleInput("\r");
+	const cfg7 = JSON.parse(readFileSync(cfgFile, "utf8"));
+	check("有存量密文先警告（未执行）", overlay2.result?.includes("旧口令") && mod.unlockVault("new-pass-456", cfg7.vault) !== null, overlay2.result ?? "");
+	while (overlay2.focus > 5) overlay2.handleInput("\x1b[A");
+	for (const ch of "third-pass-789") overlay2.handleInput(ch);
+	overlay2.handleInput("\r");
+	const cfg8 = JSON.parse(readFileSync(cfgFile, "utf8"));
+	check("同口令再 Enter 确认执行", mod.unlockVault("third-pass-789", cfg8.vault) !== null);
 
 	// ---- UX：vault 输入未 Enter → 失焦警告 + Esc 防误丢 ----
 	let closed = false;

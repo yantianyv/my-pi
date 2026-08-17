@@ -82,8 +82,9 @@ async function walkRemote(
 	client: WebDavClient,
 	onProgress?: (label: string) => void,
 	signal?: AbortSignal,
-): Promise<Map<string, RemoteFile>> {
+): Promise<{ files: Map<string, RemoteFile>; failedDirs: string[] }> {
 	const out = new Map<string, RemoteFile>();
+	const failedDirs: string[] = [];
 	const queue: string[] = ["/"];
 	let dirsDone = 0;
 	while (queue.length > 0) {
@@ -91,7 +92,22 @@ async function walkRemote(
 		const batch = queue.splice(0, WALK_CONCURRENCY);
 		await Promise.all(
 			batch.map(async (dir) => {
-				const entries = await client.list(dir);
+				// 单目录失败重试一次（client 层已有网络错误/5xx/429 重试，此处兜偶发失败）；
+				// 彻底失败则跳过该目录子树并记入 failedDirs——调用方据此抑制「远端已删」误判
+				// （否则该目录下的文件会被当作远端已删而删本地），遍历不中断
+				let entries;
+				try {
+					entries = await client.list(dir);
+				} catch {
+					await new Promise((r) => setTimeout(r, 1_000));
+					try {
+						entries = await client.list(dir);
+					} catch (e) {
+						failedDirs.push(dir);
+						onProgress?.(`⚠ 目录 ${dir} 遍历失败已跳过：${e instanceof Error ? e.message : String(e)}`);
+						return;
+					}
+				}
 				for (const f of entries) {
 					out.set(f.path, {
 						isDir: f.isDir,
@@ -106,7 +122,7 @@ async function walkRemote(
 		dirsDone += batch.length;
 		onProgress?.(`遍历远端 ${dirsDone} 个目录`);
 	}
-	return out;
+	return { files: out, failedDirs };
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +171,19 @@ function scanLocal(mirrorDir: string): Map<string, LocalFile> {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 确保远端父目录存在（MKCOL 链，幂等）；123 云盘对 MKCOL 并发限流（423），退避重试 */
+/**
+ * 远端是否相对账本记录发生变化（自适应降级）：
+ * - 双端 etag 都在：用 etag 比对（最可靠）；
+ * - 任一 etag 缺失（部分 WebDAV 服务器不回 etag）：降级 lastModified(HTTP date 原文) + size 比对；
+ * - 都不可比：false（感知不到，宁漏判不误判）。
+ */
+function remoteChangedSince(lf: LedgerFile, r: RemoteFile): boolean {
+	if (lf.etag !== undefined && r.etag !== undefined) return lf.etag !== r.etag;
+	if (lf.remoteLastModified && r.lastModified && lf.remoteLastModified !== r.lastModified) return true;
+	if (r.size !== undefined && lf.size !== undefined && lf.size !== r.size) return true;
+	return false;
+}
+
 export async function ensureRemoteDirs(client: WebDavClient, relPath: string): Promise<void> {
 	const segs = relPath.split("/").filter(Boolean);
 	let cur = "";
@@ -194,7 +223,7 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 
 	// 1) 远端遍历
 	opts.onProgress?.("遍历远端…");
-	const remote = await walkRemote(client, opts.onProgress, signal);
+	const { files: remote, failedDirs } = await walkRemote(client, opts.onProgress, signal);
 
 	// 2) 本地扫描 + 差异比对
 	const local = scanLocal(mirrorDir);
@@ -217,7 +246,7 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 			continue;
 		}
 		const localChanged = lf ? li.mtimeMs > lf.localMtime : true;
-		const remoteChanged = lf ? lf.etag !== undefined && r.etag !== undefined && lf.etag !== r.etag : false;
+		const remoteChanged = lf ? remoteChangedSince(lf, r) : false;
 		if (!lf) {
 			// 本地有、账本无 → 本地新建（未传过）→ 上传
 			toUpload.push(p);
@@ -236,6 +265,8 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 	// 从未上传（无 etag）→ 视为待补传；两端都无 → 清账本条目
 	for (const p of Object.keys(ledger.files)) {
 		if (!remote.has(p)) {
+			// 遍历失败的目录子树不可信（远端可能有，只是没爬到）→ 跳过「远端已删」判定，等下次同步
+			if (failedDirs.some((d) => (d === "/" ? p.startsWith("/") : p.startsWith(d + "/")))) continue;
 			if (local.has(p)) {
 				if (ledger.files[p].etag) delLocal.push(p);
 				else toUpload.push(p);

@@ -87,7 +87,9 @@ function findPiGlobalRoot() {
 	try {
 		const root = execSync("npm root -g", { encoding: "utf8", windowsHide: true }).trim();
 		if (root && fs.existsSync(path.join(root, "@earendil-works", "pi-coding-agent"))) return root;
-	} catch {}
+	} catch (e) {
+		log(`npm root -g 探测失败（${e.message}），改用兜底候选目录`);
+	}
 	// 兜底：常见全局目录（pnpm / nvm-global / brew / 系统 npm）
 	const candidates = [
 		process.env.APPDATA ? path.join(process.env.APPDATA, "npm", "node_modules") : null, // Windows
@@ -178,7 +180,15 @@ function copyDir(src, dst, exts = [".json", ".ts"]) {
 		if (!exts.some((e) => f.name.endsWith(e))) continue;
 		const to = path.join(dst, f.name);
 		log(`复制 ${path.relative(ROOT, from)} -> ${to}`);
-		if (!dryRun) fs.copyFileSync(from, to);
+		if (!dryRun) {
+			try {
+				fs.copyFileSync(from, to);
+			} catch (e) {
+				// 磁盘满/文件被占用/权限不足：报出具体文件并中断，避免静默留下半成品
+				console.error(`\n✗ 复制失败：${from} -> ${to}\n  原因：${e.message}\n  提示：已复制的文件保留在目标目录，修复后重跑 install.js 即可（幂等）。`);
+				process.exit(1);
+			}
+		}
 	}
 }
 

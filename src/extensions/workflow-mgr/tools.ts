@@ -336,6 +336,9 @@ export function registerTools(pi: ExtensionAPI) {
 				if (taken.has(id)) return err(`任务 id ${id} 已存在，请换一个（可用: ${[...taken].join(", ")}）`);
 				const deps = params.deps ?? [];
 				if (deps.includes(id)) return err("任务不能依赖自己");
+				const knownIds = new Set(derived.all.map((t) => t.id));
+				const missingDeps = deps.filter((d) => !knownIds.has(d));
+				if (missingDeps.length) return err(`依赖的任务不存在：${missingDeps.join(", ")}（现有任务 id: ${[...knownIds].join(", ")}）`);
 				if (hasDependencyCycle(id, deps, derived)) return err(`依赖环：${id} 的依赖链最终会回到自身，请检查 deps`);
 				const task = {
 					id,
@@ -384,6 +387,9 @@ export function registerTools(pi: ExtensionAPI) {
 				if (params.stageGoal !== undefined) found.stage.goal = params.stageGoal;
 				if (params.deps !== undefined) {
 					if (params.deps.includes(t.id)) return err("任务不能依赖自己");
+					const knownIds = new Set(derived.all.map((x) => x.id));
+					const missingDeps = params.deps.filter((d) => !knownIds.has(d));
+					if (missingDeps.length) return err(`依赖的任务不存在：${missingDeps.join(", ")}（现有任务 id: ${[...knownIds].join(", ")}）`);
 					if (hasDependencyCycle(t.id, params.deps, derived)) return err(`依赖环：${t.id} 的依赖链最终会回到自身，请检查 deps`);
 					t.deps = params.deps;
 				}
@@ -402,8 +408,10 @@ export function registerTools(pi: ExtensionAPI) {
 				const { stage, task } = found;
 				stage.tasks = stage.tasks.filter((t) => t.id !== task.id);
 				delete state.tasks[task.id];
-				// 依赖告警：谁还在依赖被删的任务
+				// 依赖悬空清理：其他任务对被删任务的依赖引用一并移除（不清理会造成静默死锁——
+				// depsSatisfied 对不存在的 id 恒为 false，那些任务将永远无法开始）
 				const dependents = derived.all.filter((x) => x.deps.includes(task.id));
+				for (const d of dependents) d.deps = d.deps.filter((x) => x !== task.id);
 				// 当前任务被删 → 重算
 				if (state.currentTaskId === task.id) {
 					reconcile(state, wf, derived);
@@ -415,7 +423,7 @@ export function registerTools(pi: ExtensionAPI) {
 				updateWidget(ctx, s);
 				let text = `已删除任务 ${task.id} ${task.title}${stage.tasks.length === 0 ? `（阶段 ${stage.name} 已清空并移除）` : ""}`;
 				if (dependents.length) {
-					text += `\n\n⚠️ 以下任务还依赖它（deps 含 ${task.id}），如需请用 edit 清理：${dependents.map((t) => `${t.id} ${t.title}`).join("、")}`;
+					text += `\n\n已同步清理 ${dependents.length} 个任务对它的依赖：${dependents.map((t) => `${t.id} ${t.title}`).join("、")}`;
 				}
 				return { content: [{ type: "text", text }], details: { kind: "workflow-remove", state: lightState(state) } };
 			}

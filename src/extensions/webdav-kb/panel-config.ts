@@ -11,6 +11,8 @@
  */
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { createBoxRenderer, editInput, renderInputWithCursor } from "../shared/ui";
 import { loadConfig, saveConfig, isConfigured, defaultMirrorDir, agentConfigDir, type KbConfig } from "./store";
 import { syncAll } from "./sync";
@@ -106,6 +108,25 @@ const ACTIONS: Action[] = [
 	{ key: "readonly-off", label: "⑥ 只读模式：开", visible: (c) => Boolean(c.readOnly) },
 ];
 
+/** 统计镜像 /vault/ 下存量密文数量（改口令警告用；目录不存在/读取失败返回 0） */
+function countVaultBlobs(mirrorDir: string): number {
+	try {
+		const vaultDir = path.join(mirrorDir, "vault");
+		if (!fs.existsSync(vaultDir)) return 0;
+		let n = 0;
+		const walk = (d: string): void => {
+			for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
+				if (ent.isDirectory()) walk(path.join(d, ent.name));
+				else if (ent.name.endsWith(".enc")) n++;
+			}
+		};
+		walk(vaultDir);
+		return n;
+	} catch {
+		return 0;
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 面板组件（单页表单）
 // ---------------------------------------------------------------------------
@@ -121,6 +142,8 @@ export class KbConfigOverlay {
 	/** 每个字段的编辑缓冲（含光标） */
 	private bufs: Record<FieldKey, string> = {} as Record<FieldKey, string>;
 	private cursors: Record<FieldKey, number> = {} as Record<FieldKey, number>;
+	/** 待二次确认的改口令（有存量密文时第一次 Enter 只警告不执行，再次输入同口令 Enter 才确认） */
+	private pendingVaultChange: string | null = null;
 	/** 焦点索引：0..fields-1 字段，之后是可见动作 */
 	private focus = 0;
 	/** 正在执行的动作标签 */
@@ -239,13 +262,28 @@ export class KbConfigOverlay {
 			if (key && this.cfg.persistVault) storeVaultKey(key, this.cfg);
 			this.result = "🔓 vault 已启用并解锁" + (this.cfg.persistVault ? "（口令已持久化）" : "");
 		} else if (isUnlocked()) {
-			// 已解锁：视为修改口令（覆盖 setup；存量密文需手动迁移）
+			// 已解锁：视为修改口令。存量密文不会自动迁移——有旧密文时第一次 Enter 只警告，
+			// 再次输入同一口令按 Enter 才确认执行（防误改导致旧笔记永久不可解密）
+			const mirrorDir = this.cfg.mirrorDir?.trim() || defaultMirrorDir(agentConfigDir());
+			const blobs = countVaultBlobs(mirrorDir);
+			if (blobs > 0 && this.pendingVaultChange !== pass) {
+				this.pendingVaultChange = pass;
+				this.result = `⚠ 镜像中有 ${blobs} 篇旧口令加密的笔记，改口令后只能用旧口令解密（需手动迁移）。确认修改请重新输入该口令再按 Enter`;
+				this.bufs.vault = "";
+				this.cursors.vault = 0;
+				this.tui.requestRender();
+				return;
+			}
+			this.pendingVaultChange = null;
 			const setup = createVault(pass);
 			this.cfg.vault = setup;
 			saveConfig(agentConfigDir(), this.cfg);
 			const key = unlockVault(pass, setup, this.cfg.persistVault);
 			if (key && this.cfg.persistVault) storeVaultKey(key, this.cfg);
-			this.result = "🔓 vault 口令已更新" + (this.cfg.persistVault ? "（口令已持久化）" : "（存量密文需手动迁移）");
+			this.result =
+				"🔓 vault 口令已更新" +
+				(this.cfg.persistVault ? "（口令已持久化）" : "") +
+				(blobs > 0 ? `（⚠ ${blobs} 篇旧密文需用旧口令手动迁移）` : "");
 		} else {
 			const key = unlockVault(pass, this.cfg.vault, this.cfg.persistVault);
 			if (key) {
@@ -288,6 +326,15 @@ export class KbConfigOverlay {
 				this.bufs.vault = "";
 				this.cursors.vault = 0;
 				this.result = "输入新口令后按 Enter（存量密文需手动迁移）";
+				this.tui.requestRender();
+				return;
+			}
+			case "vault-lock": {
+				lockVault(agentConfigDir()); // 清内存密钥 + 磁盘持久化密钥
+				this.cfg.vaultKey = undefined;
+				this.cfg.persistVault = undefined;
+				saveConfig(agentConfigDir(), this.cfg);
+				this.result = "✅ vault 已锁定（内存与磁盘密钥已清除）";
 				this.tui.requestRender();
 				return;
 			}

@@ -367,7 +367,9 @@ export default function (pi: ExtensionAPI) {
 
 	// 3) Ctrl+C：第一次打断当前 turn；打断后窗口内再按一次 → 直接执行 /rewind 回退
 	let currentCtx: ExtensionContext | null = null;
-	let ctrlCHandlerInstalled = false;
+	// 注销函数（pi 返回的 unsubscribe）；同时充当「是否已注册」标志——shutdown 时注销并复位，
+	// 新 session/reload 的新实例会重新注册，同一时刻只有一个活 handler（旧闭包不再幽灵残留）
+	let ctrlCUnsubscribe: (() => void) | undefined;
 	let lastAbortAt = 0;
 
 	pi.on("session_start", async (event, ctx) => {
@@ -377,9 +379,8 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		currentCtx = ctx;
-		if (ctx.mode !== "tui" || ctrlCHandlerInstalled) return;
-		ctrlCHandlerInstalled = true;
-		ctx.ui.onTerminalInput((data) => {
+		if (ctx.mode !== "tui" || ctrlCUnsubscribe) return;
+		ctrlCUnsubscribe = ctx.ui.onTerminalInput((data) => {
 			if (data !== "\x03" || !currentCtx) return { consume: false };
 
 			if (!currentCtx.isIdle()) {
@@ -404,6 +405,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		currentCtx = null;
+		ctrlCUnsubscribe?.();
+		ctrlCUnsubscribe = undefined;
 		// 中止后台 init；runInitAgent 会捕获 abort 并走失败收尾，此时 notify 对已关闭的会话是 no-op
 		initAbort?.abort(new Error("会话结束"));
 		initAbort = null;

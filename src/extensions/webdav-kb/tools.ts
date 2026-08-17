@@ -660,7 +660,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				const client = new WebDavClient(cfg.baseUrl!, cfg.username!, cfg.password!, { proxyUrl: cfg.proxyUrl });
 				await client.delete(rel); // 远端删（幂等：不存在也返回成功）
 				const ledger = loadLedger(mirror);
-				delete ledger.files[params.path];
+				delete ledger.files[rel]; // 账本 key = 磁盘/远端实际路径（vault 为 .enc）
 				saveLedger(mirror, ledger);
 				// 本地镜像删（含 vault 的 .enc）
 				const abs = mirrorPath(mirror, rel);
@@ -723,7 +723,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				const client = new WebDavClient(cfg.baseUrl!, cfg.username!, cfg.password!, { proxyUrl: cfg.proxyUrl });
 				await client.delete(rel);
 				const ledger = loadLedger(mirror);
-				delete ledger.files[params.path];
+				delete ledger.files[rel]; // 账本 key = 磁盘/远端实际路径（vault 为 .enc）
 				saveLedger(mirror, ledger);
 				const abs = mirrorPath(mirror, rel);
 				if (fs.existsSync(abs)) fs.unlinkSync(abs);

@@ -73,8 +73,8 @@ try {
 	const setup = createVault("正确口令123");
 	check("createVault 生成 salt+check", setup.salt.length > 0 && setup.check.length > 0);
 	check("初始未解锁", !isUnlocked());
-	check("错口令解锁失败", unlockVault("错误口令", setup) === false && !isUnlocked());
-	check("正确口令解锁成功", unlockVault("正确口令123", setup) === true && isUnlocked());
+	check("错口令解锁失败", unlockVault("错误口令", setup) === null && !isUnlocked());
+	check("正确口令解锁成功", unlockVault("正确口令123", setup) !== null && isUnlocked());
 
 	// ---- 加解密往返 ----
 	const text = "秘密内容：PBKDF2 与 AES-256-GCM 的加密笔记。";

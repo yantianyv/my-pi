@@ -46,6 +46,7 @@ writeFileSync(
 	[
 		'export const matchesKey = () => false;',
 		"export const Key = {};",
+		"export const CURSOR_MARKER = '';",
 		"export const truncateToWidth = (s, w) => s;",
 		"export const visibleWidth = (s) => s.length;",
 		"export const parseKey = (s) => null;",

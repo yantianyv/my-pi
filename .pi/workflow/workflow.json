@@ -1,0 +1,236 @@
+{
+  "schemaVersion": 1,
+  "mode": "human-ai",
+  "stages": [
+    {
+      "id": "test-fix",
+      "name": "测试修复",
+      "goal": "恢复 4 处既有测试失败（实现演进导致的 mock/断言漂移）",
+      "tasks": [
+        {
+          "id": "0.1",
+          "title": "修 hud/unquote 测试：pi-tui mock 补 CURSOR_MARKER",
+          "desc": "hud/test 的手写 pi-tui mock 缺 CURSOR_MARKER 导出导致 esbuild bundle 失败；mock 补导出即可",
+          "humanTasks": [],
+          "aiTasks": [
+            "在 hud/test 的 mock 生成处补 CURSOR_MARKER 导出",
+            "跑 unquote.test.mjs 验证通过"
+          ],
+          "deliverable": "hud unquote 测试全绿",
+          "doneSignal": "node src/extensions/hud/test/unquote.test.mjs 输出全部通过",
+          "deps": []
+        },
+        {
+          "id": "0.2",
+          "title": "修 kb/crypto 测试：unlockVault 断言适配 Buffer|null 签名",
+          "desc": "unlockVault 从 boolean 演进为 Buffer|null，test:76-77 断言 === false/=== true 改为 === null/!== null",
+          "humanTasks": [],
+          "aiTasks": [
+            "改 crypto.test.mjs 两处断言",
+            "验证通过"
+          ],
+          "deliverable": "crypto 测试全绿",
+          "doneSignal": "node src/extensions/webdav-kb/test/crypto.test.mjs 输出全部通过",
+          "deps": []
+        },
+        {
+          "id": "0.3",
+          "title": "修 kb/panel-config 测试：动作区导航改语义定位",
+          "desc": "ACTIONS 新增「记住口令/只读模式」后硬编码方向键次数漂移；导航改为按 action key 循环定位到 vault-lock",
+          "humanTasks": [],
+          "aiTasks": [
+            "改 panel-config.test.mjs 的 vault-lock 导航为语义定位",
+            "验证通过"
+          ],
+          "deliverable": "panel-config 测试全绿",
+          "doneSignal": "node src/extensions/webdav-kb/test/panel-config.test.mjs 输出全部通过",
+          "deps": []
+        },
+        {
+          "id": "0.4",
+          "title": "修 workflow/render 测试：边框断言适配圆角",
+          "desc": "createBoxRenderer 统一圆角 ╭╮╰╯ 后，render.test.mjs:169 断言直角 ┌┐└┘ 失败；改圆角断言",
+          "humanTasks": [],
+          "aiTasks": [
+            "改 render.test.mjs 边框断言为圆角字符",
+            "验证通过"
+          ],
+          "deliverable": "render 测试全绿",
+          "doneSignal": "node src/extensions/workflow-mgr/test/render.test.mjs 输出全部通过",
+          "deps": []
+        }
+      ]
+    },
+    {
+      "id": "small-fix",
+      "name": "小修复",
+      "goal": "G1/G2/G3/G4/G5 五个低成本修复",
+      "tasks": [
+        {
+          "id": "1.1",
+          "title": "G1: web-tool raceFirstSuccess 收口 abort",
+          "desc": "DecisiveError reject 路径不 abort 输家分支（连接/定时器残留）；abort 逻辑收进 raceFirstSuccess 内部或调用方 catch 补双 abort",
+          "humanTasks": [],
+          "aiTasks": [
+            "读 fetch.ts raceFirstSuccess 与 fetchPageWithFallback",
+            "实现 settled 后统一 abort 所有分支",
+            "tsc + build 验证"
+          ],
+          "deliverable": "reject 路径也 abort 全部 in-flight 分支",
+          "doneSignal": "tsc 0 报错且 build 成功",
+          "deps": []
+        },
+        {
+          "id": "1.2",
+          "title": "G2: claude-it/task-alert 的 onTerminalInput 注销",
+          "desc": "pi 返回 unsubscribe 且 session 切换时扩展整体 rebind，session_shutdown 里调 unsubscribe 安全闭环",
+          "humanTasks": [],
+          "aiTasks": [
+            "claude-it.ts 模块级存 unsubscribe，session_shutdown 调用",
+            "task-alert.ts 同样处理",
+            "tsc + build 验证"
+          ],
+          "deliverable": "两个扩展的终端输入监听器可注销",
+          "doneSignal": "tsc 0 报错且 build 成功",
+          "deps": []
+        },
+        {
+          "id": "1.3",
+          "title": "G3: webdav-kb 账本 key 明密文统一",
+          "desc": "kb_delete/kb_move 用明文路径删账本条目，vault 文件实际 key 是 .enc 路径；封装 ledgerKeyOf 统一三处",
+          "humanTasks": [],
+          "aiTasks": [
+            "找到 put/delete/move 三处账本 key 计算",
+            "封装统一函数",
+            "跑 webdav-kb 测试验证"
+          ],
+          "deliverable": "账本 key 计算单点化",
+          "doneSignal": "webdav-kb sync/tools 测试通过",
+          "deps": []
+        },
+        {
+          "id": "1.4",
+          "title": "G4: workflow-mgr deps 悬空校验",
+          "desc": "edit/add 拒绝指向不存在任务的 deps；remove 删除任务后自动清理其余任务的悬空引用",
+          "humanTasks": [],
+          "aiTasks": [
+            "tools.ts edit/add 加 deps 引用存在性校验",
+            "remove 后自动清理悬空 deps",
+            "跑 workflow-mgr 测试验证"
+          ],
+          "deliverable": "无法造出静默死锁任务",
+          "doneSignal": "workflow-mgr render/stale-ctx 测试通过",
+          "deps": []
+        },
+        {
+          "id": "1.5",
+          "title": "G5: install.js 健壮性",
+          "desc": "copyDir 包 try/catch 给具体文件级错误提示；npm root -g 失败输出诊断 log",
+          "humanTasks": [],
+          "aiTasks": [
+            "copyDir 加错误处理",
+            "npm root -g catch 加 log",
+            "node install.js --dry-run 验证"
+          ],
+          "deliverable": "安装失败有明确诊断",
+          "doneSignal": "--dry-run 正常输出",
+          "deps": []
+        }
+      ]
+    },
+    {
+      "id": "kb-enhance",
+      "name": "webdav-kb 增强",
+      "goal": "G6 etag 自适应降级 + G8 walkRemote 重试容错 + G11 vault 警告",
+      "tasks": [
+        {
+          "id": "2.1",
+          "title": "G6: etag 缺失时远端变更自适应降级检测",
+          "desc": "服务器不返回 etag 时 remoteChanged 恒 false 漏同步；降级用 lastModified(mtime)+size 比对，有 etag 时行为不变",
+          "humanTasks": [],
+          "aiTasks": [
+            "读 sync.ts 对比逻辑与账本结构",
+            "实现 etag 缺失降级 mtime+size",
+            "sync 测试验证"
+          ],
+          "deliverable": "无 etag 服务器上远端变更可被检测",
+          "doneSignal": "webdav-kb sync 测试通过",
+          "deps": []
+        },
+        {
+          "id": "2.2",
+          "title": "G8: walkRemote 单目录失败重试 + 容错",
+          "desc": "单目录 PROPFIND 失败导致整树遍历中断；加重试（指数退避），彻底失败后记警告跳过该目录继续",
+          "humanTasks": [],
+          "aiTasks": [
+            "读 walkRemote",
+            "加重试 + 容错继续",
+            "sync 测试验证"
+          ],
+          "deliverable": "单目录故障不再拖垮整个同步",
+          "doneSignal": "webdav-kb sync 测试通过",
+          "deps": []
+        },
+        {
+          "id": "2.3",
+          "title": "G11: vault 改口令醒目警告",
+          "desc": "不实现迁移，但改口令时检测存量 .enc 文件并醒目警告旧密文将无法解密 + 二次确认",
+          "humanTasks": [],
+          "aiTasks": [
+            "找到改口令入口（面板 vault-change / 命令）",
+            "加存量密文检测与警告确认",
+            "panel 测试验证"
+          ],
+          "deliverable": "改口令前用户被明确告知后果",
+          "doneSignal": "webdav-kb panel-config 测试通过",
+          "deps": []
+        }
+      ]
+    },
+    {
+      "id": "hud-polish",
+      "name": "hud 微优化",
+      "goal": "G9 三个无代价微优化",
+      "tasks": [
+        {
+          "id": "3.1",
+          "title": "G9: hud 微优化三件套",
+          "desc": "gitTimer 非 git 目录停表/降频；turn_end 的 refreshGitStats 加节流；lastRateRefresh 纳入 resetCostTracking",
+          "humanTasks": [],
+          "aiTasks": [
+            "gitStats 为 null 时停 gitTimer（检测到仓库再启动）",
+            "turn_end git 刷新加节流",
+            "resetCostTracking 重置 lastRateRefresh",
+            "tsc + build 验证"
+          ],
+          "deliverable": "非 git 目录不再每 5s 空调用",
+          "doneSignal": "tsc 0 报错且 build 成功",
+          "deps": []
+        }
+      ]
+    },
+    {
+      "id": "verify",
+      "name": "整体验证",
+      "goal": "全量回归 + 安装",
+      "tasks": [
+        {
+          "id": "4.1",
+          "title": "全量验证：tsc + build + 全部测试 + install",
+          "desc": "所有改动完成后跑 tsc 0 报错、build 10/10、全部测试绿、install 到 ~/.pi/agent/",
+          "humanTasks": [],
+          "aiTasks": [
+            "npx typescript -p src/config/tsconfig.json",
+            "node src/build.js",
+            "跑全部 *.test.mjs",
+            "node install.js -y --skip-build",
+            "提交"
+          ],
+          "deliverable": "全部测试绿 + 已安装 + 已提交",
+          "doneSignal": "所有测试输出全部通过，git 有对应提交",
+          "deps": []
+        }
+      ]
+    }
+  ]
+}

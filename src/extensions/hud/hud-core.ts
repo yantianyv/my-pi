@@ -250,10 +250,14 @@ export default async function (pi: ExtensionAPI) {
 	}
 
 	/** 采集当前 git 状态（分支 + 暂存/工作区/未跟踪文件数）。 */
+	let lastGitProbe = 0; // 上次真开子进程探测的时间（非 git 目录降频 + turn_end 节流共用）
 	async function refreshGitStats(ctx: ExtensionContext) {
 		if (!ctxAlive(ctx)) return; // 同 refreshBalance：旧 ctx 异步续跑直接放弃
 		if (!gitMod) return; // hud-git 子模块缺失：恒显示「⎇ -」
 		if (gitInflight) return;
+		// 非 git 目录降频探测：5s 定时器照跑但不开子进程，60s 才真探一次（兼顾 git init 后恢复显示）
+		if (gitStats === null && Date.now() - lastGitProbe < 60_000) return;
+		lastGitProbe = Date.now();
 		gitInflight = true;
 		try {
 			const { stdout } = await execFileAsync("git", ["status", "--porcelain=v1", "--branch"], {
@@ -625,6 +629,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		// 重置速率统计（避免 resume 旧会话时把历史成本当成首轮增量）
 		if (costMod) costMod.resetCostTracking(ctx);
+		lastRateRefresh = 0; // 新 session 允许立即拉汇率（节流计时跨 session 无意义）
 		if (ctx.mode !== "tui") return;
 		installFooter(ctx);
 	});
@@ -638,7 +643,8 @@ export default async function (pi: ExtensionAPI) {
 		if (costMod) costMod.recordTurnCosts(ctx);
 		if (!footerInstalled) return;
 		if (Date.now() - lastAutoRefresh > TURN_REFRESH_THROTTLE_MS) void refreshBalance(ctx);
-		void refreshGitStats(ctx);
+		// git 状态：5s 定时器在跑，turn_end 只补「距上次探测超 2s」的即时刷新（防快速连续 turn 重复开子进程）
+		if (Date.now() - lastGitProbe > 2_000) void refreshGitStats(ctx);
 	});
 
 	pi.on("model_select", async (_event, ctx) => {

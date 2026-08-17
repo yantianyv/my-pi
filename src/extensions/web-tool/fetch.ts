@@ -246,11 +246,15 @@ async function fetchPageWithFallback(url: string, outerSignal?: AbortSignal): Pr
 		}
 	})();
 
-	const { index, value } = await raceFirstSuccess([directPath, fallbackPath]);
-	// 已有一条成功：掐掉另一条在途请求，避免幽灵连接/定时器残留
-	if (index === 0) fallbackAbort.abort();
-	else directAbort.abort();
-	return value;
+	// 任何结局（成功 / DecisiveError 判死 / 全部失败）都掐断两条分支的在途请求，
+	// 避免幽灵连接与超时定时器残留（abort 已完成的分支是无害 no-op）
+	try {
+		const { value } = await raceFirstSuccess([directPath, fallbackPath]);
+		return value;
+	} finally {
+		directAbort.abort();
+		fallbackAbort.abort();
+	}
 }
 
 /** 抓取 URL → markdown（校验协议 / 非 HTML 报错 / 字节上限 / 字符截断） */

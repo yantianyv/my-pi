@@ -71,7 +71,7 @@ export default function (pi: ExtensionAPI) {
 	let frame = 0;
 	let alertActive = false;
 	let currentCtx: ExtensionContext | null = null;
-	let inputHookInstalled = false;
+	let inputHookUnsubscribe: (() => void) | undefined; // pi 返回的注销函数，兼作「已注册」标志
 	/** 上一次 agent_end 是否因 Ctrl+C/abort 中断（中断不算完成，不触发提醒） */
 	let lastEndWasAbort = false;
 
@@ -162,13 +162,16 @@ export default function (pi: ExtensionAPI) {
 	// 按键即撤：onTerminalInput 是原始终端按键流（input 事件要等提交才触发）
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
-		if (ctx.mode !== "tui" || inputHookInstalled) return;
-		inputHookInstalled = true;
-		ctx.ui.onTerminalInput(() => {
+		if (ctx.mode !== "tui" || inputHookUnsubscribe) return;
+		inputHookUnsubscribe = ctx.ui.onTerminalInput(() => {
 			if (alertActive && currentCtx) stopAlert(currentCtx);
 			return { consume: false }; // 只观察，不拦截按键
 		});
 	});
 
-	pi.on("session_shutdown", async () => clearTimers());
+	pi.on("session_shutdown", async () => {
+		clearTimers();
+		inputHookUnsubscribe?.();
+		inputHookUnsubscribe = undefined;
+	});
 }
