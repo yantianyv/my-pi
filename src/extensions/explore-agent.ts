@@ -13,7 +13,7 @@
  *   /explore-model 可配置：auto-not-free（忽略免费模型）或固定 provider/modelId；
  *   无参数进入可搜索模型选择器（↑↓ 选择、Enter 确认、Esc 取消，顶部搜索框实时过滤、
  *   当前项 ✓ 标记），设置持久化到 ~/.pi/agent/explore-model.json；
- * - 预算保护：单任务最多 MAX_TURNS 轮、TASK_TIMEOUT_MS 超时、跟随主 agent abort。
+ * - 预算保护：单任务 TASK_TIMEOUT_MS 超时、跟随主 agent abort。
  */
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
@@ -57,12 +57,8 @@ const EXPLORE_DEFAULT_MODEL = "auto";
 const MAX_TASKS = 16;
 /** 子代理最大并行数 */
 const CONCURRENCY = 4;
-/** 单个子代理最多多少轮（一轮 = 一次 LLM 调用 + 其工具调用） */
-const MAX_TURNS = 12;
 /** 单个子代理超时 */
-const TASK_TIMEOUT_MS = 4 * 60_000;
-/** 子模型单次输出上限 */
-const SUBAGENT_MAX_TOKENS = 4096;
+const TASK_TIMEOUT_MS = 15 * 60_000;
 
 // ---------------------------------------------------------------------------
 // 子模型选择
@@ -127,7 +123,7 @@ function buildSystemPrompt(cwd: string): string {
 		"",
 		"工作要求：",
 		"1. 自主决定探索路径：先用 ls / find / grep 定位相关文件，再用 read 精读关键片段",
-		"2. 高效：尽量控制在 10 次工具调用以内，不要读无关文件",
+		"2. 高效：在保障质量的情况下尽量减少不必要的工具调用，不要读无关文件",
 		"3. 报告要精炼：不要客套话，不要粘贴代码原文（一律用『路径:行号』引用代替），结论必须自己归纳，不能用工具输出代替思考",
 		"4. 不要尝试「顺手改进」任何文件——你只读，发现问题记录在报告里即可",
 		"",
@@ -199,12 +195,9 @@ async function runSubAgent(
 			});
 		};
 
-		let turns = 0;
 		const config: AgentLoopConfig = {
 			model,
-			maxTokens: SUBAGENT_MAX_TOKENS,
 			convertToLlm,
-			shouldStopAfterTurn: () => ++turns >= MAX_TURNS,
 		};
 
 		const userMessage: AgentMessage = { role: "user", content: task, timestamp: Date.now() };
@@ -230,7 +223,7 @@ async function runSubAgent(
 				.trim();
 			if (text) return { task, ok: true, report: text };
 		}
-		return { task, ok: false, error: "子代理未产出报告（可能预算用尽）" };
+		return { task, ok: false, error: "子代理未产出报告" };
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);
 		return { task, ok: false, error: msg.includes("abort") ? "已中止（超时或用户取消）" : msg };
