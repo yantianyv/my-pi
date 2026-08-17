@@ -2,8 +2,9 @@
 /**
  * webdav-kb / commands.ts 配置命令测试（esbuild bundle + mock pi + mock DAV）
  *
- * 覆盖：命令注册、带参子命令（url/user/pass/proxy/mirror/vault/vault-unlock/vault-lock/test）、
- * 非 TUI 文本面板、连通性测试（成功/凭据错误）、/kb-sync 手动同步、未配置引导。
+ * 覆盖：命令注册、非 TUI 文本面板（摘要 + TUI 面板提示）、无子命令（参数被忽略，
+ * 不解析不持久化）、/kb-sync 手动同步、未配置引导。
+ * （面板本身的字段编辑/vault 口令/连通测试/立即同步等行为由 panel-config.test.mjs 覆盖）
  *
  * 用法：node src/extensions/webdav-kb/test/commands.test.mjs（仓库根目录执行）
  */
@@ -92,53 +93,32 @@ try {
 	const captures = {};
 	const ctx = makeCtx(captures);
 	await cmd("kb-config").handler("", ctx);
-	check("非 TUI 显示配置面板", captures.notify?.text.includes("WebDAV") && captures.notify?.text.includes("/kb-config"), captures.notify?.text.slice(0, 60));
+	check("非 TUI 显示配置摘要", captures.notify?.text.includes("WebDAV") && captures.notify?.text.includes("/kb-config"), captures.notify?.text.slice(0, 60));
 
-	// ---- 带参子命令 ----
+	// ---- 无子命令：参数被忽略，不解析不持久化 ----
+	const cfgFile = join(configDir, "kb-config.json");
+	writeFileSync(cfgFile, "{}", "utf8"); // 初始空配置（面板保存路径由 panel-config.test.mjs 覆盖）
 	await cmd("kb-config").handler("url " + dav.baseUrl, ctx);
 	await cmd("kb-config").handler("user test-user", ctx);
 	await cmd("kb-config").handler("pass test-pass", ctx);
 	await cmd("kb-config").handler("mirror " + mirrorDir, ctx);
-	const cfg = JSON.parse(requireFs(configDir, "kb-config.json"));
-	check("url/user/pass/mirror 已持久化", cfg.baseUrl === dav.baseUrl && cfg.username === "test-user" && cfg.password === "test-pass" && cfg.mirrorDir === mirrorDir, JSON.stringify(cfg));
-
-	// ---- vault 子命令 ----
 	await cmd("kb-config").handler("vault 口令abc", ctx);
-	const cfg2 = JSON.parse(requireFs(configDir, "kb-config.json"));
-	check("vault 启用并写入 salt+check", Boolean(cfg2.vault?.salt) && Boolean(cfg2.vault?.check));
-	check("vault 启用后立即解锁", mod.isUnlocked());
-	await cmd("kb-config").handler("vault-lock", ctx);
-	check("vault-lock 锁定", !mod.isUnlocked());
-	await cmd("kb-config").handler("vault-unlock 错口令", ctx);
-	check("错口令解锁失败", !mod.isUnlocked());
-	await cmd("kb-config").handler("vault-unlock 口令abc", ctx);
-	check("正确口令解锁成功", mod.isUnlocked());
+	const cfgAfter = JSON.parse(readFileSync(cfgFile, "utf8"));
+	check("传参不解析不持久化（无子命令）", !cfgAfter.baseUrl && !cfgAfter.username && !cfgAfter.password && !cfgAfter.mirrorDir && !cfgAfter.vault, JSON.stringify(cfgAfter));
+	// 任意参数同样被忽略，仍走非 TUI 摘要 + TUI 面板提示
+	const cap5 = {};
+	await cmd("kb-config").handler("foobar", makeCtx(cap5));
+	check("任意参数忽略并提示 TUI 面板", cap5.notify?.text.includes("TUI") && cap5.notify?.text.includes("/kb-config"), cap5.notify?.text.slice(0, 60));
 
-	// ---- 连通性测试 ----
-	const cap2 = {};
-	const ctx2 = makeCtx(cap2);
-	await cmd("kb-config").handler("test", ctx2);
-	check("连通性测试成功", cap2.notify?.text.includes("连通正常"), cap2.notify?.text);
-	// 错误凭据
-	await cmd("kb-config").handler("pass wrong-pass", ctx);
-	const cap3 = {};
-	await cmd("kb-config").handler("test", makeCtx(cap3));
-	check("错误凭据连通失败", cap3.notify?.text.includes("连通失败") || cap3.notify?.text.includes("失败"), cap3.notify?.text);
-	await cmd("kb-config").handler("pass test-pass", ctx);
-
-	// ---- /kb-sync 手动同步 ----
+	// ---- /kb-sync 手动同步（配置直接写入，模拟面板已保存） ----
+	writeFileSync(cfgFile, JSON.stringify({ baseUrl: dav.baseUrl, username: "test-user", password: "test-pass", mirrorDir }), "utf8");
 	dav.seed("/notes/synced.md", "---\ntitle: 同步测试\ntags: []\n---\n内容\n");
 	const cap4 = {};
 	await cmd("kb-sync").handler("", makeCtx(cap4));
 	check("/kb-sync 下载文件", existsSync(join(mirrorDir, "notes", "synced.md")));
 
-	// ---- 未知子命令 ----
-	const cap5 = {};
-	await cmd("kb-config").handler("foobar", makeCtx(cap5));
-	check("未知子命令给提示", cap5.notify?.text.includes("未知子命令"), cap5.notify?.text.slice(0, 40));
-
 	// ---- 未配置 /kb-sync ----
-	writeFileSync(join(configDir, "kb-config.json"), "{}", "utf8");
+	writeFileSync(cfgFile, "{}", "utf8");
 	const cap6 = {};
 	await cmd("kb-sync").handler("", makeCtx(cap6));
 	check("未配置 /kb-sync 引导", cap6.notify?.text.includes("/kb-config"), cap6.notify?.text.slice(0, 50));
@@ -151,10 +131,6 @@ try {
 		/* 清理 bundle */
 	}
 	rmSync(tmp, { recursive: true, force: true });
-}
-
-function requireFs(dir, name) {
-	return readFileSync(join(dir, name), "utf8");
 }
 
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);

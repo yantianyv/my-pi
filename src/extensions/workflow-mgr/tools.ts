@@ -1,5 +1,5 @@
 /**
- * workflow-mgr 工具注册层：9 个 wf_* 工具的 schema 定义与注册。
+ * workflow-mgr 工具注册层：7 个 wf_* 工具的 schema 定义与注册。
  *
  * 从 index.ts 拆出：index 只负责组装（tools/commands/events），本模块持有
  * 全部工具注册逻辑与辅助（err/taskDetail/commitAndRefresh），共享 store 经
