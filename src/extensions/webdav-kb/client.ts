@@ -13,15 +13,14 @@
  *   不依赖服务器的 Depth: infinity 支持（各家实现差异大，国产盘经常不支持或返回异常）。
  * - 认证：Basic（base64(user:password)），覆盖绝大多数 WebDAV 服务（含 123 云盘）。
  * - 重试：网络错误 / 5xx / 429 自动重试（指数退避，默认 2 次）；4xx（除 429）不重试直接抛错。
- * - 代理：可选 HTTP 代理（CONNECT 隧道，复用 web-tool 的 makeProxyConnection 模式）——
+ * - 代理：可选 HTTP 代理（CONNECT 隧道，复用 shared/net 的 makeProxyConnection）——
  *   直连失败且判定为网络不可达时经代理重试一次；未配置代理则纯直连。
  * - 错误：统一抛 DavError（含 HTTP status / method / path），调用方按 status 分类处理。
  * - 时间：lastModified 保留服务器原文（HTTP date 串），比较由 sync 层做（优先 etag）。
  */
 import * as http from "node:http";
 import * as https from "node:https";
-import * as net from "node:net";
-import * as tls from "node:tls";
+import { makeProxyConnection, makeTimeoutSignal } from "../shared/net";
 
 const XML_HEADER = '<?xml version="1.0" encoding="utf-8"?>';
 const PROPFIND_BODY = `${XML_HEADER}<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`;
@@ -135,65 +134,6 @@ function isNetworkFailure(e: unknown, status?: number): boolean {
 	return false;
 }
 
-/** 创建带超时 + 外部取消监听的 AbortController（web-tool 同款） */
-function makeTimeoutSignal(timeoutMs: number, outer?: AbortSignal): { controller: AbortController; cleanup: () => void } {
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
-	const onAbort = () => controller.abort();
-	outer?.addEventListener("abort", onAbort);
-	return {
-		controller,
-		cleanup: () => {
-			clearTimeout(timer);
-			outer?.removeEventListener("abort", onAbort);
-		},
-	};
-}
-
-/** 经 HTTP 代理建 CONNECT 隧道，返回 createConnection 工厂（web-tool makeProxyConnection 同款） */
-function makeProxyConnection(targetUrl: string, proxyUrl: string) {
-	const target = new URL(targetUrl);
-	const proxy = new URL(proxyUrl);
-	if (proxy.protocol !== "http:") throw new Error(`仅支持 http:// 代理，收到 ${proxy.protocol}//`);
-	const targetPort = Number(target.port || (target.protocol === "https:" ? 443 : 80));
-	const proxyPort = Number(proxy.port || 80);
-	return (_opts: unknown, cb: (err: Error | null, socket?: any) => void): any => {
-		const socket = net.connect(proxyPort, proxy.hostname);
-		const onError = (e: Error) => {
-			socket.removeListener("data", onData);
-			cb(e);
-		};
-		socket.once("error", onError);
-		socket.once("connect", () => {
-			socket.write(`CONNECT ${target.hostname}:${targetPort} HTTP/1.1\r\nHost: ${target.hostname}:${targetPort}\r\n\r\n`);
-		});
-		let buf = "";
-		const onData = (chunk: Buffer) => {
-			buf += chunk.toString("latin1");
-			const idx = buf.indexOf("\r\n\r\n");
-			if (idx < 0) return;
-			socket.removeListener("data", onData);
-			socket.removeListener("error", onError);
-			const m = /^HTTP\/\d+\.\d+\s+(\d+)/.exec(buf.slice(0, idx));
-			if (!m || Number(m[1]) !== 200) {
-				socket.destroy();
-				cb(new Error(`代理 CONNECT 失败：${m ? `HTTP ${m[1]}` : "响应无法解析"}`));
-				return;
-			}
-			if (target.protocol === "https:") {
-				const tlsSocket = tls.connect({ socket, servername: target.hostname });
-				tlsSocket.once("secureConnect", () => cb(null, tlsSocket));
-				tlsSocket.once("error", (e) => {
-					socket.removeListener("error", onError);
-					cb(e);
-				});
-			} else {
-				cb(null, socket);
-			}
-		};
-		socket.on("data", onData);
-	};
-}
 
 /** 经代理发任意方法请求（CONNECT 隧道 + 完整 body 收发），返回统一响应 */
 function proxyRequest(

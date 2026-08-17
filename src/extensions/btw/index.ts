@@ -30,14 +30,7 @@
  */
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
-import {
-	formatContextWindow,
-	formatModelPrice,
-	findConfiguredModel,
-	listAvailableModels,
-	ModelSelectItem,
-	ModelSelectOverlay,
-} from "../shared/model-select";
+import { registerModelConfigCommand } from "../shared/model-select";
 import {
 	resolveBtwModel,
 	btwModelSetting,
@@ -174,86 +167,17 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ---- /btw-config：配置 btw 问答使用的模型 ----
-	pi.registerCommand("btw-config", {
-		description: "配置 btw 使用的模型：auto（默认，最便宜可用模型）、auto-not-free（忽略免费模型）或 provider/modelId；不带参数进入交互选择（含搜索）",
-		handler: async (args, ctx) => {
-			const arg = args?.trim() ?? "";
-
-			// 带参数：直接设置
-			if (arg) {
-				if (arg === "auto" || arg === "auto-not-free") {
-					setBtwModelSetting(arg);
-					ctx.ui.notify(`btw 模型已设为 ${arg}（${btwSettingLabel(arg)}）`, "info");
-					return;
-				}
-				const m = findConfiguredModel(ctx, arg);
-				if (m) {
-					setBtwModelSetting(`${m.provider}/${m.id}`);
-					ctx.ui.notify(`btw 模型已设为 ${btwModelSetting}`, "info");
-					return;
-				}
-				// 未命中：子串匹配到多个时列出部分候选，没有时给用法提示
-				const matches = listAvailableModels(ctx).filter((x) =>
-					`${x.provider}/${x.id}`.toLowerCase().includes(arg.toLowerCase()),
-				);
-				ctx.ui.notify(
-					matches.length > 0
-						? `「${arg}」匹配 ${matches.length} 个模型（${matches
-								.slice(0, 3)
-								.map((x) => `${x.provider}/${x.id}`)
-								.join("、")}${matches.length > 3 ? " 等" : ""}），请用完整 provider/modelId 指定`
-						: `未找到「${arg}」。用法：/btw-config auto、auto-not-free 或 /btw-config provider/modelId`,
-					"warning",
-				);
-				return;
-			}
-
-			// 无参数：打开可搜索模型选择器（非交互模式只展示当前设置与用法）
-			if (!ctx.hasUI) {
-				ctx.ui.notify(
-					`当前 btw 模型：${btwModelSetting}。用法：/btw-config auto、auto-not-free 或 /btw-config provider/modelId`,
-					"info",
-				);
-				return;
-			}
-			// 列表 = 两个 auto 策略 + 全部已认证可用模型（价格升序）；顶部搜索框实时过滤
-			const models = listAvailableModels(ctx);
-			const items: ModelSelectItem[] = [
-				{
-					label: "auto（默认）：最便宜可用模型，按价格顺序故障转移",
-					value: "auto",
-					search: "auto 默认",
-				},
-				{
-					label: "auto-not-free：忽略免费模型，最便宜的非免费模型按价格顺序故障转移",
-					value: "auto-not-free",
-					search: "auto-not-free 忽略免费",
-				},
-				...models.map((m) => ({
-					label: `${m.provider}/${m.id}（${formatModelPrice(m)} · ctx ${formatContextWindow(m.contextWindow)}）`,
-					value: `${m.provider}/${m.id}`,
-					search: `${m.provider}/${m.id} ${m.name ?? ""}`.toLowerCase(),
-				})),
-			];
-			const result = await ctx.ui.custom<string | null>(
-				(tui, theme, _kb, done) => new ModelSelectOverlay(tui, theme, items, btwModelSetting, done),
-				{
-					overlay: true,
-					overlayOptions: {
-						anchor: "right-center",
-						width: "58%",
-						minWidth: 58,
-						maxHeight: "90%",
-						margin: { right: 1 },
-					},
-				},
-			);
-			if (result) {
-				setBtwModelSetting(result);
-				ctx.ui.notify(`btw 模型已设为 ${result}（${btwSettingLabel(result)}）`, "info");
-			}
-		},
+	// ---- /btw-config：配置 btw 问答使用的模型（交互与 /explore-model 共用 shared 工厂） ----
+	registerModelConfigCommand(pi, {
+		command: "btw-config",
+		description:
+			"配置 btw 使用的模型：auto（默认，最便宜可用模型）、auto-not-free（忽略免费模型）或 provider/modelId；不带参数进入交互选择（含搜索）",
+		displayName: "btw 模型",
+		getSetting: () => btwModelSetting,
+		setSetting: setBtwModelSetting,
+		settingLabel: btwSettingLabel,
+		autoItemLabel: "auto（默认）：最便宜可用模型，按价格顺序故障转移",
+		autoNotFreeItemLabel: "auto-not-free：忽略免费模型，最便宜的非免费模型按价格顺序故障转移",
 	});
 
 	// 会话切换/关闭时中止后台流、清掉未发送的转交内容

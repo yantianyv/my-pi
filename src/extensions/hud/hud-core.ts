@@ -40,6 +40,7 @@ import { getCapabilities, hyperlink, truncateToWidth, visibleWidth } from "@eare
 import { execFile } from "child_process";
 import { promisify } from "util";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { clearStatusTimers, setStatusWithTTL } from "../shared/status";
 
 const execFileAsync = promisify(execFile);
 
@@ -159,6 +160,10 @@ export default async function (pi: ExtensionAPI) {
 		"token-saver": { color: "muted", priority: 70 }, // 节省量反馈
 		"workflow-mgr": { color: "accent", priority: 72 }, // 人机协作任务面板摘要（workflow-mgr）
 		"model-switch": { color: "accent", priority: 70 }, // 模型切换
+		"kb-sync": { color: "accent", priority: 76 }, // 知识库同步进度（webdav-kb）
+		"kb-test": { color: "accent", priority: 65 }, // 知识库连通测试（webdav-kb）
+		"kb-vault": { color: "muted", priority: 62 }, // vault 解锁/锁定状态（webdav-kb）
+		"btw-transfer": { color: "muted", priority: 60 }, // btw 问答已附带提示（btw）
 	};
 	/** 检测 ctx 是否仍有效：session 替换 / reload 后旧 ctx 的所有 getter 都会抛 stale 错误。 */
 	function ctxAlive(ctx: ExtensionContext): boolean {
@@ -168,28 +173,6 @@ export default async function (pi: ExtensionAPI) {
 		} catch {
 			return false;
 		}
-	}
-	/** 短时状态推送 + TTL 自动清除（hud 内部自用；各扩展的 TTL 由扩展自己管）。 */
-	const statusClearTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	function pushStatus(ctx: ExtensionContext, key: string, text: string, ttlMs: number) {
-		try {
-			ctx.ui.setStatus(key, text);
-		} catch {
-			// 旧 ctx 已失效（reload / session 替换后异步续跑才推状态），放弃推送避免 uncaughtException
-			return;
-		}
-		const old = statusClearTimers.get(key);
-		if (old) clearTimeout(old);
-		statusClearTimers.set(
-			key,
-			setTimeout(() => {
-				try {
-					ctx.ui.setStatus(key, undefined);
-				} catch {
-					// 旧 ctx 已失效（reload / session 替换后 TTL 才到期），吞掉避免 uncaughtException
-				}
-			}, ttlMs),
-		);
 	}
 	let lastBalanceError = ""; // 上次余额查询错误（变化时才推送动态区警告，防刷屏）
 	let balance: BalanceState = { loading: false };
@@ -257,7 +240,7 @@ export default async function (pi: ExtensionAPI) {
 			const msg = err instanceof Error ? err.message : String(err);
 			if (lastBalanceError !== msg) {
 				lastBalanceError = msg;
-				pushStatus(ctx, "balance-error", "⚠ 余额查询失败", 15_000);
+				setStatusWithTTL(ctx, "balance-error", "⚠ 余额查询失败", 15_000);
 			}
 		} finally {
 			inflight = false;
@@ -287,7 +270,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 	}
 
-	// （setDynamic/clearDynamic 已随动态区迁移移除：短时消息统一走 ctx.ui.setStatus + pushStatus）
+	// （setDynamic/clearDynamic 已随动态区迁移移除：短时消息统一走 ctx.ui.setStatus + setStatusWithTTL）
 
 	/** 余额行的纯文本描述（用于 /balance 的 notify）。 */
 	function describeBalance(): string {
@@ -662,17 +645,23 @@ export default async function (pi: ExtensionAPI) {
 		balance = { loading: false }; // 供应商可能变化，丢弃旧缓存
 		tuiRef?.requestRender();
 		// 动态区提示模型切换（3 秒 TTL 自动消失）
-		if (ctx.model?.id) pushStatus(ctx, "model-switch", `⇄ ${ctx.model.id}`, 3_000);
+		if (ctx.model?.id) setStatusWithTTL(ctx, "model-switch", `⇄ ${ctx.model.id}`, 3_000);
 		if (footerInstalled) void refreshBalance(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
-		for (const t of statusClearTimers.values()) clearTimeout(t);
-		statusClearTimers.clear();
+		clearStatusTimers();
+		if (refreshTimer) {
+			clearInterval(refreshTimer);
+			refreshTimer = undefined;
+		}
 		if (gitTimer) {
 			clearInterval(gitTimer);
 			gitTimer = undefined;
 		}
+		// 存在性标志复位：shutdown 后 hud 不再活跃（installFooter 会重新置 true），
+		// 防止 workflow-mgr 等下游在非 dispose 路径的 session 替换后误判 hud 仍可用
+		(globalThis as Record<string, unknown>).__PI_HUD_ACTIVE__ = false;
 	});
 
 	// ---- 命令 ----

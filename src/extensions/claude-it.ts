@@ -22,10 +22,9 @@ import {
 	runAgentLoop,
 	type AgentLoopConfig,
 	type AgentMessage,
-	type StreamFn,
 } from "@earendil-works/pi-agent-core";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
-import type { Message, Model } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
+import { convertToLlm, createPiStreamFn } from "./shared/agent";
 import { Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -142,13 +141,6 @@ function buildClaudeMergePrompt(): string {
 // init 子代理（独立上下文，后台运行）
 // ---------------------------------------------------------------------------
 
-/** 标准消息直通转换：子代理会话里只有 user/assistant/toolResult */
-function convertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.filter(
-		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
-	) as Message[];
-}
-
 function buildInitSystemPrompt(cwd: string): string {
 	// 固定指令在前、cwd 在后，利于 provider 端 prompt 缓存命中
 	return [
@@ -179,16 +171,7 @@ async function runInitAgent(
 		createBashTool(ctx.cwd),
 	];
 
-	// 每次 LLM 调用前从 pi 的模型注册表取最新认证（兼容 OAuth 刷新）
-	const streamFn: StreamFn = async (m, c, options) => {
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
-		if (!auth.ok) throw new Error(`认证失败：${auth.error}`);
-		return streamSimple(m, c, {
-			...options,
-			apiKey: auth.apiKey ?? options?.apiKey,
-			headers: { ...auth.headers, ...options?.headers },
-		});
-	};
+	const streamFn = createPiStreamFn(ctx);
 
 	let turns = 0;
 	const config: AgentLoopConfig = {

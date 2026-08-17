@@ -25,11 +25,11 @@ import {
 	proxyFetch,
 	getProxyUrl,
 	isWalledFailure,
-	makeTimeoutSignal,
 	resBytes,
 	httpStatusHint,
 	decodeBody,
 } from "./http";
+import { makeTimeoutSignal } from "../shared/net";
 
 /** domino 的 createWindow（any 桥接，见上方 @ts-ignore 说明） */
 const createWindow = _createWindow as (html?: string) => any;
@@ -122,6 +122,7 @@ async function curlFetch(url: string, timeoutMs: number, outerSignal?: AbortSign
 		"-sS", "-f", "-L", "--max-redirs", "10",
 		"--max-time", String(Math.max(5, Math.ceil(timeoutMs / 1000))),
 		"--connect-timeout", "5",
+		"--compressed", // 自动声明 Accept-Encoding 并解码 gzip/br/deflate，避免拿到压缩字节流
 		"-A", UA_POOL[0],
 		"-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 	];

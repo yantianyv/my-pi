@@ -21,23 +21,18 @@ import {
 	runAgentLoop,
 	type AgentLoopConfig,
 	type AgentMessage,
-	type StreamFn,
 } from "@earendil-works/pi-agent-core";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
-import type { Message } from "@earendil-works/pi-ai";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Type } from "typebox";
 import {
 	type AnyModel,
 	findConfiguredModel,
-	formatContextWindow,
-	formatModelPrice,
 	listAvailableModels,
-	ModelSelectItem,
-	ModelSelectOverlay,
 	modelSettingLabel,
+	registerModelConfigCommand,
 } from "./shared/model-select";
+import { convertToLlm, createPiStreamFn } from "./shared/agent";
 import { isModelConfig, loadJsonConfig, saveJsonConfig } from "./shared/config";
 import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
 
@@ -138,13 +133,6 @@ function buildSystemPrompt(cwd: string): string {
 	].join("\n");
 }
 
-/** 标准消息直通转换：子代理会话里只有 user/assistant/toolResult，无需特殊处理 */
-function convertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.filter(
-		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
-	) as Message[];
-}
-
 function linkSignals(
 	parent: AbortSignal | undefined,
 	timeoutMs: number,
@@ -183,17 +171,7 @@ async function runSubAgent(
 	try {
 		const tools = createReadOnlyTools(ctx.cwd);
 
-		// 每次 LLM 调用前从 pi 的模型注册表取最新认证（兼容 OAuth 刷新），
-		// 请求本身由 pi-ai 的 provider 实现发出——即「pi 中登录好的 API」。
-		const streamFn: StreamFn = async (m, c, options) => {
-			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
-			if (!auth.ok) throw new Error(`认证失败：${auth.error}`);
-			return streamSimple(m, c, {
-				...options,
-				apiKey: auth.apiKey ?? options?.apiKey,
-				headers: { ...auth.headers, ...options?.headers },
-			});
-		};
+		const streamFn = createPiStreamFn(ctx);
 
 		const config: AgentLoopConfig = {
 			model,
@@ -346,87 +324,17 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// /explore-model：配置 explore 子代理使用的模型（与 /btw-config 同款交互）
+	// /explore-model：配置 explore 子代理使用的模型（交互与 /btw-config 共用 shared 工厂）
 	//   带参数：auto / auto-not-free / provider/modelId 直接设置；不带参数：打开可搜索选择器
-	pi.registerCommand("explore-model", {
+	registerModelConfigCommand(pi, {
+		command: "explore-model",
 		description:
 			"配置 explore 子模型：auto（默认，优先指定模型否则最便宜）、auto-not-free（忽略免费模型）或 provider/modelId；不带参数进入交互选择（含搜索）",
-		handler: async (args, ctx) => {
-			const arg = args?.trim() ?? "";
-
-			// 带参数：直接设置
-			if (arg) {
-				if (arg === "auto" || arg === "auto-not-free") {
-					setExploreModelSetting(arg);
-					ctx.ui.notify(`explore 子模型已设为 ${arg}（${exploreSettingLabel(arg)}）`, "info");
-					return;
-				}
-				const m = findConfiguredModel(ctx, arg);
-				if (m) {
-					setExploreModelSetting(`${m.provider}/${m.id}`);
-					ctx.ui.notify(`explore 子模型已设为 ${exploreModelSetting}`, "info");
-					return;
-				}
-				// 未命中：子串匹配到多个时列出部分候选，没有时给用法提示
-				const matches = listAvailableModels(ctx).filter((x) =>
-					`${x.provider}/${x.id}`.toLowerCase().includes(arg.toLowerCase()),
-				);
-				ctx.ui.notify(
-					matches.length > 0
-						? `「${arg}」匹配 ${matches.length} 个模型（${matches
-								.slice(0, 3)
-								.map((x) => `${x.provider}/${x.id}`)
-								.join("、")}${matches.length > 3 ? " 等" : ""}），请用完整 provider/modelId 指定`
-						: `未找到「${arg}」。用法：/explore-model auto、auto-not-free 或 /explore-model provider/modelId`,
-					"warning",
-				);
-				return;
-			}
-
-			// 无参数：打开可搜索模型选择器（非交互模式只展示当前设置与用法）
-			if (!ctx.hasUI) {
-				ctx.ui.notify(
-					`当前 explore 子模型：${exploreModelSetting}。用法：/explore-model auto、auto-not-free 或 /explore-model provider/modelId`,
-					"info",
-				);
-				return;
-			}
-			// 列表 = 两个 auto 策略 + 全部已认证可用模型（价格升序）；顶部搜索框实时过滤
-			const models = listAvailableModels(ctx);
-			const items: ModelSelectItem[] = [
-				{
-					label: "auto（默认）：优先指定模型（deepseek/deepseek-v4-flash），不可用则最便宜",
-					value: "auto",
-					search: "auto 默认",
-				},
-				{
-					label: "auto-not-free：忽略免费模型，最便宜的非免费模型",
-					value: "auto-not-free",
-					search: "auto-not-free 忽略免费",
-				},
-				...models.map((m) => ({
-					label: `${m.provider}/${m.id}（${formatModelPrice(m)} · ctx ${formatContextWindow(m.contextWindow)}）`,
-					value: `${m.provider}/${m.id}`,
-					search: `${m.provider}/${m.id} ${m.name ?? ""}`.toLowerCase(),
-				})),
-			];
-			const result = await ctx.ui.custom<string | null>(
-				(tui, theme, _kb, done) => new ModelSelectOverlay(tui, theme, items, exploreModelSetting, done),
-				{
-					overlay: true,
-					overlayOptions: {
-						anchor: "right-center",
-						width: "58%",
-						minWidth: 58,
-						maxHeight: "90%",
-						margin: { right: 1 },
-					},
-				},
-			);
-			if (result) {
-				setExploreModelSetting(result);
-				ctx.ui.notify(`explore 子模型已设为 ${result}（${exploreSettingLabel(result)}）`, "info");
-			}
-		},
+		displayName: "explore 子模型",
+		getSetting: () => exploreModelSetting,
+		setSetting: setExploreModelSetting,
+		settingLabel: exploreSettingLabel,
+		autoItemLabel: "auto（默认）：优先指定模型（deepseek/deepseek-v4-flash），不可用则最便宜",
+		autoNotFreeItemLabel: "auto-not-free：忽略免费模型，最便宜的非免费模型",
 	});
 }

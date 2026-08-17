@@ -11,7 +11,7 @@
  *   查找已认证模型（负数价格=动态定价，视为价格未知排最后）；
  * - formatModelPrice / formatContextWindow / modelSettingLabel：展示文案。
  */
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { createBoxRenderer, editInput, renderScrollingInput } from "./ui";
@@ -242,4 +242,103 @@ export class ModelSelectOverlay {
 
 	invalidate(): void {}
 	dispose(): void {}
+}
+
+// ---------------------------------------------------------------------------
+// 模型配置命令工厂（/btw-config 与 /explore-model 的同构交互收敛于此）
+// ---------------------------------------------------------------------------
+
+export interface ModelConfigCommandOptions {
+	/** 命令名（如 "btw-config"） */
+	command: string;
+	/** 命令描述 */
+	description: string;
+	/** notify 文案中的名称（如 "btw 模型" / "explore 子模型"） */
+	displayName: string;
+	getSetting: () => string;
+	/** 设置并持久化（实现方保证所有设置入口统一走这里） */
+	setSetting: (value: string) => void;
+	/** 设置值的人话说明（notify 用） */
+	settingLabel: (setting: string) => string;
+	/** 选择器中 auto / auto-not-free 两个策略项的文案 */
+	autoItemLabel: string;
+	autoNotFreeItemLabel: string;
+}
+
+/**
+ * 注册「模型配置命令」：带参数直接设置（auto / auto-not-free / provider/modelId，
+ * 未命中时子串匹配给候选），无参数打开可搜索 ModelSelectOverlay。
+ * /btw-config 与 /explore-model 原先各自维护约 80 行同构逻辑，现共用本工厂。
+ */
+export function registerModelConfigCommand(pi: ExtensionAPI, opts: ModelConfigCommandOptions): void {
+	pi.registerCommand(opts.command, {
+		description: opts.description,
+		handler: async (args, ctx) => {
+			const arg = args?.trim() ?? "";
+			const usage = `用法：/${opts.command} auto、auto-not-free 或 /${opts.command} provider/modelId`;
+
+			// 带参数：直接设置
+			if (arg) {
+				if (arg === "auto" || arg === "auto-not-free") {
+					opts.setSetting(arg);
+					ctx.ui.notify(`${opts.displayName}已设为 ${arg}（${opts.settingLabel(arg)}）`, "info");
+					return;
+				}
+				const m = findConfiguredModel(ctx, arg);
+				if (m) {
+					opts.setSetting(`${m.provider}/${m.id}`);
+					ctx.ui.notify(`${opts.displayName}已设为 ${opts.getSetting()}`, "info");
+					return;
+				}
+				// 未命中：子串匹配到多个时列出部分候选，没有时给用法提示
+				const matches = listAvailableModels(ctx).filter((x) =>
+					`${x.provider}/${x.id}`.toLowerCase().includes(arg.toLowerCase()),
+				);
+				ctx.ui.notify(
+					matches.length > 0
+						? `「${arg}」匹配 ${matches.length} 个模型（${matches
+								.slice(0, 3)
+								.map((x) => `${x.provider}/${x.id}`)
+								.join("、")}${matches.length > 3 ? " 等" : ""}），请用完整 provider/modelId 指定`
+						: `未找到「${arg}」。${usage}`,
+					"warning",
+				);
+				return;
+			}
+
+			// 无参数：打开可搜索模型选择器（非交互模式只展示当前设置与用法）
+			if (!ctx.hasUI) {
+				ctx.ui.notify(`当前${opts.displayName}：${opts.getSetting()}。${usage}`, "info");
+				return;
+			}
+			// 列表 = 两个 auto 策略 + 全部已认证可用模型（价格升序）；顶部搜索框实时过滤
+			const models = listAvailableModels(ctx);
+			const items: ModelSelectItem[] = [
+				{ label: opts.autoItemLabel, value: "auto", search: "auto 默认" },
+				{ label: opts.autoNotFreeItemLabel, value: "auto-not-free", search: "auto-not-free 忽略免费" },
+				...models.map((m) => ({
+					label: `${m.provider}/${m.id}（${formatModelPrice(m)} · ctx ${formatContextWindow(m.contextWindow)}）`,
+					value: `${m.provider}/${m.id}`,
+					search: `${m.provider}/${m.id} ${m.name ?? ""}`.toLowerCase(),
+				})),
+			];
+			const result = await ctx.ui.custom<string | null>(
+				(tui, theme, _kb, done) => new ModelSelectOverlay(tui, theme, items, opts.getSetting(), done),
+				{
+					overlay: true,
+					overlayOptions: {
+						anchor: "right-center",
+						width: "58%",
+						minWidth: 58,
+						maxHeight: "90%",
+						margin: { right: 1 },
+					},
+				},
+			);
+			if (result) {
+				opts.setSetting(result);
+				ctx.ui.notify(`${opts.displayName}已设为 ${result}（${opts.settingLabel(result)}）`, "info");
+			}
+		},
+	});
 }

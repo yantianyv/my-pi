@@ -15,10 +15,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as http from "node:http";
 import * as https from "node:https";
-import * as net from "node:net";
-import * as tls from "node:tls";
 import * as zlib from "node:zlib";
 import { loadJsonConfig, saveJsonConfig } from "../shared/config";
+import { makeProxyConnection, makeTimeoutSignal } from "../shared/net";
 
 // ---------------------------------------------------------------------------
 // 可调配置（改这里后 node install.js 重装生效）
@@ -103,57 +102,6 @@ export function validateProxy(v: string): boolean {
 	}
 }
 
-/** 为 http/https.request 提供 createConnection：经 HTTP 代理建 CONNECT 隧道（TLS 目标再套 tls） */
-function makeProxyConnection(
-	targetUrl: string,
-	proxyUrl: string,
-): (opts: any, cb: (err: Error | null, socket?: any) => void) => undefined {
-	const target = new URL(targetUrl);
-	const proxy = new URL(proxyUrl);
-	if (proxy.protocol !== "http:") throw new Error(`仅支持 http:// 代理，收到 ${proxy.protocol}//`);
-	const targetPort = Number(target.port || (target.protocol === "https:" ? 443 : 80));
-	const proxyPort = Number(proxy.port || 80);
-	return (_opts, cb) => {
-		const socket = net.connect(proxyPort, proxy.hostname);
-		const onError = (e: Error) => {
-			socket.removeListener("data", onData);
-			cb(e);
-		};
-		socket.once("error", onError);
-		socket.once("connect", () => {
-			socket.write(`CONNECT ${target.hostname}:${targetPort} HTTP/1.1\r\nHost: ${target.hostname}:${targetPort}\r\n\r\n`);
-		});
-		let buf = "";
-		const onData = (chunk: Buffer) => {
-			buf += chunk.toString("latin1");
-			const idx = buf.indexOf("\r\n\r\n");
-			if (idx < 0) return;
-			socket.removeListener("data", onData);
-			socket.removeListener("error", onError);
-			const head = buf.slice(0, idx);
-			const m = /^HTTP\/\d+\.\d+\s+(\d+)/.exec(head);
-			if (!m || Number(m[1]) !== 200) {
-				socket.destroy();
-				cb(new Error(`代理 CONNECT 失败：${m ? `HTTP ${m[1]}` : "响应无法解析"}`));
-				return undefined;
-			}
-			if (target.protocol === "https:") {
-				const tlsSocket = tls.connect({ socket, servername: target.hostname });
-				tlsSocket.once("secureConnect", () => cb(null, tlsSocket));
-				tlsSocket.once("error", (e) => {
-					socket.removeListener("error", onError);
-					cb(e);
-				});
-			} else {
-				cb(null, socket);
-			}
-			return undefined;
-		};
-		socket.on("data", onData);
-		return undefined;
-	};
-}
-
 /** 判断失败是否属于“被墙/网络不可达”类，适合触发代理重试 */
 export function isWalledFailure(e: unknown, httpStatus?: number): boolean {
 	if (httpStatus != null && httpStatus > 0) {
@@ -182,19 +130,6 @@ export function isWalledFailure(e: unknown, httpStatus?: number): boolean {
 	return false;
 }
 
-/** 创建本地超时控制器，并监听外部取消信号 */
-export function makeTimeoutSignal(timeoutMs: number, outerSignal?: AbortSignal): { controller: AbortController; cleanup: () => void } {
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
-	const onAbort = () => controller.abort();
-	outerSignal?.addEventListener("abort", onAbort);
-	const cleanup = () => {
-		clearTimeout(timer);
-		outerSignal?.removeEventListener("abort", onAbort);
-	};
-	return { controller, cleanup };
-}
-
 /** 读取响应体为 Uint8Array（兼容 global fetch 的 ArrayBuffer 与 Node http/https 的 Buffer） */
 export async function resBytes(res: FRes): Promise<Uint8Array> {
 	const raw = await res.arrayBuffer();
@@ -215,7 +150,7 @@ export async function directFetch(url: string, init: any, timeoutMs: number, out
 function nodeHttpRequest(
 	targetUrl: string,
 	headers: Record<string, string>,
-	createConnection: (opts: any, cb: (err: Error | null, socket?: any) => void) => undefined,
+	createConnection: (opts: unknown, cb: (err: Error | null, socket?: any) => void) => undefined,
 	signal: AbortSignal,
 ): Promise<FRes> {
 	return new Promise((resolve, reject) => {

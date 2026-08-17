@@ -12,7 +12,7 @@
  *
  * 路径：.pi/workflow/{workflow,state,config}.json（项目级、跨会话、可 git 审查）。
  */
-import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadJsonConfig, saveJsonConfig } from "../shared/config";
@@ -359,8 +359,17 @@ export class WorkflowStore {
 		const ts = new Date().toISOString().replace(/[:.]/g, "-");
 		const dir = join(base, `${ts}-${name}`);
 		mkdirSync(dir, { recursive: true });
+		// rename 跨文件系统（如镜像目录与工作流目录不同盘符/分区）会抛 EXDEV，退化为复制+删除
+		const moveFile = (src: string, dest: string) => {
+			try {
+				renameSync(src, dest);
+			} catch {
+				copyFileSync(src, dest);
+				unlinkSync(src);
+			}
+		};
 		for (const p of [workflowPath(this.cwd), statePath(this.cwd), panelConfigPath(this.cwd)]) {
-			if (existsSync(p)) renameSync(p, join(dir, basename(p)));
+			if (existsSync(p)) moveFile(p, join(dir, basename(p)));
 		}
 		this.wf = null;
 		this.derived = null;

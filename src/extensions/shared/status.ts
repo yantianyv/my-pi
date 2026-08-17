@@ -23,7 +23,12 @@ export function setStatusWithTTL(
 	text: string | undefined,
 	ttlMs: number,
 ): void {
-	ctx.ui.setStatus(key, text);
+	try {
+		ctx.ui.setStatus(key, text);
+	} catch {
+		// 旧 ctx 已失效（异步续跑/事件延迟触达），放弃推送避免 uncaughtException
+		return;
+	}
 	const old = timers.get(key);
 	if (old) clearTimeout(old);
 	if (text === undefined) {
