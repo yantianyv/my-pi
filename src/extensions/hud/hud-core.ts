@@ -205,21 +205,6 @@ export default async function (pi: ExtensionAPI) {
 		if (h < 24) return rm ? `${h}h${rm}m` : `${h}h`;
 		return `${Math.floor(h / 24)}d`;
 	};
-	// 涨价倒计时中文格式（向上取整到分，到点才消失）：>1 天 → “3天5时”，>1 时 → “5时32分”，其余 → “42分”
-	const fmtCountdown = (ms: number): string => {
-		const totalMin = Math.ceil(ms / 60_000);
-		if (totalMin >= 60 * 24) {
-			const d = Math.floor(totalMin / (60 * 24));
-			const h = Math.floor((totalMin % (60 * 24)) / 60);
-			return h > 0 ? `${d}天${h}时` : `${d}天`;
-		}
-		if (totalMin >= 60) {
-			const h = Math.floor(totalMin / 60);
-			const m = totalMin % 60;
-			return m > 0 ? `${h}时${m}分` : `${h}时`;
-		}
-		return `${totalMin}分`;
-	};
 
 	/** 拉取当前供应商的余额（含节流与并发保护）。 */
 	async function refreshBalance(ctx: ExtensionContext) {
@@ -608,18 +593,11 @@ export default async function (pi: ExtensionAPI) {
 					// ---- 行 3：账户（余额 / plan）+ 消耗统计 ----
 					// 计费徽章（挂余额行末尾）：
 					// - DeepSeek：高峰/低峰时段标签（北京时间 9:00-12:00 / 14:00-18:00，高峰 = warning 橙黄、低峰 = success 绿）
-					//   新旧价均带峰谷，标签恒显示；旧价（新峰谷价生效前）期间追加涨价倒计时，两者共存
 					// - MiMo Token Plan：夜间优惠时段（北京时间 0:00-8:00），低峰 = success 绿（0.8x 消耗）、高峰 = 正常
 					const peakTag = (() => {
 						if (model?.provider === "deepseek" && costMod) {
 							const isPeak = costMod.isDeepSeekPeakHour(Date.now());
-							const tag = theme.fg(isPeak ? "warning" : "success", isPeak ? "高峰" : "低峰");
-							const countdown = costMod.deepseekPriceCountdownMs(Date.now());
-							const cd =
-								countdown != null
-									? `${theme.fg("dim", " ・ ")}${theme.fg("warning", `${fmtCountdown(countdown)}后涨价`)}`
-									: "";
-							return `${theme.fg("dim", " ・ ")}${tag}${cd}`;
+							return `${theme.fg("dim", " ・ ")}${theme.fg(isPeak ? "warning" : "success", isPeak ? "高峰" : "低峰")}`;
 						}
 						if (model?.provider === "xiaomi-token-plan-cn" && costMod) {
 							const isOffpeak = costMod.isMimoOffpeakHour(Date.now());
