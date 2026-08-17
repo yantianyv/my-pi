@@ -16,7 +16,6 @@ import {
 	AnyModel,
 	findConfiguredModel,
 	listAvailableModels,
-	modelSettingLabel,
 } from "../shared/model-select";
 import { isModelConfig, loadJsonConfig, saveJsonConfig } from "../shared/config";
 
@@ -88,14 +87,6 @@ export const BTW_SYSTEM_PROMPT = [
 // ---------------------------------------------------------------------------
 // btw 模型设置
 // ---------------------------------------------------------------------------
-
-/** btw 模型设置的人话说明（复用 shared modelSettingLabel，带 btw 的 auto 策略文案） */
-export function btwSettingLabel(setting: string): string {
-	return modelSettingLabel(setting, {
-		auto: "最便宜可用模型，按价格顺序故障转移",
-		autoNotFree: "忽略免费模型，最便宜的非免费模型按价格顺序故障转移",
-	});
-}
 
 /** 当前 btw 模型设置：'auto'（默认）/ 'auto-not-free'（忽略免费模型）或 'provider/modelId'；/btw-config 修改并持久化 */
 export let btwModelSetting: string = loadBtwModelSetting();

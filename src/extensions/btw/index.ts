@@ -35,7 +35,6 @@ import {
 	resolveBtwModel,
 	btwModelSetting,
 	setBtwModelSetting,
-	btwSettingLabel,
 	BTW_TIMEOUT_MS,
 	BTW_OVERLAY_WIDTH,
 	BTW_OVERLAY_MIN_WIDTH,
@@ -167,7 +166,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ---- /btw-config：配置 btw 问答使用的模型（交互与 /explore-model 共用 shared 工厂） ----
+	// ---- /btw-config：配置 btw 问答使用的模型（交互与 /explore-config 共用 shared 工厂） ----
 	registerModelConfigCommand(pi, {
 		command: "btw-config",
 		description:
@@ -175,9 +174,6 @@ export default function (pi: ExtensionAPI) {
 		displayName: "btw 模型",
 		getSetting: () => btwModelSetting,
 		setSetting: setBtwModelSetting,
-		settingLabel: btwSettingLabel,
-		autoItemLabel: "auto（默认）：最便宜可用模型，按价格顺序故障转移",
-		autoNotFreeItemLabel: "auto-not-free：忽略免费模型，最便宜的非免费模型按价格顺序故障转移",
 	});
 
 	// 会话切换/关闭时中止后台流、清掉未发送的转交内容

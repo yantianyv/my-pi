@@ -9,8 +9,8 @@
  * - 子代理跑 pi-agent-core 的 agentLoop（官方 agent 循环，工具自主调用）；
  * - 模型调用走 pi 已登录的通道：认证来自 ctx.modelRegistry.getApiKeyAndHeaders()，
  *   请求由 pi-ai 自己的 provider 实现发出（streamSimple），支持任意 API 类型；
- * - 子模型选择：默认 auto（优先 PREFERRED_MODELS，兜底选「已认证且价格最低」的可用模型），
- *   /explore-model 可配置：auto-not-free（忽略免费模型）或固定 provider/modelId；
+ * - 子模型选择：默认 auto（最便宜可用模型，与 /btw-config 的 auto 语义统一），
+ *   /explore-config 可配置：auto-not-free（忽略免费模型）或固定 provider/modelId；
  *   无参数进入可搜索模型选择器（↑↓ 选择、Enter 确认、Esc 取消，顶部搜索框实时过滤、
  *   当前项 ✓ 标记），设置持久化到 ~/.pi/agent/explore-model.json；
  * - 预算保护：单任务 TASK_TIMEOUT_MS 超时、跟随主 agent abort。
@@ -29,7 +29,6 @@ import {
 	type AnyModel,
 	findConfiguredModel,
 	listAvailableModels,
-	modelSettingLabel,
 	registerModelConfigCommand,
 } from "./shared/model-select";
 import { convertToLlm, createPiStreamFn } from "./shared/agent";
@@ -40,12 +39,9 @@ import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
 // 可调配置
 // ---------------------------------------------------------------------------
 
-/** 优先选用的子模型（provider/modelId），按顺序尝试；都不可用时自动选最便宜的可用模型 */
-const PREFERRED_MODELS: Array<[string, string]> = [["deepseek", "deepseek-v4-flash"]];
-
-/** explore 模型设置持久化文件（agent 目录下，/explore-model 修改后写入，/reload 重载扩展后恢复） */
+/** explore 模型设置持久化文件（agent 目录下，/explore-config 修改后写入，/reload 重载扩展后恢复） */
 const EXPLORE_MODEL_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "explore-model.json");
-/** 默认设置：auto = 优先 PREFERRED_MODELS，不可用则选最便宜可用模型 */
+/** 默认设置：auto = 最便宜可用模型（与 /btw-config 的 auto 语义一致，不搞特殊优先） */
 const EXPLORE_DEFAULT_MODEL = "auto";
 
 /** 单次最多并行派出的子代理数：2~16（schema minItems=2 保底下限，超出 16 截断并在结果里说明） */
@@ -59,7 +55,7 @@ const TASK_TIMEOUT_MS = 15 * 60_000;
 // 子模型选择
 // ---------------------------------------------------------------------------
 
-/** 当前 explore 模型设置：'auto'（默认）/ 'auto-not-free'（忽略免费模型）或 'provider/modelId'；/explore-model 修改并持久化 */
+/** 当前 explore 模型设置：'auto'（默认）/ 'auto-not-free'（忽略免费模型）或 'provider/modelId'；/explore-config 修改并持久化 */
 let exploreModelSetting: string = loadExploreModelSetting();
 
 /** 读取持久化的 explore 模型设置；文件缺失/损坏/内容非法时返回默认 auto（复用 shared/config 通用工具） */
@@ -72,18 +68,10 @@ function saveExploreModelSetting(value: string): void {
 	saveJsonConfig(EXPLORE_MODEL_CONFIG_FILE, { model: value });
 }
 
-/** 设置 explore 模型并持久化（/explore-model 所有设置入口统一走这里，避免漏存） */
+/** 设置 explore 模型并持久化（/explore-config 所有设置入口统一走这里，避免漏存） */
 function setExploreModelSetting(value: string): void {
 	exploreModelSetting = value;
 	saveExploreModelSetting(value);
-}
-
-/** explore 模型设置的人话说明（复用 shared modelSettingLabel，带 explore 的 auto 策略文案） */
-function exploreSettingLabel(setting: string): string {
-	return modelSettingLabel(setting, {
-		auto: "优先指定模型，不可用则最便宜可用模型",
-		autoNotFree: "忽略免费模型，最便宜的非免费模型",
-	});
 }
 
 /** 已认证且价格最低的可用模型（excludeFree 时忽略免费模型） */
@@ -93,12 +81,8 @@ function cheapestAvailable(ctx: ExtensionContext, opts?: { excludeFree?: boolean
 
 /** 解析当前 explore 模型设置；固定模型不可用（认证被移除等）时静默回退 auto，保证探索尽量可用 */
 function pickExploreModel(ctx: ExtensionContext): AnyModel | undefined {
-	const reg = ctx.modelRegistry;
 	if (exploreModelSetting === "auto") {
-		for (const [provider, modelId] of PREFERRED_MODELS) {
-			const m = reg.find(provider, modelId);
-			if (m && reg.hasConfiguredAuth(m)) return m;
-		}
+		// auto 统一语义：最便宜可用模型（与 /btw-config 一致，不搞特殊优先）
 		return cheapestAvailable(ctx);
 	}
 	if (exploreModelSetting === "auto-not-free") {
@@ -324,17 +308,15 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// /explore-model：配置 explore 子代理使用的模型（交互与 /btw-config 共用 shared 工厂）
+	// /explore-config：配置 explore 子代理使用的模型（交互与 /btw-config 共用 shared 工厂；
+	//   0.5 统一：命令名对齐 -config 后缀，auto 语义统一为最便宜可用模型，不搞特殊优先）
 	//   带参数：auto / auto-not-free / provider/modelId 直接设置；不带参数：打开可搜索选择器
 	registerModelConfigCommand(pi, {
-		command: "explore-model",
+		command: "explore-config",
 		description:
-			"配置 explore 子模型：auto（默认，优先指定模型否则最便宜）、auto-not-free（忽略免费模型）或 provider/modelId；不带参数进入交互选择（含搜索）",
+			"配置 explore 子模型：auto（默认，最便宜可用模型）、auto-not-free（忽略免费模型）或 provider/modelId；不带参数进入交互选择（含搜索）",
 		displayName: "explore 子模型",
 		getSetting: () => exploreModelSetting,
 		setSetting: setExploreModelSetting,
-		settingLabel: exploreSettingLabel,
-		autoItemLabel: "auto（默认）：优先指定模型（deepseek/deepseek-v4-flash），不可用则最便宜",
-		autoNotFreeItemLabel: "auto-not-free：忽略免费模型，最便宜的非免费模型",
 	});
 }
