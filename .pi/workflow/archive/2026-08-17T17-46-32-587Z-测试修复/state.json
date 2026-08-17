@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-17T17:45:11.256Z",
-  "currentTaskId": "4.1",
+  "updatedAt": "2026-08-17T17:46:32.586Z",
+  "currentTaskId": null,
   "tasks": {
     "0.1": {
       "status": "done",
@@ -56,8 +56,8 @@
       "doneAt": "2026-08-17T17:45:11.256Z"
     },
     "4.1": {
-      "status": "doing",
-      "startedAt": "2026-08-17T17:45:11.256Z"
+      "status": "done",
+      "doneAt": "2026-08-17T17:46:24.796Z"
     }
   },
   "milestones": {},
@@ -230,6 +230,13 @@
       "event": "task_start",
       "taskId": "4.1",
       "msg": "全量验证：tsc + build + 全部测试 + install"
+    },
+    {
+      "ts": "2026-08-17T17:46:24.796Z",
+      "event": "task_done",
+      "taskId": "4.1",
+      "msg": "全量验证：tsc + build + 全部测试 + install"
     }
-  ]
+  ],
+  "archiveStatus": "全部完成：4 处测试修复 + 9 项绿色区域修复，12/12 测试绿，已安装已提交（fe9af0d）"
 }
