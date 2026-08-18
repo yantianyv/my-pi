@@ -39,10 +39,12 @@ const EXT_SRC = path.join(DIST, "extensions");
 const SOUNDS_SRC = path.join(ROOT, "static", "sounds");
 const SKILLS_SRC = path.join(ROOT, "static", "skills");
 const MODELS_SRC = path.join(ROOT, "static", "models.json");
+const WEBUI_SRC = path.join(ROOT, "static", "webui");
 const THEMES_DST = path.join(PI_AGENT, "themes");
 const EXT_DST = path.join(PI_AGENT, "extensions");
 const SOUNDS_DST = path.join(PI_AGENT, "sounds");
 const SKILLS_DST = path.join(PI_AGENT, "skills");
+const WEBUI_DST = path.join(PI_AGENT, "webui");
 
 const THEME_NAME = "matrix"; // 默认启用的主题（对应 static/themes/matrix.json）
 const PI_PACKAGE = "@earendil-works/pi-coding-agent"; // pi 本体包名
@@ -335,6 +337,7 @@ async function main() {
 	copyDir(EXT_SRC, EXT_DST);
 	copyDir(SOUNDS_SRC, SOUNDS_DST, [".wav"]);
 	copyDir(SKILLS_SRC, SKILLS_DST, [".md"]);
+	copyDir(WEBUI_SRC, WEBUI_DST, [".html"]);
 	applySettings();
 	installModelsJson();
 	generateTsconfig();
