@@ -1,0 +1,348 @@
+#!/usr/bin/env node
+/**
+ * ask 扩展回归测试（复用 workflow-mgr 测试基建模式）
+ *
+ * 原理：esbuild（src/node_modules 构建依赖）把扩展 bundle 成单文件 ESM 再 import；
+ * external 白名单与 build.js 一致（@earendil-works/*、typebox），运行时经本目录
+ * node_modules junction（→ pi 全局）解析。theme mock 纯文本透传，不干扰宽度计算。
+ *
+ * 覆盖：
+ * - 场景 A：六题型全流程作答 → 提交 → 工具结果含答案、问卷文件已删除
+ * - 场景 B：必答未完成时 Enter → 不提交、焦点跳到首个未答题
+ * - 场景 C：Esc 搁置 → 草稿写回文件（status:draft + answers）
+ * - 场景 D：/answer 重开草稿 → 预填恢复 → 提交 → sendUserMessage 送达、文件删除
+ * - 场景 E：/answer 多份 → 选择器 → 选中打开
+ * - 场景 F：手写 JSON（缺省字段推断）+ 损坏文件（invalid 报告）
+ * - 渲染不变量：整屏页每次 render 恰好 termRows 行、每行恰好 width 列（全屏遮蔽前提）
+ *
+ * 用法：node src/extensions/ask/test/ask.test.mjs（仓库根目录执行）
+ */
+import { build } from "esbuild";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { visibleWidth } from "@earendil-works/pi-tui";
+
+const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
+const EXT_DIR = join(TEST_DIR, ".."); // src/extensions/ask/
+const SRC_DIR = join(EXT_DIR, "../.."); // src/
+const BUNDLE = join(TEST_DIR, ".tmp-bundle.mjs");
+
+let failures = 0;
+const check = (name, cond) => {
+	if (cond) console.log(`  ✓ ${name}`);
+	else {
+		console.error(`  ✗ ${name}`);
+		failures++;
+	}
+};
+
+const themeMock = { fg: (_c, t) => t, bg: (_c, t) => t, bold: (t) => t };
+const TERM_ROWS = 24;
+const TERM_COLS = 80;
+const makeTui = () => ({ terminal: { rows: TERM_ROWS, columns: TERM_COLS }, requestRender() {} });
+
+/** 键位模拟（pi-tui matchesKey 的原始输入序列） */
+const K = {
+	up: "\x1b[A",
+	down: "\x1b[B",
+	right: "\x1b[C",
+	enter: "\r",
+	escape: "\x1b",
+	space: " ",
+};
+
+function makePi() {
+	return {
+		tools: [],
+		commands: {},
+		events: {},
+		sent: [],
+		registerTool(t) {
+			this.tools.push(t);
+		},
+		registerCommand(name, c) {
+			this.commands[name] = c;
+		},
+		on(ev, cb) {
+			this.events[ev] = cb;
+		},
+		sendUserMessage(text, opts) {
+			this.sent.push({ text, opts });
+		},
+	};
+}
+
+/** mock ctx：ui.custom 捕获 factory 与 overlay 参数，返回 promise 由测试驱动 done 解决 */
+function makeCtx(cwd, captures) {
+	return {
+		cwd,
+		hasUI: true,
+		mode: "tui",
+		ui: {
+			setStatus: (key, text) => {
+				captures.statuses[key] = text;
+			},
+			notify: (text, kind) => {
+				captures.notifies.push({ text, kind });
+			},
+			custom: (factory, opts) =>
+				new Promise((resolve) => {
+					captures.customs.push({ factory, opts, resolve });
+				}),
+		},
+	};
+}
+
+function makeCaptures() {
+	return { customs: [], statuses: {}, notifies: [] };
+}
+
+/** 弹出当前捕获的组件实例（done 解决 custom promise） */
+function openCaptured(captures, idx = captures.customs.length - 1) {
+	const c = captures.customs[idx];
+	const comp = c.factory(makeTui(), themeMock, {}, (r) => c.resolve(r));
+	comp.focused = true;
+	return comp;
+}
+
+/** 渲染不变量：恰好 TERM_ROWS 行、每行恰好 TERM_COLS 列 */
+function assertFullscreen(comp, label) {
+	let lines = [];
+	try {
+		lines = comp.render(TERM_COLS);
+	} catch (e) {
+		check(`${label}: render 不抛异常`, false);
+		console.error("      →", e.message);
+		return;
+	}
+	check(`${label}: 行数 === ${TERM_ROWS}（实际 ${lines.length}）`, lines.length === TERM_ROWS);
+	let bad = 0;
+	for (const line of lines) if (visibleWidth(line) !== TERM_COLS) bad++;
+	check(`${label}: 每行恰好 ${TERM_COLS} 列（违例 ${bad} 行）`, bad === 0);
+}
+
+const FULL_PARAMS = {
+	id: "test-survey",
+	title: "技术选型确认",
+	description: "覆盖全部题型",
+	questions: [
+		{ id: "q1", type: "single", question: "用哪个日期库？", options: [{ label: "dayjs", description: "小" }, { label: "date-fns" }] },
+		{ id: "q2", type: "multi", question: "需要哪些功能？", options: [{ label: "时区" }, { label: "相对时间" }, { label: "格式化" }], max: 2 },
+		{ id: "q3", type: "text", question: "字段命名风格？", placeholder: "如 snake_case" },
+		{ id: "q4", type: "confirm", question: "需要缓存吗？" },
+		{ id: "q5", type: "rating", question: "紧急程度？" },
+		{ id: "q6", type: "number", question: "有效期小时数？", min: 1, max: 24 },
+		{ id: "q7", type: "text", question: "备注（选答）", required: false },
+	],
+};
+
+function typeText(comp, text) {
+	for (const ch of text) comp.handleInput(ch);
+}
+
+async function main() {
+	await build({
+		entryPoints: [join(EXT_DIR, "index.ts")],
+		outfile: BUNDLE,
+		bundle: true,
+		format: "esm",
+		platform: "node",
+		external: ["@earendil-works/*", "typebox"],
+		tsconfig: join(SRC_DIR, "config", "tsconfig.build.json"),
+		target: "es2022",
+		logLevel: "silent",
+	});
+	const mod = await import(`${pathToFileURL(BUNDLE).href}?t=${Date.now()}`);
+
+	// ---- 场景 A：六题型全流程提交 ----
+	console.log("场景 A：全流程作答提交");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		check("A: ask 工具已注册", !!tool);
+		check("A: /answer 命令已注册", !!pi.commands.answer);
+
+		const execP = tool.execute("tc1", FULL_PARAMS, null, null, ctx);
+		// execute 内先写文件再进 custom（排队链首个立即执行），让出微任务
+		await new Promise((r) => setTimeout(r, 10));
+		check("A: execute 打开了整屏 overlay", captures.customs.length === 1 && captures.customs[0].opts?.overlay === true);
+		const ov = captures.customs[0].opts?.overlayOptions;
+		check("A: overlay 全屏参数（100% 宽 / 100% 高 / 左上）", ov?.width === "100%" && ov?.maxHeight === "100%" && ov?.anchor === "top-left");
+
+		const comp = openCaptured(captures);
+		assertFullscreen(comp, "A: 初始渲染");
+
+		// q1 单选：空格选 dayjs → 焦点自动跳到 q2 首行
+		comp.handleInput(K.space);
+		// q2 多选：空格选「时区」→ 下移 → 空格选「相对时间」→ 下移再空格触发 max=2 限制
+		comp.handleInput(K.space);
+		comp.handleInput(K.down);
+		comp.handleInput(K.space);
+		comp.handleInput(K.down);
+		comp.handleInput(K.space); // 超限提示，不选中
+		// 移到 q3 输入行（当前在 q2 第 3 选项，down×2 经「其他」到 q3）
+		comp.handleInput(K.down);
+		comp.handleInput(K.down);
+		typeText(comp, "snake_case");
+		// Enter：必答未完成 → 不提交，焦点跳到 q4
+		comp.handleInput(K.enter);
+		check("A: 必答未完成时 Enter 不提交", captures.customs.length === 1);
+		assertFullscreen(comp, "A: 校验提示后渲染");
+		// q4 判断：y 快捷选「是」→ 自动跳到 q5 评分
+		comp.handleInput("y");
+		// q5 评分：→ 得最低分，数字键直选 5
+		comp.handleInput(K.right);
+		comp.handleInput("5");
+		// q6 数字
+		comp.handleInput(K.down);
+		typeText(comp, "12");
+		// q7 选答跳过：下移后 Enter 提交
+		comp.handleInput(K.down);
+		comp.handleInput(K.enter);
+
+		const result = await execP;
+		check("A: 提交后 details.status === submitted", result.details?.status === "submitted");
+		const text = result.content?.[0]?.text ?? "";
+		check("A: 答案含单选 dayjs", text.includes("dayjs"));
+		check("A: 答案含多选两项", text.includes("时区、相对时间"));
+		check("A: 答案含文本 snake_case", text.includes("snake_case"));
+		check("A: 答案含判断「是」与评分 5 与数字 12", /→ 是/.test(text) && /→ 5/.test(text) && /→ 12/.test(text));
+		check("A: 选答题显示（跳过）", text.includes("（跳过）"));
+		check("A: 问卷文件已删除", !existsSync(join(dir, ".pi", "questionnaires", "test-survey.json")));
+		check("A: 待答状态已清除", captures.statuses.ask === undefined);
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 B/C：搁置 + 草稿 ----
+	console.log("场景 B：Esc 搁置保存草稿");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const execP = tool.execute("tc2", FULL_PARAMS, null, null, ctx);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		comp.handleInput(K.space); // q1 选 dayjs
+		comp.handleInput(K.escape); // 搁置
+		const result = await execP;
+		check("B: details.status === shelved", result.details?.status === "shelved");
+		check("B: 结果提示 /answer 可继续", (result.content?.[0]?.text ?? "").includes("/answer"));
+		const file = join(dir, ".pi", "questionnaires", "test-survey.json");
+		check("B: 问卷文件保留", existsSync(file));
+		const saved = JSON.parse(readFileSync(file, "utf8"));
+		check("B: 草稿 status=draft 且含 q1 答案", saved.status === "draft" && saved.answers?.q1 === "dayjs");
+		check("B: 待答状态提示已推送", typeof captures.statuses.ask === "string" && captures.statuses.ask.includes("1 份"));
+
+		// ---- 场景 D：/answer 重开草稿提交 ----
+		console.log("场景 D：/answer 重开草稿并提交");
+		const captures2 = makeCaptures();
+		const ctx2 = makeCtx(dir, captures2);
+		const cmdP = pi.commands.answer.handler("", ctx2);
+		await new Promise((r) => setTimeout(r, 10));
+		check("D: 单份问卷直接打开（无选择器）", captures2.customs.length === 1);
+		const comp2 = openCaptured(captures2);
+		assertFullscreen(comp2, "D: 草稿重开渲染");
+		// q1 已预填 dayjs（焦点 0 在 q1 首项）；q2 选两项
+		comp2.handleInput(K.down); // q1 opt1 —— 注意 q1 已选，直接 down 到 q2？不行，逐行移动
+		// 用 trySubmit 的跳转快速定位：先 Enter 让焦点跳到第一个未答必答题（q2）
+		comp2.handleInput(K.enter);
+		comp2.handleInput(K.space);
+		comp2.handleInput(K.down);
+		comp2.handleInput(K.space);
+		// q3
+		comp2.handleInput(K.enter); // 又跳到 q3（下一个未答必答）
+		typeText(comp2, "camelCase");
+		comp2.handleInput(K.enter); // 跳到 q4
+		comp2.handleInput("n"); // 否
+		comp2.handleInput(K.enter); // q4 已答 → 跳到 q5
+		comp2.handleInput("3");
+		comp2.handleInput(K.enter); // 跳到 q6
+		typeText(comp2, "8");
+		comp2.handleInput(K.enter); // 全部必答完成 → 提交
+		await cmdP;
+		check("D: 答案经 sendUserMessage 送达", pi.sent.length === 1);
+		check("D: 送达含草稿预填的 dayjs 与新答案", (pi.sent[0]?.text ?? "").includes("dayjs") && (pi.sent[0]?.text ?? "").includes("camelCase"));
+		check("D: followUp 投递模式", pi.sent[0]?.opts?.deliverAs === "followUp");
+		check("D: 提交后文件已删除", !existsSync(file));
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 E：多份选择器 ----
+	console.log("场景 E：/answer 多份选择");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		// 手写两份问卷文件
+		const qDir = join(dir, ".pi", "questionnaires");
+		mkdirSync(qDir, { recursive: true });
+		writeFileSync(
+			join(qDir, "a-first.json"),
+			JSON.stringify({ id: "a-first", title: "第一份", createdAt: "2026-01-01T00:00:00Z", questions: [{ question: "选 a 还是 b？", options: [{ label: "a" }, { label: "b" }] }] }),
+		);
+		writeFileSync(
+			join(qDir, "b-second.json"),
+			JSON.stringify({ id: "b-second", title: "第二份", createdAt: "2026-01-02T00:00:00Z", questions: [{ type: "text", question: "随便说点？" }] }),
+		);
+		writeFileSync(join(qDir, "broken.json"), "{ 这不是合法 JSON");
+		const cmdP = pi.commands.answer.handler("", ctx);
+		await new Promise((r) => setTimeout(r, 10));
+		check("E: 多份时先弹选择器", captures.customs.length === 1);
+		check("E: 损坏文件被 warning 提示", captures.notifies.some((n) => n.kind === "warning" && n.text.includes("broken.json")));
+		const picker = openCaptured(captures, 0);
+		const pickerLines = picker.render(60);
+		check("E: 选择器渲染包含两份问卷", pickerLines.join("\n").includes("第一份") && pickerLines.join("\n").includes("第二份"));
+		check("E: 手写问卷题型推断为 single", pickerLines.join("\n").includes("a-first"));
+		picker.handleInput(K.down); // 选第二份
+		picker.handleInput(K.enter);
+		await new Promise((r) => setTimeout(r, 10));
+		check("E: 选中后打开问卷页", captures.customs.length === 2);
+		const page = openCaptured(captures, 1);
+		assertFullscreen(page, "E: 第二份渲染");
+		page.handleInput(K.escape); // 搁置不写答案
+		await cmdP;
+		const saved = JSON.parse(readFileSync(join(qDir, "b-second.json"), "utf8"));
+		check("E: 搁置后 status=draft", saved.status === "draft");
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 F：非法参数报错 ----
+	console.log("场景 F：非法问卷参数报错");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		let errMsg = "";
+		try {
+			await tool.execute("tc3", { title: "坏问卷", questions: [{ type: "single", question: "没选项" }] }, null, null, ctx);
+		} catch (e) {
+			errMsg = e.message;
+		}
+		check("F: single 缺 options 抛错", errMsg.includes("options"));
+		check("F: 不打开 UI", captures.customs.length === 0);
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	console.log(failures === 0 ? "\n全部通过 ✓" : `\n${failures} 项失败 ✗`);
+	process.exit(failures === 0 ? 0 : 1);
+}
+
+await main();

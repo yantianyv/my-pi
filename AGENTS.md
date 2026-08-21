@@ -44,6 +44,7 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       hud-cost.ts   #       hud-cost：消耗统计 / DeepSeek 定价 / 按量付费文本 / 实时汇率
       hud-git.ts    #       hud-git：git 状态解析
       test/         #       hud-git 路径引号解码回归测试（node src/extensions/hud/test/unquote.test.mjs）
+    ask/          #     问卷（多文件扩展源码，build.js 把 index.ts 打包成单文件 ask.ts）：types.ts 数据模型/容错规范化 + store.ts 问卷文件读写（.pi/questionnaires/）+ page.ts 整屏问卷页/选择器 + tool.ts ask 工具 + commands.ts /answer 命令 + state.ts 状态推送/排队链；test/ask.test.mjs 回归测试（40 场景）
     btw/          #     /btw 临时旁支问答（多文件扩展源码，build.js 把 index.ts 打包成单文件 btw.ts）：config.ts 常量/模型选择 + messages.ts 消息清洗 + render.ts markdown 渲染 + overlay.ts 浮层组件 + run.ts 后台流式问答 + index.ts 入口
     btf-think.ts  #   思考折叠标签动画（Thinking... 逐帧动画，独立 UI 反馈插件）
     claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn、双击 Ctrl+C 预填 /rewind 回退
@@ -68,13 +69,14 @@ static/              #   静态部署物（无需编译，install.js 直接从�
   themes/matrix.json  #     黑客帝国荧光绿主题
   sounds/task_complete.wav  #     任务完成提示音
   patches/            #     pi 补丁脚本
-    apply-pi-tui-scroll-freeze.mjs  #       pi-tui 滚动冻结补丁：修复流式期间滚轮上翻被拽飞；pi 升级后需重跑
+    apply-pi-tui-scroll-freeze.mjs  #       pi-tui 滚动冻结补丁：修复流式期间滚轮上翻被拽飞；pi 升级后需重跑；仅作用于 regular（内联）渲染模式，fullscreen 模式下为死代码可跳过重跑（见注意事项）
     apply-pi-ai-usage-guard.mjs     #       pi-ai usage 缺失防护补丁：模型偶发返回无 usage 的 assistant 消息导致后续调用瞬时失败；pi 升级后需重跑
     apply-zuchongzhi-zh.mjs        #       祖冲之汉化补丁：pi 无官方 i18n，直接替换 dist 编译产物硬编码英文为中文（236 处/9 文件）；pi 升级后需重跑
   webui/index.html  #     webui 前端单页（聊天 + 状态栏，列表/聊天双视图按 URL 分流；install.js 复制到 ~/.pi/agent/webui/）
   models.json        #     OpenRouter 路由模板：install.js 复制/深度合并到 ~/.pi/agent/models.json（见 README「OpenRouter 路由策略」节）
 dist/               # 扩展产物（build.js 生成，gitignore 不入库）：install.js 只认这里的 extensions/；每次 install 自动重建，克隆后 node install.js 即用（pi/esbuild 缺失自动装）
   extensions/       #   扩展产物：每扩展一个零耦合单文件 .ts（hud.ts 由 hud/ 合并而来）
+    ask.ts          #     ask/ 合并为单文件（问卷）
     btw.ts          #     内含 shared/model-select.ts 内联（btw 与 explore 共用模型选择器）
     hud.ts          #     hud/ 五个子模块合并为单文件（解决 hud 拆分问题）
     ...             #     其余扩展与源码同名
@@ -89,6 +91,7 @@ dist/               # 扩展产物（build.js 生成，gitignore 不入库）：
 - **hud 余额适配**：`BALANCE_ADAPTERS` 注册表（hud/hud-balance.ts）按 providerId 逐一适配；DeepSeek 消耗按 `DEEPSEEK_PRICES`（hud/hud-cost.ts）官方人民币定价直算（恒 ¥，永不依赖汇率），峰谷开关 `DEEPSEEK_PEAK_PRICING`（hud/hud-cost.ts，当前 false）；其余供应商成本按原始货币 USD 记录、显示时换算。汇率三态（hud/hud-cost.ts）：实时（frankfurter→open.er-api 多源，1h 节流）→ 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`）→ 无（断网且无缓存，显示原始货币 USD，不用固定近似值）。hud 子模块**可选加载**：任一缺失时对应功能降级（余额行显「模块缺失」/ 隐藏消耗统计 / git 恒「⎇ -」），不拖垮整个 HUD。
 - **explore 子代理**：跑 pi-agent-core 官方 `agentLoop`，认证走 `ctx.modelRegistry.getApiKeyAndHeaders()`；子模型默认 `auto`（最便宜可用模型，与 /btw-config 的 auto 语义统一），`/explore-config` 可配 `auto`/`auto-not-free`/固定 provider/modelId，无参数弹可搜索选择器（与 /btw-config 同款 ModelSelectOverlay），设置持久化到 `~/.pi/agent/explore-model.json`。
 - **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；进度经 `ctx.ui.setStatus("init", …)` 推送由 hud 行 1 动态区显示。同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:61-65）。
+- **ask 问卷**：AI 侧 `ask` 工具创建问卷（single/multi/text/confirm/rating/number 六题型，选项题自动带「其他」自由输入）写入 `.pi/questionnaires/<id>.json` 并立即整屏弹出；用户 Enter 提交（答案作工具结果返回）或 Esc 搁置（草稿写回文件 status:draft，随时 /answer 续答，提交后答案经 `pi.sendUserMessage` 以 followUp 送达，文件即删）。「问卷即文件」：手写 JSON 丢进目录也能被 /answer 扫描识别。整屏页 = overlay（width/maxHeight 100% + 左上锚点 + 每行补满全宽）——pi 的 overlay 是逐行不透明合成，全屏即遮蔽聊天/HUD；高度权威值由 overlayOptions.visible 回调每帧捕获（tui.terminal.rows 可能滞后）。已知限制：regular（内联）模式下全屏 overlay 与聊天共享原生滚动缓冲，滚轮上滑会看到残影（仅美观问题，实时画面正常）；fullscreen 模式（alternate screen）下零污染。
 - **claude-it 回退**：`/rewind` 命令（navigateTree 是命令 ctx 专属能力）回退到上一条用户消息、内容放回输入框；双击 Ctrl+C（打断后 2s 窗口内）预填 `/rewind` 命令，回车执行。Ctrl+C 打断不触发 task-alert 完成提醒——task-alert 监听 agent_end，最后一条 assistant 消息 `stopReason="aborted"` 即跳过 agent_settled 提醒（零耦合，不依赖 claude-it）。
 
 ## 代码风格与约定
@@ -103,4 +106,5 @@ dist/               # 扩展产物（build.js 生成，gitignore 不入库）：
 - `src/config/tsconfig.template.json` → `install.js` 探测 pi 全局目录生成 `src/config/tsconfig.json`（`.gitignore` 忽略生成物，不入库）；生成物仅服务本地 tsc 检查（`paths` 映射 `@earendil-works/*` / `typebox`），运行时仍由 jiti 直接加载，不经 tsc。换机器/pi 升级路径变了重跑 `node install.js` 即可
 - `install.js` 会修改全局 `~/.pi/agent/settings.json`（theme 字段），跑 `--dry-run` 先预览；copyDir 已支持子目录递归（多文件扩展 hud/）
 - `docs/deepseek/` 是本地参考资料（不入库，版权归 DeepSeek），不要当作可执行配置；`src/sounds/` 只放提示音
+- **fullscreen 渲染模式与补丁的关系**：`apply-pi-tui-scroll-freeze.mjs` 只 patch regular（内联）模式的 `tui-main-screen.js`；切到 fullscreen（`/settings` → tui-mode）后渲染走 `tui-alt-screen.js`，补丁变死代码、升级 pi 可跳过重跑。`apply-pi-ai-usage-guard.mjs` 与 `apply-zuchongzhi-zh.mjs` 与渲染模式无关，两种模式下都需重跑。（2026-08 起试用 fullscreen：滚动跟手度略降，待长期观察后定稿——若切回 regular 需重跑 scroll-freeze）
 - `claude-it.ts` 会拦截裸输入 `exit`（不带 `/`）直接退出 pi，属刻意设计

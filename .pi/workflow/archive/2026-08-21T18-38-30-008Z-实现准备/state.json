@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-21T18:38:30.006Z",
+  "currentTaskId": null,
+  "tasks": {
+    "0.1": {
+      "status": "done",
+      "doneAt": "2026-08-21T10:20:41.421Z"
+    },
+    "1.1": {
+      "status": "done",
+      "doneAt": "2026-08-21T10:36:01.081Z"
+    },
+    "1.2": {
+      "status": "done",
+      "doneAt": "2026-08-21T18:35:59.838Z"
+    }
+  },
+  "milestones": {},
+  "notes": [
+    {
+      "id": "n1",
+      "ts": "2026-08-21T10:02:44.933Z",
+      "content": "ask 扩展已拍板决策：①AI 同批多问卷排队逐个自动打开，工具描述不鼓励一次建多份；②选择题用空格键选中，Enter 为问卷级提交；③已答文件直接删除；④支持手写 JSON 丢入 .pi/questionnaires/ 被 /answer 扫描识别；⑤待答提示走 setStatus(\"ask\", ...) hud 通道；⑥题型 single/multi/text(含multiline)/confirm/rating/number，rank 留 v2；⑦Esc=搁置（草稿写回 answers 字段 status:draft）；⑧/answer：0 份提示、1 份直开、多份列表选；⑨搁置后提交经 sendUserMessage 发答案，自动打开时提交则答案直接作工具结果"
+    }
+  ],
+  "log": [
+    {
+      "ts": "2026-08-21T10:02:44.933Z",
+      "event": "note_add",
+      "taskId": "n1",
+      "msg": "ask 扩展已拍板决策：①AI 同批多问卷排队逐个自动打开，工具描述不鼓励一次建多份；②选择题用空格键选中，Enter 为问卷级提交；③已答文件直接删除；④支持手写 JSON 丢入 .pi/questionnaires/ 被 /answer 扫描识别；⑤待答提示走 setStatus(\"ask\", ...) hud 通道；⑥题型 single/multi/text(含multiline)/confirm/rating/number，rank 留 v2；⑦Esc=搁置（草稿写回 answers 字段 status:draft）；⑧/answer：0 份提示、1 份直开、多份列表选；⑨搁置后提交经 sendUserMessage 发答案，自动打开时提交则答案直接作工具结果"
+    },
+    {
+      "ts": "2026-08-21T10:20:41.421Z",
+      "event": "task_done",
+      "taskId": "0.1",
+      "msg": "调研 pi custom 组件 API 与可复用原语"
+    },
+    {
+      "ts": "2026-08-21T10:20:41.421Z",
+      "event": "task_start",
+      "taskId": "1.1",
+      "msg": "编写 ask 扩展（schema/store/tool/command/问卷页）"
+    },
+    {
+      "ts": "2026-08-21T10:36:01.081Z",
+      "event": "task_done",
+      "taskId": "1.1",
+      "msg": "编写 ask 扩展（schema/store/tool/command/问卷页）"
+    },
+    {
+      "ts": "2026-08-21T10:36:01.081Z",
+      "event": "task_start",
+      "taskId": "1.2",
+      "msg": "安装并实测问卷全流程"
+    },
+    {
+      "ts": "2026-08-21T18:35:59.838Z",
+      "event": "task_done",
+      "taskId": "1.2",
+      "msg": "安装并实测问卷全流程"
+    }
+  ],
+  "archiveStatus": "全部完成：ask 扩展（问卷即文件 + 整屏页 + /answer）已实现并实测通过"
+}

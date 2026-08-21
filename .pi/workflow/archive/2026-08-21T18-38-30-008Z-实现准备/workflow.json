@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "mode": "human-ai",
+  "stages": [
+    {
+      "id": "prep",
+      "name": "实现准备",
+      "goal": "摸清 pi 组件 API 与本仓库可复用原语，定稿实现方案",
+      "tasks": [
+        {
+          "id": "0.1",
+          "title": "调研 pi custom 组件 API 与可复用原语",
+          "desc": "读 tui.md 组件/全屏 custom 章节、extensions.md registerTool 细节、shared/ui.ts 与 model-select.ts 键盘交互范式，确认全屏问卷页的技术路线",
+          "humanTasks": [],
+          "aiTasks": [
+            "精读相关文档与源码",
+            "输出实现要点清单（组件接口、键盘处理、焦点/IME、工具注册与渲染）"
+          ],
+          "deliverable": "实现要点清单（对话中给出）",
+          "doneSignal": "清单覆盖：Component 接口、全屏 custom 用法、registerTool execute/render API、可复用 shared 原语",
+          "deps": []
+        }
+      ]
+    },
+    {
+      "id": "impl",
+      "name": "实现 ask 扩展",
+      "goal": "完成 src/extensions/ask/ 多文件扩展并通过类型检查与构建",
+      "tasks": [
+        {
+          "id": "1.1",
+          "title": "编写 ask 扩展（schema/store/tool/command/问卷页）",
+          "desc": "问卷即文件（.pi/questionnaires/*.json）+ ask 工具创建并自动整屏打开 + /answer 命令 + 题型 single/multi/text/confirm/rating/number + 排队逐个打开 + Esc 搁置草稿 + 已答删除 + setStatus 提示",
+          "humanTasks": [],
+          "aiTasks": [
+            "编写 src/extensions/ask/ 各模块",
+            "tsc 类型检查 0 报错",
+            "node src/build.js 构建成功生成 dist/extensions/ask.ts"
+          ],
+          "deliverable": "src/extensions/ask/ 源码 + dist 产物",
+          "doneSignal": "tsc 0 报错且 build 产物存在",
+          "deps": []
+        },
+        {
+          "id": "1.2",
+          "title": "安装并实测问卷全流程",
+          "desc": "node install.js 安装后 /reload，实测：AI 创建问卷自动打开、空格选择、Enter 提交、Esc 搁置草稿、/answer 单份直开/多份选择、手写 JSON 扫描、已答文件删除、status 提示",
+          "humanTasks": [
+            "pi 内 /reload",
+            "按清单实测各场景并回报异常"
+          ],
+          "aiTasks": [
+            "执行 node install.js 安装",
+            "给出实测清单",
+            "根据回报修复问题"
+          ],
+          "deliverable": "实测通过的 ask 扩展",
+          "doneSignal": "用户确认全流程实测通过",
+          "deps": [
+            "1.1"
+          ]
+        }
+      ]
+    }
+  ]
+}
