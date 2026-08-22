@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-22T14:37:30.614Z",
-  "currentTaskId": "4.1",
+  "updatedAt": "2026-08-22T14:53:42.643Z",
+  "currentTaskId": "5.1",
   "tasks": {
     "0.1": {
       "status": "done",
@@ -44,14 +44,16 @@
       "blockReason": "等待用户预览官方 hud：pi -e npm:@narumitw/pi-statusline 和 pi -e npm:pi-powerline-footer（临时加载不进 settings），然后拍板借鉴清单"
     },
     "4.1": {
-      "status": "doing",
-      "startedAt": "2026-08-22T14:36:41.025Z"
+      "status": "done",
+      "doneAt": "2026-08-22T14:48:55.308Z"
     },
     "4.2": {
-      "status": "todo"
+      "status": "done",
+      "doneAt": "2026-08-22T14:53:02.047Z"
     },
     "5.1": {
-      "status": "todo"
+      "status": "doing",
+      "startedAt": "2026-08-22T14:53:42.642Z"
     }
   },
   "milestones": {},
@@ -206,6 +208,30 @@
       "event": "task_blocked",
       "taskId": "3.2",
       "msg": "3.2: 等待用户预览官方 hud：pi -e npm:@narumitw/pi-statusline 和 pi -e npm:pi-powerline-footer（临时加载不进 settings），然后拍板借鉴清单"
+    },
+    {
+      "ts": "2026-08-22T14:48:55.308Z",
+      "event": "task_done",
+      "taskId": "4.1",
+      "msg": "doneSignal 独立审计借鉴"
+    },
+    {
+      "ts": "2026-08-22T14:48:55.308Z",
+      "event": "task_start",
+      "taskId": "4.2",
+      "msg": "崩溃恢复与持久化借鉴"
+    },
+    {
+      "ts": "2026-08-22T14:53:02.047Z",
+      "event": "task_done",
+      "taskId": "4.2",
+      "msg": "崩溃恢复与持久化借鉴"
+    },
+    {
+      "ts": "2026-08-22T14:53:42.642Z",
+      "event": "task_start",
+      "taskId": "5.1",
+      "msg": "文档更新与提交"
     }
   ]
 }

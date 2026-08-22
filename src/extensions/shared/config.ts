@@ -14,13 +14,28 @@ import * as path from "node:path";
 
 /** 读取 JSON 配置文件：缺失/损坏/校验不过时返回 fallback（不抛异常） */
 export function loadJsonConfig<T>(file: string, fallback: T, validate: (v: unknown) => v is T): T {
+	// 清理写入崩溃残留的临时文件（saveJsonConfig 的 .tmp-<pid>）
+	try {
+		for (const f of fs.readdirSync(path.dirname(file))) {
+			if (f.startsWith(path.basename(file) + ".tmp-")) fs.unlinkSync(path.join(path.dirname(file), f));
+		}
+	} catch {
+		/* 目录不存在等忽略 */
+	}
 	try {
 		if (fs.existsSync(file)) {
 			const d = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
 			if (validate(d)) return d;
+			// 合法 JSON 但校验不过（如 schemaVersion 升级）：既定语义，静默回默认
 		}
 	} catch {
-		/* 文件损坏视为默认 */
+		// JSON 解析失败 = 文件损坏（非正常退出/磁盘问题）——隔离留证再回默认，
+		// 避免用户数据无声丢失（可手动从 .corrupt-<时间戳> 恢复）
+		try {
+			fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+		} catch {
+			/* 隔离失败也只能回默认 */
+		}
 	}
 	return fallback;
 }

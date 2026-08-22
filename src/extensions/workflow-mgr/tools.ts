@@ -22,6 +22,7 @@ import {
 } from "./store";
 import { lightState, renderBrief, summaryLine } from "./brief";
 import { updateWidget } from "./panel";
+import { auditCompletion } from "./audit";
 import type { TaskDef, WorkflowDef, WorkflowMode } from "./types";
 import { WORKFLOW_SCHEMA_VERSION } from "./types";
 
@@ -538,6 +539,21 @@ export function registerTools(pi: ExtensionAPI) {
 					details: { kind: "switch" as const, state: lightState(state) },
 				};
 			};
+
+			// 独立审计（借鉴 pi-goal-x 的 completion auditor；config.json 设 auditOnComplete:true 开启）：
+			// 完成推进前派全新上下文的只读+bash 子代理核验完成信号，不通过则打回（任务保持 doing）。
+			// 审计自身故障（超时/异常）放行——增强不是门禁，基础设施故障不卡死工作流。
+			if (complete && cur && curSt && curSt.status !== "done" && cur.doneSignal && s.getPanelConfig().auditOnComplete) {
+				if (ctx.hasUI) ctx.ui.setStatus("workflow-mgr", `🔍 独立审计「${cur.title}」…`);
+				const verdict = await auditCompletion(ctx, cur);
+				if (ctx.hasUI) ctx.ui.setStatus("workflow-mgr", undefined);
+				if (!verdict.pass) {
+					return err(
+						`⛔ 独立审计未通过，任务「${cur.title}」保持进行中：\n${verdict.reason}\n\n` +
+							`请按审计意见补齐后再次 wf_switch。（审计可在 .pi/workflow/config.json 设 auditOnComplete:false 关闭）`,
+					);
+				}
+			}
 
 			// 模式一：显式 taskId 切换（先校验，再 settle 当前，最后开始目标）
 			if (params.taskId) {

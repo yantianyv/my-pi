@@ -85,4 +85,6 @@ export interface WorkflowState {
 export interface PanelConfig {
 	schemaVersion: number;
 	showPanel: boolean;
+	/** 完成推进前独立审计（借鉴 pi-goal-x：wf_switch 完成任务时派全新上下文的只读子代理核验完成信号，默认 false） */
+	auditOnComplete?: boolean;
 }

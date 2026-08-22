@@ -109,7 +109,8 @@ export function isWorkflowState(v: unknown): v is WorkflowState {
 /** config.json 校验 */
 export function isPanelConfig(v: unknown): v is PanelConfig {
 	const c = v as PanelConfig | null;
-	return !!c && c.schemaVersion === PANEL_SCHEMA_VERSION && typeof c.showPanel === "boolean";
+	return !!c && c.schemaVersion === PANEL_SCHEMA_VERSION && typeof c.showPanel === "boolean" &&
+		(c.auditOnComplete === undefined || typeof c.auditOnComplete === "boolean");
 }
 
 /* ------------------------------ 状态构造与一致性 ------------------------------ */

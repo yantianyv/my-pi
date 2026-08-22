@@ -12,7 +12,7 @@ node install.js           # 一键：自动 npm install（首次，需网络）�
 node install.js --dry-run # 先预览要做什么，不修改
 ```
 
-安装后重启 pi 或执行 `/reload` 生效。首次运行会自动拉取构建依赖（esbuild）并构建产物，之后每次运行都是：构建 + 安装一步到位。**伪编译架构**：源码层 `src/extensions/shared/` 共享模块（如 btw 与 explore 共用的模型选择器）在构建时内联进各扩展产物——原始代码高复用、编译产物零耦合；`src/extensions/hud/` 多文件扩展也被合并为单个 `hud.ts`（详见「伪编译架构」节）。
+安装后重启 pi 或执行 `/reload` 生效。首次运行会自动拉取构建依赖（esbuild）并构建产物，之后每次运行都是：构建 + 安装一步到位。**伪编译架构**：源码层 `src/extensions/shared/` 共享模块在构建时内联进各扩展产物——原始代码高复用、编译产物零耦合；`src/extensions/hud/` 多文件扩展也被合并为单个 `hud.ts`（详见「伪编译架构」节）。另外 `src/vendor/` 收录三个社区官方插件源码副本（pi-subagents / pi-btw / pi-rtk-optimizer，均 MIT 原样收录含 LICENSE），install.js 一并部署（见「官方插件」节）。
 
 ## 包含内容
 
@@ -22,10 +22,10 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `hud/`（源码多文件：`index.ts` + `hud-core.ts` + `hud-balance.ts` + `hud-cost.ts` + `hud-git.ts`；build.js 合并为单文件 `hud.ts` 产物）— 3 行 HUD 状态栏，见下 | `~/.pi/agent/extensions/` |
 | `extensions/` | `btf-think.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking... → Thinking....，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`） | `~/.pi/agent/extensions/` |
-| `extensions/` | `explore-agent.ts` — `explore` 工具：只读子代理并行探索代码库、返回报告（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `task-alert.ts` — 任务完成提醒：提示音 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `btw.ts` — `/btw` 临时旁支问答：侧栏单轮问答，不写入会话历史（见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `token-saver.ts` — 上下文 token 节省器：自动清洗 bash 工具冗余输出（见下） | `~/.pi/agent/extensions/` |
+| `vendor/` | `pi-subagents` — 子代理委派（scout/reviewer/worker/oracle 等内建角色 + FleetView 舰队面板，替代原自研 explore-agent） | `~/.pi/agent/vendor/` |
+| `vendor/` | `pi-btw` — `/btw` 旁支问答（真实子会话、/btw:tangent、inject/summarize 回注，替代原自研 btw） | `~/.pi/agent/vendor/` |
+| `vendor/` | `pi-rtk-optimizer` — bash 输出多阶段压缩 + rtk 命令改写（替代原自研 token-saver） | `~/.pi/agent/vendor/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webui/` — 本地 Web 界面：TUI 进程内 HTTP+SSE 服务，浏览器与 TUI 实时双向同步（聊天/状态栏/git 操作，复用 hud 模块），`/webui` 命令（见下） | `~/.pi/agent/extensions/` |
@@ -105,11 +105,10 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | 指令模式 | 输入以 `!` 开头 | `⚡ 指令模式` | 100 |
 | 余额查询失败 | 余额接口报错（错误变化时才推，防刷屏） | `⚠ 余额查询失败` | 95 |
 | 任务完成 | task-alert 推送（自管闪烁帧） | `✅ 任务完成`（闪烁） | 90 |
-| explore 进度 | explore 子代理派发中，实时更新 | `🔎 2/3` | 85 |
 | /init 进度 | claude-it 后台 init | `⚙ init · 5` | 80 |
 | 联网搜索 | web_search 执行中 | `🔍 搜索中` | 75 |
 | 网页抓取 | web_fetch 执行中 | `⬇️ 抓取中` | 74 |
-| 短反馈 | 搜索完成 / explore 完成 / 模型切换 / token-saver 节省 | `🔍 5 条`、`🔎 ✓ 2/3`、`⇄ gpt-5`、`✂ 省 12.3k` | 70 |
+| 短反馈 | 搜索完成 / 模型切换 | `🔍 5 条`、`⇄ gpt-5` | 70 |
 
 各扩展只负责 `setStatus(key, text)`，不知道 hud 的存在；`key` 与样式表约定在 `hud/hud-core.ts` 的 `STATUS_STYLE`（未登记 key 默认灰字、不参与竞争）。hud 被 `/hud` 关闭时，这些状态自动回落**原生 footer 第 3 行**显示（官方 `getExtensionStatuses()` 通道），信息屏B 无缝接管。
 
@@ -148,15 +147,13 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 
 **新增供应商适配**：在 `hud/balance.ts` 的 `BALANCE_ADAPTERS` 注册表里添加一个 `BalanceAdapter` 即可（参考 `deepseekAdapter` 或 `kimiCodingAdapter`）。余额/余量在 `fetch` 里实现；右下角消耗统计在 `rateText(ctx, now)` 里单独实现（按量付费用 `hud/cost.ts` 共享的 `meteredRateText`，订阅制可返回 token 消耗，不需要则返回 `null`）。
 
-## 并行探索子代理（src/extensions/explore-agent.ts）
+## 官方插件（src/vendor/，收录社区实现）
 
-类似 Claude Code 的 explore agent：注册 `explore` 工具，主 agent 只负责**分配任务**，每个任务派一个子代理自主探索并返回精炼报告——节省主上下文、降低成本（默认用廉价模型）、加快速度。
+经过与 [pi 包目录](https://pi.dev/packages) 的逐一对比（2026-08），三个自研扩展被更成熟的社区实现替代，源码原样收录进 `src/vendor/`（均 MIT，含各自 LICENSE 与出处表，对齐更新流程见 `src/vendor/README.md`）：
 
-- **子代理形态**：跑 pi-agent-core 的官方 `agentLoop`，拥有 pi 官方只读工具集（`read` / `ls` / `grep` / `find`），自主决定探索路径；主 agent 不指定文件，只描述任务（如「搞清 auth 模块的登录流程，给出关键文件与函数」）。
-- **模型调用**：直接走 pi 已登录的通道——认证来自 `ctx.modelRegistry.getApiKeyAndHeaders()`（含 OAuth），请求由 pi-ai 自己的 provider 实现发出，支持任意 API 类型。
-- **子模型选择**：默认 `auto`——最便宜可用模型（与 `/btw-config` 的 auto 语义统一，不搞特殊优先）；`/explore-config` 可配置子模型（与 `/btw-config` 同款交互）：`auto` / `auto-not-free`（忽略免费模型）/ `provider/modelId` 固定指定，无参数打开**可搜索选择器**（↑↓ 选择、Enter 确认、Esc 取消、顶部搜索框实时过滤、当前项 ✓ 标记），设置持久化到 `~/.pi/agent/explore-model.json`，`/reload` 后保留。
-- **预算保护**：一次 2~16 个任务（至少 2 个保证并行度，超出 16 截断）、4 并发、单子代理最多 12 轮 / 4 分钟超时、跟随主 agent 的 abort 信号（Ctrl+C 可中断）。
-- **结果**：所有子代理的报告汇总为一个 Markdown 返回给主 agent；单任务失败不影响其他任务。
+- **[pi-subagents](https://github.com/nicobailon/pi-subagents)**（替代 explore-agent）：子代理委派——内建 scout（代码侦察）/researcher/worker/reviewer/oracle 等角色，支持并行、后台运行、FleetView 舰队面板（`/subagents-fleet`）、`/council` 多模型议事；用自然语言即可调用（「用 scout 探索一下这个仓库」）。
+- **[pi-btw](https://github.com/dbachelder/pi-btw)**（替代 btw）：`/btw` 旁支问答——真实子会话（带 read/bash/edit 工具）、`/btw:tangent` 无上下文分支、`/btw:inject` / `/btw:summarize` 回注主会话、隐藏线程跨 `/reload` 持久化、`Alt+/` 焦点切换。
+- **[pi-rtk-optimizer](https://github.com/MasuRii/pi-rtk-optimizer)**（替代 token-saver）：bash/read/grep 输出多阶段压缩（ANSI 剥离、测试聚合、构建过滤、git 压缩、linter 聚合、搜索分组、截断）+ `/rtk stats` 节省统计 + `/rtk` 设置面板；命令改写委托外部 `rtk` 二进制（[rtk-ai/rtk](https://github.com/rtk-ai/rtk)，Apache-2.0，已装于 `%APPDATA%\npm\rtk.exe`，缺失时自动旁路仅留压缩）。
 
 ## 任务完成提醒（src/extensions/task-alert.ts）
 
@@ -168,41 +165,18 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 
 撤销时机：任意按键（`onTerminalInput` 原始终端按键流，无需等到发送）/ 新任务开始立即撤；10 分钟无操作自动撤。
 
-## 上下文 Token 节省器（src/extensions/token-saver.ts）
-
-自动清洗 bash 工具的冗余输出，节省上下文 token（0 配置，加载即生效）：
-
-- **清洗规则**：git（status/log/diff 精简）、npm/pnpm（去安装横幅）、tsc（去重复错误头）、pip、docker、`--help` 长帮助文本；
-- **截断保护**：超长输出截断后保存到 `~/.pi/agent/tmp/` 并附文件路径，需要时可 read 查看全文；
-- **节省量反馈**：经官方 `ctx.ui.setStatus("token-saver", "✂ 省 Xk")` 通道推送，HUD 行 1 动态区显示（见上「短反馈」槽位），hud 缺席时回落原生 footer。
-
 ## 联网工具（src/extensions/web-tool/）
 
 注册 `web_search`（多源搜索）与 `web_fetch`（抓网页转 markdown）两个自定义工具：agent 查实时信息（GitHub issue、文档、新闻、价格）时搜索，需要深读时抓取，全部**零 API key 零费用**（不依赖 kimi 订阅）。
 
 - **`web_search` 多源搜索**：`query` + 可选 `source`（`web` 默认 / `npm` 垂类）；返回 标题+URL+摘要 列表（**最多 15 条**），无 AI 总结——由主 agent 自行判断，成本为 0；
-  - **通用网页**：cn.bing.com RSS + 360 搜索 HTML 双源并行，结果**逐条评分合并**（不再整源择优）：标题/URL（仅 hostname+pathname，query 参数是搜索词 echo 不计）/摘要按权重逐词计分 + 完整查询短语命中强加成 + 标题全命中加成；跨源去重（URL 规范化去跟踪参数 / 标题归一化）后按分数降序取前 15 条——bing 泛化查询（如「陕西师范大学」被吞成长尾词）混入的低相关条目自然沉底，两个源的高质量条目都能入选，混合时**按来源分组展示**（`[bing]`/`[so360]` 组标题，组内分数降序、序号全局连续）；限流时 bing 只回 1 条占位，评分 0 自动滤除（实测 360 稳定、`data-mdurl` 带真实 URL）；评分权重在文件顶部可调；
+  - **通用网页**：cn.bing.com RSS + 360 搜索 HTML + 百度搜索 HTML **三源并行**（baidu 块级 `mu` 属性直取真实 URL，摘要从 `s-data` 注释 JSON 解析；第三源选型实测否决：DuckDuckGo 两端点 202 反爬、Jina 不可达、Mojeek 403），结果**逐条评分合并**（不再整源择优）：标题/URL（仅 hostname+pathname，query 参数是搜索词 echo 不计）/摘要按权重逐词计分 + 完整查询短语命中强加成 + 标题全命中加成；跨源去重（URL 规范化去跟踪参数 / 标题归一化）后按分数降序取前 15 条——bing 泛化查询（如「陕西师范大学」被吞成长尾词）混入的低相关条目自然沉底，三个源的高质量条目都能入选，混合时**按来源分组展示**（`[bing]`/`[so360]`/`[baidu]` 组标题，组内分数降序、序号全局连续）；限流时 bing 只回 1 条占位，评分 0 自动滤除（实测 360 稳定、`data-mdurl` 带真实 URL）；评分权重在文件顶部可调；
   - **npm 垂类**（`source: "npm"`）：npm registry JSON API 查包名/版本/描述/主页；pypi.org 搜索页有 Client Challenge 反爬，Python 包走默认网页搜索（如 `site:pypi.org/project/`）；
-- **`web_fetch` 抓取转 markdown**：`url` + 可选 `maxChars`（默认 12000、上限 60000）；HTML 经 domino 解析 → 启发式选正文容器（article/main/常见内容 class，回退 body）→ turndown(+gfm) 转 markdown（表格/代码块/列表/引用）→ 相对链接补全为绝对 → 压缩空行/截断；非 HTML（PDF 等）与抓不到的站点如实报错并提示改用搜索；
+- **`web_fetch` 抓取转 markdown**：`url` + 可选 `maxChars`（默认 12000、上限 60000）；HTML 经 domino 解析 → 启发式选正文容器（article/main/常见内容 class，回退 body）→ turndown(+gfm) 转 markdown（表格/代码块/列表/引用）→ 相对链接补全为绝对 → 压缩空行/截断；**GitHub blob URL 重写为 raw 直取**（blob 页行号/按钮噪音大，raw 纯文本原文直出、防源码被当 HTML 标签吞掉）；**正文极短（JS 空壳）用 Googlebot UA 重试一次**（不少 SPA 只对搜索引擎爬虫做预渲染）；非 HTML（PDF 等）与抓不到的站点如实报错并提示改用搜索；
 - **被墙自动代理重试**：直连与降级**并行竞速**——直连（含换 UA）与系统 curl（自动 `-x` 代理，TLS 指纹不同可绕过 GitHub 等对 Node 的 301 挑战）同时发起，谁先成功用谁、另一条立即掐断；被墙站点 curl 秒回，不傻等直连连接黑洞超时；404 等确定性错误立即判死（任何传输方式结果相同）；两条皆失败才认定失败并聚合错误；curl 缺失时降级退 Node 内置 net/tls CONNECT 隧道（**零新增 npm 依赖**）；代理由 **`/web-tool-config`** 命令设置——无参数打开设置面板输入 `http://` 地址（Enter 保存 / Esc 取消 / 清空回车 = 清除），或 `/web-tool-config <url>` 直接设置、`/web-tool-config off` 清除、`show` 查看；设置持久化到 `~/.pi/agent/web-fetch-proxy.json`（**不读环境变量**，避免系统 HTTPS_PROXY 意外生效）；仅支持 `http://` 代理（Clash/V2Ray 等本地代理的常见形态）；web_search 的搜索请求同样享受代理降级；
 - **token 节约**：正文提取 + 截断，实测 100KB HTML 页面 → 约 800 字符 markdown；turndown/domino/gfm 由 build.js（esbuild）内联进单文件产物，运行时零外部依赖（build.js external 白名单只留 `@earendil-works/*` 与 `typebox`）；
 - **差评降权（动态黑名单）**：`web_dislike(domains, reason?)` 工具——AI 深读某条结果发现内容与标题不符/灌水/死链时对其域名记差评，持久化到 `~/.pi/agent/web-search-blacklist.json`（跨会话生效，**无需维护域名白名单**，降权对象由使用中自然沉淀）；搜索评分按差评次数降权（`×0.6/次`），累计 5 次直接滤除该域名条目（子域名同样受降权，父域不受）；`/web-tool-config blacklist` 查看（累计次数/降权系数/原因）、`blacklist clear` 清空；
 - **可调配置**：文件顶部「可调配置」区（源顺序、结果数、超时、字节/字符上限、差评降权系数/封禁阈值），改后 `node install.js` 重装生效。
-
-## 临时旁支问答（src/extensions/btw/）
-
-对齐 Claude Code 的 `/btw`：主任务进行中想顺便问个小事（如「刚才为什么选这个方案」「改了哪些关键文件」），直接 `/btw <问题>` 在右侧浮层里得到回答，不打断当前任务、不污染主会话。
-
-- **零污染**：回答在独立上下文中生成，不写入会话历史，主 agent 并行运行不受影响；
-- **面板内多轮追问**：回答完成后按 `Enter` 底部弹出输入框继续问（最多 8 轮），上下文 = 主会话 + 面板内历次问答，仍独立于主会话；`Esc` 退回浏览、`↑`/`↓` 滚动查看完整记录；
-- **一键转正**：按 `m` 把面板内全部 Q/A 打包，**随下一条消息附带发送**（不立即发出）——输入框只显示你正常输入的内容，HUD 常驻提示 `📎 已附带 btw 问答`（hud 关着时显示在原生 footer 第 3 行），提交下一条消息时问答自动拼接到消息末尾，随后提示消失；临时问题值得跟进时无缝升级为正式任务；
-- **带上下文**：自动携带当前会话已解析的上下文（含压缩结果），能回答与当前任务相关的问题；主 agent 正在工作时，上下文**截止到最近一次用户输入**（不含未完成的 turn 和中间工具结果），避免带偏；
-- **Markdown 轻量渲染**：回答区支持行内粗体/斜体/代码、`#` 标题、`-` 列表、``` 代码块、markdown 表格（列宽自适应、超宽自动压缩、表头高亮）样式，阅读更清晰；
-- **只读工具常驻**：面板内始终可读文件/搜索代码（`read` / `ls` / `grep` / `find`，无 bash、只读不写），问「xx 函数在哪定义」「这个配置是干嘛的」类问题可直接查证代码，工具执行时状态行显示 `🔧 read src/a.ts`；需要跨仓库大规模探索仍建议用 `explore`，需要保留分支讨论用 `/fork`；
-- **操作**：流式显示回答（含工具轮次的中间过程文本），`Esc` 关闭并中止请求；同时只允许一个面板；
-- **模型可选（/btw-config）**：默认 `auto` = 当前已认证可用模型中最便宜的（input+output 单价合计，同价按 id 序），并按价格从低到高**故障转移**——最便宜模型调用失败（认证/网络/API 错误）自动换下一个更贵的模型重试，全部失败才报错；`auto-not-free` 机制相同但忽略价格 ≤ 0 的免费模型；也可 `/btw-config provider/modelId` 指定固定模型；`/btw-config` 不带参数弹出**可搜索选择器**：顶部输入框打字即实时过滤（匹配 provider/id/显示名，不区分大小写），列表展示全部已认证可用模型（价格、上下文窗口），`↑↓` 选择、`Enter` 确认、`Esc` 取消，当前设置带 ✓ 标记；面板标题栏常驻显示实际使用的模型名（auto 故障转移换模型时同步更新），开面板时 also notify 当前生效模型；设置持久化到 `~/.pi/agent/btw-config.json`，`/reload` 重载扩展后保留；
-- **成本控制**：主会话上下文限最近 60 条、单条工具输出截断 1500 字符、单轮问答最多 6 轮 LLM 调用、回答上限 4096 token、面板线程限 8 轮（文件顶部可调）。
-- **缓存友好（无需额外配置）**：btw 与主会话走同一序列化管线，pi-ai 自动给 system + 最后一条 user 消息打 `cache_control`（Claude Code 同款做法，缓存前缀）——btw 的系统提示词是常量、面板线程是稳定增长前缀，短时间内追问、agentLoop 多轮工具迭代都能命中 provider 前缀缓存；DeepSeek / OpenAI 兼容端点走自动前缀缓存。Anthropic 类端点可用环境变量 `PI_CACHE_RETENTION=long` 把缓存 TTL 提到 1 小时（需模型支持）。注意：“复用主会话缓存”不可行——严格前缀匹配下，btw 的序列与主会话序列不同，缓存 key 天然不重合，这是设计使然。
 
 ## 人机协作任务面板（src/extensions/workflow-mgr/）
 
@@ -211,7 +185,7 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 - **数据（项目级、跨会话、可 git 审查）**：`.pi/workflow/workflow.json`（工作流定义：阶段→任务，含人机分工/交付物/完成信号/依赖 + 可选 `mode`：`human-ai`/`agent`）、`state.json`（进度：当前任务/任务状态/里程碑/AI 记录/日志）、`config.json`（面板开关）；**无内置示例**：从未创建过时为空工作流（常驻面板整体隐藏），AI 用 `wf_workflow` 从零创建；
 - **协作模式（mode）**：工作流级可选字段，缺省 `human-ai`（AI 指挥、人执行）向后兼容；`agent` = **纯 agent 自动驾驶**（0.3 拍板）——无人类分工（`humanTasks` 可不填、渲染/简报隐藏「你:」行）、AI 用 `wf_switch` 连续推进直到全部完成并 `wf_workflow archive` 收尾，遇到无法完成的任务用 `wf_block` 标记原因停下报告；
 - **常驻面板**：输入框下方背景色区块，3~5 行——当前任务（最显眼）+ 阶段 + 右对齐进度条（`▓`实心/`░`空心，附 完成数/总数）、分工两行 `你:/AI:`（多项「、」连接，agent 模式隐藏「你:」）、阻塞 warning 提示、里程碑三态（`▶`当前目标/`○`未完成/`✓`已完成）；宽度自适应（`visibleWidth`：中文=2 列、块元素=1 列），窗口 resize 自动重排；空工作流显示「无任务，请先让 AI 用 wf_workflow 规划」；**hud 接管**：hud 存在且开启时，面板内容改由 hud 在 footer 底部渲染（屏幕最底，任务/分工/里程碑 ≈4 行），常驻面板隐藏——经 hud 通用接口 `__PI_HUD_API__.registerExtraRows` 注册渲染函数（**内容与样式由 workflow 自决**，与常驻面板同款：12 格进度条 + selectedBg 底色，确保体验一致），`notifyExtraRowsUpdate` 请求重绘，零耦合零 import；**常驻面板开关联动**：`showPanel=false` 时 hud 底部行一并隐藏；`/hud` 关闭后自动恢复自绘面板（`hud:state-change` 事件驱动）；
-- **工具（7 个）**：`wf_workflow`（list/import/add/edit/remove/archive/reset——**初始化优先 import**：用 write 写一份草稿 json（`{stages:[{name,goal,tasks:[{title,deps,...}]}]}`，id 自动生成如 0.1/1.2、deps 可直接引用本批未来 id）一次性导入整份计划，远比逐条 add 省 token，add 只用于已有工作流增补调整；非空时拒绝导入；add 时 stageId 不存在自动建阶段、id 自动生成如 1.2、防依赖环（导入含全图环检测带链路）；可带 `mode` 设工作流级协作模式；remove 同步清状态、空阶段自动移除；**archive 归档工作流**：可带 `status` 描述收尾状态（完成/放弃/其他），**归档 ≠ 完成**——快照保留任务真实状态、不做强制 done 标记，数据移入 `.pi/workflow/archive/` 留档可 git 审查，不提供找回功能需时手动查看；reset 清空工作流）、`wf_status`（当前任务+分工+交付物+完成信号+下一步+阻塞+里程碑+最近记录）、`wf_switch`（**推进核心**：一次调用替代 start+done——无参=完成当前任务并自动开始下一个依赖满足的任务，无下一个则全部完成；`taskId=X` 显式切换；`complete=false` 搁置当前任务回 todo 直接转移；switch 到 blocked 任务即解除阻塞）、`wf_block`（阻塞+原因）、`wf_rollback`（回退 todo/doing，输出依赖警告清单不自动回退下游）、`wf_note`（**AI 记录，对用户透明**：交流中的重要结论/约束/偏好，增删读改 {id,ts,content}，作为跨会话记忆）、`wf_milestone`（增/改/删/改名里程碑）；
+- **工具（7 个）**：`wf_workflow`（list/import/add/edit/remove/archive/reset——**初始化优先 import**：用 write 写一份草稿 json（`{stages:[{name,goal,tasks:[{title,deps,...}]}]}`，id 自动生成如 0.1/1.2、deps 可直接引用本批未来 id）一次性导入整份计划，远比逐条 add 省 token，add 只用于已有工作流增补调整；非空时拒绝导入；add 时 stageId 不存在自动建阶段、id 自动生成如 1.2、防依赖环（导入含全图环检测带链路）；可带 `mode` 设工作流级协作模式；remove 同步清状态、空阶段自动移除；**archive 归档工作流**：可带 `status` 描述收尾状态（完成/放弃/其他），**归档 ≠ 完成**——快照保留任务真实状态、不做强制 done 标记，数据移入 `.pi/workflow/archive/` 留档可 git 审查，不提供找回功能需时手动查看；reset 清空工作流）、`wf_status`（当前任务+分工+交付物+完成信号+下一步+阻塞+里程碑+最近记录）、`wf_switch`（**推进核心**：一次调用替代 start+done——无参=完成当前任务并自动开始下一个依赖满足的任务，无下一个则全部完成；`taskId=X` 显式切换；`complete=false` 搁置当前任务回 todo 直接转移；switch 到 blocked 任务即解除阻塞；**独立审计**（借鉴 pi-goal-x completion auditor）：`.pi/workflow/config.json` 设 `auditOnComplete:true` 后，完成推进前派全新上下文的只读+bash 子代理核验完成信号（不信宣布者、自己查证据），不通过则打回任务保持 doing；审计自身故障放行——增强不是门禁）、`wf_block`（阻塞+原因）、`wf_rollback`（回退 todo/doing，输出依赖警告清单不自动回退下游）、`wf_note`（**AI 记录，对用户透明**：交流中的重要结论/约束/偏好，增删读改 {id,ts,content}，作为跨会话记忆）、`wf_milestone`（增/改/删/改名里程碑）；
 - **命令**：`/workflow-config` 轻量功能浮窗（居中浮窗：显示详细信息/常驻面板开关，↑↓ 选择 Enter 执行 Esc 关闭；详细信息页任意键返回）——**只留无参**（0.4 拍板：人无需管理工作流，管理是 AI 的事）；
 - **AI 角色注入（条件注入，0.2 拍板）**：`before_agent_start` 按三态把指南追加进 systemPrompt（不进对话、不膨胀会话文件）：无工作流/空工作流 → **零注入**（简单任务不被引导，AI 靠工具描述按需发现）；`human-ai` → 完整指挥者角色（下达指令格式 📋任务/🎯目标/📌做法/✅回报/🔍验证、完成信号验证后 `wf_switch`、重要结论用 `wf_note` 记录）；`agent` → 轻量自动驾驶执行者（连续 `wf_switch` 直到完成并 archive，障碍 `wf_block` 停下报告）；
 - **渲染回归测试**：`node src/extensions/workflow-mgr/test/render.test.mjs`（test/ 下 node_modules junction 指向 pi 全局包；esbuild bundle 扩展 + mock pi/ctx → 15 场景 A-O：三态渲染断言、工具流程、switch 语义、mode、注入三态、wf_note 增删读改、archive 自动完成）。
@@ -222,7 +196,7 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 
 - **四命名空间**：`/notes`（永久知识）/ `/references`（文档摘录，markitdown 产出）/ `/scratch`（临时草稿，可随时清理）/ `/vault`（加密区：需口令解锁、口令只存内存、密文仅 kb 工具可读写，口令忘了=数据永久丢失）；路径必须分层 `/命名空间/用途/自由层级/文件名`（至少 4 段，禁止命名空间/用途下放裸文件）；
 - **分类层级守则（PROTOCOL.md）**：`/references` 第 2 层按文档功能**六值判定**（知识文献/规范文书/操作指南/数据名录/表单模板/素材资源，互斥判整体体裁），`/notes` 按知识主题类判定（技术笔记/研究笔记/方法总结/工作职业/生活管理/兴趣创作）；自由层级由 AI 管理（<3 个文件并入相近层、长期 <2 个文件的层并入、层级名禁项目名/来源形态/编号前缀）。守则本体 = 网盘根 `PROTOCOL.md`（跨设备同步、用户可直接编辑迭代，`kb_help` 优先读它、缺失回退内嵌默认版 protocol.ts）；`PROTOCOL.md` 对 `kb_list`/`kb_status` **不透明**（守则走 `kb_help` 专用通道，不混入内容浏览，`kb_search` 保留索引作兜底旁路）；
-- **本地镜像 + 增量同步**：所有读操作（搜索/面板/AI 工具）打在本地镜像（毫秒级、离线可用）；同步账本 `.kb-sync.json` 记录 etag + 本地 mtime 快照，增量比对——远端 etag 变+本地未动→下载、本地 mtime 变+远端未动→上传、远端删+本地未动→删本地、本地删+远端未动→删远端、两侧都变→**冲突**（保留远端为权威，本地版存 `.conflict-<时间戳>` 副本、仅本地不回传）；上传前自动补齐远端父目录（MKCOL 链，123 云盘对并发 MKCOL 敏感、串行+重试最稳）；**同步后自动清理本地镜像空目录**（`.kb-` 隐藏项与镜像根保留）；AI 写入（`kb_write`/`kb_append`）本地原子落盘 + 立即 PUT 远端，离线失败留账本下次同步补传；
+- **本地镜像 + 增量同步**：所有读操作（搜索/面板/AI 工具）打在本地镜像（毫秒级、离线可用）；同步账本 `.kb-sync.json` 记录 etag + 本地 mtime 快照，增量比对——远端 etag 变+本地未动→下载、本地 mtime 变+远端未动→上传、远端删+本地未动→删本地、本地删+远端未动→删远端、两侧都变→**冲突**（保留远端为权威，本地版存 `.conflict-<时间戳>` 副本、仅本地不回传）；上传前自动补齐远端父目录（MKCOL 链，123 云盘对并发 MKCOL 敏感、串行+重试最稳）；**同步健壮性**（借鉴 pi-sync）：`.kb-sync.lock` 互斥锁防多会话并发互踩（活锁拒绝、死进程/30 分钟超时安全回收）、`.kb-sync-journal.json` 记录中断阶段（成功才删除，下次同步报告并靠幂等重跑收敛）、**上传前 secret 扫描**（高精度密钥模式命中即拦截上传、本地保留，配置 `allowSecretUpload:true` 可关）、远端删除 404 幂等；**同步后自动清理本地镜像空目录**（`.kb-` 隐藏项与镜像根保留）；AI 写入（`kb_write`/`kb_append`）本地原子落盘 + 立即 PUT 远端，离线失败留账本下次同步补传；
 - **只读模式**：适配 WebDAV 账号只有读权限的场景；`/kb-config` 面板切换（默认关，下次会话生效）。开启后：AI 只见只读工具（`kb_write`/`kb_append`/`kb_upload`/`kb_import`/`kb_delete`/`kb_move` 在 session_start 一次性隐藏，`kb_sync` 保留）、同步自适应为仅下载（本地删过的远端文件重新下载回本地，本地新建/修改留在本地不上传）、首次引导的 PROTOCOL.md 写入跳过；
 - **全文检索**：零依赖零向量（中文 bigram 滑动窗口 + 英文分词 + BM25），增量索引持久化 `.kb-index.json`（按 mtime 只重读变更文件）；纯文本多格式（md/txt/csv/tsv/json/jsonl/yaml/yml/toml/html/xml），csv/tsv 表头加权、frontmatter 仅 md 强制；vault 未解锁时加密区内容不可见（密文仅内存索引）；
 - **vault 加密区**：口令只存内存，密文落盘 `.enc` 后缀，读写经解密/加密（列表/检索按明文路径对齐）；未解锁写入报错；
@@ -321,15 +295,21 @@ rm ~/.pi/agent/themes/matrix.json
 rm ~/.pi/agent/extensions/hud.ts
 rm ~/.pi/agent/extensions/btf-think.ts
 rm ~/.pi/agent/extensions/claude-it.ts
-rm ~/.pi/agent/extensions/explore-agent.ts
 rm ~/.pi/agent/extensions/task-alert.ts
-rm ~/.pi/agent/extensions/btw.ts
-rm ~/.pi/agent/extensions/token-saver.ts
 rm ~/.pi/agent/extensions/web-tool.ts
+rm ~/.pi/agent/extensions/webdav-kb.ts
+rm ~/.pi/agent/extensions/webui.ts
+rm ~/.pi/agent/extensions/workflow-mgr.ts
+rm ~/.pi/agent/extensions/ask.ts
 rm ~/.pi/agent/sounds/task_complete.wav
+# 官方插件（vendor）：pi remove 按本地路径移除（同时清 settings.json packages 登记）
+pi remove ~/.pi/agent/vendor/pi-subagents
+pi remove ~/.pi/agent/vendor/pi-btw
+pi remove ~/.pi/agent/vendor/pi-rtk-optimizer
+rm -rf ~/.pi/agent/vendor
 ```
 
-（`settings.json` 里的 `"theme": "matrix"` 改回其他主题即可；`models.json` 已并入你手改的 `~/.pi/agent/models.json`（深度合并，模板键以仓库为准），要还原需手动移除模板注入的 `providers.openrouter.compat.openRouterRouting`；三个补丁打在全局 node_modules 上，重装 pi 即还原，祖冲之汉化另有 `--restore` 一键还原英文。）
+（`settings.json` 里的 `"theme": "matrix"` 改回其他主题即可；`models.json` 已并入你手改的 `~/.pi/agent/models.json`（深度合并，模板键以仓库为准），要还原需手动移除模板注入的 `providers.openrouter.compat.openRouterRouting`；三个补丁打在全局 node_modules 上，重装 pi 即还原，祖冲之汉化另有 `--restore` 一键还原英文；rtk 二进制删 `%APPDATA%\npm\rtk.exe` 即可。）
 
 ## 说明
 
