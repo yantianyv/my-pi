@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-22T14:53:42.643Z",
-  "currentTaskId": "5.1",
+  "updatedAt": "2026-08-22T15:04:50.459Z",
+  "currentTaskId": null,
   "tasks": {
     "0.1": {
       "status": "done",
@@ -52,8 +52,8 @@
       "doneAt": "2026-08-22T14:53:02.047Z"
     },
     "5.1": {
-      "status": "doing",
-      "startedAt": "2026-08-22T14:53:42.642Z"
+      "status": "done",
+      "doneAt": "2026-08-22T15:04:50.459Z"
     }
   },
   "milestones": {},
@@ -230,6 +230,12 @@
     {
       "ts": "2026-08-22T14:53:42.642Z",
       "event": "task_start",
+      "taskId": "5.1",
+      "msg": "文档更新与提交"
+    },
+    {
+      "ts": "2026-08-22T15:04:50.459Z",
+      "event": "task_done",
       "taskId": "5.1",
       "msg": "文档更新与提交"
     }
