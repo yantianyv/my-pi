@@ -34,6 +34,8 @@ export interface KbConfig {
 	vaultKey?: string;
 	/** 只读模式：隐藏写工具、同步仅下载（面板切换，下次会话生效） */
 	readOnly?: boolean;
+	/** 允许上传含疑似密钥的笔记（默认 false：secret 扫描命中即拦截上传，见 secrets.ts） */
+	allowSecretUpload?: boolean;
 }
 
 const isKbConfig = (v: unknown): v is KbConfig => {

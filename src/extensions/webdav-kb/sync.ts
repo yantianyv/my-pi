@@ -16,6 +16,10 @@
  *
  * 并发策略：远端遍历与批量下载各带并发上限（避免国产盘并发超限被限流）。
  * 上传前自动补齐远端父目录（MKCOL 链）。
+ *
+ * 健壮性（借鉴 pi-sync）：syncAll 持 .kb-sync.lock 互斥锁（活锁拒绝、进程死/超时 30min
+ * 自动回收）；.kb-sync-journal.json 记录计划与阶段，成功才删除——中断后下次同步报告并
+ * 靠重跑差异比对收敛（各操作幂等：重下/重传/重删安全，删本地前必有 .history 留档）。
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -30,6 +34,7 @@ import {
 	mirrorPath,
 } from "./store";
 import { isLfsPath, syncLfsCacheFromRemote } from "./lfs";
+import { scanSecrets } from "./secrets";
 
 /** 目录遍历并发上限（PROPFIND） */
 const WALK_CONCURRENCY = 4;
@@ -37,6 +42,113 @@ const WALK_CONCURRENCY = 4;
 const DOWNLOAD_CONCURRENCY = 4;
 /** 上传并发上限（123 云盘对并发 MKCOL 建目录敏感，串行 + 重试最稳） */
 const UPLOAD_CONCURRENCY = 1;
+
+// ---------------------------------------------------------------------------
+// 同步锁与恢复日志（借鉴 pi-sync：锁防多会话并发互踩；journal 记录中断点）
+// ---------------------------------------------------------------------------
+
+/** 锁文件（.kb- 前缀，scanLocal/上传均不感知） */
+const LOCK_NAME = ".kb-sync.lock";
+/** 恢复日志：记录上次同步的计划与中断阶段 */
+const JOURNAL_NAME = ".kb-sync-journal.json";
+/** 锁超过该时长视为残留（持有进程已死/挂起），安全回收 */
+const LOCK_STALE_MS = 30 * 60_000;
+
+interface SyncJournal {
+	startedAt: string;
+	/** 中断时所在阶段（plan 后的各阶段；同步成功结束会删除 journal，见到即中断） */
+	phase: "download" | "conflict" | "upload" | "delete";
+	toDownload: string[];
+	toUpload: string[];
+	delLocal: string[];
+	delRemote: string[];
+}
+
+/** 进程存活探测：kill(pid, 0) 不杀进程只验活；ESRCH=不存在，EPERM=存在但无权（也算活） */
+function pidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (e) {
+		return (e as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** 获取同步锁（wx 独占创建）。成功返 release；失败（活锁持有中）抛 DavError；残留锁（进程死/超时）安全回收。 */
+function acquireSyncLock(mirrorDir: string): { release: () => void } {
+	const lockPath = path.join(mirrorDir, LOCK_NAME);
+	fs.mkdirSync(mirrorDir, { recursive: true });
+	for (let attempt = 0; ; attempt++) {
+		try {
+			const fd = fs.openSync(lockPath, "wx");
+			fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+			fs.closeSync(fd);
+			return {
+				release: () => {
+					try {
+						fs.unlinkSync(lockPath);
+					} catch {
+						/* 已消失也无妨 */
+					}
+				},
+			};
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+		}
+		// 锁已存在：读持有者信息，活且未超时 → 拒；否则回收重试一次
+		let holder = "未知持有者";
+		let stale = false;
+		try {
+			const meta = JSON.parse(fs.readFileSync(lockPath, "utf8")) as { pid?: number; startedAt?: string };
+			holder = `PID ${meta.pid}（始于 ${meta.startedAt}）`;
+			const age = meta.startedAt ? Date.now() - Date.parse(meta.startedAt) : Number.POSITIVE_INFINITY;
+			stale = !meta.pid || !pidAlive(meta.pid) || age > LOCK_STALE_MS;
+		} catch {
+			stale = true; // 锁文件读不出 = 写了一半的残锁，回收
+		}
+		if (!stale || attempt > 0) {
+			throw new DavError(
+				`另一个同步正在进行：${holder}。若确认无其他 pi 在同步，删除镜像目录下的 ${LOCK_NAME} 即可`,
+				undefined,
+				"SYNC",
+			);
+		}
+		try {
+			fs.unlinkSync(lockPath);
+		} catch {
+			/* 被竞态抢走也无妨，下轮 wx 判定 */
+		}
+	}
+}
+
+/** 读残留 journal（上次同步中断）：有则返回之并清除（报告后重跑差异比对即可收敛——各操作幂等） */
+function recoverJournal(mirrorDir: string): SyncJournal | null {
+	const jp = path.join(mirrorDir, JOURNAL_NAME);
+	try {
+		const j = JSON.parse(fs.readFileSync(jp, "utf8")) as SyncJournal;
+		fs.unlinkSync(jp);
+		return j;
+	} catch {
+		return null;
+	}
+}
+
+/** 写 journal（覆盖式：阶段推进即更新，成功结束由 clearJournal 删除） */
+function writeJournal(mirrorDir: string, j: SyncJournal): void {
+	try {
+		fs.writeFileSync(path.join(mirrorDir, JOURNAL_NAME), JSON.stringify(j, null, 1), "utf8");
+	} catch {
+		/* journal 写失败不阻塞同步 */
+	}
+}
+
+function clearJournal(mirrorDir: string): void {
+	try {
+		fs.unlinkSync(path.join(mirrorDir, JOURNAL_NAME));
+	} catch {
+		/* 不存在 */
+	}
+}
 // 注意：本地改动检测用「严格大于」而非容差——所有写入（下载/putNote）都即时记录
 // statSync 的精确 mtimeMs，之后任何 statSync 都会返回同一值，因此 > 即真实改动；
 // 粗粒度文件系统（如 FAT 2s 精度）重写可能落入同一刻 → 等下次同步再发现，可接受。
@@ -212,8 +324,27 @@ function safeLocal(mirrorDir: string, rel: string): string {
 	return abs;
 }
 
-/** 增量同步主体 */
+/**
+ * 增量同步（带锁 + 恢复日志）：多会话并发时后到者直接报错；上次中断（journal 残留）
+ * 报告后经重跑差异比对自然收敛——下载/上传/删除均幂等（删除前已有 .history 留档）。
+ */
 export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOptions = {}): Promise<SyncStats> {
+	const lock = acquireSyncLock(mirrorDir);
+	try {
+		const stale = recoverJournal(mirrorDir);
+		if (stale) {
+			opts.onProgress?.(
+				`检测到上次同步中断于「${stale.phase}」阶段（${stale.startedAt}）；操作幂等，重跑差异比对即可收敛`,
+			);
+		}
+		return await syncAllInner(cfg, mirrorDir, opts);
+	} finally {
+		lock.release();
+	}
+}
+
+/** 增量同步主体 */
+async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions = {}): Promise<SyncStats> {
 	const stats: SyncStats = { downloaded: 0, uploaded: 0, deleted: 0, conflicts: 0, unchanged: 0, errors: [] };
 	const signal = opts.signal;
 	const client = new WebDavClient(cfg.baseUrl!, cfg.username!, cfg.password!, {
@@ -288,6 +419,17 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 		toUpload.length = 0;
 	}
 
+	// 恢复日志：计划落盘，各阶段推进时更新 phase；成功结束才删除（见到残留 journal 即上次中断）
+	const journal: SyncJournal = {
+		startedAt: new Date().toISOString(),
+		phase: "download",
+		toDownload,
+		toUpload,
+		delLocal,
+		delRemote,
+	};
+	writeJournal(mirrorDir, journal);
+
 	// 3) 下载（并发）
 	await mapLimit(toDownload, DOWNLOAD_CONCURRENCY, async (p) => {
 		if (signal?.aborted) return;
@@ -310,6 +452,8 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 	});
 
 	// 4) 冲突处理：保留远端为权威，本地版存 .conflict-<时间戳>.md（仅本地，不参与上传）
+	journal.phase = "conflict";
+	writeJournal(mirrorDir, journal);
 	for (const p of conflicts) {
 		if (signal?.aborted) throw new DavError("同步已取消", undefined, "SYNC");
 		try {
@@ -333,11 +477,21 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 	}
 
 	// 5) 上传（并发 + 父目录补齐）
+	journal.phase = "upload";
+	writeJournal(mirrorDir, journal);
 	await mapLimit(toUpload, UPLOAD_CONCURRENCY, async (p) => {
 		if (signal?.aborted) return;
 		try {
 			const abs = safeLocal(mirrorDir, p);
 			const data = fs.readFileSync(abs);
+			// secret 扫描：命中疑似密钥 → 拦截上传（本地保留；账本无 etag 每次同步都会重试报错，提醒用户处理）
+			if (!cfg.allowSecretUpload) {
+				const hits = scanSecrets(data.toString("utf8"));
+				if (hits.length) {
+					stats.errors.push(`上传 ${p}: 含疑似密钥（${hits.join("、")}），已拦截上传，本地文件保留`);
+					return;
+				}
+			}
 			await ensureRemoteDirs(client, p);
 			const etag = await putWithEtag(client, p, data);
 			ledger.files[p] = {
@@ -354,6 +508,8 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 
 	// 6) 删除：远端删本地文件；本地删远端文件（不删远端目录，目录由服务器自管）
 	// 远端已删（delLocal）：本地是最后的副本 → 先留 .history 历史再删，防远端误删
+	journal.phase = "delete";
+	writeJournal(mirrorDir, journal);
 	for (const p of delLocal) {
 		try {
 			const abs = safeLocal(mirrorDir, p);
@@ -375,6 +531,11 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 			delete ledger.files[p];
 			stats.deleted++;
 		} catch (e) {
+			// 404 = 远端已不存在，删除目标已达成（幂等）：照样清账本，不计错误
+			if (e instanceof DavError && e.status === 404) {
+				delete ledger.files[p];
+				continue;
+			}
 			stats.errors.push(`删除远端 ${p}: ${e instanceof Error ? e.message : String(e)}`);
 		}
 	}
@@ -388,6 +549,7 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 
 	// 8) LFS 元数据缓存刷新（只同步元数据，不下载本体）
 	syncLfsCacheFromRemote(mirrorDir, remote);
+	clearJournal(mirrorDir); // 全部完成，清除恢复日志
 	return stats;
 }
 
@@ -437,6 +599,14 @@ export async function putNote(
 	ledger.files[relPath] = { ...ledger.files[relPath], size: fs.statSync(abs).size, localMtime: mtime };
 	saveLedger(mirrorDir, ledger);
 	// 立即上传（失败静默：账本 mtime 已更新，下次同步自动补传）
+	// secret 扫描例外：命中疑似密钥不静默——抛错让工具层如实告知 AI/用户（本地已落盘，仅远端被拦）
+	if (!cfg.allowSecretUpload) {
+		const text = typeof content === "string" ? content : new TextDecoder().decode(content);
+		const hits = scanSecrets(text);
+		if (hits.length) {
+			throw new Error(`笔记已在本地保存，但含疑似密钥（${hits.join("、")}），已拦截上传；确认无敏感信息后在 kb-config.json 设 allowSecretUpload 或手动移除密钥再同步`);
+		}
+	}
 	try {
 		const client = new WebDavClient(cfg.baseUrl!, cfg.username!, cfg.password!, { proxyUrl: cfg.proxyUrl });
 		await ensureRemoteDirs(client, relPath);
