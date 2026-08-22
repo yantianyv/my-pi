@@ -7,6 +7,9 @@
  * - 双通道竞速：直连（含换 UA 重试）与降级（系统 curl 自动带代理 / 无 curl 退 Node CONNECT
  *   隧道）并行，谁先成功用谁；404 等确定性错误立即判死（任何传输方式结果相同）
  * - fetchAsMarkdown：校验协议 / 非 HTML 报错 / 字节上限 / 字符截断 / 正文极短提示
+ *   成功率补救（不依赖外部服务）：GitHub blob URL 重写为 raw 直取（blob 页行号/按钮噪音大）；
+ *   正文极短（JS 空壳判定）时用 Googlebot UA 重试一次——不少 SPA 只对搜索引擎爬虫做预渲染。
+ *   （Jina Reader 第三通道曾评估：2026-08 本机实测 r.jina.ai 直连与代理均不可达，放弃）
  *
  * 注意：本模块不注册任何 pi API，仅导出函数/常量，由入口（web_search/web_fetch 工具）驱动。
  */
@@ -33,6 +36,17 @@ import { makeTimeoutSignal } from "../shared/net";
 
 /** domino 的 createWindow（any 桥接，见上方 @ts-ignore 说明） */
 const createWindow = _createWindow as (html?: string) => any;
+
+/** GitHub blob 页面重写为 raw 直取：blob HTML 页行号/按钮/面包屑噪音大，raw 是纯文本源码。
+ *  （raw.githubusercontent.com 与 github.com 同网络栈，竞速/代理通道原样适用） */
+function rewriteUrl(url: string): string {
+	const m = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/.exec(url);
+	if (m) return `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}/${m[4]}`;
+	return url;
+}
+
+/** Googlebot UA：JS 空壳页面（正文极短）的重试手段——不少 SPA 只对搜索引擎爬虫做预渲染/SSR */
+const GOOGLEBOT_UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
 
 /** 直连超时（毫秒）：被墙站点直连多为连接黑洞（挂到超时），短超时快速切降级；
  *  正常站 1-3s 足够，5s 已偏激进，误伤时 curl 兜底仍能拿到结果（降级不算失败） */
@@ -265,7 +279,7 @@ export async function fetchAsMarkdown(
 ): Promise<{ markdown: string; title: string; finalUrl: string; bytes: number; truncated: boolean }> {
 	let u: URL;
 	try {
-		u = new URL(url);
+		u = new URL(rewriteUrl(url));
 	} catch {
 		throw new Error(`无效 URL：${url}`);
 	}
@@ -285,7 +299,11 @@ export async function fetchAsMarkdown(
 	const buf = await resBytes(res);
 	const bytes = Math.min(buf.byteLength, FETCH_MAX_BYTES);
 	const html = decodeBody(buf.subarray(0, bytes), res.headers.get("content-type") ?? "");
-	const { markdown, title } = htmlToMarkdown(html, u.href);
+	// text/plain（如 GitHub raw 直取的源码）不能走 HTML→markdown：源码里的 <...> 会被当标签吞掉，原文直出
+	const isPlainText = ctype.includes("text/plain");
+	const { markdown, title } = isPlainText
+		? { markdown: html, title: u.pathname.split("/").pop() ?? "" }
+		: htmlToMarkdown(html, u.href);
 	let out = markdown;
 	let truncated = bytes < buf.byteLength; // 字节被截断
 	if (out.length > maxChars) {
@@ -295,7 +313,30 @@ export async function fetchAsMarkdown(
 		out = out.slice(0, cut).trimEnd();
 		truncated = true;
 	}
-	// 正文极短：可能是需登录 / JS 渲染 / 空壳页面，如实提示避免误判为抓取成功
+	// 正文极短：可能是需登录 / JS 渲染 / 空壳页面——先用 Googlebot UA 重试一次
+	// （不少 SPA 只对搜索引擎爬虫预渲染）；仍极短才如实提示，避免误判为抓取成功
+	if (out.trim().length < 80) {
+		const retry = await directFetch(
+			u.href,
+			{ headers: browserHeaders(GOOGLEBOT_UA), redirect: "follow" },
+			DIRECT_TIMEOUT_MS,
+			signal,
+		).catch(() => null);
+		if (retry && !(retry instanceof Error) && !isPlainText) {
+			const rbuf = await resBytes(retry);
+			const rhtml = decodeBody(rbuf.subarray(0, Math.min(rbuf.byteLength, FETCH_MAX_BYTES)), retry.headers.get("content-type") ?? "");
+			const rmd = htmlToMarkdown(rhtml, u.href);
+			if (rmd.markdown.trim().length > out.trim().length) {
+				out = rmd.markdown;
+				if (out.length > maxChars) {
+					let cut = out.lastIndexOf("\n", maxChars);
+					if (cut < maxChars * 0.7) cut = maxChars;
+					out = out.slice(0, cut).trimEnd();
+					truncated = true;
+				}
+			}
+		}
+	}
 	if (out.trim().length < 80) {
 		out += "\n\n> ⚠️ 页面正文极短——可能需登录、JS 渲染或页面已失效，内容可信度有限，建议用 web_search 核对。";
 	}

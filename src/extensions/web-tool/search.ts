@@ -2,7 +2,10 @@
  * web-tool/search：多源搜索 + 条目级评分合并（web-tool 多文件扩展的组成部分）
  *
  * 职责：
- * - 三源：bing.cn RSS / 360 搜索 HTML（通用网页，双源并行）/ npm registry JSON（垂类包）
+ * - 四源：bing.cn RSS / 360 HTML / baidu HTML（通用网页，三源并行）/ npm registry JSON（垂类包）
+ *   （第三源选型实测 2026-08：DuckDuckGo html/lite 两端点均返回 202 反爬验证、Jina 直连与代理均不可达、
+ *   Mojeek 403、公共 SearXNG 实例不稳定、Exa MCP 需完整协议握手成本过高——最终落 baidu；
+ *   baidu 块级 mu 属性直接给真实 URL，免去跳转链解析）
  * - 结果**逐条评分合并**：标题/URL/摘要按权重计分 + 完整查询短语命中强加成，
  *   跨源去重（URL 规范化 / 标题归一化）后按分数降序取前 MAX_RESULTS
  * - 差评降权（动态黑名单）：评分时按 dislikePenalty 降权，达封禁阈值直接滤除
@@ -86,6 +89,41 @@ async function searchSo360(query: string): Promise<SearchResult[]> {
 		const snippet = decodeHtml(
 			stripTags(b.match(/<div class="res-desc">([\s\S]*?)<\/div>/)?.[1] ?? ""),
 		);
+		if (url && /^https?:\/\//.test(url)) results.push({ title: title || url, url, snippet });
+	}
+	return results;
+}
+
+/** 百度搜索 HTML：result c-container 块内 mu 属性是真实 URL（无需解跳转链）；
+ *  标题在首个 h3（内部有 <!--s-text--> 注释包裹，先剥注释再剥标签）；
+ *  摘要嵌在 <!--s-data:{...}--> 注释的 summaryData.generalLines[].data[].text，JSON 解析失败用 "text":"..." 正则兜底 */
+async function searchBaidu(query: string): Promise<SearchResult[]> {
+	const html = await httpGet(
+		`https://www.baidu.com/s?wd=${encodeURIComponent(query)}`,
+		SEARCH_TIMEOUT_MS,
+	);
+	const blocks = html.split(/<div[^>]*class="[^"]*result c-container/).slice(1);
+	const results: SearchResult[] = [];
+	for (const b of blocks) {
+		const url = decodeHtml(b.match(/mu="([^"]+)"/)?.[1] ?? "").trim();
+		const titleRaw = b.match(/<h3[\s\S]*?<\/h3>/)?.[0] ?? "";
+		const title = decodeHtml(stripTags(titleRaw.replace(/<!--[\s\S]*?-->/g, "")));
+		let snippet = "";
+		const sd = b.match(/<!--s-data:(\{[\s\S]*?)-->/)?.[1];
+		if (sd) {
+			try {
+				const data = JSON.parse(sd) as {
+					summaryData?: { generalLines?: Array<{ data?: Array<{ text?: string }> }> };
+				};
+				snippet = (data.summaryData?.generalLines ?? [])
+					.flatMap((l) => l.data ?? [])
+					.map((d) => d.text ?? "")
+					.join(" ");
+			} catch {
+				snippet = b.match(/"text":"((?:[^"\\]|\\.)*)"/)?.[1] ?? "";
+			}
+		}
+		snippet = decodeHtml(stripTags(snippet.replace(/\\"/g, '"'))).trim();
 		if (url && /^https?:\/\//.test(url)) results.push({ title: title || url, url, snippet });
 	}
 	return results;
@@ -228,7 +266,7 @@ function mergeRankResults(sources: Array<{ src: string; results: SearchResult[] 
 	return out;
 }
 
-/** 通用网页搜索：双源并行 → 条目级评分合并 → 去重取前 MAX_RESULTS。
+/** 通用网页搜索：三源并行 → 条目级评分合并 → 去重取前 MAX_RESULTS。
  *  根因（历史）：cn.bing.com（中国版）查询理解会把「地名+机构名」组合（如“陕西师范大学”）
  *  降级成地域搜索丢弃长尾词（已实测：含“陕西师范大学”的查询全泛化成“陕西省”；裸请求/参数/
  *  编码均无法影响），360 对这类中文查询正常；限流时 bing 只回 1 条占位。合并评分下这些
@@ -237,6 +275,7 @@ export async function searchWeb(query: string): Promise<{ results: SearchResult[
 	const attempts = await Promise.allSettled([
 		searchBing(query).then((results) => ({ src: "bing" as const, results })),
 		searchSo360(query).then((results) => ({ src: "so360" as const, results })),
+		searchBaidu(query).then((results) => ({ src: "baidu" as const, results })),
 	]);
 	const sources: Array<{ src: string; results: SearchResult[] }> = [];
 	const errors: string[] = [];
@@ -263,7 +302,7 @@ export async function searchWeb(query: string): Promise<{ results: SearchResult[
 	};
 }
 
-/** 结果展示：按来源分组（组标题行 [bing]/[so360]），组内保持分数降序，序号全局连续；
+/** 结果展示：按来源分组（组标题行 [bing]/[so360]/[baidu]），组内保持分数降序，序号全局连续；
  *  来源标注只在混合源需要区分时出现（组标题），单源不分组也无来源——省 token */
 export function formatSearchResults(results: SearchResult[], source: string): string {
 	// 分组：保持源首次出现顺序（全局数组已按分数降序，故组序即组内最高分降序）
