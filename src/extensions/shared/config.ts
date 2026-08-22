@@ -6,7 +6,7 @@
  * save 走「同目录临时文件 + rename」原子替换：写入中途崩溃只会残留 .tmp 文件，
  * 不会把目标文件截断成半个 JSON（避免下次 load 静默回默认、用户数据无声丢失）。
  *
- * 使用方：btw（模型设置）、explore（子模型设置）、hud-cost（汇率缓存）等。
+ * 使用方：hud-cost（汇率缓存）、webdav-kb（配置）、workflow-mgr（面板配置）等。
  * 伪编译时被 build.js 内联进各产物，运行时零依赖。
  */
 import * as fs from "node:fs";
@@ -38,7 +38,7 @@ export function saveJsonConfig(file: string, value: unknown): void {
 	}
 }
 
-/** 常见校验器：`{ model: string 非空 }` 结构（btw / explore 模型设置文件） */
+/** 常见校验器：`{ model: string 非空 }` 结构（模型设置文件） */
 export const isModelConfig = (v: unknown): v is { model: string } => {
 	const m = (v as { model?: unknown } | null)?.model;
 	return typeof m === "string" && m.trim().length > 0;

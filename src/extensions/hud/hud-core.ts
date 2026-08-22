@@ -153,17 +153,14 @@ export default async function (pi: ExtensionAPI) {
 		"hud-bash": { color: "warning", priority: 100 }, // 指令模式提示（输入以 ! 开头）
 		"balance-error": { color: "error", priority: 95 }, // 余额查询失败
 		"task-alert": { color: "success", priority: 90 }, // 任务完成（task-alert 自管闪烁帧）
-		"explore": { color: "accent", priority: 85 }, // explore 子代理进度
 		"init": { color: "warning", priority: 80 }, // claude-it /init 进度
 		"web-search": { color: "accent", priority: 75 }, // 联网搜索状态（web-tool）
 		"web-fetch": { color: "accent", priority: 74 }, // 网页抓取状态（web-tool）
-		"token-saver": { color: "muted", priority: 70 }, // 节省量反馈
 		"workflow-mgr": { color: "accent", priority: 72 }, // 人机协作任务面板摘要（workflow-mgr）
 		"model-switch": { color: "accent", priority: 70 }, // 模型切换
 		"kb-sync": { color: "accent", priority: 76 }, // 知识库同步进度（webdav-kb）
 		"kb-test": { color: "accent", priority: 65 }, // 知识库连通测试（webdav-kb）
 		"kb-vault": { color: "muted", priority: 62 }, // vault 解锁/锁定状态（webdav-kb）
-		"btw-transfer": { color: "muted", priority: 60 }, // btw 问答已附带提示（btw）
 	};
 	/** 检测 ctx 是否仍有效：session 替换 / reload 后旧 ctx 的所有 getter 都会抛 stale 错误。 */
 	function ctxAlive(ctx: ExtensionContext): boolean {

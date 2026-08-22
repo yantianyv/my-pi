@@ -8,9 +8,12 @@
  *   3. 检测构建依赖 esbuild，缺失则自动 npm install（src/ 下）
  *   4. 自动构建扩展产物（src/build.js → dist/extensions/）
  *   5. 安装配置到 ~/.pi/agent/（扩展/主题/提示音/skills/models.json/settings）
+ *   6. 安装 vendor 第三方插件（src/vendor/ → ~/.pi/agent/vendor/，有依赖的补 npm install，
+ *      并把本地路径注册进 settings.json 的 packages）；清理已被官方版替代的旧扩展文件
  *
  * 安装到 pi 全局配置目录：
  *   dist/extensions/   → ~/.pi/agent/extensions/  （扩展产物，零耦合单文件）
+ *   src/vendor/        → ~/.pi/agent/vendor/      （官方插件源码副本，见 src/vendor/README.md）
  *   static/themes/     → ~/.pi/agent/themes/      （主题）
  *   static/sounds/     → ~/.pi/agent/sounds/      （提示音）
  *   static/skills/     → ~/.pi/agent/skills/      （pi skills：目录含 SKILL.md 被递归发现）
@@ -40,11 +43,17 @@ const SOUNDS_SRC = path.join(ROOT, "static", "sounds");
 const SKILLS_SRC = path.join(ROOT, "static", "skills");
 const MODELS_SRC = path.join(ROOT, "static", "models.json");
 const WEBUI_SRC = path.join(ROOT, "static", "webui");
+const VENDOR_SRC = path.join(ROOT, "src", "vendor");
 const THEMES_DST = path.join(PI_AGENT, "themes");
 const EXT_DST = path.join(PI_AGENT, "extensions");
 const SOUNDS_DST = path.join(PI_AGENT, "sounds");
 const SKILLS_DST = path.join(PI_AGENT, "skills");
 const WEBUI_DST = path.join(PI_AGENT, "webui");
+const VENDOR_DST = path.join(PI_AGENT, "vendor");
+
+// 已被官方插件替代的自研扩展（src/extensions/ 中删除源码后，install 时同步清理已安装的 stale 副本，
+// 避免与 vendor 版命令/工具冲突，如 /btw、bash 输出 hook）
+const LEGACY_REMOVED_EXTENSIONS = ["btw.ts", "explore-agent.ts", "token-saver.ts"];
 
 const THEME_NAME = "matrix"; // 默认启用的主题（对应 static/themes/matrix.json）
 const PI_PACKAGE = "@earendil-works/pi-coding-agent"; // pi 本体包名
@@ -198,6 +207,110 @@ function isPlainObject(v) {
 	return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
+/** 全量递归复制（vendor 包原样搬运：ts/js/mjs/md/json/png/LICENSE 等所有文件）。 */
+function copyAll(src, dst) {
+	fs.mkdirSync(dst, { recursive: true });
+	for (const f of fs.readdirSync(src, { withFileTypes: true })) {
+		if (f.name === "node_modules") continue; // 依赖由 installVendor 的 npm install 重建
+		const from = path.join(src, f.name);
+		const to = path.join(dst, f.name);
+		if (f.isDirectory()) {
+			copyAll(from, to);
+			continue;
+		}
+		log(`复制 ${path.relative(ROOT, from)} -> ${to}`);
+		if (!dryRun) {
+			try {
+				fs.copyFileSync(from, to);
+			} catch (e) {
+				console.error(`\n✗ 复制失败：${from} -> ${to}\n  原因：${e.message}\n  提示：已复制的文件保留在目标目录，修复后重跑 install.js 即可（幂等）。`);
+				process.exit(1);
+			}
+		}
+	}
+}
+
+/** 注册 vendor 包到 settings.json 的 packages（本地路径形式，幂等：已存在不重复添加）。 */
+function registerVendorPackages(pkgDirs) {
+	const settingsPath = path.join(PI_AGENT, "settings.json");
+	let settings = {};
+	if (fs.existsSync(settingsPath)) {
+		try {
+			settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+		} catch {
+			log(`警告: 无法解析 ${settingsPath}，跳过 vendor 包注册`);
+			return;
+		}
+	}
+	const packages = Array.isArray(settings.packages) ? settings.packages : [];
+	const norm = (p) => p.replace(/\//g, "\\").toLowerCase();
+	const existing = new Set(
+		packages.map((p) => norm(typeof p === "string" ? p : String(p?.source ?? ""))),
+	);
+	const missing = pkgDirs.filter((dir) => !existing.has(norm(dir)));
+	if (missing.length === 0) {
+		log("settings.packages 已包含全部 vendor 包，无需修改");
+		return;
+	}
+	for (const dir of missing) log(`注册 vendor 包: ${dir}`);
+	if (!dryRun) {
+		settings.packages = [...packages, ...missing];
+		fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
+	}
+}
+
+/**
+ * 安装 vendor 第三方插件：原样复制到 ~/.pi/agent/vendor/<包名>/，
+ * 对声明运行时 dependencies 的包补 npm install --omit=dev（pi 只对 npm/git 来源自动装依赖，本地路径不装），
+ * 最后把本地路径注册进 settings.json 的 packages。
+ */
+function installVendor() {
+	if (!fs.existsSync(VENDOR_SRC)) {
+		log(`跳过 vendor（目录不存在）: ${VENDOR_SRC}`);
+		return;
+	}
+	const pkgs = fs.readdirSync(VENDOR_SRC, { withFileTypes: true }).filter((d) => d.isDirectory());
+	if (pkgs.length === 0) return;
+	const installed = [];
+	for (const d of pkgs) {
+		const src = path.join(VENDOR_SRC, d.name);
+		const dst = path.join(VENDOR_DST, d.name);
+		copyAll(src, dst);
+		let deps = {};
+		try {
+			deps = JSON.parse(fs.readFileSync(path.join(src, "package.json"), "utf8")).dependencies ?? {};
+		} catch {
+			log(`警告: ${d.name} 无 package.json 或无法解析，跳过依赖安装`);
+		}
+		if (Object.keys(deps).length > 0) {
+			log(`安装 ${d.name} 运行时依赖：npm install --omit=dev（${Object.keys(deps).join(", ")}）`);
+			if (!dryRun) {
+				try {
+					// execSync 走 shell（本脚本既有风格，如 npm root -g / npm i -g）；
+					// spawnSync 直接调 npm.cmd 在 Node 24 会 EINVAL（CVE-2024-27980 缓解）
+					execSync("npm install --omit=dev --no-audit --no-fund", { cwd: dst, stdio: "inherit" });
+				} catch {
+					console.error(`\n✗ ${d.name} 依赖安装失败（需要网络）。修复后重跑 install.js 即可（幂等）。`);
+					process.exit(1);
+				}
+			}
+		}
+		installed.push(dst);
+	}
+	registerVendorPackages(installed);
+}
+
+/** 清理已被官方版替代的旧扩展文件：仅当源码已从 dist 消失、且文件在已安装目录中存在时删除（安全幂等）。 */
+function removeLegacyExtensions() {
+	for (const name of LEGACY_REMOVED_EXTENSIONS) {
+		const stale = path.join(EXT_DST, name);
+		const stillBuilt = fs.existsSync(path.join(EXT_SRC, name));
+		if (stillBuilt || !fs.existsSync(stale)) continue;
+		log(`删除已替代的旧扩展: ${stale}`);
+		if (!dryRun) fs.rmSync(stale, { force: true });
+	}
+}
+
 /**
  * 深度合并两个 JSON 对象（返回新对象，不改动入参）。
  * 标量/数组：override 直接覆盖 base；对象：递归合并。
@@ -338,6 +451,8 @@ async function main() {
 	copyDir(SOUNDS_SRC, SOUNDS_DST, [".wav"]);
 	copyDir(SKILLS_SRC, SKILLS_DST, [".md"]);
 	copyDir(WEBUI_SRC, WEBUI_DST, [".html"]);
+	installVendor();
+	removeLegacyExtensions();
 	applySettings();
 	installModelsJson();
 	generateTsconfig();

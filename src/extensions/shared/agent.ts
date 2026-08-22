@@ -1,8 +1,8 @@
 /**
  * 子代理公共件：消息转换 + pi 认证通道 streamFn 工厂
  *
- * claude-it（/init 子代理）与 explore（探索子代理）原先各自维护逐字相同的
- * convertToLlm 与 streamFn 实现，现收敛到此模块，由 build.js 内联进各产物。
+ * claude-it（/init 子代理）等子代理类扩展共用此模块：convertToLlm 与 streamFn
+ * 的公共实现，由 build.js 内联进各产物。
  */
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import { streamSimple } from "@earendil-works/pi-ai/compat";

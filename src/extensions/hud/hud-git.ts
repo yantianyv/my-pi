@@ -13,7 +13,7 @@
  *   - git 输出路径默认按 core.quotePath 做 C-style 转义（中文/空格等特殊字符被引号+八进制
  *     包裹），解析时统一经 `gitUnquotePath` 解码后才用于显示与操作，否则删除/暂存会因假路径失败。
  *   - 面板使用 `ctx.ui.custom()` 的 overlay 渲染，内置 commit message 输入行。
- *   - AI 生成走 `completeSimple` 单次调用（复用 explore 的子模型选择策略），不占用主会话上下文。
+ *   - AI 生成走 `completeSimple` 单次调用（自动选最便宜已认证模型），不占用主会话上下文。
  *   - 文件列表右侧通过 `git diff --numstat` 显示 +/-/binary 预览，不占用额外空间。
  *   - 操作失败时通过 `ctx.ui.notify` 反馈，成功后面板自动刷新并回调 `onRefresh` 更新 HUD。
  */
@@ -42,7 +42,7 @@ const COMMIT_MAX_DISPLAY_LINES = 6;
 
 // ---- AI 自动填写提交信息 ----
 
-/** 优先选用的 AI 模型（provider/modelId），与 explore 子代理一致；都不可用时自动选最便宜已认证模型 */
+/** 优先选用的 AI 模型（provider/modelId）；不可用时自动选最便宜已认证模型 */
 const COMMIT_AI_MODELS: Array<[string, string]> = [["deepseek", "deepseek-v4-flash"]];
 /** 喂给模型的暂存区 diff 最大字符数（超出截断） */
 const COMMIT_DIFF_MAX_CHARS = 4_000;
