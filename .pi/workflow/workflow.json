@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 1,
   "mode": "human-ai",
   "stages": [
     {
@@ -7,39 +8,75 @@
       "goal": "explore-agent / btw / token-saver 换为官方实现，建立官方插件收纳机制",
       "tasks": [
         {
+          "id": "0.1",
           "title": "建立官方插件收纳目录与 install.js 集成",
           "desc": "在 src/extensions 同级建收纳目录，记录官方插件的名称/固定版本/上游链接/license；install.js 增加安装步骤；遵守上游 license 要求",
-          "aiTasks": ["创建收纳目录与清单（含上游链接，便于对齐更新）", "install.js 集成安装步骤", "验证 node install.js --dry-run 输出正确"],
-          "humanTasks": ["拍板收纳方式（manifest 引用 vs 源码入库）"],
+          "humanTasks": [
+            "拍板收纳方式（manifest 引用 vs 源码入库）"
+          ],
+          "aiTasks": [
+            "创建收纳目录与清单（含上游链接，便于对齐更新）",
+            "install.js 集成安装步骤",
+            "验证 node install.js --dry-run 输出正确"
+          ],
           "deliverable": "收纳目录 + 清单 + install.js 改动",
-          "doneSignal": "node install.js --dry-run 显示官方插件安装步骤且无报错"
+          "doneSignal": "node install.js --dry-run 显示官方插件安装步骤且无报错",
+          "deps": []
         },
         {
+          "id": "0.2",
           "title": "pi-subagents 替代 explore-agent",
           "desc": "安装 nicobailon/pi-subagents，检查与 hud 兼容性（setStatus 通道、STATUS_STYLE 残留无害性）、与 workflow-mgr 的工具名冲突",
-          "aiTasks": ["安装并核查其状态推送/工具注册", "移除 explore-agent 源码与 shared/model-select（若 btw 也移除后无人使用）", "hud STATUS_STYLE 清理 explore 残留项", "更新 AGENTS.md"],
-          "humanTasks": ["/reload 后实际跑一次子代理验证体验"],
+          "humanTasks": [
+            "/reload 后实际跑一次子代理验证体验"
+          ],
+          "aiTasks": [
+            "安装并核查其状态推送/工具注册",
+            "移除 explore-agent 源码与 shared/model-select（若 btw 也移除后无人使用）",
+            "hud STATUS_STYLE 清理 explore 残留项",
+            "更新 AGENTS.md"
+          ],
           "deliverable": "explore-agent 下线，pi-subagents 上线",
           "doneSignal": "dist 无 explore-agent，hud 无残留引用，tsc 0 报错",
-          "deps": ["0.1"]
+          "deps": [
+            "0.1"
+          ]
         },
         {
+          "id": "0.3",
           "title": "pi-btw 替代 btw",
           "desc": "安装 dbachelder/pi-btw（真实子会话 + /btw:tangent + inject/summarize + 跨 reload 持久化）；注意 /btw 命令名冲突必须先移除我们的",
-          "aiTasks": ["移除 src/extensions/btw/", "安装 pi-btw", "更新 AGENTS.md/README"],
-          "humanTasks": ["/reload 验证 /btw 浮层体验"],
+          "humanTasks": [
+            "/reload 验证 /btw 浮层体验"
+          ],
+          "aiTasks": [
+            "移除 src/extensions/btw/",
+            "安装 pi-btw",
+            "更新 AGENTS.md/README"
+          ],
           "deliverable": "btw 下线，pi-btw 上线",
           "doneSignal": "dist 无 btw.ts，安装目录无 /btw 命令冲突",
-          "deps": ["0.1"]
+          "deps": [
+            "0.1"
+          ]
         },
         {
+          "id": "0.4",
           "title": "pi-rtk-optimizer 替代 token-saver",
           "desc": "安装 MasuRii/pi-rtk-optimizer（多阶段输出压缩管线 + /rtk stats）；两者都 hook bash 输出，必须先移除我们的",
-          "aiTasks": ["移除 token-saver.ts", "安装 pi-rtk-optimizer 并按中文场景调配置", "hud STATUS_STYLE 清理 token-saver 残留"],
-          "humanTasks": ["/reload 后跑 git/npm 命令验证压缩效果"],
+          "humanTasks": [
+            "/reload 后跑 git/npm 命令验证压缩效果"
+          ],
+          "aiTasks": [
+            "移除 token-saver.ts",
+            "安装 pi-rtk-optimizer 并按中文场景调配置",
+            "hud STATUS_STYLE 清理 token-saver 残留"
+          ],
           "deliverable": "token-saver 下线，rtk-optimizer 上线",
           "doneSignal": "dist 无 token-saver.ts，bash 输出被官方管线压缩",
-          "deps": ["0.1"]
+          "deps": [
+            "0.1"
+          ]
         }
       ]
     },
@@ -49,19 +86,34 @@
       "goal": "借鉴官方零 key 方案提升搜索与 fetch 成功率",
       "tasks": [
         {
+          "id": "1.1",
           "title": "新增零 key 搜索源（DuckDuckGo / Exa MCP）",
           "desc": "借鉴 pi-web-access 的零 key 链路：DuckDuckGo HTML 免 key 搜索 + Exa MCP 免 key 端点，并入现有 bing+360 评分合并体系",
-          "aiTasks": ["实现 DuckDuckGo HTML 源", "评估 Exa MCP 接入成本", "评分合并体系接入新源"],
+          "humanTasks": [],
+          "aiTasks": [
+            "实现 DuckDuckGo HTML 源",
+            "评估 Exa MCP 接入成本",
+            "评分合并体系接入新源"
+          ],
           "deliverable": "web_search 多源扩充",
-          "doneSignal": "web_search 中英文查询均返回多源合并结果"
+          "doneSignal": "web_search 中英文查询均返回多源合并结果",
+          "deps": []
         },
         {
+          "id": "1.2",
           "title": "fetch 成功率优化（Jina Reader + GitHub 特化）",
           "desc": "反爬/JS 页面 fallback 到 r.jina.ai 免 key 渲染代理；GitHub 仓库 URL 直接 clone 代替抓取；对照 pi-web-access 查漏",
-          "aiTasks": ["Jina Reader 作为第三通道加入竞速", "GitHub URL 识别并走 clone", "回归测试现有站点不退化"],
+          "humanTasks": [],
+          "aiTasks": [
+            "Jina Reader 作为第三通道加入竞速",
+            "GitHub URL 识别并走 clone",
+            "回归测试现有站点不退化"
+          ],
           "deliverable": "web_fetch 成功率提升",
           "doneSignal": "此前失败的页面（如 JS 渲染页）能取到正文",
-          "deps": ["1.1"]
+          "deps": [
+            "1.1"
+          ]
         }
       ]
     },
@@ -71,19 +123,33 @@
       "goal": "借鉴 pi-sync 方法论：锁、恢复日志、拉取备份、secret 扫描",
       "tasks": [
         {
+          "id": "2.1",
           "title": "同步锁与恢复日志",
           "desc": "借鉴 pi-sync：同步操作持锁（防并发互踩）、崩溃后可恢复的 journal、锁残留的安全清理流程",
-          "aiTasks": ["实现锁机制", "实现 journal", "锁残留检测与安全清理"],
+          "humanTasks": [],
+          "aiTasks": [
+            "实现锁机制",
+            "实现 journal",
+            "锁残留检测与安全清理"
+          ],
           "deliverable": "syncAll 具备锁+journal",
-          "doneSignal": "模拟同步中断后能安全恢复"
+          "doneSignal": "模拟同步中断后能安全恢复",
+          "deps": []
         },
         {
+          "id": "2.2",
           "title": "拉取前备份与 secret 扫描",
           "desc": "pull 覆盖本地前自动备份；推送前扫描 secret（API key/token）防泄露",
-          "aiTasks": ["pull 前本地备份", "push 前 secret 扫描 + 拦截确认"],
+          "humanTasks": [],
+          "aiTasks": [
+            "pull 前本地备份",
+            "push 前 secret 扫描 + 拦截确认"
+          ],
           "deliverable": "备份 + secret 扫描上线",
           "doneSignal": "含假 key 的笔记 push 时被拦截提示",
-          "deps": ["2.1"]
+          "deps": [
+            "2.1"
+          ]
         }
       ]
     },
@@ -93,20 +159,35 @@
       "goal": "hud-balance 获取方式优化 + 预览官方后定借鉴清单",
       "tasks": [
         {
+          "id": "3.1",
           "title": "hud-balance 现有适配器获取方式优化",
           "desc": "只优化已适配的供应商（如 DeepSeek）：对照 pi-tian-usage/pi-deepseek-usage 看是否有更优雅的余额获取方式；不适配新供应商",
-          "aiTasks": ["读 hud-balance.ts 现状", "读官方实现的获取方式", "有更优则替换"],
+          "humanTasks": [],
+          "aiTasks": [
+            "读 hud-balance.ts 现状",
+            "读官方实现的获取方式",
+            "有更优则替换"
+          ],
           "deliverable": "适配器优化（如有）",
-          "doneSignal": "余额显示正常且实现更优雅（或确认现状已最优）"
+          "doneSignal": "余额显示正常且实现更优雅（或确认现状已最优）",
+          "deps": []
         },
         {
+          "id": "3.2",
           "title": "官方 hud 预览与借鉴清单拍板",
           "desc": "用户 pi -e 预览 pi-statusline / pi-powerline-footer 后，选定借鉴功能（候选：宽度不足按优先级裁段、调色板）",
-          "aiTasks": ["实现拍板后的借鉴项"],
-          "humanTasks": ["pi -e npm:@narumitw/pi-statusline 与 pi -e npm:pi-powerline-footer 预览", "拍板借鉴清单"],
+          "humanTasks": [
+            "pi -e npm:@narumitw/pi-statusline 与 pi -e npm:pi-powerline-footer 预览",
+            "拍板借鉴清单"
+          ],
+          "aiTasks": [
+            "实现拍板后的借鉴项"
+          ],
           "deliverable": "借鉴功能落地",
           "doneSignal": "借鉴功能在 hud 中生效",
-          "deps": ["3.1"]
+          "deps": [
+            "3.1"
+          ]
         }
       ]
     },
@@ -116,20 +197,34 @@
       "goal": "坚持人机协作定位，借鉴 pi-goal-x 的技术点",
       "tasks": [
         {
+          "id": "4.1",
           "title": "doneSignal 独立审计借鉴",
           "desc": "借鉴 pi-goal-x 的独立 completion auditor：wf_switch 验证完成信号时可调独立子代理核查证据（可开关）",
-          "aiTasks": ["设计开关与审计流程", "实现独立审计调用"],
-          "humanTasks": ["确认审计严格程度（默认关还是开）"],
+          "humanTasks": [
+            "确认审计严格程度（默认关还是开）"
+          ],
+          "aiTasks": [
+            "设计开关与审计流程",
+            "实现独立审计调用"
+          ],
           "deliverable": "可选的独立审计",
-          "doneSignal": "开启后 wf_switch 触发独立审计并据结果放行/打回"
+          "doneSignal": "开启后 wf_switch 触发独立审计并据结果放行/打回",
+          "deps": []
         },
         {
+          "id": "4.2",
           "title": "崩溃恢复与持久化借鉴",
           "desc": "借鉴 pi-goal-x/pi-task：工作流状态跨会话持久化已具备，补齐崩溃/中断后的安全恢复路径",
-          "aiTasks": ["审查 store.ts 恢复路径", "补齐缺口"],
+          "humanTasks": [],
+          "aiTasks": [
+            "审查 store.ts 恢复路径",
+            "补齐缺口"
+          ],
           "deliverable": "恢复路径加固",
           "doneSignal": "模拟中断后状态一致",
-          "deps": ["4.1"]
+          "deps": [
+            "4.1"
+          ]
         }
       ]
     },
@@ -139,12 +234,24 @@
       "goal": "AGENTS.md/README 全面更新，分类提交",
       "tasks": [
         {
+          "id": "5.1",
           "title": "文档更新与提交",
           "desc": "AGENTS.md 目录结构/架构要点更新；README 用法更新；按扩展分类 conventional commits",
-          "aiTasks": ["更新文档", "分类提交", "node install.js 全量验证"],
+          "humanTasks": [],
+          "aiTasks": [
+            "更新文档",
+            "分类提交",
+            "node install.js 全量验证"
+          ],
           "deliverable": "文档与提交完成",
           "doneSignal": "git 干净，node install.js --dry-run 正确反映新结构",
-          "deps": ["0.4", "1.2", "2.2", "3.2", "4.2"]
+          "deps": [
+            "0.4",
+            "1.2",
+            "2.2",
+            "3.2",
+            "4.2"
+          ]
         }
       ]
     }

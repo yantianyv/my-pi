@@ -1,0 +1,211 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-22T14:37:30.614Z",
+  "currentTaskId": "4.1",
+  "tasks": {
+    "0.1": {
+      "status": "done",
+      "doneAt": "2026-08-21T19:14:41.818Z"
+    },
+    "0.2": {
+      "status": "done",
+      "doneAt": "2026-08-21T19:14:49.430Z"
+    },
+    "0.3": {
+      "status": "done",
+      "doneAt": "2026-08-21T19:14:54.234Z"
+    },
+    "0.4": {
+      "status": "done",
+      "doneAt": "2026-08-21T19:15:01.746Z"
+    },
+    "1.1": {
+      "status": "done",
+      "doneAt": "2026-08-21T19:22:17.463Z"
+    },
+    "1.2": {
+      "status": "done",
+      "doneAt": "2026-08-21T19:24:29.833Z"
+    },
+    "2.1": {
+      "status": "done",
+      "doneAt": "2026-08-22T14:29:02.352Z"
+    },
+    "2.2": {
+      "status": "done",
+      "doneAt": "2026-08-22T14:34:31.479Z"
+    },
+    "3.1": {
+      "status": "done",
+      "doneAt": "2026-08-22T14:36:24.663Z"
+    },
+    "3.2": {
+      "status": "blocked",
+      "blockReason": "等待用户预览官方 hud：pi -e npm:@narumitw/pi-statusline 和 pi -e npm:pi-powerline-footer（临时加载不进 settings），然后拍板借鉴清单"
+    },
+    "4.1": {
+      "status": "doing",
+      "startedAt": "2026-08-22T14:36:41.025Z"
+    },
+    "4.2": {
+      "status": "todo"
+    },
+    "5.1": {
+      "status": "todo"
+    }
+  },
+  "milestones": {},
+  "notes": [
+    {
+      "id": "n1",
+      "ts": "2026-08-21T19:07:55.300Z",
+      "content": "用户拍板：①官方插件源码复制入库（vendor 目录，含各自 LICENSE + 上游链接）；②被替换的 explore-agent/btw/token-saver 删除源码与文档；③btw 用 dbachelder/pi-btw；④webui 走 A 路线（保留镜像架构，按需 npx pi-web-ui，不安装）"
+    }
+  ],
+  "log": [
+    {
+      "ts": "2026-08-21T19:07:55.300Z",
+      "event": "note_add",
+      "taskId": "n1",
+      "msg": "用户拍板：①官方插件源码复制入库（vendor 目录，含各自 LICENSE + 上游链接）；②被替换的 explore-agent/btw/token-saver 删除源码与文档；③btw 用 dbachelder/pi-btw；④webui 走 A 路线（保留镜像架构，按需 npx pi-web-ui，不安装）"
+    },
+    {
+      "ts": "2026-08-21T19:14:41.818Z",
+      "event": "task_done",
+      "taskId": "0.1",
+      "msg": "建立官方插件收纳目录与 install.js 集成"
+    },
+    {
+      "ts": "2026-08-21T19:14:41.819Z",
+      "event": "task_start",
+      "taskId": "0.2",
+      "msg": "pi-subagents 替代 explore-agent"
+    },
+    {
+      "ts": "2026-08-21T19:14:49.430Z",
+      "event": "task_done",
+      "taskId": "0.2",
+      "msg": "pi-subagents 替代 explore-agent"
+    },
+    {
+      "ts": "2026-08-21T19:14:49.430Z",
+      "event": "task_start",
+      "taskId": "0.3",
+      "msg": "pi-btw 替代 btw"
+    },
+    {
+      "ts": "2026-08-21T19:14:54.234Z",
+      "event": "task_done",
+      "taskId": "0.3",
+      "msg": "pi-btw 替代 btw"
+    },
+    {
+      "ts": "2026-08-21T19:14:54.234Z",
+      "event": "task_start",
+      "taskId": "0.4",
+      "msg": "pi-rtk-optimizer 替代 token-saver"
+    },
+    {
+      "ts": "2026-08-21T19:15:01.746Z",
+      "event": "task_done",
+      "taskId": "0.4",
+      "msg": "pi-rtk-optimizer 替代 token-saver"
+    },
+    {
+      "ts": "2026-08-21T19:15:01.746Z",
+      "event": "task_start",
+      "taskId": "1.1",
+      "msg": "新增零 key 搜索源（DuckDuckGo / Exa MCP）"
+    },
+    {
+      "ts": "2026-08-21T19:22:17.463Z",
+      "event": "task_done",
+      "taskId": "1.1",
+      "msg": "新增零 key 搜索源（DuckDuckGo / Exa MCP）"
+    },
+    {
+      "ts": "2026-08-21T19:22:17.463Z",
+      "event": "task_start",
+      "taskId": "1.2",
+      "msg": "fetch 成功率优化（Jina Reader + GitHub 特化）"
+    },
+    {
+      "ts": "2026-08-21T19:24:29.833Z",
+      "event": "task_done",
+      "taskId": "1.2",
+      "msg": "fetch 成功率优化（Jina Reader + GitHub 特化）"
+    },
+    {
+      "ts": "2026-08-21T19:24:29.833Z",
+      "event": "task_start",
+      "taskId": "2.1",
+      "msg": "同步锁与恢复日志"
+    },
+    {
+      "ts": "2026-08-22T14:29:02.352Z",
+      "event": "task_done",
+      "taskId": "2.1",
+      "msg": "同步锁与恢复日志"
+    },
+    {
+      "ts": "2026-08-22T14:29:02.352Z",
+      "event": "task_start",
+      "taskId": "2.2",
+      "msg": "拉取前备份与 secret 扫描"
+    },
+    {
+      "ts": "2026-08-22T14:34:31.479Z",
+      "event": "task_done",
+      "taskId": "2.2",
+      "msg": "拉取前备份与 secret 扫描"
+    },
+    {
+      "ts": "2026-08-22T14:34:31.479Z",
+      "event": "task_start",
+      "taskId": "3.1",
+      "msg": "hud-balance 现有适配器获取方式优化"
+    },
+    {
+      "ts": "2026-08-22T14:36:24.663Z",
+      "event": "task_done",
+      "taskId": "3.1",
+      "msg": "hud-balance 现有适配器获取方式优化"
+    },
+    {
+      "ts": "2026-08-22T14:36:24.663Z",
+      "event": "task_start",
+      "taskId": "3.2",
+      "msg": "官方 hud 预览与借鉴清单拍板"
+    },
+    {
+      "ts": "2026-08-22T14:36:34.738Z",
+      "event": "task_blocked",
+      "taskId": "3.2",
+      "msg": "3.2: 等待用户预览官方 hud：pi -e npm:@narumitw/pi-statusline 和 pi -e npm:pi-powerline-footer（临时加载不进 settings），然后拍板借鉴清单"
+    },
+    {
+      "ts": "2026-08-22T14:36:41.025Z",
+      "event": "task_done",
+      "taskId": "3.2",
+      "msg": "官方 hud 预览与借鉴清单拍板"
+    },
+    {
+      "ts": "2026-08-22T14:36:41.025Z",
+      "event": "task_start",
+      "taskId": "4.1",
+      "msg": "doneSignal 独立审计借鉴"
+    },
+    {
+      "ts": "2026-08-22T14:37:03.502Z",
+      "event": "task_rollback",
+      "taskId": "3.2",
+      "msg": "3.2 → todo"
+    },
+    {
+      "ts": "2026-08-22T14:37:30.614Z",
+      "event": "task_blocked",
+      "taskId": "3.2",
+      "msg": "3.2: 等待用户预览官方 hud：pi -e npm:@narumitw/pi-statusline 和 pi -e npm:pi-powerline-footer（临时加载不进 settings），然后拍板借鉴清单"
+    }
+  ]
+}
