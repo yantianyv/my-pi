@@ -429,10 +429,11 @@ export default async function (pi: ExtensionAPI) {
 				const g = gitStats;
 				const badge = theme.fg("accent", `⎇ ${g.branch ?? "HEAD"}`);
 				const parts: string[] = [];
-				if (g.ahead || g.behind) parts.push(theme.fg("dim", `领先${g.ahead} 落后${g.behind}`));
-				if (g.staged) parts.push(theme.fg("success", `暂存${g.staged}`));
-				if (g.unstaged) parts.push(theme.fg("warning", `修改${g.unstaged}`));
-				if (g.untracked) parts.push(theme.fg("muted", `未跟踪${g.untracked}`));
+				// 计数符号制（借鉴 pi-statusline）：⇡领先 ⇣落后 +暂存 ~修改 ?未跟踪
+				if (g.ahead || g.behind) parts.push(theme.fg("dim", `⇡${g.ahead} ⇣${g.behind}`));
+				if (g.staged) parts.push(theme.fg("success", `+${g.staged}`));
+				if (g.unstaged) parts.push(theme.fg("warning", `~${g.unstaged}`));
+				if (g.untracked) parts.push(theme.fg("muted", `?${g.untracked}`));
 				return parts.length
 					? `${badge}${theme.fg("dim", " ・ ")}${parts.join(theme.fg("dim", " ・ "))}`
 					: badge;

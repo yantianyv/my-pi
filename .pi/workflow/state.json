@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-22T15:04:50.459Z",
-  "currentTaskId": null,
+  "updatedAt": "2026-08-25T04:55:18.951Z",
+  "currentTaskId": "3.2",
   "tasks": {
     "0.1": {
       "status": "done",
@@ -40,8 +40,8 @@
       "doneAt": "2026-08-22T14:36:24.663Z"
     },
     "3.2": {
-      "status": "blocked",
-      "blockReason": "等待用户预览官方 hud：pi -e npm:@narumitw/pi-statusline 和 pi -e npm:pi-powerline-footer（临时加载不进 settings），然后拍板借鉴清单"
+      "status": "doing",
+      "startedAt": "2026-08-25T04:55:18.942Z"
     },
     "4.1": {
       "status": "done",
@@ -62,6 +62,11 @@
       "id": "n1",
       "ts": "2026-08-21T19:07:55.300Z",
       "content": "用户拍板：①官方插件源码复制入库（vendor 目录，含各自 LICENSE + 上游链接）；②被替换的 explore-agent/btw/token-saver 删除源码与文档；③btw 用 dbachelder/pi-btw；④webui 走 A 路线（保留镜像架构，按需 npx pi-web-ui，不安装）"
+    },
+    {
+      "id": "n2",
+      "ts": "2026-08-25T04:55:18.951Z",
+      "content": "3.2 拍板结果：用户喜欢 pi-statusline 观感，借鉴落地 = powerline 真彩色块（░▒▓引导+过渡）+ 宽度不足按优先级裁段 + 7 套调色板（hex 取自 pi-statusline presets，MIT）。新增 src/extensions/hud/hud-powerline.ts 渲染模块；hud-core 三行改为段式 powerline 渲染；/hud palette [名字] 切换并持久化到 ~/.pi/agent/hud-config.json；默认 tokyo-night。git 计数改符号制（⇡⇣+~?）。"
     }
   ],
   "log": [
@@ -238,6 +243,18 @@
       "event": "task_done",
       "taskId": "5.1",
       "msg": "文档更新与提交"
+    },
+    {
+      "ts": "2026-08-25T04:55:18.942Z",
+      "event": "task_start",
+      "taskId": "3.2",
+      "msg": "官方 hud 预览与借鉴清单拍板"
+    },
+    {
+      "ts": "2026-08-25T04:55:18.951Z",
+      "event": "note_add",
+      "taskId": "n2",
+      "msg": "3.2 拍板结果：用户喜欢 pi-statusline 观感，借鉴落地 = powerline 真彩色块（░▒▓引导+过渡）+ 宽度不足按优先级裁段 + 7 套调色板（hex 取自 pi-statusline presets，MIT）。新增 src/extensions/hud/hud-powerline.ts 渲染模块；hud-core 三行改为段式 powerline 渲染；/hud palette [名字] 切换并持久化到 ~/.pi/agent/hud-config.json；默认 tokyo-night。git 计数改符号制（⇡⇣+~?）。"
     }
   ]
 }
