@@ -4,8 +4,10 @@
  * 职责：
  *   1. 解析 `git status --porcelain=v1 --branch` 为结构化统计，供 HUD 行 1 渲染。
  *   2. 提供 `openGitPanel()`，在 TUI 中打开一个可视化 Git 面板，可预览详细状态并执行
- *      常用操作（stage / unstage / discard / commit / refresh）。
+ *      常用操作（stage / unstage / discard / commit / refresh / sync）。
  *      提交直接在主页面完成：`g` AI 生成提交信息、`i` 手动输入（支持 ←→ 移动光标）、`c` 提交。
+ *      `s` 同步：fetch → 需要时 pull 合并 → push；无冲突全自动，产生冲突时让用户选择
+ *      「让 AI 处理冲突」（逐文件 AI 消解冲突标记后完成合并提交）或「放弃同步」（merge --abort）。
  *
  * 实现要点：
  *   - 子模块独立运行，不依赖 hud-core；缺失时 HUD 仅显示「⎇ 模块缺失」。
@@ -24,7 +26,7 @@ import { editInput } from "../shared/ui";
 import type { Message, Model } from "@earendil-works/pi-ai";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { rm } from "node:fs/promises";
+import { rm, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const execFileAsync = promisify(execFile);
@@ -48,6 +50,10 @@ const COMMIT_AI_MODELS: Array<[string, string]> = [["deepseek", "deepseek-v4-fla
 const COMMIT_DIFF_MAX_CHARS = 4_000;
 /** AI 生成提交信息超时 */
 const COMMIT_AI_TIMEOUT_MS = 30_000;
+/** 单文件超过该字符数不让 AI 处理冲突（上下文长度与可靠性考虑） */
+const CONFLICT_FILE_MAX_CHARS = 20_000;
+/** AI 解决冲突超时（整文件重写，比提交信息慢） */
+const CONFLICT_AI_TIMEOUT_MS = 60_000;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyModel = Model<any>;
 
@@ -377,6 +383,30 @@ export async function gitCheckout(cwd: string, branch: string, create = false): 
 	await git(cwd, args);
 }
 
+/** 是否有上游分支（@{u} 可解析）。 */
+export async function hasUpstream(cwd: string): Promise<boolean> {
+	try {
+		await git(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** 列出合并冲突未解决的文件（merge/rebase 进行中才有）。 */
+export async function listConflictedFiles(cwd: string): Promise<string[]> {
+	const { stdout } = await git(cwd, ["diff", "--name-only", "--diff-filter=U"]);
+	return stdout
+		.split(/\r?\n/)
+		.map((l) => l.trim())
+		.filter(Boolean);
+}
+
+/** 放弃进行中的 merge（冲突放弃同步用）。 */
+export async function gitMergeAbort(cwd: string): Promise<void> {
+	await git(cwd, ["merge", "--abort"]);
+}
+
 // ---------------------------------------------------------------------------
 // AI 自动填写提交信息
 // ---------------------------------------------------------------------------
@@ -451,6 +481,77 @@ export async function generateCommitMessage(ctx: ExtensionContext, cwd: string):
 	if (!text) throw new Error("AI 未返回内容");
 	// 去掉可能的 markdown 代码块围栏
 	return text.replace(/^```[^\n]*\n/, "").replace(/\n```\s*$/, "").trim();
+}
+
+// ---------------------------------------------------------------------------
+// AI 解决合并冲突（git 面板 s 键同步用）
+// ---------------------------------------------------------------------------
+
+/** 由 AI 消解单个冲突文件：读取含冲突标记的内容 → AI 输出解决后的完整文件 → 写回。 */
+async function resolveConflictFileWithAI(ctx: ExtensionContext, cwd: string, path: string): Promise<void> {
+	const full = resolve(cwd, path);
+	const content = await readFile(full, "utf8");
+	if (!content.includes("<<<<<<<")) return; // 无标记（如纯新增/删除冲突）保留现状，交给 add
+	if (content.length > CONFLICT_FILE_MAX_CHARS) {
+		throw new Error(`${path} 过大（${content.length} 字符），请手动解决`);
+	}
+
+	const model = pickCommitModel(ctx);
+	if (!model) throw new Error("找不到已认证的可用模型");
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) throw new Error(`认证失败：${auth.error}`);
+
+	const systemPrompt = [
+		"你是 git 合并冲突解决助手。用户给你一个含冲突标记（<<<<<<< / ======= / >>>>>>>）的文件，输出解决冲突后的完整文件。",
+		"要求：",
+		"1. 理解两侧改动的意图，尽量合并保留双方的有效改动（通常不是二选一）",
+		"2. 输出中不得残留任何冲突标记",
+		"3. 保持文件原有的缩进/换行风格",
+		"4. 只输出文件内容本身，不要解释、不要代码块围栏",
+	].join("\n");
+
+	const messages: Message[] = [
+		{
+			role: "user",
+			content: `文件路径：${path}\n\n${content}`,
+			timestamp: Date.now(),
+		},
+	];
+
+	const result = await completeSimple(
+		model,
+		{ systemPrompt, messages },
+		{
+			apiKey: auth.apiKey,
+			headers: { ...auth.headers },
+			maxTokens: 8000,
+			temperature: 0.2,
+			signal: AbortSignal.timeout(CONFLICT_AI_TIMEOUT_MS),
+		},
+	);
+
+	let text = result.content
+		.filter((b) => b.type === "text")
+		.map((b) => (b as { type: "text"; text: string }).text)
+		.join("\n");
+	// 去掉可能的整文件代码块围栏（仅当首行是 ```xxx 且末行是 ``` 才剥）
+	const fence = text.match(/^\s*```[^\n]*\n([\s\S]*)\n```\s*$/);
+	if (fence) text = fence[1];
+	if (!text.trim()) throw new Error(`${path}：AI 未返回内容`);
+	if (/^(<{7}|={7}|>{7})/m.test(text)) throw new Error(`${path}：AI 输出仍含冲突标记，请手动解决`);
+	await writeFile(full, text.endsWith("\n") ? text : text + "\n", "utf8");
+}
+
+/** AI 解决全部冲突文件并 add + 完成 merge commit；返回处理的文件数（0 = 无冲突）。 */
+export async function aiResolveAllConflicts(ctx: ExtensionContext, cwd: string): Promise<number> {
+	const files = await listConflictedFiles(cwd);
+	if (files.length === 0) return 0;
+	for (const f of files) {
+		await resolveConflictFileWithAI(ctx, cwd, f);
+		await git(cwd, ["add", "--", f]);
+	}
+	await git(cwd, ["commit", "--no-edit"]); // 完成 merge commit
+	return files.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +705,8 @@ class GitPanel {
 			this.startCommit();
 		} else if (key === "g" || key === "G") {
 			void this.aiGenerateCommit();
+		} else if (key === "s" || key === "S") {
+			void this.sync();
 		} else if (key === "r" || key === "R") {
 			void this.refresh();
 		} else if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || key === "q" || key === "Q") {
@@ -768,6 +871,92 @@ class GitPanel {
 		this.setBusy(false);
 	}
 
+	/**
+	 * s 键：同步（fetch → behind>0 时 pull 合并 → push）。
+	 * 无冲突全自动；pull 产生真冲突时让用户选择「让 AI 处理冲突 / 放弃同步」。
+	 * 无上游分支时直接 push -u 发布。
+	 */
+	private async sync() {
+		if (!this.status) return;
+		this.busyText = "同步中…";
+		this.setBusy(true);
+		this.message = "";
+		try {
+			// 无上游：直接发布当前分支
+			if (!(await hasUpstream(this.cwd))) {
+				const branch = this.status.branch ?? "HEAD";
+				await git(this.cwd, ["push", "-u", "origin", branch], LONG_GIT_TIMEOUT_MS);
+				this.message = `已发布分支 origin/${branch}`;
+				await this.refresh();
+				return;
+			}
+
+			await gitFetch(this.cwd);
+			await this.refresh();
+			const behind = this.status?.behind ?? 0;
+			const ahead = this.status?.ahead ?? 0;
+
+			if (behind > 0) {
+				let resolvedByAI = 0;
+				try {
+					// 固定 merge（--no-rebase），避免用户 pull.rebase 配置改变冲突处理路径
+					await git(this.cwd, ["pull", "--no-rebase"], LONG_GIT_TIMEOUT_MS);
+				} catch (err) {
+					const conflicted = await listConflictedFiles(this.cwd).catch(() => []);
+					if (conflicted.length === 0) {
+						// 非冲突失败（工作区脏被 git 拦截 / 网络等）：翻译常见原因，其余原样报错
+						const raw = err instanceof Error ? err.message : String(err);
+						throw new Error(
+							/would be overwritten|未跟踪文件的工作树文件会被|Please commit your changes/i.test(raw)
+								? "本地有未提交改动会被远端覆盖，请先提交或丢弃后再同步"
+								: raw,
+						);
+					}
+					// 真冲突：交用户选择
+					this.busyText = "执行中…";
+					this.setBusy(false);
+					const choice = await this.ctx.ui.select(`同步产生 ${conflicted.length} 个文件冲突`, [
+						"让 AI 处理冲突",
+						"放弃同步（恢复原状）",
+					]);
+					if (choice === undefined || choice.startsWith("放弃")) {
+						await this.runOp("放弃同步", () => gitMergeAbort(this.cwd));
+						return;
+					}
+					this.busyText = "AI 处理冲突中…";
+					this.setBusy(true);
+					try {
+						resolvedByAI = await aiResolveAllConflicts(this.ctx, this.cwd);
+					} catch (aiErr) {
+						// AI 失败：merge 仍在进行中，留给用户手动处理或再按 s 选放弃
+						this.message = `AI 处理失败：${aiErr instanceof Error ? aiErr.message : String(aiErr)}（可手动解决后提交，或再按 s 选放弃）`;
+						await this.refresh();
+						return;
+					}
+				}
+				// pull 成功 / 冲突已解决 → 推送
+				await gitPush(this.cwd);
+				this.message = resolvedByAI ? `AI 已解决 ${resolvedByAI} 个文件冲突，同步完成` : "拉取并推送完成";
+				await this.refresh();
+				return;
+			}
+
+			if (ahead > 0) {
+				await gitPush(this.cwd);
+				this.message = `已推送 ⇡${ahead}`;
+			} else {
+				this.message = "已是最新，无需同步";
+			}
+			await this.refresh();
+		} catch (err) {
+			this.message = `同步失败：${err instanceof Error ? err.message : String(err)}`;
+			await this.refresh().catch(() => {});
+		} finally {
+			this.busyText = "执行中…";
+			this.setBusy(false);
+		}
+	}
+
 	render(width: number): string[] {
 		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
 
@@ -905,7 +1094,7 @@ class GitPanel {
 		else if (category === "untracked") hints.push(`  文件 [a]暂存 [d]删除`);
 		else hints.push(`  文件 [a]暂存 [u]取消暂存 [d]丢弃`);
 
-		hints.push(`  提交 [c]提交 [g]AI生成 [i]手动输入 ·  [r]刷新 [q]退出`);
+		hints.push(`  提交 [c]提交 [g]AI生成 [i]手动输入 ·  [s]同步 [r]刷新 [q]退出`);
 		return hints;
 	}
 }
