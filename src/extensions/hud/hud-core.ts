@@ -429,14 +429,14 @@ export default async function (pi: ExtensionAPI) {
 				const g = gitStats;
 				const badge = theme.fg("accent", `⎇ ${g.branch ?? "HEAD"}`);
 				const parts: string[] = [];
-				// 计数符号制（借鉴 pi-statusline）：⇡领先 ⇣落后 +暂存 ~修改 ?未跟踪
-				if (g.ahead || g.behind) parts.push(theme.fg("dim", `⇡${g.ahead} ⇣${g.behind}`));
+				// 计数符号制（借鉴 pi-statusline）：⇡领先 ⇣落后 +暂存 ~修改 ?未跟踪；
+				// 紧凑显示：零值不显示、计数间只留空格（⎇ master ⇡1 ~2 ?1）
+				if (g.ahead) parts.push(theme.fg("dim", `⇡${g.ahead}`));
+				if (g.behind) parts.push(theme.fg("dim", `⇣${g.behind}`));
 				if (g.staged) parts.push(theme.fg("success", `+${g.staged}`));
 				if (g.unstaged) parts.push(theme.fg("warning", `~${g.unstaged}`));
 				if (g.untracked) parts.push(theme.fg("muted", `?${g.untracked}`));
-				return parts.length
-					? `${badge}${theme.fg("dim", " ・ ")}${parts.join(theme.fg("dim", " ・ "))}`
-					: badge;
+				return parts.length ? `${badge} ${parts.join(" ")}` : badge;
 			};
 
 			// 动态区（信息屏B）：读官方 setStatus 通道的状态，按样式表取优先级最高者；

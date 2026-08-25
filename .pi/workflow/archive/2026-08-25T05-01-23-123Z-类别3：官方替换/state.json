@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-25T04:55:18.951Z",
-  "currentTaskId": "3.2",
+  "updatedAt": "2026-08-25T05:01:23.116Z",
+  "currentTaskId": null,
   "tasks": {
     "0.1": {
       "status": "done",
@@ -40,8 +40,8 @@
       "doneAt": "2026-08-22T14:36:24.663Z"
     },
     "3.2": {
-      "status": "doing",
-      "startedAt": "2026-08-25T04:55:18.942Z"
+      "status": "done",
+      "doneAt": "2026-08-25T05:01:15.769Z"
     },
     "4.1": {
       "status": "done",
@@ -66,7 +66,7 @@
     {
       "id": "n2",
       "ts": "2026-08-25T04:55:18.951Z",
-      "content": "3.2 拍板结果：用户喜欢 pi-statusline 观感，借鉴落地 = powerline 真彩色块（░▒▓引导+过渡）+ 宽度不足按优先级裁段 + 7 套调色板（hex 取自 pi-statusline presets，MIT）。新增 src/extensions/hud/hud-powerline.ts 渲染模块；hud-core 三行改为段式 powerline 渲染；/hud palette [名字] 切换并持久化到 ~/.pi/agent/hud-config.json；默认 tokyo-night。git 计数改符号制（⇡⇣+~?）。"
+      "content": "3.2 最终拍板：用户预览官方 hud 后认为 powerline 观感不适合（试做一版被否，已 git 回滚，hud-powerline.ts 已删）；唯一借鉴项 = git 计数符号制（⇡⇣ +N ~N ?N），已落地提交 df028e2。结论：自有 hud 保持原观感。"
     }
   ],
   "log": [
@@ -255,6 +255,18 @@
       "event": "note_add",
       "taskId": "n2",
       "msg": "3.2 拍板结果：用户喜欢 pi-statusline 观感，借鉴落地 = powerline 真彩色块（░▒▓引导+过渡）+ 宽度不足按优先级裁段 + 7 套调色板（hex 取自 pi-statusline presets，MIT）。新增 src/extensions/hud/hud-powerline.ts 渲染模块；hud-core 三行改为段式 powerline 渲染；/hud palette [名字] 切换并持久化到 ~/.pi/agent/hud-config.json；默认 tokyo-night。git 计数改符号制（⇡⇣+~?）。"
+    },
+    {
+      "ts": "2026-08-25T05:01:09.815Z",
+      "event": "note_edit",
+      "msg": "n2"
+    },
+    {
+      "ts": "2026-08-25T05:01:15.769Z",
+      "event": "task_done",
+      "taskId": "3.2",
+      "msg": "官方 hud 预览与借鉴清单拍板"
     }
-  ]
+  ],
+  "archiveStatus": "全部完成：官方插件替换 + web-tool/webdav-kb/workflow-mgr 借鉴落地；hud 借鉴仅保留 git 符号计数（powerline 观感试做后被否，已回滚）"
 }
