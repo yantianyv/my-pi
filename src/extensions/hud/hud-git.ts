@@ -23,7 +23,8 @@ import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-cod
 import { matchesKey, Key, truncateToWidth, visibleWidth, parseKey } from "@earendil-works/pi-tui";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { editInput } from "../shared/ui";
-import type { Message, Model } from "@earendil-works/pi-ai";
+import { pickAuxModel, type AnyModel } from "../shared/model-pick";
+import type { Message } from "@earendil-works/pi-ai";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { rm, readFile, writeFile } from "node:fs/promises";
@@ -54,8 +55,6 @@ const COMMIT_AI_TIMEOUT_MS = 30_000;
 const CONFLICT_FILE_MAX_CHARS = 20_000;
 /** AI 解决冲突超时（整文件重写，比提交信息慢） */
 const CONFLICT_AI_TIMEOUT_MS = 60_000;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyModel = Model<any>;
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -411,24 +410,9 @@ export async function gitMergeAbort(cwd: string): Promise<void> {
 // AI 自动填写提交信息
 // ---------------------------------------------------------------------------
 
+/** 选模型走共享逻辑（shared/model-pick）：优先列表 + 最便宜已认证兜底，perm-gate 同款 */
 function pickCommitModel(ctx: ExtensionContext): AnyModel | undefined {
-	const reg = ctx.modelRegistry;
-	for (const [provider, modelId] of COMMIT_AI_MODELS) {
-		const m = reg.find(provider, modelId);
-		if (m && reg.hasConfiguredAuth(m)) return m;
-	}
-	// 兜底：已配置认证的模型里选 input+output 最便宜的
-	let best: AnyModel | undefined;
-	let bestCost = Infinity;
-	for (const m of reg.getAvailable()) {
-		if (!reg.hasConfiguredAuth(m)) continue;
-		const c = (m.cost?.input ?? Infinity) + (m.cost?.output ?? Infinity);
-		if (c < bestCost) {
-			best = m;
-			bestCost = c;
-		}
-	}
-	return best;
+	return pickAuxModel(ctx, COMMIT_AI_MODELS);
 }
 
 /** 由 AI 根据暂存区改动（git diff --cached）生成提交信息。 */
