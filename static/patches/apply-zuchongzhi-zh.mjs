@@ -414,6 +414,7 @@ function main() {
 		if (missing.length > 0) {
 			totalMissing += missing.length;
 			missingReports.push(`  ${rel}: 缺失 ${missing.length} 条目标串（pi 升级后文案变动？）`);
+			for (const m of missing) missingReports.push(`    - ${JSON.stringify(m)}`);
 		}
 		totalReplaced += replaced;
 

@@ -37,6 +37,10 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       config.ts     #       JSON 配置读写：原子写（tmp+rename）、损坏隔离（.corrupt- 留证）、残留 tmp 清理
       ui.ts         #       通用面板组件原语：createBoxRenderer（浮层边框渲染）/ editInput（输入编辑键统一，
                       #       含 paste 粘贴）/ renderScrollingInput（水平滚动输入框）/ renderInputWithCursor
+      model-pick.ts #       辅助 AI 任务选模型：pickAuxModel（优先列表 + 最便宜已认证兜底），hud-git / perm-gate 共用
+      model-selector.ts #   通用模型选择面板：复用 pi 官方 ModelSelectorComponent（ModelRegistry.runtime 直通），perm-gate 用
+      shell-split.ts  #     shell 复合命令拆段（&&/||/;/|/换行/子 shell 递归，引号转义保护），perm-gate 逐段判定用；
+                      #       test/shell-split.test.mjs 回归测试（20 场景）
     hud/            #     3 行 HUD（多文件扩展源码：build.js 把 index.ts 入口打包成单文件 hud.ts）
       index.ts      #       入口薄壳：re-export hud-core（pi 加载约定）
       hud-core.ts   #       核心：渲染 + 生命周期 + 命令；开启时置 globalThis.__PI_HUD_ACTIVE__（dispose 时清），workflow-mgr 据此接管底部行；子模块动态加载，缺失时降级显示
@@ -46,6 +50,14 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       test/         #       hud-git 路径引号解码回归测试（node src/extensions/hud/test/unquote.test.mjs）
     ask/          #     问卷（多文件扩展源码，build.js 把 index.ts 打包成单文件 ask.ts）：types.ts 数据模型/容错规范化 + store.ts 问卷文件读写（.pi/questionnaires/）+ page.ts 整屏问卷页/选择器 + tool.ts ask 工具 + commands.ts /answer 命令 + state.ts 状态推送/排队链；test/ask.test.mjs 回归测试（40 场景）
     btf-think.ts  #   思考折叠标签动画（Thinking... 逐帧动画，独立 UI 反馈插件）
+    crash-log.ts  #   崩溃黑匣子：prependListener 抢在 pi 的 uncaughtException 处理器（同步 exit）之前把堆栈
+                    #   同步落盘 ~/.pi/agent/pi-crash.log（含 unhandledRejection 与 exit 码），崩溃条目与会话文件按时间配对
+    perm-gate.ts    #   bash 命令三级权限门：黑名单人工复核 / 白名单放行 / AI 审核（模型覆盖项仿 pi-btw：
+                    #   /perm-gate model 复用官方 ModelSelectorComponent 面板直选，未覆盖回落 shared/model-pick 自动选；审核失败转人工；
+                    #   复合命令经 shared/shell-split 拆段逐段判定（白名单每段都要命中，防「git status && rm -rf x」绕过）；
+                    #   review 结论附 AI 提炼的候选正则（1~3 个、从窄到宽），加白/加黑时选用；
+                    #   allow 结论按 autoWhitelist 策略自动加白（exact 精确段规则 / smart AI 最窄候选 / off）；
+                    #   ~/.pi/agent/perm-gate.json 配置 + /perm-gate 命令）
     claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn、双击 Ctrl+C 预填 /rewind 回退
     task-alert.ts     #   任务完成提醒：提示音 + 标题动画 + setStatus 状态推送
     workflow-mgr/     #   人机协作任务面板（多文件扩展源码：build.js 把 index.ts 入口打包成单文件 workflow-mgr.ts）
@@ -67,7 +79,6 @@ static/              #   静态部署物（无需编译，install.js 直接从�
   themes/matrix.json  #     黑客帝国荧光绿主题
   sounds/task_complete.wav  #     任务完成提示音
   patches/            #     pi 补丁脚本
-    apply-pi-tui-scroll-freeze.mjs  #       pi-tui 滚动冻结补丁：修复流式期间滚轮上翻被拽飞；pi 升级后需重跑；仅作用于 regular（内联）渲染模式，fullscreen 模式下为死代码可跳过重跑（见注意事项）
     apply-pi-ai-usage-guard.mjs     #       pi-ai usage 缺失防护补丁：模型偶发返回无 usage 的 assistant 消息导致后续调用瞬时失败；pi 升级后需重跑
     apply-zuchongzhi-zh.mjs        #       祖冲之汉化补丁：pi 无官方 i18n，直接替换 dist 编译产物硬编码英文为中文（236 处/9 文件）；pi 升级后需重跑
   webui/index.html  #     webui 前端单页（聊天 + 状态栏，列表/聊天双视图按 URL 分流；install.js 复制到 ~/.pi/agent/webui/）
@@ -104,5 +115,5 @@ dist/               # 扩展产物（build.js 生成，gitignore 不入库）：
 - `src/config/tsconfig.template.json` → `install.js` 探测 pi 全局目录生成 `src/config/tsconfig.json`（`.gitignore` 忽略生成物，不入库）；生成物仅服务本地 tsc 检查（`paths` 映射 `@earendil-works/*` / `typebox`），运行时仍由 jiti 直接加载，不经 tsc。换机器/pi 升级路径变了重跑 `node install.js` 即可
 - `install.js` 会修改全局 `~/.pi/agent/settings.json`（theme 字段），跑 `--dry-run` 先预览；copyDir 已支持子目录递归（多文件扩展 hud/）
 - `docs/deepseek/` 是本地参考资料（不入库，版权归 DeepSeek），不要当作可执行配置；`src/sounds/` 只放提示音
-- **fullscreen 渲染模式与补丁的关系**：`apply-pi-tui-scroll-freeze.mjs` 只 patch regular（内联）模式的 `tui-main-screen.js`；切到 fullscreen（`/settings` → tui-mode）后渲染走 `tui-alt-screen.js`，补丁变死代码、升级 pi 可跳过重跑。`apply-pi-ai-usage-guard.mjs` 与 `apply-zuchongzhi-zh.mjs` 与渲染模式无关，两种模式下都需重跑。（2026-08 起试用 fullscreen：滚动跟手度略降，待长期观察后定稿——若切回 regular 需重跑 scroll-freeze）
+- **fullscreen 渲染模式已定稿**（2026-08 起试用，长期观察后转正）：旧 regular（内联）模式的滚动冻结补丁（`apply-pi-tui-scroll-freeze.mjs`）已随 fullscreen 定稿移除（fullscreen 渲染走 `tui-alt-screen.js`，补丁在其下本是死代码）。剩余两个补丁（`apply-pi-ai-usage-guard.mjs` / `apply-zuchongzhi-zh.mjs`）与渲染模式无关，pi 升级后都需重跑。
 - `claude-it.ts` 会拦截裸输入 `exit`（不带 `/`）直接退出 pi，属刻意设计

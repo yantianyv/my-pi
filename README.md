@@ -23,6 +23,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `btf-think.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking... → Thinking....，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`） | `~/.pi/agent/extensions/` |
 | `extensions/` | `task-alert.ts` — 任务完成提醒：提示音 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `perm-gate.ts` — bash 命令三级权限门：黑名单人工复核 / 白名单放行 / AI 审核（见下） | `~/.pi/agent/extensions/` |
 | `vendor/` | `pi-subagents` — 子代理委派（scout/reviewer/worker/oracle 等内建角色 + FleetView 舰队面板，替代原自研 explore-agent） | `~/.pi/agent/vendor/` |
 | `vendor/` | `pi-btw` — `/btw` 旁支问答（真实子会话、/btw:tangent、inject/summarize 回注，替代原自研 btw） | `~/.pi/agent/vendor/` |
 | `vendor/` | `pi-rtk-optimizer` — bash 输出多阶段压缩 + rtk 命令改写（替代原自研 token-saver） | `~/.pi/agent/vendor/` |
@@ -30,7 +31,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webui/` — 本地 Web 界面：TUI 进程内 HTTP+SSE 服务，浏览器与 TUI 实时双向同步（聊天/状态栏/git 操作，复用 hud 模块），`/webui` 命令（见下） | `~/.pi/agent/extensions/` |
 | `webui/` | `index.html` — webui 前端单页（聊天 + 状态栏，轻量自写 markdown） | `~/.pi/agent/webui/` |
-| `patches/` | 三个 pi 补丁：tui 滚动冻结 / ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
+| `patches/` | 两个 pi 补丁：ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装） | `~/.pi/agent/skills/` |
 | `models.json` | 模型配置模板：OpenRouter 路由（provider 级 `compat.openRouterRouting`）+ 火山方舟 Coding Plan 自定义供应商（见下；已在则深度合并，保留手改的其他 provider） | `~/.pi/agent/models.json` |
@@ -165,6 +166,16 @@ pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时
 
 撤销时机：任意按键（`onTerminalInput` 原始终端按键流，无需等到发送）/ 新任务开始立即撤；10 分钟无操作自动撤。
 
+## 命令权限门（src/extensions/perm-gate.ts）
+
+bash 命令三级管控（`tool_call` 事件拦截，只管 bash）：**复合命令先拆段**（`shared/shell-split.ts`：按 `&&`/`||`/`;`/`|`/换行拆分，`$()`/反引号子 shell 递归拆出，引号/转义保护）→ **黑名单**（整串或任一子命令段命中即转人工复核，面板带 ⚠️ 警告并指出命中段）→ **白名单**（**逐段判定：每个子命令段都要命中白名单才放行**，防止「git status && rm -rf x」被前半段规则连带放行；黑名单优先于白名单，安全兜底）→ **AI 审核**（未命中名单的命令交给辅助小模型，给出放行 / 人工复核 / 驳回三类结论；AI 审核失败——超时/无模型/网络错误/输出无法解析——一律降级人工复核）。
+
+- **人工复核面板**四操作：放行一次 / 放行并加白名单 / 驳回 / 驳回并加黑名单。AI 审核为「需复核」时会同时提炼命令核心特征为 **1~3 个候选正则**（附说明、从窄到宽排列，逐条校验可编译才采纳），加白/加黑时：单候选直接用、多候选弹面板选（附「精确匹配该命令」兜底项——复合命令拆段后**每段子命令各加一条精确规则**，与逐段判定语义对齐；Esc = 不加名单只执行本次操作）、无候选回落精确匹配；选中的正则既不匹配整串也不匹配任何子命令段时警告（AI 提炼可能有误）但不阻止加入；并行工具批里多个待复核命令经 Promise 链串行弹面板，避免对话框互相覆盖；无 UI（`-p` 等）时需复核的命令直接阻断；
+- **allow 自动加白**（`autoWhitelist` 策略，避免常用无害命令反复烧审核 token）：`exact`（默认）= AI 判 allow 后把该命令的精确段规则自动入白，同一条命令以后零 token；`smart` = 采纳 AI 候选正则最窄一条自动入白（同类变体也覆盖，候选跑偏/无候选自动退 exact）；`off` = 关闭。护栏：黑名单永远优先、去重、不覆盖黑名单已有规则、每次自动加白发通知（透明可查，也可随时 `/perm-gate` 查看名单或编辑配置文件）；`/perm-gate autowhite off|exact|smart` 切换；
+- **AI 审核**：选模型仿 pi-btw 覆盖项语义——`/perm-gate model` 打开**官方模型选择面板**（`shared/model-selector.ts` 直接复用 pi 导出的 `ModelSelectorComponent`，与内置 `/model` 同组件：搜索/scoped 切换/目录刷新；`ModelRegistry.runtime` 直通组件所需的 ModelRuntime），`/perm-gate model <provider>/<id>|auto` 直接设置；未覆盖时走共享模块 `shared/model-pick.ts` 自动选（与 hud-git 的 AI 提交信息同款「优先列表 + 最便宜已认证兜底」，优先 `deepseek/deepseek-v4-flash`），覆盖模型不可用/未认证时自动回落；`completeSimple` 单次调用不占主会话上下文；进度经官方 `setStatus("perm-gate", …)` 通道推送（hud 行 1 动态区，未登记 key 默认灰字）；allow/reject 结论会话级缓存（同一精确命令不重复审核），review 不缓存（每次由人决定）；
+- **配置**：`~/.pi/agent/perm-gate.json`（首次运行自动写默认配置，含 `rm -r`/`sudo`/`mkfs`/`dd of=/dev/` 等黑名单正则；手动编辑，无管理面板）——`enabled` 总开关、`blacklist`/`whitelist` 正则字符串列表、`aiReview`（false = 未命中名单一律转人工）、`aiTimeoutMs`；无效正则跳过并在 `/perm-gate` 状态里提示；
+- **命令**：`/perm-gate` 查看状态（开关/审核模型/自动加白策略/名单条数/无效正则/配置路径）、`/perm-gate on|off` 开关（持久化）、`/perm-gate reload` 重读配置（手动改完配置后用）、`/perm-gate model` 选审核模型、`/perm-gate autowhite` 自动加白策略。
+
 ## 联网工具（src/extensions/web-tool/）
 
 注册 `web_search`（多源搜索）与 `web_fetch`（抓网页转 markdown）两个自定义工具：agent 查实时信息（GitHub issue、文档、新闻、价格）时搜索，需要深读时抓取，全部**零 API key 零费用**（不依赖 kimi 订阅）。
@@ -218,27 +229,6 @@ TUI 进程内的本地 Web UI：浏览器是 pi 的**另一只眼睛和手**，�
 - **架构**：`server.ts`（主端：路由分发 + 会话注册表 + 内部通道 + 浏览器 SSE 订阅；Node 原生 http 零依赖，`requestTimeout=0` 保长连接）、`relay.ts`（从端：attach 长连接 + 命令执行回传 + 事件上行 + 指数退避重连 + 升级为主回调）、`bridge.ts`（事件桥 + pi API 操作，broadcast 注入式——host 直广播 / relay 上行）、`state.ts`（状态快照组装，复用 hud 模块）、`config.ts`（配置持久化，`PI_WEBUI_PORT` 环境变量覆盖端口——测试隔离用）；前端单文件（列表/聊天双视图按 URL 分流）；
 - **安全**：仅本地回环监听 + 共享 token 鉴权（API/SSE/内部通道全校验，静态页免校验——HTML 壳无敏感数据）；
 - **测试**：暂无自动化测试（主-从/SSE/图片链路靠手工联调，后续可补）。
-
-## pi-tui 滚动冻结补丁（patches/）
-
-修「agent 工作时滚轮上翻会被拽飞（滚到顶部）」的问题。根因：流式输出时整条消息每帧从 markdown 源码重渲染，消息开头几行持续变化；一旦滚出视口，pi-tui 判定 `firstChanged < prevViewportTop` 就整屏重绘——发 `\x1b[3J` 清空终端滚动缓冲区再全量重写，实测每秒 2~3 次，Windows Terminal 的滚动位置随之丢失。
-
-```bash
-node static/patches/apply-pi-tui-scroll-freeze.mjs   # 打补丁/升级（幂等），重启 pi 生效
-```
-
-补丁思路（同 Claude Code / Ink `<Static>`）：
-
-1. **流式期间**：冻结视口上方已滚入滚动缓冲区的内容（保留流式中间帧），只重绘视口内可见部分，不再清空滚动缓冲。代价：滚上去看到的旧内容可能是流式中间帧，与最终渲染略有出入。
-2. **内容收缩（任务完成时必现）**：消息定稿时通常会比最后流式帧收窄 1~2 行，逻辑行号位移无法局部差分，按收缩幅度分流：
-   - **小幅收缩（≤1 屏）**：保持视口顶部不变，逐行 `\x1b[2K` 重写视口内全部行并清掉收缩的空行（`\x1b[1B` 下移不滚动）——不清屏、不滚动、不动滚动缓冲 → 滚动缓冲（旧帧）与可见屏（新帧）行号连续，无重叠。
-   - **大幅收缩（超 1 屏或视口顶部落出内容）**：滚动缓冲里的旧帧与可见屏大量重叠且已无意义，清滚动缓冲做整屏重绘（滚动位置跳顶一次，可接受）。
-   - 不用 `fullRender("screen")`（`\x1b[2J` 清可见屏 + 保留滚动缓冲 + 重写末尾一屏）的原因：Windows Terminal 的 ED2 清屏会把可见屏旧帧移入滚动缓冲，重写后滚动缓冲（旧中间帧）与可见屏（新定稿）内容重叠——任务完成时用户滚动即看到「重复绘制」。同步输出（`\x1b[?2026h`）下整屏重绘无闪烁。
-3. **显式全局重建必须整屏重绘**：Ctrl+T 折叠思考、compaction、设置变更、会话切换、主题切换会重建整段对话。钳制路径只适合「流式增量」，全局重建走钳制会把视口上方旧内容冻结、新内容硬拼接（实测 Ctrl+T 后滚动缓冲里思考块 0 条可见、历史错乱）。因此补丁同时改 `interactive-mode.js` 三处（`rebuildChatFromMessages` / `renderCurrentSessionState` 尾部、`onThemeChange`），强制 `requestRender(true)` 整屏重绘重建滚动缓冲。
-
-脚本当前为 **V4（适配 pi 0.84+）**：0.84 起差分渲染逻辑从 `pi-tui/dist/tui.js` 移到 `tui-main-screen.js`（pi-tui 为全屏模式拆出 main/alt 两个实现），`fullRender` 从类方法改为 `doRender()` 内闭包；V4 随之迁移补丁目标，并额外处理 0.84 新增的 clearOnShrink 分支（默认关，`PI_CLEAR_ON_SHRINK=1` 启用时小幅收缩也不再清滚动缓冲）。补丁覆盖 `pi-tui/dist/tui-main-screen.js` + `dist/modes/interactive/interactive-mode.js` 两个文件，幂等（已打 V4 直接跳过）。若 pi 版本变动导致匹配失败，脚本会拒绝执行并提示人工核对。
-
-注意：补丁打在全局 `node_modules` 的 pi-tui 上，**pi 每次升级会覆盖，需重跑脚本**；若 pi-tui 版本变动导致匹配失败，脚本会拒绝执行并提示人工核对。
 
 ## pi-ai usage 缺失防护补丁（patches/apply-pi-ai-usage-guard.mjs）
 
