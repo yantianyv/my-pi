@@ -153,6 +153,8 @@ export default async function (pi: ExtensionAPI) {
 		"hud-bash": { color: "warning", priority: 100 }, // 指令模式提示（输入以 ! 开头）
 		"balance-error": { color: "error", priority: 95 }, // 余额查询失败
 		"task-alert": { color: "success", priority: 90 }, // 任务完成（task-alert 自管闪烁帧）
+		"task-alert-error": { color: "error", priority: 92 }, // 任务出错（task-alert）
+		"task-alert-wait": { color: "warning", priority: 91 }, // 等待人工干预（task-alert）
 		"init": { color: "warning", priority: 80 }, // claude-it /init 进度
 		"web-search": { color: "accent", priority: 75 }, // 联网搜索状态（web-tool）
 		"web-fetch": { color: "accent", priority: 74 }, // 网页抓取状态（web-tool）

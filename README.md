@@ -22,7 +22,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `hud/`（源码多文件：`index.ts` + `hud-core.ts` + `hud-balance.ts` + `hud-cost.ts` + `hud-git.ts`；build.js 合并为单文件 `hud.ts` 产物）— 3 行 HUD 状态栏，见下 | `~/.pi/agent/extensions/` |
 | `extensions/` | `btf-think.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking... → Thinking....，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`） | `~/.pi/agent/extensions/` |
-| `extensions/` | `task-alert.ts` — 任务完成提醒：提示音 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `task-alert.ts` — 多状态提醒：五状态五音效 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `perm-gate.ts` — bash 命令三级权限门：黑名单人工复核 / 白名单放行 / AI 审核（见下） | `~/.pi/agent/extensions/` |
 | `vendor/` | `pi-subagents` — 子代理委派（scout/reviewer/worker/oracle 等内建角色 + FleetView 舰队面板，替代原自研 explore-agent） | `~/.pi/agent/vendor/` |
 | `vendor/` | `pi-btw` — `/btw` 旁支问答（真实子会话、/btw:tangent、inject/summarize 回注，替代原自研 btw） | `~/.pi/agent/vendor/` |
@@ -106,6 +106,8 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | 指令模式 | 输入以 `!` 开头 | `⚡ 指令模式` | 100 |
 | 余额查询失败 | 余额接口报错（错误变化时才推，防刷屏） | `⚠ 余额查询失败` | 95 |
 | 任务完成 | task-alert 推送（自管闪烁帧） | `✅ 任务完成`（闪烁） | 90 |
+| 任务出错 | task-alert 推送（出错终止） | `❌ 任务出错`（闪烁） | 92 |
+| 等待人工 | task-alert 推送（ui_prompt 阻塞） | `⏳ 等待人工：权限复核`（闪烁） | 91 |
 | /init 进度 | claude-it 后台 init | `⚙ init · 5` | 80 |
 | 联网搜索 | web_search 执行中 | `🔍 搜索中` | 75 |
 | 网页抓取 | web_fetch 执行中 | `⬇️ 抓取中` | 74 |
@@ -156,15 +158,25 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 - **[pi-btw](https://github.com/dbachelder/pi-btw)**（替代 btw）：`/btw` 旁支问答——真实子会话（带 read/bash/edit 工具）、`/btw:tangent` 无上下文分支、`/btw:inject` / `/btw:summarize` 回注主会话、隐藏线程跨 `/reload` 持久化、`Alt+/` 焦点切换。
 - **[pi-rtk-optimizer](https://github.com/MasuRii/pi-rtk-optimizer)**（替代 token-saver）：bash/read/grep 输出多阶段压缩（ANSI 剥离、测试聚合、构建过滤、git 压缩、linter 聚合、搜索分组、截断）+ `/rtk stats` 节省统计 + `/rtk` 设置面板；命令改写委托外部 `rtk` 二进制（[rtk-ai/rtk](https://github.com/rtk-ai/rtk)，Apache-2.0，已装于 `%APPDATA%\npm\rtk.exe`，缺失时自动旁路仅留压缩）。
 
-## 任务完成提醒（src/extensions/task-alert.ts）
+## 多状态提醒（src/extensions/task-alert.ts）
 
-pi 完全空闲（`agent_settled`，即不会再自动重试/压缩/续跑）时给出三重提醒，便于及时回来发下一步指令；**Ctrl+C 打断（abort）不算完成，不触发提醒**：打断后 agent-loop 的最后一条 assistant 消息 `stopReason="aborted"`，task-alert 据此跳过。
+移植自 ClaudeCodeInit 的 hooks 提示音方案，五种状态五种音效（钢琴音色，音源 `ClaudeCodeInit/wav/piano/`，部署到 `~/.pi/agent/sounds/`）：
 
-- **提示音**：播放 `sounds/task_complete.wav`（钢琴音色，移植自 ClaudeCodeInit，源码在 src/sounds/）。跨平台：Windows 用 PowerShell `Media.SoundPlayer`，macOS 用 `afplay`，Linux 依次尝试 `paplay`/`aplay`，全部不可用时退到终端响铃；任何失败都静默；
-- **状态栏闪烁**：通过官方 `ctx.ui.setStatus("task-alert", …)` 通道推送闪烁帧（500ms 交替 `✅ 任务完成` / `✨ 任务完成`，本扩展自管帧切换与清除），HUD 按 `STATUS_STYLE` 映射样式后在行 1 动态区闪烁（替换「会话 Nmin」占位）。两扩展零耦合——task-alert 不知道 hud 的存在；HUD 被禁用时状态自动回落原生 footer 第 3 行，提示退化为标题栏动画；
+| 状态 | 触发时机 | 音效 | 视觉 |
+|---|---|---|---|
+| 任务完成 | `agent_settled` 正常结束（不会再自动重试/压缩/续跑） | `task_complete.wav` | 状态栏 + 标题动画（✅/✨ 闪烁） |
+| 任务出错 | `agent_settled` 且末条 assistant `stopReason="error"` | `error.wav` | 状态栏 + 标题动画（❌/⚠️ 闪烁，HUD 红色） |
+| 等待人工 | `ui_prompt_start`（pi 0.84.4 新增事件）且 agent 运行中被阻塞——perm-gate 人工复核、ask 问卷等 | `attention.wav` | 状态栏 + 标题动画（⏳/🔔 闪烁，HUD 黄色，附提示标题）；**应答（`ui_prompt_end`）自动撤，按键不撤**（用户需要按键回答提示本身） |
+| 空闲提醒 | 完成提醒后 60 秒无任何操作 | `idle_prompt.wav` | 仅补一声，不动视觉 |
+| 子代理完成 | `subagent` 工具成功结束（`tool_execution_end` 且 `!isError`） | `subagent_complete.wav` | 仅提示音（中间事件，不打断标题/状态；失败交给 turn 级 error 统一收尾） |
+
+**Ctrl+C 打断（abort）不算完成，不触发提醒**：打断后 agent-loop 的最后一条 assistant 消息 `stopReason="aborted"`，task-alert 据此跳过。「等待人工」有 `ctx.isIdle()` 守卫：用户空闲时主动开的提示（如 `/answer` 续答问卷）不打扰。
+
+- **状态栏闪烁**：三种需要视觉的状态各用独立 key 走官方 `ctx.ui.setStatus(key, …)` 通道（`task-alert` / `task-alert-error` / `task-alert-wait`，500ms 交替帧，本扩展自管帧切换与清除），HUD 按 `STATUS_STYLE` 映射不同颜色后在行 1 动态区闪烁。两扩展零耦合——task-alert 不知道 hud 的存在；HUD 被禁用时状态自动回落原生 footer 第 3 行，提示退化为标题栏动画；
+- **音频播放**：跨平台——Windows 用 PowerShell `Media.SoundPlayer`，macOS 用 `afplay`，Linux 依次尝试 `paplay`/`aplay`，全部不可用时退到终端响铃；任何失败都静默；
 - **标题栏动画**：终端标题同步闪烁，切到其他窗口也能看到。
 
-撤销时机：任意按键（`onTerminalInput` 原始终端按键流，无需等到发送）/ 新任务开始立即撤；10 分钟无操作自动撤。
+撤销时机（完成/出错）：任意按键（`onTerminalInput` 原始终端按键流，无需等到发送）/ 新任务开始立即撤；10 分钟无操作自动撤。
 
 ## 命令权限门（src/extensions/perm-gate.ts）
 
