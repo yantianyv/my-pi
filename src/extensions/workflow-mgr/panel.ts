@@ -397,6 +397,6 @@ export function textPanel(state: WorkflowState, derived: Derived): string[] {
 		lines.push("");
 		lines.push(`里程碑：${msEntries.map(([n, m]) => `${n}${m.done ? "✓" : ""}`).join("  ")}`);
 	}
-	lines.push(`记录：${state.notes.length} 条`);
+	lines.push(`记录：${state.notes.filter((n) => !n.supersededBy).length} 条`);
 	return lines;
 }

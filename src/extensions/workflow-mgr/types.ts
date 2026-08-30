@@ -54,11 +54,19 @@ export interface TaskState {
 	note?: string;
 }
 
-/** AI 记录（wf_note）：工作流内的决策记录（当前步骤产生、后续步骤需要知晓的信息） */
+/**
+ * AI 记录（wf_note）：工作流内的决策记录（当前步骤产生、后续步骤需要知晓的信息）
+ * - kind：fact（长期事实/硬约束/用户拍板，默认）| status（时效性状态快照，任务切换时提醒复核）
+ * - key：主题键（可选）；同 key 新记录自动作废旧记录（解决「决策改主意后两条打架」）
+ */
 export interface NoteRecord {
 	id: string;
 	ts: string;
 	content: string;
+	kind?: "fact" | "status";
+	key?: string;
+	/** 已被 supersededBy 指向的记录作废（list/brief 不展示，留痕可审计） */
+	supersededBy?: string;
 }
 
 /** 里程碑（名称 → 日期/完成态） */

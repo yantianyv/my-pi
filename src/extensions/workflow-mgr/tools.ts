@@ -20,10 +20,10 @@ import {
 	nextPendingTask,
 	reconcile,
 } from "./store";
-import { lightState, renderBrief, summaryLine } from "./brief";
+import { lightState, renderBrief, summaryLine, truncate } from "./brief";
 import { updateWidget } from "./panel";
 import { auditCompletion } from "./audit";
-import type { TaskDef, WorkflowDef, WorkflowMode } from "./types";
+import type { NoteRecord, TaskDef, WorkflowDef, WorkflowMode, WorkflowState } from "./types";
 import { WORKFLOW_SCHEMA_VERSION } from "./types";
 
 /* ============================== 工具参数 schema ============================== */
@@ -43,10 +43,19 @@ const rollbackParams = Type.Object({
 });
 const noteParams = Type.Object({
 	action: StringEnum(["list", "add", "edit", "remove"], {
-		description: "操作类型：list 查看全部；add 追加（自动 id+时间戳）；edit 修改（按 id）；remove 删除（按 id）",
+		description: "操作类型：list 查看全部生效记录；add 追加（自动 id+时间戳，可选 kind/key）；edit 修改（按 id）；remove 删除（按 id）",
 	}),
 	id: Type.Optional(Type.String({ description: "记录 id（edit/remove 必填）" })),
 	content: Type.Optional(Type.String({ description: "记录内容（add/edit 必填）" })),
+	kind: Type.Optional(
+		StringEnum(["fact", "status"], {
+			description:
+				"记录类型（仅 add）：fact 长期事实/硬约束/用户拍板（默认）；status 时效性状态快照——进度/收集情况等会随时间变化的信息必须用它，任务切换时会提醒复核",
+		}),
+	),
+	key: Type.Optional(
+		Type.String({ description: "主题键（仅 add，可选）：同 key 的新记录自动作废旧记录——决策/结论类建议带 key，改主意时再记一条同 key 即顶替，避免两条打架" }),
+	),
 });
 const milestoneParams = Type.Object({
 	name: Type.String({ description: "里程碑名（不存在则自动创建），如 开题/中期/答辩" }),
@@ -130,6 +139,16 @@ export function commitAndRefresh(ctx: ExtensionContext): void {
 	const s = getStore(ctx);
 	s.commitState();
 	updateWidget(ctx, s);
+}
+
+/** 时效性记录（kind=status）复核提醒：wf_switch 推进后附在结果尾部，防过时状态误导后续步骤 */
+function statusNotesReminder(state: WorkflowState): string {
+	const act = state.notes.filter((n) => !n.supersededBy && n.kind === "status");
+	if (!act.length) return "";
+	return (
+		`\n\n⚠️ 有 ${act.length} 条时效性记录（status），进入新任务前请复核是否仍然成立，过时请 wf_note remove/edit：\n` +
+		act.map((n) => `  ${n.id}${n.key ? `〈${n.key}〉` : ""} ${truncate(n.content, 40)}`).join("\n")
+	);
 }
 
 /* ============================== 工具注册 ============================== */
@@ -533,7 +552,10 @@ export function registerTools(pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text" as const,
-							text: `${prevMsg}开始任务 ${target.id} ${target.title}（${stage.name}）\n` + taskDetail(target, stage.name, derived.mode),
+							text:
+								`${prevMsg}开始任务 ${target.id} ${target.title}（${stage.name}）\n` +
+								taskDetail(target, stage.name, derived.mode) +
+								statusNotesReminder(state),
 						},
 					],
 					details: { kind: "switch" as const, state: lightState(state) },
@@ -588,9 +610,10 @@ export function registerTools(pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: allDone
-								? `🎉 全部任务完成！（${summaryLine(state, derived)}）进入收尾：可 wf_workflow archive 归档（自动标记全部完成，退出面板视野）。`
-								: "没有满足依赖的待办任务——请检查依赖或先用 wf_workflow 调整。",
+							text:
+								(allDone
+									? `🎉 全部任务完成！（${summaryLine(state, derived)}）进入收尾：可 wf_workflow archive 归档（自动标记全部完成，退出面板视野）。`
+									: "没有满足依赖的待办任务——请检查依赖或先用 wf_workflow 调整。") + statusNotesReminder(state),
 						},
 					],
 					details: { kind: "switch", state: lightState(state) },
@@ -681,10 +704,12 @@ export function registerTools(pi: ExtensionAPI) {
 		name: "wf_note",
 		label: "记录",
 		description:
-			"AI 的记录工具：在工作流中，用于记录后续步骤需要用到的信息。每进入新的步骤，应当主动使用list动作查看已有记录，并及时remove不再用得到的记录。\n" +
-			"使用准则：用户明确拍板的选择、硬约束（如「不要用 X」）、需要后续遵守的重要结论 → 记；\n" +
+			"AI 的记录工具：在工作流中，用于记录后续步骤需要用到的信息。每进入新的步骤，应当主动使用 list 动作查看已有记录，并及时 remove 不再用得到的记录。\n" +
+			"使用准则：用户明确拍板的选择、硬约束（如「不要用 X」）、需要后续遵守的重要结论 → 记（kind=fact 默认，建议带 key）；\n" +
+			"进度/收集情况/他人状态等会随时间变化的信息 → 必须 kind=status（任务切换时会提醒复核，防过时记录误导）；\n" +
 			"对话琐碎细节、任务字段已覆盖的内容（分工/交付物/完成信号）→ 不记。\n" +
-			"action：add 追加（自动 id+时间戳）/ list 查看全部 / edit 修改（按 id）/ remove 删除（按 id）。",
+			"同一主题的信息更新时：带 key 的用同 key add 新记录（自动作废旧记录），不带 key 的用 edit 改原记录——不要并排留两条互相矛盾的记录。\n" +
+			"action：add 追加（自动 id+时间戳，可选 kind/key）/ list 查看全部生效记录 / edit 修改（按 id）/ remove 删除（按 id）。",
 		promptSnippet: "记录当前步骤产生、后续步骤需要知晓的信息",
 		parameters: noteParams,
 		async execute(_id, params: NoteParams, _signal, _onUpdate, ctx) {
@@ -700,23 +725,57 @@ export function registerTools(pi: ExtensionAPI) {
 					if (m) max = Math.max(max, Number(m[1]));
 				}
 				const id = `n${max + 1}`;
-				state.notes.push({ id, ts: new Date().toISOString(), content: params.content });
+				const rec: NoteRecord = { id, ts: new Date().toISOString(), content: params.content };
+				if (params.kind === "status") rec.kind = "status"; // fact 为默认，不落盘省字段
+				if (params.key?.trim()) rec.key = params.key.trim();
+				// 同 key 作废旧记录（留痕不物理删除，list/brief 不展示）——解决「决策改主意后两条打架」
+				const superseded: NoteRecord[] = [];
+				if (rec.key) {
+					for (const n of state.notes) {
+						if (!n.supersededBy && n.key === rec.key) {
+							n.supersededBy = id;
+							superseded.push(n);
+						}
+					}
+				}
+				state.notes.push(rec);
 				logEvent(state, "note_add", params.content, id);
 				commitAndRefresh(ctx);
+				const tags = `${rec.kind === "status" ? "，status" : ""}${rec.key ? `，key=${rec.key}` : ""}`;
 				return {
-					content: [{ type: "text", text: `已记录（${id}）：${params.content}` }],
+					content: [
+						{
+							type: "text",
+							text:
+								`已记录（${id}${tags}）：${params.content}` +
+								(superseded.length
+									? `\n已作废旧记录：${superseded.map((n) => `${n.id}（${truncate(n.content, 30)}）`).join("、")}`
+									: ""),
+						},
+					],
 					details: { kind: "note", state: lightState(state) },
 				};
 			}
 
 			if (params.action === "list") {
-				if (!state.notes.length)
-					return { content: [{ type: "text", text: "暂无记录" }], details: { kind: "note", state: lightState(state) } };
+				const active = state.notes.filter((n) => !n.supersededBy);
+				const dead = state.notes.length - active.length;
+				if (!active.length)
+					return {
+						content: [{ type: "text", text: `暂无生效记录${dead ? `（${dead} 条已作废）` : ""}` }],
+						details: { kind: "note", state: lightState(state) },
+					};
 				const text =
-					`【记录】共 ${state.notes.length} 条\n` +
-					state.notes
-						.map((n) => `  ${n.id} ${new Date(n.ts).toLocaleString()} ${n.content}`)
-						.join("\n");
+					`【记录】共 ${active.length} 条生效${dead ? `（另 ${dead} 条已作废不展示）` : ""}\n` +
+					active
+						.map(
+							(n) =>
+								`  ${n.id}${n.kind === "status" ? "⏱" : ""}${n.key ? `〈${n.key}〉` : ""} ${new Date(n.ts).toLocaleString()} ${n.content}`,
+						)
+						.join("\n") +
+					(active.some((n) => n.kind === "status")
+						? "\n（⏱ = 时效性记录：请确认仍成立，过时请 remove/edit）"
+						: "");
 				return { content: [{ type: "text", text }], details: { kind: "note", state: lightState(state) } };
 			}
 

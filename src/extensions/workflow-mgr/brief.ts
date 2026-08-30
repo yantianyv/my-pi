@@ -62,13 +62,18 @@ export function renderBrief(state: WorkflowState, derived: Derived): string {
 		.join(" ");
 	if (milestones) lines.push(`- 里程碑：${milestones}`);
 
-	if (state.notes.length) {
-		const recent = state.notes.slice(-3).map((n) => truncate(n.content, 30));
-		lines.push(`- 最近记录：${recent.join("｜")}`);
+	const activeNotes = state.notes.filter((n) => !n.supersededBy);
+	if (activeNotes.length) {
+		// 全量展示生效记录（已作废的不展示）——让 AI 每次 wf_status 都能发现过时/冲突记录并清理
+		const fmt = activeNotes.map((n) => `${n.id}${n.kind === "status" ? "⏱" : ""}${n.key ? `〈${n.key}〉` : ""} ${truncate(n.content, 50)}`);
+		lines.push(`- 记录（wf_note）：${fmt.join("｜")}`);
+		if (activeNotes.some((n) => n.kind === "status")) {
+			lines.push("  ⏱ = 时效性记录：推进任务前请复核是否仍成立，过时请 wf_note remove/edit");
+		}
 	}
 
 	lines.push(
-		"- 流程指令：你是流程指挥者，向用户下达当前任务的具体指令（📋 任务/🎯 目标/📌 做法/✅ 回报/🔍 验证）；任务完成后先按完成信号验证再调用 wf_switch 推进；交流中产生了后续步骤需要知晓的结论/约束时，用 wf_note 记录；卡住用 wf_block。",
+		"- 流程指令：你是流程指挥者，向用户下达当前任务的具体指令（📋 任务/🎯 目标/📌 做法/✅ 回报/🔍 验证）；任务完成后先按完成信号验证再调用 wf_switch 推进；交流中产生了后续步骤需要知晓的结论/约束时，用 wf_note 记录（会变化的状态用 kind=status）；卡住用 wf_block。",
 	);
 	return lines.join("\n");
 }
@@ -90,7 +95,8 @@ export function lightState(state: WorkflowState) {
 		currentTaskId: state.currentTaskId,
 		tasks,
 		milestones: state.milestones,
-		notes: state.notes.slice(-10),
+		// 只带生效记录（已作废的不进 AI 视野）
+		notes: state.notes.filter((n) => !n.supersededBy).slice(-10),
 		log: state.log.slice(-10),
 	};
 }
