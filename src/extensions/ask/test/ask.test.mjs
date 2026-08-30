@@ -13,6 +13,8 @@
  * - 场景 D：/answer 重开草稿 → 预填恢复 → 提交 → sendUserMessage 送达、文件删除
  * - 场景 E：/answer 多份 → 选择器 → 选中打开
  * - 场景 F：手写 JSON（缺省字段推断）+ 损坏文件（invalid 报告）
+ * - 场景 G：action=cancel 作废搁置问卷（文件删除 + 状态清除 + 不存在报错）
+ * - 场景 H：长题干/长选项说明折行完整展示（不截断，尾部标记可见）
  * - 渲染不变量：整屏页每次 render 恰好 termRows 行、每行恰好 width 列（全屏遮蔽前提）
  *
  * 用法：node src/extensions/ask/test/ask.test.mjs（仓库根目录执行）
@@ -338,6 +340,103 @@ async function main() {
 		}
 		check("F: single 缺 options 抛错", errMsg.includes("options"));
 		check("F: 不打开 UI", captures.customs.length === 0);
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 G：action=cancel 作废问卷 ----
+	console.log("场景 G：ask cancel 作废问卷");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		// 先创建并搁置一份
+		const execP = tool.execute("tc4", FULL_PARAMS, null, null, ctx);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		comp.handleInput(K.escape);
+		await execP;
+		const file = join(dir, ".pi", "questionnaires", "test-survey.json");
+		check("G: 搁置后文件存在", existsSync(file));
+		check("G: 待答状态提示 1 份", typeof captures.statuses.ask === "string" && captures.statuses.ask.includes("1 份"));
+		// cancel 作废
+		const res = await tool.execute("tc5", { action: "cancel", id: "test-survey" }, null, null, ctx);
+		check("G: details.status === cancelled", res.details?.status === "cancelled");
+		check("G: 文件已删除", !existsSync(file));
+		check("G: 待答状态已清除", captures.statuses.ask === undefined);
+		check("G: 不打开 UI", captures.customs.length === 1);
+		// cancel 不存在的问卷 → 报错且列出提示
+		let errMsg = "";
+		try {
+			await tool.execute("tc6", { action: "cancel", id: "no-such" }, null, null, ctx);
+		} catch (e) {
+			errMsg = e.message;
+		}
+		check("G: 作废不存在的问卷报错", errMsg.includes("no-such"));
+		// cancel 缺 id → 报错
+		errMsg = "";
+		try {
+			await tool.execute("tc7", { action: "cancel" }, null, null, ctx);
+		} catch (e) {
+			errMsg = e.message;
+		}
+		check("G: cancel 缺 id 报错", errMsg.includes("id"));
+		// create 缺 title/questions → 报错
+		errMsg = "";
+		try {
+			await tool.execute("tc8", { id: "x" }, null, null, ctx);
+		} catch (e) {
+			errMsg = e.message;
+		}
+		check("G: create 缺 title 报错", errMsg.includes("title"));
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 H：长内容折行不截断 ----
+	console.log("场景 H：长题干/长选项折行展示");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const qTail = "结尾标记甲乙丙丁戊己庚辛";
+		const dTail = "描述尾部子丑寅卯辰巳午未";
+		const execP = tool.execute(
+			"tc9",
+			{
+				title: "长内容问卷",
+				questions: [
+					{
+						id: "q1",
+						type: "single",
+						question: "这是一段用于验证折行展示的超长题干。".repeat(8) + qTail,
+						options: [
+							{ label: "短选项" },
+							{ label: "长选项", description: "这是一段很长的选项说明文字。".repeat(8) + dTail },
+						],
+					},
+				],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		assertFullscreen(comp, "H: 长内容渲染");
+		// 折行点会拆开标记串：续行有缩进、行尾有补位，逐行 trim 后拼接还原原始文本再断言
+		const text = comp.render(TERM_COLS).map((l) => l.trim()).join("");
+		check("H: 长题干尾部完整可见（未截断）", text.includes(qTail));
+		check("H: 长选项说明尾部完整可见（未截断）", text.includes(dTail));
+		check("H: 折行后无截断省略号", !text.includes("…") && !text.includes("..."));
+		comp.handleInput(K.escape);
+		await execP;
 		rmSync(dir, { recursive: true, force: true });
 	}
 

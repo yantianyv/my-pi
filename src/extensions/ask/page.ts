@@ -7,7 +7,9 @@
  * （非 overlay 的 ctx.ui.custom 只替换编辑器区域，不满足「屏蔽其余显示」。）
  *
  * 焦点模型：全部可交互行（选项行 / 其他输入行 / 文本输入行 / 评分行）拍平成行列表，
- * ↑↓（或 Tab/Shift+Tab）跨题移动，页面滚动跟随焦点。键位（与用户拍板一致）：
+ * ↑↓（或 Tab/Shift+Tab）跨题移动，页面滚动跟随焦点。长文本（标题/题干/选项/说明）
+ * 经 wrapTextWithAnsi 按终端宽度折行完整展示（不截断），续行缩进对齐首行文本起点；
+ * 输入行仍单行水平滚动（renderScrollingInput）。键位（与用户拍板一致）：
  * - 空格：选择题选中（单选/判断选中后自动前进到下一行；多选切换勾选，受 max 限制）
  * - Enter：提交问卷（必答未完成时跳到第一题未完成项并提示）；多行文本聚焦时 Shift+Enter 换行
  * - Esc：搁置（草稿写回文件，随时 /answer 继续）
@@ -16,7 +18,7 @@
  * Focusable：focused 由 TUI 设置，文本行的反显光标经 renderScrollingInput 的
  * CURSOR_MARKER 透出（中文 IME 候选窗定位依赖它）。
  */
-import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { TUI } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { createBoxRenderer, editInput, renderScrollingInput } from "../shared/ui";
@@ -485,9 +487,18 @@ export class QuestionnairePage {
 		const header: string[] = [];
 		const titleText = ` 📝 ${this.qn.title}`;
 		const progressText = `已答 ${doneCount}/${this.qn.questions.length} `;
-		const gap = Math.max(1, W - visibleWidth(titleText) - visibleWidth(progressText));
-		header.push(th.fg("accent", titleText) + " ".repeat(gap) + th.fg("dim", progressText));
-		if (this.qn.description) header.push(th.fg("dim", `   ${this.qn.description}`));
+		// 标题 + 进度一行放不下时折行完整展示（不截断）
+		if (visibleWidth(titleText) + visibleWidth(progressText) + 1 <= W) {
+			const gap = Math.max(1, W - visibleWidth(titleText) - visibleWidth(progressText));
+			header.push(th.fg("accent", titleText) + " ".repeat(gap) + th.fg("dim", progressText));
+		} else {
+			header.push(...wrapTextWithAnsi(`${th.fg("accent", titleText)} ${th.fg("dim", progressText)}`, W));
+		}
+		if (this.qn.description) {
+			for (const ln of wrapTextWithAnsi(th.fg("dim", this.qn.description), Math.max(8, W - 3))) {
+				header.push(`   ${ln}`);
+			}
+		}
 		header.push(th.fg("borderMuted", "─".repeat(W)));
 
 		// ---- 内容（rows 与渲染顺序严格一致，row 字段记录全局焦点行号） ----
@@ -495,14 +506,20 @@ export class QuestionnairePage {
 		if (this.focusIdx >= rows.length) this.focusIdx = rows.length - 1;
 		const content: { text: string; row?: number }[] = [];
 		let ri = 0;
+		/** 长逻辑行折行推入 content：prefix（含 ANSI）定首行起点与续行缩进，body 折行不截断；row 焦点标记只挂在首行 */
+		const pushWrapped = (prefix: string, body: string, row?: number): void => {
+			const indent = visibleWidth(prefix);
+			const parts = wrapTextWithAnsi(body, Math.max(8, W - indent));
+			parts.forEach((p, k) => {
+				content.push(k === 0 ? { text: prefix + p, row } : { text: " ".repeat(indent) + p });
+			});
+		};
 		this.qn.questions.forEach((q, qi) => {
 			const st = this.stateOf(q);
 			content.push({ text: "" });
 			const tag = TYPE_TAGS[q.type] + (q.required === false ? "·选填" : "");
-			content.push({
-				text: ` ${th.fg("accent", `${qi + 1}.`)} ${q.question} ${th.fg("dim", `[${tag}]`)}`,
-			});
-			if (q.description) content.push({ text: th.fg("dim", `    ${q.description}`) });
+			pushWrapped(` ${th.fg("accent", `${qi + 1}.`)} `, `${q.question} ${th.fg("dim", `[${tag}]`)}`);
+			if (q.description) pushWrapped("    ", th.fg("dim", q.description));
 
 			while (ri < rows.length && rows[ri]!.qid === q.id) {
 				const row = rows[ri]!;
@@ -512,13 +529,9 @@ export class QuestionnairePage {
 					const o = opts[row.opt!]!;
 					const isMulti = q.type === "multi";
 					const mark = isMulti ? (st.sel.has(row.opt!) ? "[x]" : "[ ]") : st.sel.has(row.opt!) ? "●" : "○";
-					const prefix = focused ? th.fg("accent", " › ") : "   ";
+					const prefix = (focused ? th.fg("accent", " › ") : "   ") + `${th.fg("dim", `${row.opt! + 1}.`)} ${mark} `;
 					const label = focused ? th.fg("accent", o.label) : o.label;
-					const num = th.fg("dim", `${row.opt! + 1}.`);
-					content.push({
-						text: `${prefix}${num} ${mark} ${label}${o.description ? th.fg("dim", ` — ${o.description}`) : ""}`,
-						row: ri,
-					});
+					pushWrapped(prefix, `${label}${o.description ? th.fg("dim", ` — ${o.description}`) : ""}`, ri);
 				} else if (row.kind === "other") {
 					content.push({ text: this.renderInputRow(st.other, st.otherCursor, "填写其他内容…", focused, W), row: ri });
 				} else if (row.kind === "input") {
@@ -552,7 +565,7 @@ export class QuestionnairePage {
 				const parts: string[] = [`已选 ${st.sel.size} 项`];
 				if (q.min !== undefined) parts.push(`至少 ${q.min}`);
 				if (q.max !== undefined) parts.push(`最多 ${q.max}`);
-				content.push({ text: th.fg("dim", `      （${parts.join("，")}）`) });
+				pushWrapped("      ", th.fg("dim", `（${parts.join("，")}）`));
 			}
 		});
 

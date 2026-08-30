@@ -5,6 +5,8 @@
  * （同批多次调用经 enqueueQuestionnaireUI 排队逐个打开）→ 提交则删文件并把答案
  * 作为工具结果返回；搁置（Esc）则草稿写回文件，提示 AI 结束本轮等用户 /answer。
  * 非 TUI 环境降级：文件保留待答，工具结果携带纯文本问卷让 AI 改在对话中提问。
+ * action=cancel：AI 侧作废问卷（发现问错/搁置草稿过时时）——「问卷即文件」，按 id
+ * 找到文件删除即撤回；正在整屏作答中的问卷无法作废（彼时本工具调用正挂起等待）。
  */
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -13,7 +15,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { QuestionnairePage, type PageResult, type TermDims } from "./page";
 import { enqueueQuestionnaireUI, refreshPendingStatus, rememberCtx } from "./state";
-import { createQuestionnaire, initStore, removeQuestionnaire, saveQuestionnaire } from "./store";
+import { createQuestionnaire, initStore, listQuestionnaires, removeQuestionnaire, saveQuestionnaire } from "./store";
 import {
 	answeredProgress,
 	flattenQuestions,
@@ -69,7 +71,7 @@ const QuestionSchema = Type.Object({
 });
 
 interface AskDetails {
-	status: "submitted" | "shelved" | "text-fallback";
+	status: "submitted" | "shelved" | "text-fallback" | "cancelled";
 	title: string;
 	total: number;
 	answered?: number;
@@ -81,28 +83,67 @@ export function registerAskTool(pi: ExtensionAPI): void {
 		name: "ask",
 		label: "问卷",
 		description:
-			"创建一份问卷向用户批量提问（单选/多选/简答/判断/评分/数字）。适用：需要用户在多个方案中决策、" +
-			"或有多个问题堆积需要一次性确认。问卷会以整屏页面立即展示给用户作答：用户 Enter 提交（答案作为" +
-			"工具结果返回），或 Esc 搁置（草稿保存，用户稍后可通过 /answer 命令继续回答，答案届时会以用户" +
-			"消息形式送达）。一次只创建一份问卷，不要在同一批工具调用中多次使用本工具。",
-		promptSnippet: "创建问卷向用户批量提问（单选/多选/简答/判断/评分/数字）",
+			"创建一份问卷向用户批量提问（单选/多选/简答/判断/评分/数字），或作废（action=cancel）不再需要的待答问卷。" +
+			"适用：需要用户在多个方案中决策、或有多个问题堆积需要一次性确认。问卷会以整屏页面立即展示给用户作答：" +
+			"用户 Enter 提交（答案作为工具结果返回），或 Esc 搁置（草稿保存，用户稍后可通过 /answer 命令继续回答，" +
+			"答案届时会以用户消息形式送达）。发现问错或搁置草稿过时时，用 action=cancel + id 作废（问卷即文件，" +
+			"删除即撤回；正在作答中的问卷无法作废）。一次只创建一份问卷，不要在同一批工具调用中多次使用本工具。",
+		promptSnippet: "创建问卷向用户批量提问（单选/多选/简答/判断/评分/数字），或作废待答问卷",
 		promptGuidelines: [
 			"需要用户从多个方案中抉择、或有多个问题要确认时，用 ask 工具创建问卷，而不是在正文里罗列问题让用户逐条回复。",
 			"ask 工具一次只创建一份问卷，不要与其他 ask 调用放在同一批；用户可能搁置问卷稍后回答，收到「已搁置」结果时不要追问，简要说明后结束本轮回复。",
 		],
 		parameters: Type.Object({
-			id: Type.Optional(Type.String({ description: "问卷标识（语义化英文 slug，用作文件名，缺省自动生成）" })),
-			title: Type.String({ description: "问卷标题（一句话概括这份问卷要决定什么）" }),
+			action: Type.Optional(
+				StringEnum(["create", "cancel"], {
+					description: "操作类型：create 创建问卷（默认）/ cancel 作废待答问卷（需 id，标题与题目不需要）",
+				}),
+			),
+			id: Type.Optional(
+				Type.String({ description: "问卷标识：create 时为语义化英文 slug（用作文件名，缺省自动生成）；cancel 时必填（要作废的问卷 id）" }),
+			),
+			title: Type.Optional(Type.String({ description: "问卷标题（create 必填；一句话概括这份问卷要决定什么）" })),
 			description: Type.Optional(Type.String({ description: "问卷整体背景说明" })),
-			questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: 12 }),
+			questions: Type.Optional(Type.Array(QuestionSchema, { minItems: 1, maxItems: 12, description: "题目列表（create 必填，1~12 题）" })),
 		}),
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			rememberCtx(ctx);
 			initStore(ctx.cwd);
 
+			// ---- cancel：作废待答/搁置问卷（问卷即文件，删文件即撤回）----
+			if (params.action === "cancel") {
+				if (!params.id?.trim()) throw new Error("ask cancel 需要 id（要作废的问卷标识）");
+				const want = params.id.trim().toLowerCase();
+				const { items } = listQuestionnaires();
+				const target = items.find(
+					(i) => i.q.id.toLowerCase() === want || path.basename(i.file, ".json").toLowerCase() === want,
+				);
+				if (!target) {
+					throw new Error(
+						`问卷「${params.id}」不存在` +
+							(items.length ? `（当前待答问卷：${items.map((i) => i.q.id).join("、")}）` : "（当前没有待答问卷）"),
+					);
+				}
+				removeQuestionnaire(target.file);
+				await refreshPendingStatus();
+				return {
+					content: [
+						{
+							type: "text",
+							text: `已作废问卷「${target.q.title}」（${target.q.id}）——问卷文件已删除，用户不会再看到它。`,
+						},
+					],
+					details: { status: "cancelled", title: target.q.title, total: target.q.questions.length } satisfies AskDetails,
+				};
+			}
+
+			// ---- create（默认）----
+			if (!params.title?.trim()) throw new Error("ask 创建问卷需要 title（问卷标题）");
+			if (!params.questions?.length) throw new Error("ask 创建问卷需要 questions（至少 1 题）");
+
 			const fallbackId = params.id?.trim() || `survey-${Date.now().toString(36)}`;
-			const norm = normalizeQuestionnaire({ ...params, createdAt: new Date().toISOString() }, { fallbackId });
+			const norm = normalizeQuestionnaire({ ...params, title: params.title, questions: params.questions, createdAt: new Date().toISOString() }, { fallbackId });
 			if (!norm.ok) throw new Error(`问卷参数无效：${norm.error}`);
 			const q = norm.q;
 
@@ -165,7 +206,8 @@ export function registerAskTool(pi: ExtensionAPI): void {
 		},
 
 		renderCall(args, theme) {
-			const a = args as { title?: string; questions?: unknown[] };
+			const a = args as { action?: string; id?: string; title?: string; questions?: unknown[] };
+			if (a.action === "cancel") return new Text(`${theme.fg("warning", "🗑 作废问卷")} 「${a.id ?? ""}」`, 0, 0);
 			const n = Array.isArray(a.questions) ? a.questions.length : 0;
 			return new Text(`${theme.fg("accent", "📝 创建问卷")} 「${a.title ?? ""}」${theme.fg("dim", `（${n} 题）`)}`, 0, 0);
 		},
@@ -175,6 +217,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			if (d?.status === "submitted") msg = theme.fg("success", `✓ 用户已提交（${d.answered}/${d.total}）`);
 			else if (d?.status === "shelved")
 				msg = theme.fg("warning", `⏸ 用户已搁置（已答 ${d.answered}/${d.total} · /answer 可继续）`);
+			else if (d?.status === "cancelled") msg = theme.fg("dim", `已作废「${d.title}」`);
 			else msg = theme.fg("dim", "已创建（当前环境无 UI，转为文字提问）");
 			return new Text(msg, 0, 0);
 		},
