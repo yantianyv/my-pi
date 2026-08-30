@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-30T10:25:52.735Z",
+  "currentTaskId": null,
+  "tasks": {
+    "0.1": {
+      "status": "done",
+      "doneAt": "2026-08-30T10:25:45.720Z"
+    },
+    "0.2": {
+      "status": "doing",
+      "startedAt": "2026-08-30T10:25:45.720Z"
+    }
+  },
+  "milestones": {},
+  "notes": [
+    {
+      "id": "n1",
+      "ts": "2026-08-30T10:25:32.014Z",
+      "content": "部署方案：使用 Docker Compose 单机部署（用户拍板）",
+      "key": "部署方案",
+      "supersededBy": "n2"
+    },
+    {
+      "id": "n2",
+      "ts": "2026-08-30T10:25:36.042Z",
+      "content": "部署方案：改用 K8s 集群部署（用户改主意了）",
+      "key": "部署方案"
+    },
+    {
+      "id": "n3",
+      "ts": "2026-08-30T10:25:43.089Z",
+      "content": "材料收集进度：张三已提交，李四未提交（待跟进）",
+      "kind": "status"
+    }
+  ],
+  "log": [
+    {
+      "ts": "2026-08-30T10:25:32.014Z",
+      "event": "note_add",
+      "taskId": "n1",
+      "msg": "部署方案：使用 Docker Compose 单机部署（用户拍板）"
+    },
+    {
+      "ts": "2026-08-30T10:25:36.042Z",
+      "event": "note_add",
+      "taskId": "n2",
+      "msg": "部署方案：改用 K8s 集群部署（用户改主意了）"
+    },
+    {
+      "ts": "2026-08-30T10:25:43.089Z",
+      "event": "note_add",
+      "taskId": "n3",
+      "msg": "材料收集进度：张三已提交，李四未提交（待跟进）"
+    },
+    {
+      "ts": "2026-08-30T10:25:45.720Z",
+      "event": "task_done",
+      "taskId": "0.1",
+      "msg": "测试主题键顶替"
+    },
+    {
+      "ts": "2026-08-30T10:25:45.720Z",
+      "event": "task_start",
+      "taskId": "0.2",
+      "msg": "测试时效记录复核"
+    }
+  ],
+  "archiveStatus": "wf_note 新功能测试通过，清理测试工作流"
+}

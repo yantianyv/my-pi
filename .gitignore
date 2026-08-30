@@ -9,6 +9,7 @@ dist/
 # test 临时构建产物（各扩展回归测试的 esbuild bundle/mock，每次测试重新生成）
 src/extensions/*/test/.tmp-*
 src/extensions/*/test/.dbg-*
+src/extensions/test/.tmp-*
 
 # 问卷运行时数据（ask 扩展的草稿/答案，随答随删，类似会话状态）
 .pi/questionnaires/

@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "mode": "human-ai",
+  "stages": [
+    {
+      "id": "0",
+      "name": "测试阶段",
+      "goal": "验证 wf_note 新功能",
+      "tasks": [
+        {
+          "id": "0.1",
+          "title": "测试主题键顶替",
+          "desc": "验证同 key 自动作废旧记录",
+          "humanTasks": [
+            "确认结果"
+          ],
+          "aiTasks": [
+            "运行测试"
+          ],
+          "deliverable": "测试通过",
+          "doneSignal": "调用 wf_note 验证 list 只剩新记录",
+          "deps": []
+        },
+        {
+          "id": "0.2",
+          "title": "测试时效记录复核",
+          "desc": "验证 kind=status 记录在任务切换时触发提醒",
+          "humanTasks": [
+            "观察提醒"
+          ],
+          "aiTasks": [
+            "执行 wf_switch"
+          ],
+          "deliverable": "提醒出现",
+          "doneSignal": "wf_switch 结果尾部有 ⚠️ 提醒",
+          "deps": [
+            "0.1"
+          ]
+        }
+      ]
+    }
+  ]
+}

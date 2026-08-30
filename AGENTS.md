@@ -48,7 +48,7 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       hud-cost.ts   #       hud-cost：消耗统计 / DeepSeek 定价 / 按量付费文本 / 实时汇率
       hud-git.ts    #       hud-git：git 状态解析
       test/         #       hud-git 路径引号解码回归测试（node src/extensions/hud/test/unquote.test.mjs）
-    ask/          #     问卷（多文件扩展源码，build.js 把 index.ts 打包成单文件 ask.ts）：types.ts 数据模型/容错规范化 + store.ts 问卷文件读写（.pi/questionnaires/）+ page.ts 整屏问卷页/选择器 + tool.ts ask 工具 + commands.ts /answer 命令 + state.ts 状态推送/排队链；test/ask.test.mjs 回归测试（40 场景）
+    ask/          #     问卷（多文件扩展源码，build.js 把 index.ts 打包成单文件 ask.ts）：types.ts 数据模型/容错规范化 + store.ts 问卷文件读写（.pi/questionnaires/）+ page.ts 整屏问卷页/选择器 + tool.ts ask 工具（create 创建 / cancel 作废）+ commands.ts /answer 命令 + state.ts 状态推送/排队链；test/ask.test.mjs 回归测试（49 场景）
     btf-think.ts  #   思考折叠标签动画（Thinking... 逐帧动画，独立 UI 反馈插件）
     crash-log.ts  #   崩溃黑匣子：prependListener 抢在 pi 的 uncaughtException 处理器（同步 exit）之前把堆栈
                     #   同步落盘 ~/.pi/agent/pi-crash.log（含 unhandledRejection 与 exit 码），崩溃条目与会话文件按时间配对
@@ -62,7 +62,7 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
     task-alert.ts     #   多状态提醒：五状态五音效（完成/出错/等待人工 ui_prompt/空闲 60s/子代理完成，音源 ClaudeCodeInit wav/piano）+ 标题动画 + setStatus 状态推送（三状态独立 key）
     workflow-mgr/     #   人机协作任务面板（多文件扩展源码：build.js 把 index.ts 入口打包成单文件 workflow-mgr.ts）
       index.ts        #     插件主体（组装薄壳）：tools.ts（7 个工具 wf_workflow/status/switch/block/rollback/note/milestone，含 import 一次性导入）+ commands.ts（/workflow-config 只留无参）+ events.ts（session 钩子 + hud 联动 + 条件注入）+ 事件钩子
-      tools.ts       #     工具注册：wf_switch（完成+推进一步到位，complete=false 搁置）/ wf_note（AI 记录，对用户透明）/ wf_milestone（增删改）等 7 工具；wf_workflow import 初始化一次性导入（草稿 json，id 自动生成 + 全图环检测带链路，非空拒绝）
+      tools.ts       #     工具注册：wf_switch（完成+推进一步到位，complete=false 搁置；推进后附 status 记录复核提醒）/ wf_note（AI 记录，对用户透明：kind=fact/status 时效分类 + key 主题键顶替防决策打架，status 记录切换任务时提醒复核）/ wf_milestone（增删改）等 7 工具；wf_workflow import 初始化一次性导入（草稿 json，id 自动生成 + 全图环检测带链路，非空拒绝）
       commands.ts    #     /workflow-config 命令：只留无参（TUI 浮窗 / 非 TUI 文本面板），无子命令
       events.ts      #     事件钩子：session_start / hud:state-change / session_shutdown / before_agent_start（三态条件注入）
       store.ts        #     数据层：workflow/state/config 三 JSON 加载保存 + 派生表（含 mode）+ reconcile 一致性 + 依赖环检测；WorkflowStore 构造时固化 cwd（不持有 ctx），session 替换后不触发 stale
@@ -100,7 +100,7 @@ dist/               # 扩展产物（build.js 生成，gitignore 不入库）：
 - **hud 余额适配**：`BALANCE_ADAPTERS` 注册表（hud/hud-balance.ts）按 providerId 逐一适配；DeepSeek 消耗按 `DEEPSEEK_PRICES`（hud/hud-cost.ts）官方人民币定价直算（恒 ¥，永不依赖汇率），峰谷开关 `DEEPSEEK_PEAK_PRICING`（hud/hud-cost.ts，当前 false）；其余供应商成本按原始货币 USD 记录、显示时换算。汇率三态（hud/hud-cost.ts）：实时（frankfurter→open.er-api 多源，1h 节流）→ 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`）→ 无（断网且无缓存，显示原始货币 USD，不用固定近似值）。hud 子模块**可选加载**：任一缺失时对应功能降级（余额行显「模块缺失」/ 隐藏消耗统计 / git 恒「⎇ -」），不拖垮整个 HUD。
 - **vendor 官方插件**：src/vendor/ 收录社区插件源码副本（pi-subagents 子代理舰队 / pi-btw 旁支问答 / pi-rtk-optimizer 输出压缩+rtk 命令改写），替代原自研 explore-agent/btw/token-saver；收录原则/出处/更新流程见 src/vendor/README.md。兼容性：pi-subagents 的 FleetView 用 belowEditor widget（与 workflow-mgr 面板同区可堆叠），三者均不动 footer、setStatus 键不冲突
 - **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；进度经 `ctx.ui.setStatus("init", …)` 推送由 hud 行 1 动态区显示。同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:61-65）。
-- **ask 问卷**：AI 侧 `ask` 工具创建问卷（single/multi/text/confirm/rating/number 六题型，选项题自动带「其他」自由输入）写入 `.pi/questionnaires/<id>.json` 并立即整屏弹出；用户 Enter 提交（答案作工具结果返回）或 Esc 搁置（草稿写回文件 status:draft，随时 /answer 续答，提交后答案经 `pi.sendUserMessage` 以 followUp 送达，文件即删）。「问卷即文件」：手写 JSON 丢进目录也能被 /answer 扫描识别。整屏页 = overlay（width/maxHeight 100% + 左上锚点 + 每行补满全宽）——pi 的 overlay 是逐行不透明合成，全屏即遮蔽聊天/HUD；高度权威值由 overlayOptions.visible 回调每帧捕获（tui.terminal.rows 可能滞后）。已知限制：regular（内联）模式下全屏 overlay 与聊天共享原生滚动缓冲，滚轮上滑会看到残影（仅美观问题，实时画面正常）；fullscreen 模式（alternate screen）下零污染。
+- **ask 问卷**：AI 侧 `ask` 工具创建问卷（single/multi/text/confirm/rating/number 六题型，选项题自动带「其他」自由输入）写入 `.pi/questionnaires/<id>.json` 并立即整屏弹出；用户 Enter 提交（答案作工具结果返回）或 Esc 搁置（草稿写回文件 status:draft，随时 /answer 续答，提交后答案经 `pi.sendUserMessage` 以 followUp 送达，文件即删）。`ask action=cancel id=xxx` 作废问错/过时的待答问卷（问卷即文件，删文件即撤回；正在整屏作答中的问卷无法作废——彼时创建调用正挂起等待）。「问卷即文件」：手写 JSON 丢进目录也能被 /answer 扫描识别。长文本（标题/题干/选项/说明）经 pi-tui `wrapTextWithAnsi` 按终端宽度折行完整展示（不截断），续行缩进对齐首行文本起点；页面垂直滚动跟随焦点。整屏页 = overlay（width/maxHeight 100% + 左上锚点 + 每行补满全宽）——pi 的 overlay 是逐行不透明合成，全屏即遮蔽聊天/HUD；高度权威值由 overlayOptions.visible 回调每帧捕获（tui.terminal.rows 可能滞后）。已知限制：regular（内联）模式下全屏 overlay 与聊天共享原生滚动缓冲，滚轮上滑会看到残影（仅美观问题，实时画面正常）；fullscreen 模式（alternate screen）下零污染。
 - **claude-it 回退**：`/rewind` 命令（navigateTree 是命令 ctx 专属能力）回退到上一条用户消息、内容放回输入框；双击 Ctrl+C（打断后 2s 窗口内）预填 `/rewind` 命令，回车执行。Ctrl+C 打断不触发 task-alert 完成提醒——task-alert 监听 agent_end，最后一条 assistant 消息 `stopReason="aborted"` 即跳过 agent_settled 提醒（零耦合，不依赖 claude-it）。
 
 ## 代码风格与约定
