@@ -14,6 +14,8 @@
  *      避免对白名单段落重复审查/误判。
  *
  * 人工复核面板四操作：放行一次 / 放行并加白名单 / 驳回 / 驳回并加黑名单。
+ * 面板为自绘 overlay（ReviewPanel）：命令**全文折行展示不截断**（PgUp/PgDn 滚动，
+ * 滚动余量在分隔行指示），↑↓ 选操作、Enter 确认、1-4 直选、Esc=驳回。
  * AI 判 allow 后按 autoWhitelist 策略自动加白（默认 smart 采纳 AI 最窄候选，exact 精确段规则），
  * 常用无害命令只在首次烧一次审核 token；每次自动加白发通知，透明可查。
  * AI 审核为「需复核」时会同时提炼指令核心特征为 1~3 个候选正则（附说明、从窄到宽），
@@ -39,7 +41,8 @@
  */
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { Key, matchesKey, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import type { TUI } from "@earendil-works/pi-tui";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Message } from "@earendil-works/pi-ai";
 import * as fs from "node:fs";
@@ -60,9 +63,6 @@ const CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "perm-gate.json");
 
 /** AI 审核优先选用的模型（provider/modelId）；不可用时自动选最便宜已认证模型 */
 const PREFERRED_MODELS: Array<[string, string]> = [["deepseek", "deepseek-v4-flash"]];
-
-/** 复核面板中命令展示的最大字符数（超出截断） */
-const PANEL_CMD_MAX_CHARS = 600;
 
 /** 喂给 AI 审核的命令最大字符数（超出截断） */
 const AI_CMD_MAX_CHARS = 4_000;
@@ -178,9 +178,98 @@ function exactPattern(command: string): string {
 	return "^" + command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$";
 }
 
-/** 面板展示用：截断过长命令 */
+/** 送审摘要用：截断过长文本（仅 AI 侧 segInfo，人看的面板一律全文折行） */
 function truncateCmd(command: string, max: number): string {
-	return command.length > max ? command.slice(0, max) + "\n…(命令过长已截断)" : command;
+	return command.length > max ? command.slice(0, max) + "\n…(已截断)" : command;
+}
+
+/**
+ * 精炼 AI 候选正则：过滤、评分、排序、补充兜底
+ *
+ * AI 直出的候选常有两类毛病：
+ * 1. 过窄：包含具体参数值（如 ^git push origin main --force$），几乎不可复用
+ * 2. 过宽：仅旗标无命令锚定（如 --force），会误匹配无关命令
+ *
+ * 策略：
+ * - 过滤：不可编译 / 不匹配原命令或任何段 → 淘汰
+ * - 评分：命令锚定加分、子命令加分、过短扣分、纯旗标扣分
+ * - 补充：无合格候选时，自动从命令结构派生兜底规则
+ */
+function refineCandidates(candidates: Candidate[], command: string, segments: string[]): Candidate[] {
+	const scored: Array<{ c: Candidate; score: number }> = [];
+	const cmdName = command.trim().split(/\s+/)[0] || "";
+	const subcmd = command.trim().split(/\s+/)[1] || "";
+
+	for (const c of candidates) {
+		// 可编译性
+		let re: RegExp;
+		try {
+			re = new RegExp(c.pattern, REGEX_FLAGS);
+		} catch {
+			continue;
+		}
+		// 必须匹配原命令或至少一个段
+		if (!re.test(command) && !segments.some((s) => re.test(s))) continue;
+
+		let score = 50;
+		// 命令锚定加分
+		if (/^\^/.test(c.pattern)) score += 15;
+		if (/^\^[a-zA-Z]/.test(c.pattern)) score += 10;
+		// 包含命令名加分
+		if (cmdName && c.pattern.includes(cmdName)) score += 12;
+		// 包含子命令加分
+		if (subcmd && !subcmd.startsWith("-") && c.pattern.includes(subcmd)) score += 10;
+		// 过短扣分（< 8 字符的模式太宽）
+		if (c.pattern.length < 8) score -= 30;
+		else if (c.pattern.length < 12) score -= 10;
+		// 仅旗标无命令名扣分
+		if (cmdName && !c.pattern.includes(cmdName) && /^--?\w+/.test(c.pattern)) score -= 25;
+		// 字母数字过少扣分
+		if (c.pattern.replace(/[^a-zA-Z0-9]/g, "").length < 6) score -= 20;
+
+		scored.push({ c, score });
+	}
+
+	scored.sort((a, b) => b.score - a.score);
+	const refined = scored.slice(0, 3).map((s) => s.c);
+
+	// 全部不合格 → 自动从命令结构派生兜底规则
+	if (refined.length === 0) {
+		refined.push(...generateFallbackPatterns(command, segments));
+	}
+	return refined;
+}
+
+/**
+ * 从命令结构自动生成兜底白名单规则（AI 候选全部不合格时使用）
+ * 策略：提取命令名 + 子命令，生成适当宽松的锚定正则
+ */
+function generateFallbackPatterns(command: string, segments: string[]): Candidate[] {
+	const patterns: Candidate[] = [];
+	const src = segments.length > 0 ? segments : [command];
+
+	for (const seg of src) {
+		const parts = seg.trim().split(/\s+/);
+		const cmdName = parts[0];
+		if (!cmdName) continue;
+		const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+		// 精确段规则（兜底，只认一模一样的命令）
+		patterns.push({
+			pattern: exactPattern(seg),
+			note: `精确匹配「${seg.length > 30 ? seg.slice(0, 30) + "…" : seg}」`,
+		});
+
+		// 命令 + 子命令（如果有且不是旗标）
+		if (parts.length >= 2 && !parts[1]!.startsWith("-")) {
+			const subcmd = parts[1]!;
+			patterns.push({
+				pattern: `^${esc(cmdName)}\\s+${esc(subcmd)}`,
+				note: `${cmdName} ${subcmd} 及其所有参数`,
+			});
+		}
+	}
+	return patterns.slice(0, 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,22 +278,34 @@ function truncateCmd(command: string, max: number): string {
 
 const AI_SYSTEM_PROMPT = [
 	"你是 shell 命令安全审核员。AI 编码助手要在用户机器上执行一条 bash 命令，由你判断是否安全。",
+	"\n===== 结论 =====",
 	"给出三类结论之一：",
 	'- "allow"：常规开发操作（构建、测试、查看文件、git 只读操作等），无不可逆/破坏性风险',
 	'- "review"：可能有风险，需要人工确认——涉及删除/覆盖文件、修改系统配置、权限变更、',
 	"  网络外发数据、安装/卸载软件、git 破坏性操作（push --force、reset --hard、clean -f）等",
 	'- "reject"：明显危险或恶意——破坏系统、删除用户数据、窃取/外传密钥与隐私数据等',
+	"\n===== 复合命令 =====",
 	"命令可能是复合形式（&&、;、|、||、$()、反引号）：按风险最高的子命令给结论，candidates 针对风险子命令提炼；",
 	"特别注意危险操作藏在无害命令后半段的情况（如 git status && rm -rf x）。",
 	"输入可能附带「拆段分析」：标注 [白名单命中] 的段落是用户预先认可的安全命令，视为可信、不再审核；",
 	"重点审核 [未命中] 段落，最终结论按未命中段的最高风险给出（candidates 也只针对未命中段提炼）。",
-	"命令可能是多行（python -c \"...\" 内嵌脚本、heredoc 等）：提炼正则时保持命令原样，不要把多行美化成单行",
-	"（如删去换行/缩进）；跨任意内容用 .*（匹配时自动加 s 标志，可跨换行）。",
-	'当 action 为 "allow" 或 "review" 时，同时提炼该命令的核心特征，给出 1~3 个候选正则（candidates 字段）：',
-	'- allow：候选用于自动加入白名单（避免同类无害命令反复审核）；review：供用户人工选用；reject：candidates 给空数组',
-	'- 每个候选 {"pattern":"JavaScript 正则（不带标志，匹配时会自动加 i 和 s）","note":"一句话说明覆盖范围"}',
-	"- 从窄到宽排列（如 ^git push --force → git push.*--force → --force），正则尽量锚定命令开头或关键旗标",
-	"只输出一行 JSON，不要解释、不要代码块围栏：",
+	"\n===== 候选正则提炼（candidates）=====",
+	'当 action 为 "allow" 或 "review" 时，提炼候选白名单/黑名单正则。reject 时 candidates 给空数组。',
+	"\n设计原则：",
+	"1. 命令锚定：每个正则必须包含命令名（如 git/npm/python/docker），防止误匹配其他命令；",
+	"   优先用 ^ 开头锚定命令起始位置", 
+	"2. 操作语义：包含子命令或关键旗标，捕获「做什么」而非「具体怎么做」；",
+	"3. 适当宽松：允许参数顺序变化、路径/URL 等参数值不同、额外旗标存在；",
+	"4. 避免过窄：不要包含具体文件路径、分支名、URL 等会变化的参数值；",
+	"5. 避免过宽：不要只给旗标（如 --force）而不包含命令名——会误匹配无关命令。",
+	"\n三个层级（从窄到宽，每层 0~1 个，总数 1~3 个）：",
+	"- 窄：^命令\\s+子命令\\s+.*关键旗标  （如 ^git\\s+push\\s+.*--force）",
+	"- 中：^命令\\s+子命令              （如 ^git\\s+push）",
+	"- 宽：^命令.*关键旗标              （如 ^git.*--force，仅当旗标是核心风险标识时）",
+	"\n命令可能是多行（python -c \"...\" 内嵌脚本、heredoc 等）：",
+	"正则保持命令原样（不要美化成单行），跨任意内容用 .* （匹配时自动加 s 标志，可跨换行）。",
+	"\n每个候选格式：{\"pattern\":\"JavaScript 正则（不带标志）\",\"note\":\"一句话说明覆盖范围\"}",
+	"\n只输出一行 JSON，不要解释、不要代码块围栏：",
 	'{"action":"allow|review|reject","reason":"一句话中文说明","candidates":[{"pattern":"...","note":"..."}]}',
 ].join("\n");
 
@@ -274,6 +375,113 @@ async function aiReview(
 	}
 }
 
+/**
+ * 人工复核面板（overlay 组件）：命令全文折行展示（不截断），PgUp/PgDn 滚动文本区
+ * （滚动余量在分隔行指示，不吃内容行）；↑↓ 移动、Enter 确认、1-4 直选、Esc = 驳回（done(null)）。
+ * 模块级导出供回归测试直接实例化（不走 tool_call 事件链路，避免触碰真实配置文件）。
+ */
+export class ReviewPanel {
+	focused = false;
+
+	private static ACTIONS = ["放行一次", "放行并加白名单", "驳回", "驳回并加黑名单"];
+	private idx = 0;
+	private scroll = 0;
+	/** 最近一次 render 的文本区窗口行数（PgUp/PgDn 步长）与最大滚动 */
+	private lastBudget = 5;
+	private lastMaxScroll = 0;
+
+	constructor(
+		private tui: TUI,
+		private theme: Theme,
+		private title: string,
+		private command: string,
+		private detail: string,
+		private done: (choice: string | null) => void,
+	) {}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, Key.escape)) {
+			this.done(null);
+			return;
+		}
+		if (matchesKey(data, Key.up)) {
+			this.idx = Math.max(0, this.idx - 1);
+			return;
+		}
+		if (matchesKey(data, Key.down)) {
+			this.idx = Math.min(ReviewPanel.ACTIONS.length - 1, this.idx + 1);
+			return;
+		}
+		if (matchesKey(data, Key.pageUp)) {
+			this.scroll = Math.max(0, this.scroll - this.lastBudget);
+			return;
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			this.scroll = Math.min(this.lastMaxScroll, this.scroll + this.lastBudget);
+			return;
+		}
+		if (matchesKey(data, Key.enter)) {
+			this.done(ReviewPanel.ACTIONS[this.idx]!);
+			return;
+		}
+		if (/^[1-4]$/.test(data)) {
+			this.done(ReviewPanel.ACTIONS[Number(data) - 1]!);
+			return;
+		}
+	}
+
+	render(width: number): string[] {
+		const th = this.theme;
+		const { row, topBorder, bottomBorder, border } = createBoxRenderer(th, Math.max(10, width - 2));
+		const innerW = Math.max(10, width - 2);
+
+		// 文本区逻辑行：命令全文折行（多行命令逐行再折）+ 说明
+		const textLines: string[] = [];
+		for (const ln of this.command.split("\n")) {
+			for (const w of wrapTextWithAnsi(ln, Math.max(8, innerW - 4))) textLines.push(`  ${w}`);
+		}
+		if (this.detail) {
+			textLines.push("");
+			for (const w of wrapTextWithAnsi(th.fg("dim", this.detail), Math.max(8, innerW - 2))) textLines.push(w);
+		}
+
+		// 高度预算：终端 80% 减去固定行（顶/底框 + 分隔 + 操作标题 + 4 操作 + 提示行 = 9）
+		const termRows = this.tui.terminal.rows || 24;
+		const budget = Math.max(3, Math.min(textLines.length, Math.floor(termRows * 0.8) - 9));
+		this.lastBudget = budget;
+		this.lastMaxScroll = Math.max(0, textLines.length - budget);
+		this.scroll = Math.max(0, Math.min(this.scroll, this.lastMaxScroll));
+		const visible = textLines.slice(this.scroll, this.scroll + budget);
+
+		// 分隔行兼滚动指示（不吃内容行）
+		const below = textLines.length - (this.scroll + visible.length);
+		const scrollNote =
+			this.scroll > 0 && below > 0
+				? ` ▲${this.scroll} 行 ▼${below} 行（PgUp/PgDn） `
+				: this.scroll > 0
+					? ` ▲ 上方还有 ${this.scroll} 行（PgUp） `
+					: below > 0
+						? ` ▼ 下方还有 ${below} 行（PgDn） `
+						: "";
+		const dividerLine = border(`├${th.fg("dim", scrollNote)}${"─".repeat(Math.max(0, innerW - visibleWidth(scrollNote)))}┤`);
+
+		const lines: string[] = [topBorder(` ${this.title} `)];
+		for (const ln of visible) lines.push(row(ln));
+		lines.push(dividerLine);
+		lines.push(row(th.fg("accent", " 如何处理？")));
+		ReviewPanel.ACTIONS.forEach((a, i) => {
+			const prefix = i === this.idx ? th.fg("accent", " › ") : "   ";
+			lines.push(row(`${prefix}${i === this.idx ? th.fg("accent", a) : a}`));
+		});
+		lines.push(row(th.fg("dim", " ↑↓ 选择 · Enter 确认 · 1-4 直选 · PgUp/PgDn 滚动命令 · Esc 驳回")));
+		lines.push(bottomBorder());
+		return lines;
+	}
+
+	invalidate(): void {}
+	dispose(): void {}
+}
+
 // ---------------------------------------------------------------------------
 // 扩展主体
 // ---------------------------------------------------------------------------
@@ -323,15 +531,15 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * allow 结论自动加白（autoWhitelist 策略）：
-	 * exact = 精确段规则；smart = AI 候选最窄一条（跑偏/无候选退 exact）。
-	 * 护栏：去重、不覆盖黑名单已有规则、smart 候选匹配不到本命令时不采纳；每次加白发通知（透明可查）。
+	 * exact = 精确段规则；smart = 精炼后最优候选（评分排序，跑偏/无候选退 exact）。
+	 * 护栏：去重、不覆盖黑名单已有规则、候选经 refineCandidates 过滤评分；每次加白发通知（透明可查）。
 	 */
 	function autoWhitelist(ctx: ExtensionContext, command: string, segments: string[], verdict: Verdict): void {
 		if (cfg.autoWhitelist === "off") return;
 		const exact = (segments.length > 0 ? segments : [command]).map(exactPattern);
 		let patterns: string[] = exact;
 		if (cfg.autoWhitelist === "smart" && verdict.candidates.length > 0) {
-			const candidate = verdict.candidates[0].pattern; // 最窄候选
+			const candidate = verdict.candidates[0].pattern; // 精炼后最优候选（评分排序）
 			try {
 				const re = new RegExp(candidate, REGEX_FLAGS);
 				if (re.test(command) || segments.some((s) => re.test(s))) patterns = [candidate];
@@ -465,23 +673,12 @@ export default function (pi: ExtensionAPI) {
 		const result = new Promise<{ block: true; reason: string } | undefined>((resolve) => {
 			panelChain = panelChain.then(async () => {
 				const title = source === "blacklist" ? "⚠️ 命中黑名单，需人工复核" : "🛡 AI 建议人工复核";
-				const lines = [
-					title,
-					"",
-					"命令：",
-					truncateCmd(command, PANEL_CMD_MAX_CHARS),
-					"",
-					detail ? `说明：${detail}` : "",
-					detail ? "" : "",
-					"如何处理？",
-				].filter((l) => l !== "");
-				const choice = await ctx.ui.select(lines.join("\n"), [
-					"放行一次",
-					"放行并加白名单",
-					"驳回",
-					"驳回并加黑名单",
-				]);
-					switch (choice) {
+				// 自绘复核面板：命令全文折行展示不截断（PgUp/PgDn 滚动），Esc/「驳回」= 驳回
+				const choice = await ctx.ui.custom<string | null>(
+					(tui, theme, _kb, done) => new ReviewPanel(tui, theme, title, command, detail, done),
+					{ overlay: true, overlayOptions: { width: "92%", minWidth: 60, maxHeight: "80%" } },
+				);
+				switch (choice) {
 					case "放行一次":
 						resolve(undefined);
 						break;
@@ -537,8 +734,9 @@ export default function (pi: ExtensionAPI) {
 			: undefined;
 		if (wholeHit || segHit) {
 			const re = wholeHit ?? segHit!.re!;
+			// detail 随面板全文折行展示，不再截断
 			const detail = segHit
-				? `子命令段「${truncateCmd(segHit.seg, 100).replace(/\n/g, " ⏎ ")}」命中黑名单规则：${re.source}`
+				? `子命令段「${segHit.seg}」命中黑名单规则：${re.source}`
 				: `命中黑名单规则：${re.source}`;
 			return humanReview(ctx, command, segments, "blacklist", detail);
 		}
@@ -566,7 +764,11 @@ export default function (pi: ExtensionAPI) {
 		if (!verdict) {
 			const model = resolveReviewModel(ctx);
 			if (model) verdict = await aiReview(ctx, command, cfg.aiTimeoutMs, model, segInfo);
-			if (verdict && verdict.action !== "review") aiCache.set(command, verdict);
+			if (verdict) {
+				// 精炼候选正则：过滤不合格、评分排序、兜底补充
+				verdict = { ...verdict, candidates: refineCandidates(verdict.candidates, command, segments) };
+				if (verdict.action !== "review") aiCache.set(command, verdict);
+			}
 		}
 		if (!verdict) {
 			return humanReview(ctx, command, segments, "ai", "AI 审核失败（超时/无可用模型/网络错误/输出无法解析），转人工复核");
