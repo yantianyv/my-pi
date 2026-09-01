@@ -13,9 +13,9 @@
  *      白名单命中情况（命中段视为用户预先认可），AI 聚焦未命中段审核，
  *      避免对白名单段落重复审查/误判。
  *
- * 人工复核面板四操作：放行一次 / 放行并加白名单 / 驳回 / 驳回并加黑名单。
+ * 人工复核面板五操作：放行一次 / 放行并加白名单 / 驳回 / 驳回并加黑名单。
  * 面板为自绘 overlay（ReviewPanel）：命令**全文折行展示不截断**（PgUp/PgDn 滚动，
- * 滚动余量在分隔行指示），↑↓ 选操作、Enter 确认、1-4 直选、Esc=驳回。
+ * 滚动余量在分隔行指示），↑↓ 选操作、Enter 确认、1-5 直选、Esc=驳回。
  * AI 判 allow 后按 autoWhitelist 策略自动加白（默认 smart 采纳 AI 最窄候选，exact 精确段规则），
  * 常用无害命令只在首次烧一次审核 token；每次自动加白发通知，透明可查。
  * AI 审核为「需复核」时会同时提炼指令核心特征为 1~3 个候选正则（附说明、从窄到宽），
@@ -87,14 +87,7 @@ interface PermGateConfig {
 const DEFAULT_CONFIG: PermGateConfig = {
 	enabled: true,
 	blacklist: [
-		"\\brm\\s+(-[a-zA-Z]*r|--recursive)", // rm -r / rm -rf / rm --recursive
-		"\\bsudo\\b",
-		"\\bmkfs(\\.[a-z0-9]+)?\\b",
-		"\\bdd\\b[^\\n]*\\bof=/dev/",
-		">\\s*/dev/(sd|nvme|hd)", // 覆写磁盘设备
-		"\\bchmod\\b[^\\n]*\\b777\\b",
-		"\\b(shutdown|reboot|poweroff|halt)\\b",
-		":\\(\\)\\s*\\{", // fork 炸弹 :(){ :|:& };:
+		"\\bdws\\s+chat\\s+send\\b", // dws 发送消息拦截
 	],
 	whitelist: [],
 	aiReview: true,
@@ -278,17 +271,13 @@ function generateFallbackPatterns(command: string, segments: string[]): Candidat
 
 const AI_SYSTEM_PROMPT = [
 	"你是 shell 命令安全审核员。AI 编码助手要在用户机器上执行一条 bash 命令，由你判断是否安全。",
+	"你的审核标准非常宽松：只拦截明显恶意的指令，绝大多数常规开发操作都应放行。",
 	"\n===== 结论 =====",
 	"给出三类结论之一：",
-	'- "allow"：常规开发操作（构建、测试、查看文件、git 只读操作等），无不可逆/破坏性风险',
-	'- "review"：可能有风险，需要人工确认——涉及删除/覆盖文件、修改系统配置、权限变更、',
-	"  网络外发数据、安装/卸载软件、git 破坏性操作（push --force、reset --hard、clean -f）等",
-	'- "reject"：明显危险或恶意——破坏系统、删除用户数据、窃取/外传密钥与隐私数据等',
+	'- "allow"：绝大多数命令都应放行',
+	'- "review"：仅当命令具有明显风险且无法判断意图时才需人工确认',
+	'- "reject"：仅拦截明显恶意的指令',
 	"\n===== 复合命令 =====",
-	"命令可能是复合形式（&&、;、|、||、$()、反引号）：按风险最高的子命令给结论，candidates 针对风险子命令提炼；",
-	"特别注意危险操作藏在无害命令后半段的情况（如 git status && rm -rf x）。",
-	"输入可能附带「拆段分析」：标注 [白名单命中] 的段落是用户预先认可的安全命令，视为可信、不再审核；",
-	"重点审核 [未命中] 段落，最终结论按未命中段的最高风险给出（candidates 也只针对未命中段提炼）。",
 	"\n===== 候选正则提炼（candidates）=====",
 	'当 action 为 "allow" 或 "review" 时，提炼候选白名单/黑名单正则。reject 时 candidates 给空数组。',
 	"\n设计原则：",
@@ -377,13 +366,13 @@ async function aiReview(
 
 /**
  * 人工复核面板（overlay 组件）：命令全文折行展示（不截断），PgUp/PgDn 滚动文本区
- * （滚动余量在分隔行指示，不吃内容行）；↑↓ 移动、Enter 确认、1-4 直选、Esc = 驳回（done(null)）。
+ * （滚动余量在分隔行指示，不吃内容行）；↑↓ 移动、Enter 确认、1-5 直选、Esc = 驳回（done(null)）。
  * 模块级导出供回归测试直接实例化（不走 tool_call 事件链路，避免触碰真实配置文件）。
  */
 export class ReviewPanel {
 	focused = false;
 
-	private static ACTIONS = ["放行一次", "放行并加白名单", "驳回", "驳回并加黑名单"];
+	private static ACTIONS = ["放行一次", "放行并加白名单", "放行并加黑名单", "驳回", "驳回并加黑名单"];
 	private idx = 0;
 	private scroll = 0;
 	/** 最近一次 render 的文本区窗口行数（PgUp/PgDn 步长）与最大滚动 */
@@ -424,7 +413,7 @@ export class ReviewPanel {
 			this.done(ReviewPanel.ACTIONS[this.idx]!);
 			return;
 		}
-		if (/^[1-4]$/.test(data)) {
+		if (/^[1-5]$/.test(data)) {
 			this.done(ReviewPanel.ACTIONS[Number(data) - 1]!);
 			return;
 		}
@@ -435,17 +424,17 @@ export class ReviewPanel {
 		const { row, topBorder, bottomBorder, border } = createBoxRenderer(th, Math.max(10, width - 2));
 		const innerW = Math.max(10, width - 2);
 
-		// 文本区逻辑行：命令全文折行（多行命令逐行再折）+ 说明
+		// 文本区逻辑行：AI 说明在顶部（固定可见），命令在下方（可滚动）
 		const textLines: string[] = [];
+		if (this.detail) {
+			for (const w of wrapTextWithAnsi(th.fg("dim", this.detail), Math.max(8, innerW - 2))) textLines.push(w);
+			textLines.push("");
+		}
 		for (const ln of this.command.split("\n")) {
 			for (const w of wrapTextWithAnsi(ln, Math.max(8, innerW - 4))) textLines.push(`  ${w}`);
 		}
-		if (this.detail) {
-			textLines.push("");
-			for (const w of wrapTextWithAnsi(th.fg("dim", this.detail), Math.max(8, innerW - 2))) textLines.push(w);
-		}
 
-		// 高度预算：终端 80% 减去固定行（顶/底框 + 分隔 + 操作标题 + 4 操作 + 提示行 = 9）
+		// 高度预算：终端 80% 减去固定行（顶/底框 + 分隔 + 操作标题 + 5 操作 + 提示行 = 10）
 		const termRows = this.tui.terminal.rows || 24;
 		const budget = Math.max(3, Math.min(textLines.length, Math.floor(termRows * 0.8) - 9));
 		this.lastBudget = budget;
@@ -473,7 +462,7 @@ export class ReviewPanel {
 			const prefix = i === this.idx ? th.fg("accent", " › ") : "   ";
 			lines.push(row(`${prefix}${i === this.idx ? th.fg("accent", a) : a}`));
 		});
-		lines.push(row(th.fg("dim", " ↑↓ 选择 · Enter 确认 · 1-4 直选 · PgUp/PgDn 滚动命令 · Esc 驳回")));
+		lines.push(row(th.fg("dim", " ↑↓ 选择 · Enter 确认 · 1-5 直选 · PgUp/PgDn 滚动命令 · Esc 驳回")));
 		lines.push(bottomBorder());
 		return lines;
 	}
@@ -689,6 +678,17 @@ export default function (pi: ExtensionAPI) {
 							cfg.whitelist.push(...patterns);
 							saveConfig();
 							ctx.ui.notify(`perm-gate：已加入白名单：${patterns.join("、")}`, "info");
+						}
+						resolve(undefined);
+						break;
+					}
+					case "放行并加黑名单": {
+						const patterns = await pickListPatterns(ctx, command, segments, candidates);
+						if (patterns) {
+							for (const p of patterns) warnIfNotMatch(ctx, p, command, segments);
+							cfg.blacklist.push(...patterns);
+							saveConfig();
+							ctx.ui.notify(`perm-gate：已加入黑名单：${patterns.join("、")}`, "info");
 						}
 						resolve(undefined);
 						break;

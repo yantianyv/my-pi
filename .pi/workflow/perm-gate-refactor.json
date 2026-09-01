@@ -1,0 +1,21 @@
+{
+  "mode": "human-ai",
+  "stages": [
+    {
+      "id": "analysis",
+      "name": "分析现有代码",
+      "goal": "分析perm-gate.ts的当前实现，确定需要修改的部分",
+      "tasks": [
+        {
+          "title": "分析ReviewPanel类",
+          "desc": "查看ReviewPanel.ACTIONS数组和humanReview函数，确定添加'通过但加入黑名单'的位置",
+          "humanTasks": [],
+          "aiTasks": ["读取perm-gate.ts的ReviewPanel类和humanReview函数", "确定修改点"],
+          "deliverable": "修改方案文档",
+          "doneSignal": "确认修改点",
+          "deps": []
+        }
+      ]
+    }
+  ]
+}
