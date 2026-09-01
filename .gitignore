@@ -10,6 +10,8 @@ dist/
 src/extensions/*/test/.tmp-*
 src/extensions/*/test/.dbg-*
 src/extensions/test/.tmp-*
+# 根目录手跑 esbuild 调试产物兜底（outfile 相对路径未带目录时落 CWD）
+/.tmp-*
 
 # 问卷运行时数据（ask 扩展的草稿/答案，随答随删，类似会话状态）
 .pi/questionnaires/
