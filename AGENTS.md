@@ -57,6 +57,8 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   复合命令经 shared/shell-split 拆段逐段判定（白名单每段都要命中，防「git status && rm -rf x」绕过）；
                     #   review 结论附 AI 提炼的候选正则（1~3 个、从窄到宽），加白/加黑时选用；
                     #   allow 结论按 autoWhitelist 策略自动加白（exact 精确段规则 / smart AI 最窄候选 / off）；
+                    #   白名单规则带保鲜元数据（addedAt/lastHit/hits，命中时刷新），超 30 天未命中自动清理（启动/加白时），
+                    #   /perm-gate prune 手动清理、状态行提示过期条数；旧版纯字符串配置自动归一化兼容；
                     #   ~/.pi/agent/perm-gate.json 配置 + /perm-gate 命令）
     claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn、双击 Ctrl+C 预填 /rewind 回退
     task-alert.ts     #   多状态提醒：五状态五音效（完成/出错/等待人工 ui_prompt/空闲 60s/子代理完成，音源 ClaudeCodeInit wav/piano）+ 标题动画 + setStatus 状态推送（三状态独立 key）

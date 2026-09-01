@@ -67,10 +67,26 @@ const PREFERRED_MODELS: Array<[string, string]> = [["deepseek", "deepseek-v4-fla
 /** 喂给 AI 审核的命令最大字符数（超出截断） */
 const AI_CMD_MAX_CHARS = 4_000;
 
+/** 白名单规则保鲜期（天）：超过未命中自动清理（防无限膨胀） */
+const WHITELIST_EXPIRE_DAYS = 30;
+
+/**
+ * 白名单规则（带保鲜元数据，防无限膨胀）：
+ * - addedAt / lastHit：加白时刻 / 最近一次命中时刻（保鲜依据）
+ * - hits：历史命中次数（/perm-gate 可查）
+ * - 超过 WHITELIST_EXPIRE_DAYS 未命中的规则在启动/加白时自动清理，/perm-gate prune 手动清理
+ */
+interface WhitelistRule {
+	pattern: string;
+	addedAt: number;
+	lastHit: number;
+	hits: number;
+}
+
 interface PermGateConfig {
 	enabled: boolean;
 	blacklist: string[];
-	whitelist: string[];
+	whitelist: WhitelistRule[];
 	aiReview: boolean;
 	aiTimeoutMs: number;
 	/** AI 审核模型覆盖项（"provider/modelId"；null = 自动：优先列表 + 最便宜已认证兜底） */
@@ -123,7 +139,11 @@ function isConfig(v: unknown): v is PermGateConfig {
 		Array.isArray(c.blacklist) &&
 		c.blacklist.every((s) => typeof s === "string") &&
 		Array.isArray(c.whitelist) &&
-		c.whitelist.every((s) => typeof s === "string") &&
+		// 兼容旧格式纯字符串列表（toWhitelistRules 归一化）；新格式为带保鲜元数据的对象
+		c.whitelist.every(
+			(r) =>
+				typeof r === "string" || (typeof r === "object" && r !== null && typeof r.pattern === "string"),
+		) &&
 		typeof c.aiReview === "boolean" &&
 		typeof c.aiTimeoutMs === "number" &&
 		// model 为后加字段：旧配置缺失时容错（缺省 null = 自动），避免校验不过回默认丢名单
@@ -134,6 +154,28 @@ function isConfig(v: unknown): v is PermGateConfig {
 			c.autoWhitelist === "exact" ||
 			c.autoWhitelist === "smart")
 	);
+}
+
+/** 旧格式兼容：string[] 或带字段的对象 → WhitelistRule[]（缺字段补默认，非法项跳过） */
+function toWhitelistRules(list: unknown, now = Date.now()): WhitelistRule[] {
+	if (!Array.isArray(list)) return [];
+	const out: WhitelistRule[] = [];
+	for (const item of list) {
+		if (typeof item === "string") {
+			if (item) out.push({ pattern: item, addedAt: now, lastHit: now, hits: 0 });
+		} else if (item && typeof item === "object") {
+			const r = item as Partial<WhitelistRule>;
+			if (typeof r.pattern === "string" && r.pattern) {
+				out.push({
+					pattern: r.pattern,
+					addedAt: typeof r.addedAt === "number" ? r.addedAt : now,
+					lastHit: typeof r.lastHit === "number" ? r.lastHit : now,
+					hits: typeof r.hits === "number" ? r.hits : 0,
+				});
+			}
+		}
+	}
+	return out;
 }
 
 function loadConfig(): { cfg: PermGateConfig; isNew: boolean } {
@@ -147,6 +189,7 @@ function loadConfig(): { cfg: PermGateConfig; isNew: boolean } {
 	const cfg = loadJsonConfig(CONFIG_FILE, structuredClone(DEFAULT_CONFIG), isConfig);
 	cfg.model ??= null; // 旧配置无该字段时归一化
 	cfg.autoWhitelist ??= "smart";
+	cfg.whitelist = toWhitelistRules(cfg.whitelist); // 旧纯字符串列表归一化为带保鲜元数据
 	return { cfg, isNew };
 }
 
@@ -481,6 +524,8 @@ export default function (pi: ExtensionAPI) {
 		const loaded = loadConfig();
 		cfg = loaded.cfg;
 		if (loaded.isNew) saveJsonConfig(CONFIG_FILE, cfg); // 首次运行写默认配置，方便用户编辑
+		// 启动时清理超过保鲜期的白名单规则（历史残留不堆积）
+		if (pruneWhitelist() > 0) saveJsonConfig(CONFIG_FILE, cfg);
 	}
 
 	/** AI 审核结论会话级缓存（精确命令 → 结论；review 不缓存，每次都让人工决定） */
@@ -491,6 +536,54 @@ export default function (pi: ExtensionAPI) {
 
 	function saveConfig(): void {
 		saveJsonConfig(CONFIG_FILE, cfg);
+	}
+
+	// 白名单保鲜：命中时刷新规则内存元数据，落盘 throttle（避免高频 bash 调用频繁写配置）
+	let whitelistTouchDirty = false;
+	let lastWhitelistPersist = 0;
+	const WHITELIST_PERSIST_MIN_MS = 60_000;
+
+	/** 命中白名单规则：刷新保鲜期与计数（内存记录，落盘见 maybePersistWhitelist） */
+	function touchWhitelist(rule: WhitelistRule, now: number): void {
+		rule.hits++;
+		rule.lastHit = now;
+		whitelistTouchDirty = true;
+	}
+
+	/** 落盘未持久化的命中刷新（throttle，最短间隔 60s） */
+	function maybePersistWhitelist(): void {
+		if (!whitelistTouchDirty) return;
+		const now = Date.now();
+		if (now - lastWhitelistPersist < WHITELIST_PERSIST_MIN_MS) return;
+		lastWhitelistPersist = now;
+		whitelistTouchDirty = false;
+		saveConfig();
+	}
+
+	/** 白名单规则工厂（新规则保鲜期从加白时刻起算） */
+	function newWhitelistRule(pattern: string, now = Date.now()): WhitelistRule {
+		return { pattern, addedAt: now, lastHit: now, hits: 0 };
+	}
+
+	/** 清理超过保鲜期未命中的白名单规则；返回清理条数 */
+	function pruneWhitelist(): number {
+		const cutoff = Date.now() - WHITELIST_EXPIRE_DAYS * 86_400_000;
+		const before = cfg.whitelist.length;
+		cfg.whitelist = cfg.whitelist.filter((r) => r.lastHit >= cutoff);
+		return before - cfg.whitelist.length;
+	}
+
+	/** 白名单编译（携带规则对象供命中保鲜）；无效正则收集进 invalid */
+	function compileWhitelist(invalid: string[]): Array<{ re: RegExp; rule: WhitelistRule }> {
+		const out: Array<{ re: RegExp; rule: WhitelistRule }> = [];
+		for (const r of cfg.whitelist) {
+			try {
+				out.push({ re: new RegExp(r.pattern, REGEX_FLAGS), rule: r });
+			} catch {
+				invalid.push(r.pattern);
+			}
+		}
+		return out;
 	}
 
 	/**
@@ -537,9 +630,12 @@ export default function (pi: ExtensionAPI) {
 				/* 不可编译退精确规则（解析阶段已过滤，双保险） */
 			}
 		}
-		const fresh = patterns.filter((p) => !cfg.whitelist.includes(p) && !cfg.blacklist.includes(p));
+		const fresh = patterns.filter(
+			(p) => !cfg.whitelist.some((r) => r.pattern === p) && !cfg.blacklist.includes(p),
+		);
 		if (fresh.length === 0) return;
-		cfg.whitelist.push(...fresh);
+		pruneWhitelist(); // 先清过期规则（与新增同批落盘）
+		cfg.whitelist.push(...fresh.map((pattern) => newWhitelistRule(pattern)));
 		saveConfig();
 		ctx.ui.notify(`perm-gate 自动加白（${cfg.autoWhitelist}）：${fresh.join("、")}`, "info");
 	}
@@ -675,7 +771,7 @@ export default function (pi: ExtensionAPI) {
 						const patterns = await pickListPatterns(ctx, command, segments, candidates);
 						if (patterns) {
 							for (const p of patterns) warnIfNotMatch(ctx, p, command, segments);
-							cfg.whitelist.push(...patterns);
+							cfg.whitelist.push(...patterns.map((p) => newWhitelistRule(p)));
 							saveConfig();
 							ctx.ui.notify(`perm-gate：已加入白名单：${patterns.join("、")}`, "info");
 						}
@@ -721,7 +817,7 @@ export default function (pi: ExtensionAPI) {
 		// 编译名单（bash 调用频率低，每次现编译开销可忽略；无效正则跳过）
 		const invalid: string[] = [];
 		const blacklist = compilePatterns(cfg.blacklist, invalid);
-		const whitelist = compilePatterns(cfg.whitelist, invalid);
+		const whitelist = compileWhitelist(invalid);
 
 		// 复合命令拆段（&& / || / ; / | / 换行 / $() / `...`）：白名单逐段判定，
 		// 防止「git status && rm -rf x」被前半段的白名单规则连带放行
@@ -741,8 +837,23 @@ export default function (pi: ExtensionAPI) {
 			return humanReview(ctx, command, segments, "blacklist", detail);
 		}
 
-		// 2. 白名单 → 放行（逐段：每个子命令段都要命中白名单，缺一段都不放）
-		if (segments.length > 0 && segments.every((s) => whitelist.some((p) => p.test(s)))) return undefined;
+		// 2. 白名单 → 放行（逐段：每个子命令段都要命中白名单，缺一段都不放）；命中规则刷新保鲜
+		if (segments.length > 0) {
+			const hitNow = Date.now();
+			let allHit = true;
+			for (const s of segments) {
+				const hit = whitelist.find((w) => w.re.test(s));
+				if (!hit) {
+					allHit = false;
+					break;
+				}
+				touchWhitelist(hit.rule, hitNow);
+			}
+			if (allHit) {
+				maybePersistWhitelist(); // 允许时落盘保鲜（throttle）
+				return undefined;
+			}
+		}
 
 		// 3. 未命中 → AI 审核（关闭时一律转人工）
 		if (!cfg.aiReview) {
@@ -750,12 +861,17 @@ export default function (pi: ExtensionAPI) {
 		}
 		// 逐段白名单命中情况：有命中段时随命令一起标注给 AI——命中段视为用户预先认可，
 		// AI 聚焦未命中段审核，避免对白名单段落重复审查/误判，candidates 也只针对未命中段
-		const segInfo = segments.some((s) => whitelist.some((p) => p.test(s)))
+		const hitNow = Date.now();
+		const segHits = segments
+			.map((s) => whitelist.find((w) => w.re.test(s)))
+			.filter((w): w is NonNullable<typeof w> => !!w);
+		for (const h of segHits) touchWhitelist(h.rule, hitNow);
+		const segInfo = segHits.length > 0
 			? segments
 					.map((s) => {
-						const re = whitelist.find((p) => p.test(s));
-						const label = re ? "白名单命中" : "未命中";
-						const rule = re ? `（规则：${truncateCmd(re.source, 80)}）` : "";
+						const hit = whitelist.find((w) => w.re.test(s));
+						const label = hit ? "白名单命中" : "未命中";
+						const rule = hit ? `（规则：${truncateCmd(hit.re.source, 80)}）` : "";
 						return `- [${label}] ${truncateCmd(s, 120).replace(/\n/g, " ⏎ ")}${rule}`;
 					})
 					.join("\n")
@@ -783,9 +899,11 @@ export default function (pi: ExtensionAPI) {
 		return undefined; // allow
 	});
 
-	// /perm-gate 命令：状态查看 / 开关 / 重读配置 / 审核模型选择（名单编辑走配置文件，不提供管理面板）
+	// /perm-gate 命令：状态查看 / 开关 / 重读配置 / 审核模型选择 / 自动加白策略 / 清理过期白名单
+	// （名单编辑走配置文件，不提供管理面板）
 	pi.registerCommand("perm-gate", {
-		description: "bash 命令权限门：查看状态 / on / off / reload / model [provider/id|auto] / autowhite [off|exact|smart]",
+		description:
+			"bash 命令权限门：查看状态 / on / off / reload / model [provider/id|auto] / autowhite [off|exact|smart] / prune",
 		handler: async (args, ctx) => {
 			const sub = args.trim().toLowerCase();
 			if (sub === "on" || sub === "off") {
@@ -798,6 +916,15 @@ export default function (pi: ExtensionAPI) {
 				cfg = loadConfig().cfg;
 				aiCache.clear();
 				ctx.ui.notify("perm-gate 配置已重读", "info");
+				return;
+			}
+			if (sub === "prune") {
+				const pruned = pruneWhitelist();
+				if (pruned > 0) saveConfig();
+				ctx.ui.notify(
+					`perm-gate：已清理 ${pruned} 条超过 ${WHITELIST_EXPIRE_DAYS} 天未命中的白名单规则，剩 ${cfg.whitelist.length} 条`,
+					"info",
+				);
 				return;
 			}
 			if (sub === "autowhite" || sub.startsWith("autowhite ")) {
@@ -844,12 +971,15 @@ export default function (pi: ExtensionAPI) {
 			}
 			const invalid: string[] = [];
 			compilePatterns(cfg.blacklist, invalid);
-			compilePatterns(cfg.whitelist, invalid);
+			compileWhitelist(invalid);
+			maybePersistWhitelist(); // 查询前落盘未持久化的命中刷新
+			const expiredCut = Date.now() - WHITELIST_EXPIRE_DAYS * 86_400_000;
+			const expired = cfg.whitelist.filter((r) => r.lastHit < expiredCut).length;
 			ctx.ui.notify(
 				[
 					`perm-gate ${cfg.enabled ? "✅ 开启" : "❌ 关闭"}（AI 审核 ${cfg.aiReview ? "开" : "关"}，自动加白 ${cfg.autoWhitelist}）`,
 					`审核模型：${cfg.model ?? "自动（优先列表 + 最便宜兜底）"}`,
-					`白名单 ${cfg.whitelist.length} 条 / 黑名单 ${cfg.blacklist.length} 条`,
+					`白名单 ${cfg.whitelist.length} 条${expired ? `（${expired} 条超过 ${WHITELIST_EXPIRE_DAYS} 天未命中，/perm-gate prune 清理）` : ""} / 黑名单 ${cfg.blacklist.length} 条`,
 					invalid.length ? `⚠️ 无效正则 ${invalid.length} 条：${invalid.join("、")}` : "",
 					`配置文件：${CONFIG_FILE}`,
 				]
