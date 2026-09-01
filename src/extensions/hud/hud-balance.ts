@@ -3,20 +3,30 @@
  *
  * 职责：
  * - 统一 BalanceData/BalanceAdapter 接口，按供应商逐一适配（按量充值余额 vs 订阅 plan 余量 vs 订阅+加油包）
- * - 已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding / sensenova / opencode-go
- * - 消耗统计文本（rateText）复用 hud-cost 的按量付费实现（¥/min 或 $/min）
+ * - 已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding / sensenova / opencode-go / zai-coding-cn
+ * - 消耗统计文本（rateText）复用 hud-cost 的按量付费实现（¥/min 或 $/min；zai-coding-cn 走积分轨，积分不换算 ¥/$）
+ *
+ * 窗口展示约定：多窗口额度条（quotas）统一按窗口周期**从大到小**排列（月 > 周 > 5h，
+ * 与 Kimi 的「周 · 5h」风格一致）；detail 明细随 windows 数组同序，天然一致。
  *
  * 注意：本模块不注册任何 pi API，仅导出接口与注册表，由入口模块驱动。
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	CREDIT_SYMBOL,
 	currencySymbol,
 	fmtNum,
 	getRateSource,
 	getUsdCnyRate,
 	meteredRateText,
+	sampleZaiCredits,
 	sumSessionUsage,
+	ZAI_QUOTA_URL,
+	zai5hWindow,
+	zaiWindowUsedCredits,
 	type RateTextPart,
+	type ZaiQuotaResponse,
+	type ZaiTokenLimit,
 } from "./hud-cost";
 
 // ---------------------------------------------------------------------------
@@ -227,11 +237,9 @@ function rowLabel(row: KimiUsageRow): string {
 const kimiCodingAdapter: BalanceAdapter = {
 	providerId: "kimi-coding",
 	label: "Kimi For Coding",
-	// 订阅制：不显示 ¥/min，展示会话 token 消耗
-	rateText(ctx, _now) {
-		const t = sumSessionUsage(ctx);
-		if (t.turns === 0) return null;
-		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
+	// 订阅制：仍按 K2.7 Code API 价估算等效消费（¥/min + ¥累计）
+	rateText(ctx, now) {
+		return meteredRateText(ctx, now);
 	},
 	async fetch(ctx) {
 		const auth = await ctx.modelRegistry.getProviderAuth("kimi-coding");
@@ -583,6 +591,10 @@ const sensenovaAdapter: BalanceAdapter = {
  * 官方未写入文档的接口：GET https://opencode.ai/zen/go/v1/usage（Bearer API key），
  * 返回 rolling / weekly / monthly 的 percent 与 resetsAt。
  * 来源：https://github.com/farion1231/cc-switch/issues/6433
+ *
+ * HUD 行展示对齐 Kimi 风格（简化）：只画「额度条 + 窗口标签 + 百分比」，
+ * 金额用量与重置倒计时收进 detail，由 /balance notify 查看。
+ * 窗口顺序统一大周期在前：月 > 周 > 5h。
  */
 const GO_USAGE_LIMITS = { rolling: 12, weekly: 30, monthly: 60 }; // USD
 
@@ -617,11 +629,10 @@ function formatGoReset(ms: number): string {
 const opencodeGoAdapter: BalanceAdapter = {
 	providerId: "opencode-go",
 	label: "OpenCode Go",
-	// 订阅制：不显示 ¥/min，展示本会话的 token 消耗
-	rateText(ctx, _now) {
-		const t = sumSessionUsage(ctx);
-		if (t.turns === 0) return null;
-		return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
+	// 订阅制：按 Go 订阅内官方 USD 计价估算等效消耗（$/min + $累计，hud-cost USD 轨；
+	// msgCost 已为 opencode-go 接入 GO_PRICES，有汇率时显示 ¥）
+	rateText(ctx, now) {
+		return meteredRateText(ctx, now);
 	},
 	async fetch(ctx) {
 		const auth = await ctx.modelRegistry.getProviderAuth("opencode-go");
@@ -639,10 +650,11 @@ const opencodeGoAdapter: BalanceAdapter = {
 
 		const data = (await res.json()) as GoUsagePayload;
 		const now = Date.now();
+		// 大周期在前（月 > 周 > 5h），对齐 Kimi 风格
 		const windows = [
-			{ key: "rolling" as const, label: "5h", limit: GO_USAGE_LIMITS.rolling, w: data.usage.rolling },
-			{ key: "weekly" as const, label: "周", limit: GO_USAGE_LIMITS.weekly, w: data.usage.weekly },
 			{ key: "monthly" as const, label: "月", limit: GO_USAGE_LIMITS.monthly, w: data.usage.monthly },
+			{ key: "weekly" as const, label: "周", limit: GO_USAGE_LIMITS.weekly, w: data.usage.weekly },
+			{ key: "rolling" as const, label: "5h", limit: GO_USAGE_LIMITS.rolling, w: data.usage.rolling },
 		];
 
 		// 整体状态：任一窗口耗尽/报错 → error；任一窗口 ≥80% → warning
@@ -656,22 +668,125 @@ const opencodeGoAdapter: BalanceAdapter = {
 			if (w.percent >= 80) status = "warning";
 		}
 
+		// 额度条：Kimi 风格简化——HUD 行只画「额度条 + 标签 + 百分比」（不带金额与重置倒计时），
+		// 完整明细（百分比 + 重置倒计时）保留在 detail 供 /balance 查看
 		const quotas: BalanceQuota[] = windows.map(({ label, limit, w }) => ({
 			label,
 			used: (w.percent / 100) * limit,
 			limit,
-			currency: "USD",
-			reset: formatGoReset(Date.parse(w.resetsAt) - now),
 		}));
 
 		const detail = windows
-			.map(({ label, w }) => `${label} ${w.percent}%（${formatGoReset(Date.parse(w.resetsAt) - now)}）`)
+			.map(({ label, limit, w }) => {
+				const usedUsd = ((w.percent / 100) * limit).toFixed(2);
+				return `${label} $${usedUsd}/${limit.toFixed(2)}（${formatGoReset(Date.parse(w.resetsAt) - now)}）`;
+			})
 			.join(" · ");
 
 		return {
 			status,
 			amount: "OpenCode Go",
 			detail,
+			quotas,
+		};
+	},
+};
+
+/**
+ * Z.AI Coding CN（智谱 GLM Coding Plan 国内版，Coding 端点 open.bigmodel.cn）：订阅积分制。
+ * 配额接口（官方未写入文档，社区监控通用）：GET /api/monitor/usage/quota/limit，
+ * 认证 Authorization: <apiKey>（裸 key，无 Bearer 前缀）。
+ * 响应 data.limits[]：积分窗口 type=CREDIT_LIMIT（新版透明积分制，实测 Lite 档两条：
+ * 5h + 周；旧版为他档为 TOKENS_LIMIT）按 nextResetTime 升序 → [0]=5h、末条=周，
+ * 另有 type=TIME_LIMIT 一条（MCP 月度，部分档位无）；
+ * percentage=已用百分比，currentValue/usage（可选）=已用/总额度积分。
+ * 来源：https://github.com/showlotus/glm-usage（VS Code 扩展，MIT）+ 本机实测校准。
+ *
+ * 展示：余额行画三窗口额度条（百分比，紧凑）；积分绝对值/套餐档位收进 detail 供 /balance 查看；
+ * 消耗速率走 hud-cost 积分轨（fetch 顺带喏积分差分器，与 turn_end 采样共用同一状态）。
+ */
+const zaiCodingCnAdapter: BalanceAdapter = {
+	providerId: "zai-coding-cn",
+	label: "Z.AI Coding CN",
+	// 积分轨：meteredRateText 内按 provider 分流（积分/min + 累计积分，不换算 ¥/$）
+	rateText: meteredRateText,
+	async fetch(ctx) {
+		const key = await ctx.modelRegistry.getApiKeyForProvider("zai-coding-cn");
+		if (!key) throw new Error("未配置 API key（请使用智谱开放平台 Coding Plan 专用 Key）");
+
+		const res = await fetch(ZAI_QUOTA_URL, {
+			headers: { Authorization: key, Accept: "application/json" },
+			signal: AbortSignal.timeout(10_000),
+		});
+		if (!res.ok) {
+			const text = await res.text().catch(() => "");
+			throw new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
+		}
+		const data = (await res.json()) as ZaiQuotaResponse;
+		const limits = data.data?.limits ?? [];
+		if (limits.length === 0) throw new Error("响应缺少 data.limits（请确认 Key 属于 Coding Plan 套餐）");
+
+		// 窗口分类：积分窗口（CREDIT_LIMIT 新版 / TOKENS_LIMIT 旧版）按 nextResetTime 升序
+		//（[0]=5h、末条=周）；TIME_LIMIT=MCP 月度（Lite 档实测无此条）
+		const tokenLimits = limits
+			.filter((l) => l.type === "CREDIT_LIMIT" || l.type === "TOKENS_LIMIT")
+			.sort((a, b) => (a.nextResetTime ?? 0) - (b.nextResetTime ?? 0));
+		const mcp = limits.find((l) => l.type === "TIME_LIMIT");
+
+		// 余额刷新顺带喏积分差分器（与 turn_end 采样共用同一状态，见 hud-cost 积分轨）
+		const w5h = tokenLimits[0];
+		if (w5h) {
+			const used = zaiWindowUsedCredits(w5h);
+			if (used !== null) sampleZaiCredits(used, w5h.nextResetTime ?? 0);
+		}
+
+		const now = Date.now();
+		// 大周期在前（MCP月 > 周 > 5h），对齐 Kimi 风格
+		const windows: Array<{ label: string; w: ZaiTokenLimit }> = [];
+		if (mcp) windows.push({ label: "MCP月", w: mcp });
+		if (tokenLimits.length > 1) windows.push({ label: "周", w: tokenLimits[tokenLimits.length - 1] });
+		if (tokenLimits[0]) windows.push({ label: "5h", w: tokenLimits[0] });
+
+		// 整体状态：任一窗口用满 → error；任一 ≥80% → warning
+		let status: BalanceStatus = "ok";
+		for (const { w } of windows) {
+			const pct = typeof w.percentage === "number" ? w.percentage : 0;
+			if (pct >= 100) {
+				status = "error";
+				break;
+			}
+			if (pct >= 80) status = "warning";
+		}
+
+		// 额度条：百分比模式（积分绝对值收进 detail，避免 HUD 行超宽截断）
+		const describe = (label: string, w: ZaiTokenLimit): string => {
+			const pct = typeof w.percentage === "number" ? w.percentage : 0;
+			const used = zaiWindowUsedCredits(w);
+			const total = typeof w.usage === "number" && w.usage > 0 ? w.usage : null;
+			const reset =
+				typeof w.nextResetTime === "number" && w.nextResetTime > now
+					? formatGoReset(w.nextResetTime - now)
+					: undefined;
+			const usedText = used !== null ? fmtNum(Math.round(used)) : `${pct.toFixed(0)}%`;
+			const totalText = total !== null ? `/${fmtNum(Math.round(total))}` : "";
+			return `${label} ${CREDIT_SYMBOL}${usedText}${totalText}（${pct.toFixed(0)}%${reset ? ` · ${reset}后重置` : ""}）`;
+		};
+		// 额度条：纯百分比模式（积分绝对值/重置时间收进 detail），不带重置倒计时保持 HUD 行简洁
+		const quotas: BalanceQuota[] = windows.map(({ label, w }) => ({
+			label,
+			used: typeof w.percentage === "number" ? w.percentage : 0,
+			limit: 100,
+		}));
+
+		// 明细（/balance 查看）：套餐档位 + 各窗口积分用量（🪙 符号）+ 重置倒计时
+		const level = data.data?.level;
+		const detailParts = windows.map(({ label, w }) => describe(label, w));
+		if (level) detailParts.unshift(`套餐 ${level}`);
+
+		return {
+			status,
+			amount: "GLM Coding",
+			detail: detailParts.join(" · ") || undefined,
 			quotas,
 		};
 	},
@@ -689,4 +804,5 @@ export const BALANCE_ADAPTERS: Record<string, BalanceAdapter> = {
 	[volcengineCodingAdapter.providerId]: volcengineCodingAdapter,
 	[sensenovaAdapter.providerId]: sensenovaAdapter,
 	[opencodeGoAdapter.providerId]: opencodeGoAdapter,
+	[zaiCodingCnAdapter.providerId]: zaiCodingCnAdapter,
 };

@@ -590,6 +590,12 @@ export default async function (pi: ExtensionAPI) {
 							const isOffpeak = costMod.isMimoOffpeakHour(Date.now());
 							return `${theme.fg("dim", " ・ ")}${theme.fg(isOffpeak ? "success" : "warning", isOffpeak ? "夜间优惠" : "高峰")}`;
 						}
+						// OpenCode Go：仅 DeepSeek 系列模型有峰谷价（高峰 = 周一~周五北京 09-12 / 14-18，周末全天平峰）；
+						// 其余 Go 模型（GLM/Kimi/Qwen/MiniMax…）平价无峰谷，不显示徽章
+						if (model?.provider === "opencode-go" && /deepseek/i.test(model.id ?? "") && costMod) {
+							const isPeak = costMod.isGoPeakHour(Date.now());
+							return `${theme.fg("dim", " ・ ")}${theme.fg(isPeak ? "warning" : "success", isPeak ? "高峰" : "低峰")}`;
+						}
 						return "";
 					})();
 					const left3 = renderBalanceLine() + peakTag;
@@ -640,7 +646,12 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("turn_end", async (_event, ctx) => {
 		// 记录本 turn 消耗（成本增量入 10 分钟窗口 + 输出 token 速率 EMA 平滑）
-		if (costMod) costMod.recordTurnCosts(ctx);
+		if (costMod) {
+			costMod.recordTurnCosts(ctx);
+			// Z.AI Coding CN：积分轨只能远端采样（消息 usage 不含积分），
+			// turn_end 拉一次 quota 接口做差分（fire-and-forget，内部 30s 节流）
+			if (ctx.model?.provider === "zai-coding-cn") void costMod.recordZaiCreditUsage(ctx);
+		}
 		if (!footerInstalled) return;
 		if (Date.now() - lastAutoRefresh > TURN_REFRESH_THROTTLE_MS) void refreshBalance(ctx);
 		// git 状态：5s 定时器在跑，turn_end 只补「距上次探测超 2s」的即时刷新（防快速连续 turn 重复开子进程）
