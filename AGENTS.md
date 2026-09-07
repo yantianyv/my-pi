@@ -50,6 +50,10 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       test/         #       hud-git 路径引号解码回归测试（node src/extensions/hud/test/unquote.test.mjs）
     ask/          #     问卷（多文件扩展源码，build.js 把 index.ts 打包成单文件 ask.ts）：types.ts 数据模型/容错规范化 + store.ts 问卷文件读写（.pi/questionnaires/）+ page.ts 整屏问卷页/选择器 + tool.ts ask 工具（create 创建 / cancel 作废）+ commands.ts /answer 命令 + state.ts 状态推送/排队链；test/ask.test.mjs 回归测试（49 场景）
     btf-think.ts  #   思考折叠标签动画（Thinking... 逐帧动画，独立 UI 反馈插件）
+    clipboard.ts #   剪贴板读写：clipboard_get 读取（可截断）+ clipboard_set 写入（空串清空）+ /clipboard 命令；
+                    #   跨平台（Windows PowerShell Get/Set-Clipboard、macOS pbpaste/pbcopy、Linux xclip 退 xsel，
+                    #   零依赖，统一临时文件中转规避 PS5.1 管道 UTF-16LE 编码乱码与 shell 转义；读时 CRLF→LF 归一化），
+                    #   write 前读旧内容摘要报告覆盖、状态走 shared/status 联动 hud
     crash-log.ts  #   崩溃黑匣子：prependListener 抢在 pi 的 uncaughtException 处理器（同步 exit）之前把堆栈
                     #   同步落盘 ~/.pi/agent/pi-crash.log（含 unhandledRejection 与 exit 码），崩溃条目与会话文件按时间配对
     perm-gate.ts    #   bash 命令三级权限门：黑名单人工复核 / 白名单放行 / AI 审核（模型覆盖项仿 pi-btw：
@@ -83,6 +87,12 @@ static/              #   静态部署物（无需编译，install.js 直接从�
   patches/            #     pi 补丁脚本
     apply-pi-ai-usage-guard.mjs     #       pi-ai usage 缺失防护补丁：模型偶发返回无 usage 的 assistant 消息导致后续调用瞬时失败；pi 升级后需重跑
     apply-zuchongzhi-zh.mjs        #       祖冲之汉化补丁：pi 无官方 i18n，直接替换 dist 编译产物硬编码英文为中文（236 处/9 文件）；pi 升级后需重跑
+    apply-pi-launch-report.mjs     #       启动垫片取证补丁 v2：给 npm 的 pi.cmd/pi.ps1/pi 注入 NODE_OPTIONS（8GB 堆 + --report-on-fatalerror）
+                                   #       + stderr 追加落盘 ~/.pi/agent/pi-stderr.log + ps1 记录 [START]/[EXIT] 退出码；背景是 pi 反复无声崩溃
+                                   #       （实测本机 WER 对 node abort 不产生事件、--report-on-fatalerror 也抓不到 abort 类死亡，
+                                   #       abort 前的 stderr 原生栈是唯一确定通道）；幂等、自动清理 v1 注入；pi 升级后需重跑
+                                   #       另有 pi-x64.cmd/ps1 A/B 启动器（x64 node 模拟层跑同一 cli.js，对照 arm64 原生崩溃；
+                                   #       背景：2026-09-02 崩溃捕获到退出码 0xC0000409 fastfail，本机为骁龙 X Elite + arm64 node）
   webui/index.html  #     webui 前端单页（聊天 + 状态栏，列表/聊天双视图按 URL 分流；install.js 复制到 ~/.pi/agent/webui/）
   models.json        #     OpenRouter 路由模板：install.js 复制/深度合并到 ~/.pi/agent/models.json（见 README「OpenRouter 路由策略」节）
   vendor/           #   官方（社区）插件源码收录区（与 extensions/ 同级）：pi-subagents（替代自研 explore-agent）/ pi-btw（替代自研 btw）/ pi-rtk-optimizer（替代自研 token-saver）；均 MIT 原样收录（含各自 LICENSE），README.md 含出处表与对齐更新流程；install.js 复制到 ~/.pi/agent/vendor/、有依赖的包补 npm install --omit=dev、本地路径注册进 settings.json 的 packages；伴随物 rtk 二进制（Apache-2.0）在 PATH 上（%APPDATA%\npm\rtk.exe，不入库）

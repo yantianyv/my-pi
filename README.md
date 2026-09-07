@@ -28,6 +28,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `vendor/` | `pi-btw` — `/btw` 旁支问答（真实子会话、/btw:tangent、inject/summarize 回注，替代原自研 btw） | `~/.pi/agent/vendor/` |
 | `vendor/` | `pi-rtk-optimizer` — bash 输出多阶段压缩 + rtk 命令改写（替代原自研 token-saver） | `~/.pi/agent/vendor/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webui/` — 本地 Web 界面：TUI 进程内 HTTP+SSE 服务，浏览器与 TUI 实时双向同步（聊天/状态栏/git 操作，复用 hud 模块），`/webui` 命令（见下） | `~/.pi/agent/extensions/` |
 | `webui/` | `index.html` — webui 前端单页（聊天 + 状态栏，轻量自写 markdown） | `~/.pi/agent/webui/` |
@@ -201,6 +202,16 @@ bash 命令三级管控（`tool_call` 事件拦截，只管 bash）：**复合�
 - **token 节约**：正文提取 + 截断，实测 100KB HTML 页面 → 约 800 字符 markdown；turndown/domino/gfm 由 build.js（esbuild）内联进单文件产物，运行时零外部依赖（build.js external 白名单只留 `@earendil-works/*` 与 `typebox`）；
 - **差评降权（动态黑名单）**：`web_dislike(domains, reason?)` 工具——AI 深读某条结果发现内容与标题不符/灌水/死链时对其域名记差评，持久化到 `~/.pi/agent/web-search-blacklist.json`（跨会话生效，**无需维护域名白名单**，降权对象由使用中自然沉淀）；搜索评分按差评次数降权（`×0.6/次`），累计 5 次直接滤除该域名条目（子域名同样受降权，父域不受）；`/web-tool-config blacklist` 查看（累计次数/降权系数/原因）、`blacklist clear` 清空；
 - **可调配置**：文件顶部「可调配置」区（源顺序、结果数、超时、字节/字符上限、差评降权系数/封禁阈值），改后 `node install.js` 重装生效。
+
+## 剪贴板工具（src/extensions/clipboard.ts）
+
+为 AI 提供系统剪贴板的读写能力，零原生依赖（产物保持零外部依赖单文件）：
+
+- **`clipboard_get([maxChars])`**：读取当前剪贴板文本（用户最近复制的内容，适合「看我复制的xxx」/把链接/代码/文本拿进来处理）。默认最多返回 50000 字符、上限 200000，超长截断防撑爆上下文；空或仅含图片等非文本内容时给明确提示。
+- **`clipboard_set(content)`**：把文本写入剪贴板（AI 编辑结果写回，用户直接 Ctrl+V 粘贴；空字符串 = 清空）。返回时报告**被覆盖旧内容的摘要**（长度 + 前 40 字符），让 AI 与用户感知覆盖了什么——剪贴板常存敏感内容（密码/密钥），工具描述提示 AI 写入前先 `clipboard_get` 确认。
+- **`/clipboard`**：用户自查当前剪贴板内容；`/clipboard clear` 清空。
+
+跨平台实现（均为系统自带命令，无需额外安装）：Windows 用 PowerShell `Get-Clipboard -Raw` / `Set-Clipboard -Value`，macOS 用 `pbpaste` / `pbcopy`，Linux 用 `xclip`（缺失退 `xsel`）。读写统一经 `os.tmpdir()` 临时文件中转再删（规避 PowerShell 5.1 管道输出 UTF-16LE 的编码乱码、规避命令行转义）；读时把 CRLF/CR 归一化为 LF（Windows 剪贴板物理存 CRLF，与 mac/Linux 的 `\n` 输出对齐）。
 
 ## 人机协作任务面板（src/extensions/workflow-mgr/）
 
