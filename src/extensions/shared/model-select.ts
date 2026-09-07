@@ -258,6 +258,8 @@ export interface ModelConfigCommandOptions {
 	getSetting: () => string;
 	/** 设置并持久化（实现方保证所有设置入口统一走这里） */
 	setSetting: (value: string) => void;
+	/** 设置变更后回调（ctx 可用，供调用方按新设置做后续动作，如重注册工具描述） */
+	onSettingChanged?: (ctx: ExtensionContext) => void;
 	/** 设置值的人话说明（notify 用）；缺省用 shared 统一文案（auto = 最便宜可用模型） */
 	settingLabel?: (setting: string) => string;
 	/** 选择器中 auto / auto-not-free 两个策略项的文案；缺省用 shared 统一文案 */
@@ -278,17 +280,21 @@ export function registerModelConfigCommand(pi: ExtensionAPI, opts: ModelConfigCo
 	const handler = async (args: string, ctx: ExtensionContext) => {
 		const arg = args?.trim() ?? "";
 		const usage = `用法：/${opts.command} auto、auto-not-free 或 /${opts.command} provider/modelId`;
+		const applySetting = (value: string) => {
+			opts.setSetting(value);
+			opts.onSettingChanged?.(ctx);
+		};
 
 		// 带参数：直接设置
 		if (arg) {
 			if (arg === "auto" || arg === "auto-not-free") {
-				opts.setSetting(arg);
+				applySetting(arg);
 				ctx.ui.notify(`${opts.displayName}已设为 ${arg}（${settingLabel(arg)}）`, "info");
 				return;
 			}
 			const m = findConfiguredModel(ctx, arg);
 			if (m) {
-				opts.setSetting(`${m.provider}/${m.id}`);
+				applySetting(`${m.provider}/${m.id}`);
 				ctx.ui.notify(`${opts.displayName}已设为 ${opts.getSetting()}`, "info");
 				return;
 			}
@@ -338,7 +344,7 @@ export function registerModelConfigCommand(pi: ExtensionAPI, opts: ModelConfigCo
 			},
 		);
 		if (result) {
-			opts.setSetting(result);
+			applySetting(result);
 			ctx.ui.notify(`${opts.displayName}已设为 ${result}（${settingLabel(result)}）`, "info");
 		}
 	};

@@ -15,9 +15,26 @@
  * - 模型调用走 pi 已登录的通道：认证来自 ctx.modelRegistry.getApiKeyAndHeaders()，
  *   请求由 pi-ai 自己的 provider 实现发出（streamSimple），支持任意 API 类型；
  * - 子模型选择：默认 auto（最便宜可用模型），/explore-config 可配置；
- * - 预算保护：单任务 TASK_TIMEOUT_MS 超时、跟随主 agent abort。
+ * - 预算保护：单任务 TASK_TIMEOUT_MS 超时、跟随主 agent abort；
+ * - 自适应并发：供应商并发配额无公开 API，乐观起步（CONCURRENCY）动态探测——
+ *   限流/5xx/网络错误收并发 + 指数退避重试（限次数），成功后逐步升回上限；
+ * - 进度展示：活跃任务在前（工具调用次数/重试中），已完成折叠成汇总行。
+ *
+ * 工具说明引导：任务数 = 子代理数，一次调用至少 2 个任务（含拒绝引导，避免
+ * 主 agent 先派 1 个试探失败再补派）；描述保持简洁，不含过程性说明。
+ * 视觉能力动态标注：子模型支持读图（Model.input 含 "image"）时，在工具描述/
+ * 指南中标出「可派发截图/图片分析任务」。判定依赖模型注册表（注册时拿不到 ctx），
+ * 故在拿到 ctx 的时机（session_start / /explore-config 变更后 / execute 内）
+ * 重新注册同名工具覆盖描述（同扩展 tools Map.set 覆盖 + refreshTools 下 turn 生效），
+ * 幂等防抖避免无意义刷新。
  */
-import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ExtensionAPI,
+	ExtensionContext,
+	ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import {
 	runAgentLoop,
@@ -47,11 +64,20 @@ const EXPLORE_MODEL_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "explo
 const EXPLORE_DEFAULT_MODEL = "auto";
 
 /** 单次最多并行派出的子代理数 */
-const MAX_TASKS = 16;
-/** 子代理最大并行数 */
-const CONCURRENCY = 4;
+const MAX_TASKS = 32;
+/** 子代理并行数上限（自适应并发的恢复上限：出错退避收并发，成功后逐步升回这里） */
+const CONCURRENCY = 8;
 /** 单个子代理超时 */
 const TASK_TIMEOUT_MS = 15 * 60_000;
+/** 单任务最大重试次数（仅限可重试错误：限流/5xx/网络抖动/超时） */
+const TASK_RETRIES = 2;
+/** 重试退避基数（指数递增：2s → 4s → …） */
+const BACKOFF_BASE_MS = 2_000;
+/** 重试退避上限 */
+const BACKOFF_MAX_MS = 30_000;
+/** 可重试错误特征：限流/服务端错误/网络抖动/子代理超时；用户取消不在此列 */
+const RETRYABLE_RE =
+	/\b(429|500|502|503|504)\b|rate.?limit|too many requests|overloaded|capacity|econnreset|econnrefused|epipe|etimedout|enotfound|eai_again|socket hang up|fetch failed|network|子代理超时/i;
 
 // ---------------------------------------------------------------------------
 // 子模型选择
@@ -80,6 +106,148 @@ function pickExploreModel(ctx: ExtensionContext): AnyModel | undefined {
 	if (exploreModelSetting === "auto") return cheapestAvailable(ctx);
 	if (exploreModelSetting === "auto-not-free") return cheapestAvailable(ctx, { excludeFree: true });
 	return findConfiguredModel(ctx, exploreModelSetting) ?? cheapestAvailable(ctx);
+}
+
+/** 模型是否具备读图能力（input 声明含 "image"） */
+function modelHasVision(model: AnyModel | undefined): boolean {
+	return !!model?.input?.includes("image");
+}
+
+/** 当前子模型（按设置解析后）是否支持读图 */
+function detectExploreVision(ctx: ExtensionContext): boolean {
+	return modelHasVision(pickExploreModel(ctx));
+}
+
+// ---------------------------------------------------------------------------
+// 自适应并发 + 退避重试（供应商并发配额无公开 API 可查，采用乐观起步动态探测：
+// 初始按 CONCURRENCY 跑，可重试错误出现时收并发 + 指数退避，任务成功逐步升回上限）
+// ---------------------------------------------------------------------------
+
+/** 可动态升降的并发闸门：acquire 占坑，release 还坑，limit 随成功/失败自适应 */
+class AdaptiveLimiter {
+	limit: number;
+	private active = 0;
+	private waiters: Array<() => void> = [];
+
+	constructor(initial: number) {
+		this.limit = initial;
+	}
+
+	async acquire(): Promise<void> {
+		if (this.active < this.limit) {
+			this.active++;
+			return;
+		}
+		await new Promise<void>((resolve) => this.waiters.push(resolve));
+	}
+
+	release(): void {
+		this.active--;
+		this.pump();
+	}
+
+	/** 出错退避：收并发（下限 1，已占坑的不回收） */
+	lower(): void {
+		this.limit = Math.max(1, this.limit - 1);
+	}
+
+	/** 任务成功：逐步恢复并发（封顶 CONCURRENCY） */
+	raise(): void {
+		this.limit = Math.min(CONCURRENCY, this.limit + 1);
+		this.pump();
+	}
+
+	/** 有余坑时唤醒等待者（唤醒即占坑，防重复唤醒超发） */
+	private pump(): void {
+		while (this.active < this.limit && this.waiters.length) {
+			this.active++;
+			this.waiters.shift()!();
+		}
+	}
+}
+
+/** 可中止的退避休眠：parent signal 取消时提前抛出 */
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(timer);
+				reject(new Error("abort"));
+			},
+			{ once: true },
+		);
+	});
+}
+
+function isRetryable(error: string | undefined): boolean {
+	return !!error && RETRYABLE_RE.test(error);
+}
+
+// ---------------------------------------------------------------------------
+// 工具定义（描述按视觉能力动态拼装）
+// ---------------------------------------------------------------------------
+
+/** 已注册的工具定义是否带视觉标注（幂等防抖） */
+let registeredWithVision = false;
+
+/** 参数 schema 与视觉无关，静态定义；描述引导在下方 buildExploreToolDefinition */
+const EXPLORE_PARAMS = Type.Object({
+	tasks: Type.Array(Type.String(), {
+		description:
+			"每个任务派一个子代理（任务数 = 子代理数）。任务可按探索问题拆分，也可把大量文件/目录按批次分治，" +
+			"只要各任务范围与目标互不重叠（避免子代理重复探索同一区域）、粒度尽量均匀（各任务耗时相近，" +
+			"别让个别重型任务拖慢整批并行）。一次至少 2 个、最多 ${MAX_TASKS} 个任务" +
+			"（超出上限的调用会被拒绝，任务过多可拆成多批调用）。",
+		minItems: 2,
+		maxItems: MAX_TASKS,
+	}),
+});
+
+function buildExploreToolDefinition(
+	pi: ExtensionAPI,
+	hasVision: boolean,
+): ToolDefinition<typeof EXPLORE_PARAMS, ExploreDetails> {
+	const visionNote = hasVision ? "子代理模型支持读图，可派发截图/图片/图表分析任务。" : "";
+	return {
+		name: "explore",
+		label: "探索子代理",
+		description:
+			"并行派出 2~${MAX_TASKS} 个只读子代理探索代码库并返回结构化报告（一个任务 = 一个子代理）。" +
+			"每个子代理拥有 read/ls/grep/find 工具，自主决定阅读哪些文件，你只负责分配任务；任务描述要具体可回答。" +
+			visionNote +
+			"适合：了解陌生模块结构、定位功能实现、梳理调用链——比主 agent 逐文件 read 更省上下文、更快、更便宜。" +
+			"子代理不能修改文件。",
+		promptSnippet: "explore: 派只读子代理并行探索代码库并返回报告（省主上下文）",
+		promptGuidelines: [
+			"需要了解陌生代码结构或定位实现时，优先用 explore 派子代理，而不是自己逐文件 read；拿到报告后再对关键文件精读。",
+			"explore 的任务描述要具体可回答，推荐格式：【目标】要查清的问题【范围】相关目录或关键词【期望产出】如『按目录分组的文件清单+行号』。",
+			"explore 至少传 2 个任务才值得调用（任务数 = 子代理数）；任务可拆探索问题、也可把大批量文件按目录/列表切分分治，" +
+			"各任务范围互不重叠、耗时尽量相近（并行批次等最慢者完成）即可；一批内全部提交，不要先派 1 个试探再补派。",
+			"explore 报告抽样验证后再采信：关键路径可用 read 抽查是否真实存在，再据此派工修改。",
+			...(hasVision
+				? ["explore 子代理支持读图（视觉模型）：涉及截图/图片/图表文件时，可直接让子代理读图分析。"]
+				: []),
+		],
+		parameters: EXPLORE_PARAMS,
+		executionMode: "parallel",
+		execute: (_toolCallId, params, signal, onUpdate, ctx): Promise<AgentToolResult<ExploreDetails>> => {
+			// 兜底收敛：模型实际能力与已注册标注不一致时重注册（下个 turn 生效）
+			registerExploreTool(pi, modelHasVision(pickExploreModel(ctx)));
+			return executeExplore(ctx, params, signal, onUpdate);
+		},
+	};
+}
+
+/**
+ * 注册/重注册 explore 工具：同名 Map.set 覆盖 + refreshTools（下个 turn 起描述生效）。
+ * 幂等：标注状态未变时不重复刷新。
+ */
+function registerExploreTool(pi: ExtensionAPI, hasVision: boolean): void {
+	if (hasVision === registeredWithVision) return;
+	registeredWithVision = hasVision;
+	pi.registerTool(buildExploreToolDefinition(pi, hasVision));
 }
 
 // ---------------------------------------------------------------------------
@@ -200,8 +368,16 @@ async function runSubAgent(
 		}
 		return { task, ok: false, error: "子代理未产出报告" };
 	} catch (e) {
-		const msg = e instanceof Error ? e.message : String(e);
-		return { task, ok: false, error: msg.includes("abort") ? "已中止（超时或用户取消）" : msg };
+		if (signal.aborted) {
+			// 区分超时（可重试，RETRYABLE_RE 命中）与用户取消（不可重试）
+			const isTimeout = signal.reason instanceof Error && signal.reason.message.includes("超时");
+			return {
+				task,
+				ok: false,
+				error: isTimeout ? `子代理超时（${Math.round(TASK_TIMEOUT_MS / 60_000)} 分钟）` : "已中止（用户取消）",
+			};
+		}
+		return { task, ok: false, error: e instanceof Error ? e.message : String(e) };
 	} finally {
 		dispose();
 	}
@@ -233,89 +409,11 @@ interface ExploreDetails {
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => clearStatusTimers());
-	pi.registerTool({
-		name: "explore",
-		label: "探索子代理",
-		description:
-			"派出一个或多个只读子代理并行探索代码库并返回结构化报告。每个子代理拥有 read/ls/grep/find 工具，会自主决定阅读哪些文件，你只负责分配任务。" +
-			"适合：了解陌生模块结构、定位功能实现、梳理调用链等——比主 agent 逐文件 read 更省上下文、更快、更便宜。" +
-			"任务描述要具体可回答；多个相互独立的任务一次派出。子代理不能修改文件。",
-		promptSnippet: "explore: 派只读子代理并行探索代码库并返回报告（省主上下文）",
-		promptGuidelines: [
-			"需要了解陌生代码结构或定位实现时，优先用 explore 派子代理，而不是自己逐文件 read；拿到报告后再对关键文件精读。",
-			"explore 的任务描述要具体可回答，推荐格式：【目标】要查清的问题【范围】相关目录或关键词【期望产出】如『按目录分组的文件清单+行号』；多个相互独立的任务放在一次调用里并行执行。",
-			"explore 报告抽样验证后再采信：关键路径可用 read 抽查是否真实存在，再据此派工修改。",
-		],
-		parameters: Type.Object({
-			tasks: Type.Array(Type.String(), {
-				description: `分配给子代理的探索任务列表，每个任务派一个子代理，2~${MAX_TASKS} 个（至少 2 个保证并行度，超出 ${MAX_TASKS} 截断）`,
-				minItems: 2,
-			}),
-		}),
-		executionMode: "parallel",
-		execute: async (_toolCallId, params, signal, onUpdate, ctx): Promise<AgentToolResult<ExploreDetails>> => {
-			const fail = (text: string): AgentToolResult<ExploreDetails> => ({
-				content: [{ type: "text", text }],
-				details: { model: "", total: 0, succeeded: 0, tasks: [] },
-			});
-
-			const model = pickExploreModel(ctx);
-			if (!model) {
-				return fail("explore：找不到可用的子模型（没有任何已配置认证的模型）。请改用 read/grep 自行探索。");
-			}
-
-			const truncatedNote =
-				params.tasks.length > MAX_TASKS ? `\n（注意：只执行了前 ${MAX_TASKS} 个任务，其余已忽略）` : "";
-			const tasks = params.tasks.slice(0, MAX_TASKS);
-			const modelName = `${model.provider}/${model.id}`;
-
-			const toolCallCounts = new Array<number>(tasks.length).fill(0);
-			const doneFlags = new Array<boolean>(tasks.length).fill(false);
-			const doneCount = () => doneFlags.filter(Boolean).length;
-			const report = () => {
-				const perTask = tasks
-					.map((t, i) => {
-						const status = doneFlags[i] ? "✓" : `${toolCallCounts[i]} 次工具调用`;
-						const label = t.length > 24 ? t.slice(0, 24) + "…" : t;
-						return `  ${i + 1}. [${status}] ${label}`;
-					})
-					.join("\n");
-				onUpdate?.({
-					content: [{ type: "text", text: `子代理探索中（${modelName}）：\n${perTask}` }],
-					details: { model: modelName, total: tasks.length, succeeded: 0, tasks: [] },
-				});
-				ctx.ui.setStatus("explore", `🔎 ${doneCount()}/${tasks.length}`);
-			};
-			report();
-
-			const results = await pool(tasks, CONCURRENCY, async (task: string, i) => {
-				try {
-					return await runSubAgent(ctx, model, task, signal, () => {
-						toolCallCounts[i]++;
-						report();
-					});
-				} finally {
-					doneFlags[i] = true;
-					report();
-				}
-			});
-
-			const succeeded = results.filter((r) => r.ok).length;
-			setStatusWithTTL(ctx, "explore", `🔎 ✓ ${succeeded}/${results.length}`, 6_000);
-			const sections = results.map((r) =>
-				r.ok ? `## 任务：${r.task}\n${r.report}` : `## 任务：${r.task}\n⚠ ${r.error}`,
-			);
-			const text = [
-				`探索完成：${succeeded}/${results.length} 个任务成功（子模型 ${modelName}）${truncatedNote}`,
-				"",
-				...sections,
-			].join("\n\n");
-
-			return {
-				content: [{ type: "text", text }],
-				details: { model: modelName, total: results.length, succeeded, tasks: results },
-			};
-		},
+	// 初始注册（未知视觉能力时不标注）；有 ctx 的时机再收敛
+	registerExploreTool(pi, false);
+	// 会话开始时探测当前子模型视觉能力并重注册标注（下个 turn 生效）
+	pi.on("session_start", async (_event, ctx) => {
+		registerExploreTool(pi, detectExploreVision(ctx));
 	});
 
 	// /explore-config：配置 explore 子代理使用的模型
@@ -326,5 +424,113 @@ export default function (pi: ExtensionAPI) {
 		displayName: "explore 子模型",
 		getSetting: () => exploreModelSetting,
 		setSetting: setExploreModelSetting,
+		// 设置变更后立即按新模型重注册视觉标注
+		onSettingChanged: (ctx) => registerExploreTool(pi, detectExploreVision(ctx)),
 	});
+}
+
+/**
+ * explore 执行主体：解析子模型 → 并行派子代理 → 汇总结构化报告。
+ * 由 buildExploreToolDefinition 的 execute 闭包调用。
+ */
+async function executeExplore(
+	ctx: ExtensionContext,
+	params: { tasks: string[] },
+	signal: AbortSignal | undefined,
+	onUpdate: AgentToolUpdateCallback<ExploreDetails> | undefined,
+): Promise<AgentToolResult<ExploreDetails>> {
+	const fail = (text: string): AgentToolResult<ExploreDetails> => ({
+		content: [{ type: "text", text }],
+		details: { model: "", total: 0, succeeded: 0, tasks: [] },
+	});
+
+	const model = pickExploreModel(ctx);
+	if (!model) {
+		return fail("explore：找不到可用的子模型（没有任何已配置认证的模型）。请改用 read/grep 自行探索。");
+	}
+
+	// 防御：schema 已用 maxItems 硬拦（超出直接校验失败回给 AI），此处仅防非校验路径
+	const truncatedNote =
+		params.tasks.length > MAX_TASKS ? `\n（注意：只执行了前 ${MAX_TASKS} 个任务，其余已忽略）` : "";
+	const tasks = params.tasks.slice(0, MAX_TASKS);
+	const modelName = `${model.provider}/${model.id}`;
+
+	const toolCallCounts = new Array<number>(tasks.length).fill(0);
+	const retryCounts = new Array<number>(tasks.length).fill(0);
+	const doneFlags = new Array<boolean>(tasks.length).fill(false);
+	const taskResults = new Array<TaskResult | undefined>(tasks.length).fill(undefined);
+	const doneCount = () => doneFlags.filter(Boolean).length;
+	const limiter = new AdaptiveLimiter(CONCURRENCY);
+	/** 进度展示：活跃任务在前（含工具调用次数/重试中），已完成的折叠成一行汇总 */
+	const report = () => {
+		const active: string[] = [];
+		let doneOk = 0;
+		let doneFail = 0;
+		tasks.forEach((t, i) => {
+			const label = t.length > 24 ? t.slice(0, 24) + "…" : t;
+			if (!doneFlags[i]) {
+				const retryNote = retryCounts[i] > 0 ? ` · ↻重试${retryCounts[i]}/${TASK_RETRIES}` : "";
+				active.push(`  ${i + 1}. [${toolCallCounts[i]} 次工具调用${retryNote}] ${label}`);
+			} else if (taskResults[i]?.ok) {
+				doneOk++;
+			} else {
+				doneFail++;
+			}
+		});
+		const perTask = [
+			...active,
+			...(doneOk + doneFail > 0 ? [`  · 已完成 ${doneOk} 个${doneFail ? `（✗ 失败 ${doneFail}）` : ""}`] : []),
+		].join("\n");
+		onUpdate?.({
+			content: [{ type: "text", text: `子代理探索中（${modelName} · 并发 ${limiter.limit}/${CONCURRENCY}）：\n${perTask}` }],
+			details: { model: modelName, total: tasks.length, succeeded: 0, tasks: [] },
+		});
+		ctx.ui.setStatus("explore", `🔎 ${doneCount()}/${tasks.length} · ⚙${limiter.limit}`);
+	};
+	report();
+
+	// 动态并发执行：pool 只做调度（无固定上限），实际并发由 limiter 自适应控制——
+	// 可重试错误 → lower() 收并发 + 指数退避后重试；成功 → raise() 逐步升回上限
+	const results = await pool(tasks, tasks.length, async (task: string, i: number) => {
+		await limiter.acquire();
+		try {
+			for (let attempt = 0; ; attempt++) {
+				const r = await runSubAgent(ctx, model, task, signal, () => {
+					toolCallCounts[i]++;
+					report();
+				});
+				taskResults[i] = r;
+				if (r.ok || !isRetryable(r.error) || attempt >= TASK_RETRIES || signal?.aborted) return r;
+				retryCounts[i] = attempt + 1;
+				limiter.lower();
+				report();
+				try {
+					await sleep(Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_MAX_MS), signal);
+				} catch {
+					return { task, ok: false, error: "已中止（用户取消）" };
+				}
+			}
+		} finally {
+			if (taskResults[i]?.ok) limiter.raise();
+			limiter.release();
+			doneFlags[i] = true;
+			report();
+		}
+	});
+
+	const succeeded = results.filter((r) => r.ok).length;
+	setStatusWithTTL(ctx, "explore", `🔎 ✓ ${succeeded}/${results.length}`, 6_000);
+	const sections = results.map((r) =>
+		r.ok ? `## 任务：${r.task}\n${r.report}` : `## 任务：${r.task}\n⚠ ${r.error}`,
+	);
+	const text = [
+		`探索完成：${succeeded}/${results.length} 个任务成功（子模型 ${modelName}）${truncatedNote}`,
+		"",
+		...sections,
+	].join("\n\n");
+
+	return {
+		content: [{ type: "text", text }],
+		details: { model: modelName, total: results.length, succeeded, tasks: results },
+	};
 }
