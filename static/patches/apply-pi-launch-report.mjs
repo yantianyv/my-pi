@@ -1,35 +1,59 @@
 #!/usr/bin/env node
 /**
- * pi 启动垫片补丁：崩溃取证增强（报告级黑匣子）
+ * pi 启动垫片补丁 v2：崩溃取证（报告 + stderr 落盘 + 退出码）
  *
- * 背景：教研室项目 pi 反复无声崩溃（进程消失、无 JS 异常、无 WER 记录、无 exit 事件），
- * crash-log 扩展只能抓 JS 层异常。本补丁给 npm 生成的 pi 启动垫片注入 NODE_OPTIONS：
- * - --max-old-space-size=8192：排除 V8 堆上限 OOM 类死因（若真是 OOM 顺便直接治好）
- * - --report-on-fatalerror：V8 致命错误（OOM abort / CHECK 失败等，不触发 JS 回调的层级）
- *   自动生成完整诊断报告（JSON：堆统计 + 原生栈 + JS 栈）到 ~/.pi/agent/reports/
+ * 背景：教研室/成绩分析项目 pi 反复无声崩溃，签名一致——进程消失、无 JS 异常
+ * （crash-log 扩展零记录）、无 V8 报告（--report-on-fatalerror 零报告）、无 WER 事件。
+ * 实测本机 WER 对 node 的 abort 不产生事件、--report-on-fatalerror 也不触发（两者都被
+ * 验证过），因此「abort 类原生死亡」（node 内部断言 / V8 CHECK / llhttp 崩溃）在本机
+ * 原本完全零痕迹。唯一确定能抓到它的通道：abort 死前会往 stderr 打原生调用栈。
  *
- * 打补丁对象：npm 全局 bin 下的 pi.cmd / pi.ps1 / pi（sh）三个垫片；幂等（带标记跳过）。
- * pi 升级（npm i -g）会重写垫片，届时需重跑本补丁（与其他 patches 同惯例）。
+ * 本补丁给 npm 生成的 pi 三个启动垫片（pi.cmd / pi.ps1 / pi）注入：
+ * - --max-old-space-size=8192：排除 V8 堆上限 OOM
+ * - --report-on-fatalerror：V8 致命错误诊断报告 → ~/.pi/agent/reports/
+ * - stderr 追加落盘 → ~/.pi/agent/pi-stderr-<时间戳>.log（每次启动独立文件，避免多实例写锁；
+ *   cmd/sh 用共享追加不受锁影响；ps1 保留 30 天，自动清理旧文件；abort 类死亡的原生栈会落在这里）
+ * - pi.ps1 额外记录 [START]/[EXIT] 行（区分正常/异常退出）
+ *
+ * 幂等（检测到 v2 标记跳过；自动清理 v1 注入行）。pi 升级（npm i -g）会重写垫片，
+ * 届时需重跑本补丁（与其他 patches 同惯例）。
  *
  * 用法：node static/patches/apply-pi-launch-report.mjs
  */
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-const MARKER = "PI-REPORT-PATCH";
-const REPORT_DIR = join(homedir(), ".pi", "agent", "reports");
+const MARKER = "PI-CRASH-FORENSICS";
+const DIR = join(homedir(), ".pi", "agent");
+const REPORT_DIR = join(DIR, "reports");
+const ERRLOG = join(DIR, "pi-stderr.log");
 const NODE_OPTS = "--max-old-space-size=8192 --report-on-fatalerror";
 
-// npm 全局 bin 目录（与 pi 同级）
+/** 清理 v1/v2 历史注入行（按标记与特征行过滤） */
+function stripOld(s) {
+	return s
+		.split(/\r?\n/)
+		.filter(
+			(l) =>
+				!l.includes("PI-REPORT-PATCH") &&
+				!l.includes("PI-CRASH-FORENSICS") &&
+				!l.includes("--report-on-fatalerror") &&
+				!l.includes("--report-directory") &&
+				!l.includes("pi-stderr.log") &&
+				!l.includes(".pi/agent/reports") &&
+				!l.includes(".pi\\\\agent\\\\reports") &&
+				!l.includes("agent\\reports"),
+		)
+		.join("\n");
+}
+
 function npmBinDir() {
 	try {
 		const prefix = execFileSync("npm", ["prefix", "-g"], { encoding: "utf8" }).trim();
 		return join(prefix, process.platform === "win32" ? "" : "bin");
 	} catch {
-		// 兜底：从本补丁位置推不出，退回 npm 全局默认
 		return process.env.APPDATA ? join(process.env.APPDATA, "npm") : join(homedir(), ".npm-global", "bin");
 	}
 }
@@ -38,16 +62,23 @@ const BIN = npmBinDir();
 mkdirSync(REPORT_DIR, { recursive: true });
 let patched = 0;
 
-// --- pi.cmd：SETLOCAL 后注入 NODE_OPTIONS ---
+// --- pi.cmd ---
 const cmdPath = join(BIN, "pi.cmd");
 try {
-	let s = readFileSync(cmdPath, "utf8");
+	let s = stripOld(readFileSync(cmdPath, "utf8"));
 	if (s.includes(MARKER)) {
-		console.log(`[跳过] ${cmdPath} 已打补丁`);
+		console.log(`[跳过] ${cmdPath} 已是 v2`);
 	} else {
-		const inject = `SETLOCAL\r\nREM ${MARKER}: 崩溃取证（大堆 + 致命错误诊断报告），pi 升级后重跑 static/patches/apply-pi-launch-report.mjs\r\nIF NOT EXIST "${REPORT_DIR}" MD "${REPORT_DIR}"\r\nSET "NODE_OPTIONS=${NODE_OPTS} --report-directory=${REPORT_DIR}"\r\n`;
-		if (!s.includes("SETLOCAL")) throw new Error("pi.cmd 结构不符合预期（无 SETLOCAL）");
+		const inject = [
+			"SETLOCAL",
+			`REM ${MARKER} v2: 崩溃取证（大堆+诊断报告+stderr落盘），pi 升级后重跑 static/patches/apply-pi-launch-report.mjs`,
+			`IF NOT EXIST "${REPORT_DIR}" MD "${REPORT_DIR}"`,
+			`SET "NODE_OPTIONS=${NODE_OPTS} --report-directory=${REPORT_DIR}"`,
+		].join("\r\n");
 		s = s.replace("SETLOCAL", inject);
+		// node 调用行尾部挂 stderr 追加重定向 + 统一回 CRLF（批处理 LF-only 有 GOTO 标签风险）
+		s = s.replace(/("%_prog%"[^&\r\n]*%*)(\r?\n)$/, '$1 2>>"' + ERRLOG + '"\r\n');
+		if (!s.includes("\r\n")) s = s.replace(/\n/g, "\r\n");
 		writeFileSync(cmdPath, s);
 		patched++;
 		console.log(`[完成] ${cmdPath}`);
@@ -56,15 +87,34 @@ try {
 	console.error(`[失败] ${cmdPath}: ${e.message}`);
 }
 
-// --- pi.ps1：$basedir 赋值后注入 ---
+// --- pi.ps1 ---
 const ps1Path = join(BIN, "pi.ps1");
 try {
-	let s = readFileSync(ps1Path, "utf8");
+	let s = stripOld(readFileSync(ps1Path, "utf8"));
 	if (s.includes(MARKER)) {
-		console.log(`[跳过] ${ps1Path} 已打补丁`);
+		console.log(`[跳过] ${ps1Path} 已是 v2`);
 	} else {
-		const inject = `\n# ${MARKER}: 崩溃取证（大堆 + 致命错误诊断报告），pi 升级后重跑 static/patches/apply-pi-launch-report.mjs\nif (-not (Test-Path "${REPORT_DIR.replace(/\\/g, "\\\\")}")) { New-Item -ItemType Directory -Path "${REPORT_DIR.replace(/\\/g, "\\\\")}" | Out-Null }\n$env:NODE_OPTIONS = "${NODE_OPTS} --report-directory=${REPORT_DIR.replace(/\\/g, "\\\\")}"\n`;
-		s = s.replace("$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent", "$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent" + inject);
+		const rep = String(REPORT_DIR).replace(/\\/g, "\\\\");
+		const log = String(ERRLOG).replace(/\\/g, "\\\\");
+		const inject = [
+			`# ${MARKER} v2: 崩溃取证（大堆+诊断报告+stderr落盘），pi 升级后重跑 static/patches/apply-pi-launch-report.mjs`,
+			`if (-not (Test-Path "${rep}")) { New-Item -ItemType Directory -Path "${rep}" | Out-Null }`,
+			`$env:NODE_OPTIONS = "${NODE_OPTS} --report-directory=${rep}"`,
+			`$piStderr = "$env:USERPROFILE\\.pi\\agent\\pi-stderr-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date)  # 每次启动独立文件，避免多实例写锁冲突（cmd 的 2>> 是共享追加不受影响）`,
+			`Get-ChildItem "$env:USERPROFILE\\.pi\\agent\\pi-stderr-*.log" -ErrorAction SilentlyContinue | Where-Object LastWriteTime -lt (Get-Date).AddDays(-30) | Remove-Item -ErrorAction SilentlyContinue`,
+			`Add-Content -Path $piStderr -Value "[START $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') args=$args]"`,
+		].join("\n");
+		s = s.replace("$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent", "$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent\n" + inject);
+		// 逐行处理：含 cli.js" $args 的调用行尾挂重定向；$ret=$LASTEXITCODE 后插 EXIT 记录
+		s = s
+			.split("\n")
+			.map((l) => (l.includes('cli.js" $args') && !l.includes("2>>") ? l + " 2>> $piStderr" : l))
+			.flatMap((l) =>
+				l.trim() === "$ret=$LASTEXITCODE"
+					? [l, `  Add-Content -Path $piStderr -Value "[EXIT $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') code=$LASTEXITCODE]"`]
+					: [l],
+			)
+			.join("\n");
 		writeFileSync(ps1Path, s);
 		patched++;
 		console.log(`[完成] ${ps1Path}`);
@@ -73,15 +123,20 @@ try {
 	console.error(`[失败] ${ps1Path}: ${e.message}`);
 }
 
-// --- pi（sh）：basedir 计算后注入 export ---
+// --- pi (sh) ---
 const shPath = join(BIN, "pi");
 try {
-	let s = readFileSync(shPath, "utf8");
+	let s = stripOld(readFileSync(shPath, "utf8"));
 	if (s.includes(MARKER)) {
-		console.log(`[跳过] ${shPath} 已打补丁`);
+		console.log(`[跳过] ${shPath} 已是 v2`);
 	} else {
-		const inject = `\n# ${MARKER}: 崩溃取证（大堆 + 致命错误诊断报告），pi 升级后重跑 static/patches/apply-pi-launch-report.mjs\nmkdir -p "${REPORT_DIR}" 2>/dev/null\nexport NODE_OPTIONS="${NODE_OPTS} --report-directory=${REPORT_DIR}"\n`;
-		s = s.replace('case `uname` in', inject + "case `uname` in");
+		const inject = [
+			`# ${MARKER} v2: 崩溃取证（大堆+诊断报告+stderr落盘），pi 升级后重跑 static/patches/apply-pi-launch-report.mjs`,
+			`mkdir -p "${REPORT_DIR}" 2>/dev/null`,
+			`export NODE_OPTIONS="${NODE_OPTS} --report-directory=${REPORT_DIR}"`,
+		].join("\n");
+		s = s.replace("case `uname` in", inject + "\ncase `uname` in");
+		s = s.replaceAll(/(exec "?\$basedir\/node"?|exec node)(\s+"\$basedir\/node_modules\/.*?cli\.js" "\$@")/g, "$1$2 2>>\"" + ERRLOG + '"');
 		writeFileSync(shPath, s);
 		patched++;
 		console.log(`[完成] ${shPath}`);
@@ -90,5 +145,5 @@ try {
 	console.error(`[失败] ${shPath}: ${e.message}`);
 }
 
-console.log(`\n共补丁 ${patched} 个垫片。诊断报告目录：${REPORT_DIR}`);
-console.log("下次若再无声崩溃，查看该目录下的 report-*.json（含堆统计与原生/JS 栈）。");
+console.log(`\n共补丁 ${patched} 个垫片。诊断报告：${REPORT_DIR}；stderr 日志：${ERRLOG}`);
+console.log("下次无声崩溃后：优先看 pi-stderr.log 尾部（abort 类原生栈会落在这）。");
