@@ -52,9 +52,13 @@ const OptionSchema = Type.Object({
 
 const QuestionSchema = Type.Object({
 	id: Type.Optional(Type.String({ description: "题目 id（缺省自动 q1/q2…）" })),
-	type: StringEnum([...QUESTION_TYPES], {
-		description: "题型：single 单选 / multi 多选 / text 简答 / confirm 是否 / rating 评分 / number 数字",
-	}),
+	// type 不强制：漏传时由 normalizeQuestionnaire 容错推断（有 options → single，否则 → text），
+	// schema 层必填会让 pi 校验直接拦下本可救回的调用（容错推断形同虚设）
+	type: Type.Optional(
+		StringEnum([...QUESTION_TYPES], {
+			description: "题型：single 单选 / multi 多选 / text 简答 / confirm 是否 / rating 评分 / number 数字（漏传时自动推断：有 options 视为单选，否则简答）",
+		}),
+	),
 	question: Type.String({ description: "完整的问题文本（清晰、具体，以问号结尾）" }),
 	description: Type.Optional(Type.String({ description: "补充说明（背景、权衡），帮助用户决策" })),
 	options: Type.Optional(
@@ -70,6 +74,22 @@ const QuestionSchema = Type.Object({
 	required: Type.Optional(Type.Boolean({ description: "是否必答（默认 true）；选答题用户可跳过" })),
 });
 
+/** 自动标题最大长度（取第一题问句首行截断） */
+const AUTO_TITLE_MAX = 30;
+
+/** title 缺省兜底：取第一题问句首行截断做标题（模型偶尔漏传 title，不因小失误让整次创建失败） */
+function deriveTitle(questions: unknown[]): string {
+	for (const q of questions) {
+		const raw = (q as { question?: unknown })?.question;
+		const text = typeof raw === "string" ? raw.trim() : "";
+		if (!text) continue;
+		const oneLine = text.split(/\r?\n/)[0]!.trim();
+		const chars = Array.from(oneLine);
+		return chars.length > AUTO_TITLE_MAX ? `${chars.slice(0, AUTO_TITLE_MAX).join("")}…` : oneLine;
+	}
+	return "未命名问卷";
+}
+
 interface AskDetails {
 	status: "submitted" | "shelved" | "text-fallback" | "cancelled";
 	title: string;
@@ -84,6 +104,8 @@ export function registerAskTool(pi: ExtensionAPI): void {
 		label: "问卷",
 		description:
 			"创建一份问卷向用户批量提问（单选/多选/简答/判断/评分/数字），或作废（action=cancel）不再需要的待答问卷。" +
+			"questions 必填（1~12 题，每题含完整问句 question，题型 type 建议明确给出——单/多选另带 options 2~8 个；type 漏传时自动推断：有 options 视为单选，否则简答）；title 建议提供，" +
+				"漏传时自动取第一题问句截断，不会报错。" +
 			"适用：需要用户在多个方案中决策、或有多个问题堆积需要一次性确认。问卷会以整屏页面立即展示给用户作答：" +
 			"用户 Enter 提交（答案作为工具结果返回），或 Esc 搁置（草稿保存，用户稍后可通过 /answer 命令继续回答，" +
 			"答案届时会以用户消息形式送达）。发现问错或搁置草稿过时时，用 action=cancel + id 作废（问卷即文件，" +
@@ -91,6 +113,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 		promptSnippet: "创建问卷向用户批量提问（单选/多选/简答/判断/评分/数字），或作废待答问卷",
 		promptGuidelines: [
 			"需要用户从多个方案中抉择、或有多个问题要确认时，用 ask 工具创建问卷，而不是在正文里罗列问题让用户逐条回复。",
+			"questions 必填（每题含 question 完整问句，题型 type 建议明确给出；single/multi 必带 options 2~8 个，不要加「其他」会自动追加）；type 漏传时自动推断（有 options 视为单选，否则简答），不会报错；title 建议提供（一句话概括要决定什么），漏了会自动取第一题问句，不会报错。",
 			"ask 工具一次只创建一份问卷，不要与其他 ask 调用放在同一批；用户可能搁置问卷稍后回答，收到「已搁置」结果时不要追问，简要说明后结束本轮回复。",
 		],
 		parameters: Type.Object({
@@ -102,9 +125,11 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			id: Type.Optional(
 				Type.String({ description: "问卷标识：create 时为语义化英文 slug（用作文件名，缺省自动生成）；cancel 时必填（要作废的问卷 id）" }),
 			),
-			title: Type.Optional(Type.String({ description: "问卷标题（create 必填；一句话概括这份问卷要决定什么）" })),
+			title: Type.Optional(
+				Type.String({ description: "问卷标题（一句话概括这份问卷要决定什么；建议提供，缺省时自动取第一题问句截断）" }),
+			),
 			description: Type.Optional(Type.String({ description: "问卷整体背景说明" })),
-			questions: Type.Optional(Type.Array(QuestionSchema, { minItems: 1, maxItems: 12, description: "题目列表（create 必填，1~12 题）" })),
+			questions: Type.Optional(Type.Array(QuestionSchema, { minItems: 1, maxItems: 12, description: "题目列表（create 必填，1~12 题；每题必须含 question 与 type）" })),
 		}),
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -139,11 +164,14 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			}
 
 			// ---- create（默认）----
-			if (!params.title?.trim()) throw new Error("ask 创建问卷需要 title（问卷标题）");
-			if (!params.questions?.length) throw new Error("ask 创建问卷需要 questions（至少 1 题）");
+			if (!params.questions?.length) {
+				throw new Error("ask 创建问卷需要 questions（至少 1 题，每题含完整问句 question 与题型 type）");
+			}
+			// title 容错：模型偶尔漏传，自动取第一题问句截断，不让整次创建失败
+			const title = params.title?.trim() || deriveTitle(params.questions);
 
 			const fallbackId = params.id?.trim() || `survey-${Date.now().toString(36)}`;
-			const norm = normalizeQuestionnaire({ ...params, title: params.title, questions: params.questions, createdAt: new Date().toISOString() }, { fallbackId });
+			const norm = normalizeQuestionnaire({ ...params, title, questions: params.questions, createdAt: new Date().toISOString() }, { fallbackId });
 			if (!norm.ok) throw new Error(`问卷参数无效：${norm.error}`);
 			const q = norm.q;
 
@@ -209,9 +237,24 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			const a = args as { action?: string; id?: string; title?: string; questions?: unknown[] };
 			if (a.action === "cancel") return new Text(`${theme.fg("warning", "🗑 作废问卷")} 「${a.id ?? ""}」`, 0, 0);
 			const n = Array.isArray(a.questions) ? a.questions.length : 0;
-			return new Text(`${theme.fg("accent", "📝 创建问卷")} 「${a.title ?? ""}」${theme.fg("dim", `（${n} 题）`)}`, 0, 0);
+			const title = a.title?.trim() || (Array.isArray(a.questions) ? deriveTitle(a.questions) : "");
+			return new Text(
+				`${theme.fg("accent", "📝 创建问卷")} 「${title}」${a.title?.trim() ? "" : theme.fg("dim", "（自动标题）")}${theme.fg("dim", `（${n} 题）`)}`,
+				0,
+				0,
+			);
 		},
-		renderResult(result, _options, theme) {
+		renderResult(result, _options, theme, context) {
+			// 执行失败（缺 title/questions/参数无效/问卷不存在等）时 details 为空，
+			// 必须如实展示错误原因；否则所有失败都会被下面的 else 分支误报成「无 UI 降级」。
+			if (context.isError) {
+				const text = result.content
+					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+					.map((c) => c.text)
+					.join("\n")
+					.trim();
+				return new Text(theme.fg("error", `✗ ${text || "问卷操作失败"}`), 0, 0);
+			}
 			const d = result.details as AskDetails | undefined;
 			let msg: string;
 			if (d?.status === "submitted") msg = theme.fg("success", `✓ 用户已提交（${d.answered}/${d.total}）`);

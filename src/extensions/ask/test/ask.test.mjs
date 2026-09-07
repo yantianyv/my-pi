@@ -15,6 +15,8 @@
  * - 场景 F：手写 JSON（缺省字段推断）+ 损坏文件（invalid 报告）
  * - 场景 G：action=cancel 作废搁置问卷（文件删除 + 状态清除 + 不存在报错）
  * - 场景 H：长题干/长选项说明折行完整展示（不截断，尾部标记可见）
+ * - 场景 I：执行失败如实渲染真实原因（不误报「无 UI 降级」）
+ * - 场景 J：title 缺省自动取第一题问句截断（不再报错）
  * - 渲染不变量：整屏页每次 render 恰好 termRows 行、每行恰好 width 列（全屏遮蔽前提）
  *
  * 用法：node src/extensions/ask/test/ask.test.mjs（仓库根目录执行）
@@ -384,14 +386,14 @@ async function main() {
 			errMsg = e.message;
 		}
 		check("G: cancel 缺 id 报错", errMsg.includes("id"));
-		// create 缺 title/questions → 报错
+		// create 缺 questions → 报错（title 缺省已改为自动取第一题问句，不再报错，见场景 J）
 		errMsg = "";
 		try {
 			await tool.execute("tc8", { id: "x" }, null, null, ctx);
 		} catch (e) {
 			errMsg = e.message;
 		}
-		check("G: create 缺 title 报错", errMsg.includes("title"));
+		check("G: create 缺 questions 报错", errMsg.includes("questions"));
 		rmSync(dir, { recursive: true, force: true });
 	}
 
@@ -437,6 +439,68 @@ async function main() {
 		check("H: 折行后无截断省略号", !text.includes("…") && !text.includes("..."));
 		comp.handleInput(K.escape);
 		await execP;
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 I：执行失败如实渲染（不误报「无 UI 降级」）----
+	console.log("场景 I：执行失败如实渲染错误原因");
+	{
+		const pi = makePi();
+		mod.default(pi);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		// 缺 questions 抛错：模拟 agent-loop 的 createErrorToolResult 传给 renderResult（details 为空）
+		const errText = "ask 创建问卷需要 questions（至少 1 题，每题含完整问句 question 与题型 type）";
+		const errComp = tool.renderResult(
+			{ content: [{ type: "text", text: errText }], details: undefined },
+			{},
+			themeMock,
+			{ isError: true, args: {} },
+		);
+		const errLine = errComp.render(TERM_COLS).map((l) => l.trim()).join("");
+		check("I: 失败显示真实原因", errLine.includes("需要 questions"));
+		check("I: 失败不再误报「无 UI 降级」", !errLine.includes("无 UI") && !errLine.includes("无交互 UI"));
+		// 非错误路径（真·无 UI 降级）仍显示降级文案
+		const okComp = tool.renderResult(
+			{ content: [{ type: "text", text: "x" }], details: { status: "text-fallback", title: "t", total: 1 } },
+			{},
+			themeMock,
+			{ isError: false, args: {} },
+		);
+		check("I: 真降级仍显示降级文案", okComp.render(TERM_COLS).map((l) => l.trim()).join("").includes("转为文字提问"));
+	}
+
+	// ---- 场景 J：title 缺省自动取第一题问句（模型偶尔漏传 title，不再让整次创建失败）----
+	console.log("场景 J：title 缺省自动取第一题问句");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const longQ = "这是一个超过三十个字符的超长问题，用来验证自动标题会在合适的位置截断并带上省略号结尾标记XYZ";
+		const execP = tool.execute(
+			"tc10",
+			{ id: "auto-title", questions: [{ type: "single", question: longQ, options: [{ label: "a" }, { label: "b" }] }] },
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		const text = comp.render(TERM_COLS).map((l) => l.trim()).join("");
+		check("J: 页面标题取第一题问句", text.includes("这是一个超过三十个字符的超长问题"));
+		comp.handleInput(K.escape);
+		const result = await execP;
+		check("J: details.title 为自动标题（带截断省略号）", typeof result.details?.title === "string" && result.details.title.endsWith("…"));
+		const file = join(dir, ".pi", "questionnaires", "auto-title.json");
+		const saved = JSON.parse(readFileSync(file, "utf8"));
+		check("J: 自动标题已落盘且长度受控", typeof saved.title === "string" && saved.title.endsWith("…") && Array.from(saved.title).length === 31);
+		// renderCall：title 缺省时显示自动标题 + 标记
+		const callComp = tool.renderCall({ questions: [{ question: longQ }] }, themeMock);
+		const callText = callComp.render(TERM_COLS).map((l) => l.trim()).join("");
+		check("J: renderCall 显示自动标题与标记", callText.includes("创建问卷") && callText.includes("自动标题"));
 		rmSync(dir, { recursive: true, force: true });
 	}
 
