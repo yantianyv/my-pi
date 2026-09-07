@@ -12,7 +12,7 @@ node install.js           # 一键：自动 npm install（首次，需网络）�
 node install.js --dry-run # 先预览要做什么，不修改
 ```
 
-安装后重启 pi 或执行 `/reload` 生效。首次运行会自动拉取构建依赖（esbuild）并构建产物，之后每次运行都是：构建 + 安装一步到位。**伪编译架构**：源码层 `src/extensions/shared/` 共享模块在构建时内联进各扩展产物——原始代码高复用、编译产物零耦合；`src/extensions/hud/` 多文件扩展也被合并为单个 `hud.ts`（详见「伪编译架构」节）。另外 `src/vendor/` 收录三个社区官方插件源码副本（pi-subagents / pi-btw / pi-rtk-optimizer，均 MIT 原样收录含 LICENSE），install.js 一并部署（见「官方插件」节）。
+安装后重启 pi 或执行 `/reload` 生效。首次运行会自动拉取构建依赖（esbuild）并构建产物，之后每次运行都是：构建 + 安装一步到位。**伪编译架构**：源码层 `src/extensions/shared/` 共享模块在构建时内联进各扩展产物——原始代码高复用、编译产物零耦合；`src/extensions/hud/` 多文件扩展也被合并为单个 `hud.ts`（详见「伪编译架构」节）。另外 `src/vendor/` 收录一个社区插件源码副本（pi-rtk-optimizer，MIT 原样收录含 LICENSE），install.js 一并部署（见「官方插件」节）。
 
 ## 包含内容
 
@@ -21,12 +21,10 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `themes/` | `matrix.json` — 黑客帝国风格荧光绿主题 | `~/.pi/agent/themes/` |
 | `extensions/` | `hud/`（源码多文件：`index.ts` + `hud-core.ts` + `hud-balance.ts` + `hud-cost.ts` + `hud-git.ts`；build.js 合并为单文件 `hud.ts` 产物）— 3 行 HUD 状态栏，见下 | `~/.pi/agent/extensions/` |
 | `extensions/` | `btf-think.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking... → Thinking....，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
+| `extensions/` | `btw/` — `/btw` 旁支问答：侧栏浮层多轮追问、`m` 转正附带、`/btw-config` 模型 auto 最便宜故障转移（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`） | `~/.pi/agent/extensions/` |
 | `extensions/` | `task-alert.ts` — 多状态提醒：五状态五音效 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `perm-gate.ts` — bash 命令三级权限门：黑名单人工复核 / 白名单放行 / AI 审核（见下） | `~/.pi/agent/extensions/` |
-| `vendor/` | `pi-subagents` — 子代理委派（scout/reviewer/worker/oracle 等内建角色 + FleetView 舰队面板，替代原自研 explore-agent） | `~/.pi/agent/vendor/` |
-| `vendor/` | `pi-btw` — `/btw` 旁支问答（真实子会话、/btw:tangent、inject/summarize 回注，替代原自研 btw） | `~/.pi/agent/vendor/` |
-| `vendor/` | `pi-rtk-optimizer` — bash 输出多阶段压缩 + rtk 命令改写（替代原自研 token-saver） | `~/.pi/agent/vendor/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `qr.ts` — 二维码：`qr_encode` 编码（显示到 UI + PNG 落盘）+ `qr_decode` 解码 + `/qr` 命令（见下） | `~/.pi/agent/extensions/` |
@@ -153,13 +151,22 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 
 **新增供应商适配**：在 `hud/balance.ts` 的 `BALANCE_ADAPTERS` 注册表里添加一个 `BalanceAdapter` 即可（参考 `deepseekAdapter` 或 `kimiCodingAdapter`）。余额/余量在 `fetch` 里实现；右下角消耗统计在 `rateText(ctx, now)` 里单独实现（按量付费用 `hud/cost.ts` 共享的 `meteredRateText`，订阅制可返回 token 消耗，不需要则返回 `null`）。
 
+## 旁支问答（src/extensions/btw/）
+
+Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行中打开右侧浮层做临时问答，不写入会话历史、主会话零污染：
+
+- **`/btw <问题>`**：打开浮层立即提问；面板内可多轮追问（Enter 输入，最多 6 轮），上下文 = 主会话（含压缩结果）+ 面板内历次问答；流式显示回答，`Esc` 关闭并中止，`↑↓` 滚动查看
+- **`m` 转正**：面板内按 `m` 把全部问答打包暂存，随下一条交互消息附带发送（输入框只见自己文本 + 「📎 已附带」提示，不立即发出，可控可撤）
+- **只读工具**：始终携带 read / ls / grep / find（无 bash）——「xx 函数在哪定义」类问题可直接查证代码，只读不写
+- **`/btw-config`**：模型选择——默认 auto = 已认证可用模型中最便宜的，按价格顺序故障转移（调用失败自动换下一个更贵的重试）；另有 auto-not-free 与任意 provider/modelId 可选，支持关键词搜索；持久化到 `~/.pi/agent/btw-config.json`
+
+实现：问答跑 pi-agent-core 官方 agentLoop（与 /init 子代理同构），认证走 `ctx.modelRegistry.getApiKeyAndHeaders()`；消息序列全量降级清洗（toolResult 降 user、剥 tool_use/thinking、合并同角色、保证 user 结尾），兼容 OpenAI/Anthropic 两类端点；浮层走 `ctx.ui.custom` overlay 模式。曾收录官方 pi-btw 替代（2026-08-22），实测多轮追问/上下文携带有 bug 于 2026-09-07 回退自研版（出处与借鉴评估见 `src/vendor/README.md` 回退记录）。
+
 ## 官方插件（src/vendor/，收录社区实现）
 
-经过与 [pi 包目录](https://pi.dev/packages) 的逐一对比（2026-08），三个自研扩展被更成熟的社区实现替代，源码原样收录进 `src/vendor/`（均 MIT，含各自 LICENSE 与出处表，对齐更新流程见 `src/vendor/README.md`）：
+目前仅收录 **[pi-rtk-optimizer](https://github.com/MasuRii/pi-rtk-optimizer)**（替代 token-saver）：bash/read/grep 输出多阶段压缩（ANSI 剥离、测试聚合、构建过滤、git 压缩、linter 聚合、搜索分组、截断）+ `/rtk stats` 节省统计 + `/rtk` 设置面板；命令改写委托外部 `rtk` 二进制（[rtk-ai/rtk](https://github.com/rtk-ai/rtk)，Apache-2.0，已装于 `%APPDATA%\npm\rtk.exe`，缺失时自动旁路仅留压缩）。
 
-- **[pi-subagents](https://github.com/nicobailon/pi-subagents)**（替代 explore-agent）：子代理委派——内建 scout（代码侦察）/researcher/worker/reviewer/oracle 等角色，支持并行、后台运行、FleetView 舰队面板（`/subagents-fleet`）、`/council` 多模型议事；用自然语言即可调用（「用 scout 探索一下这个仓库」）。
-- **[pi-btw](https://github.com/dbachelder/pi-btw)**（替代 btw）：`/btw` 旁支问答——真实子会话（带 read/bash/edit 工具）、`/btw:tangent` 无上下文分支、`/btw:inject` / `/btw:summarize` 回注主会话、隐藏线程跨 `/reload` 持久化、`Alt+/` 焦点切换。
-- **[pi-rtk-optimizer](https://github.com/MasuRii/pi-rtk-optimizer)**（替代 token-saver）：bash/read/grep 输出多阶段压缩（ANSI 剥离、测试聚合、构建过滤、git 压缩、linter 聚合、搜索分组、截断）+ `/rtk stats` 节省统计 + `/rtk` 设置面板；命令改写委托外部 `rtk` 二进制（[rtk-ai/rtk](https://github.com/rtk-ai/rtk)，Apache-2.0，已装于 `%APPDATA%\npm\rtk.exe`，缺失时自动旁路仅留压缩）。
+其余两个曾收录的包均已回退自研版（pi-subagents → explore-agent，2026-08-30；pi-btw → btw，2026-09-07），出处与借鉴评估见 `src/vendor/README.md` 回退记录。
 
 ## 多状态提醒（src/extensions/task-alert.ts）
 
@@ -328,8 +335,6 @@ rm ~/.pi/agent/extensions/workflow-mgr.ts
 rm ~/.pi/agent/extensions/ask.ts
 rm ~/.pi/agent/sounds/task_complete.wav
 # 官方插件（vendor）：pi remove 按本地路径移除（同时清 settings.json packages 登记）
-pi remove ~/.pi/agent/vendor/pi-subagents
-pi remove ~/.pi/agent/vendor/pi-btw
 pi remove ~/.pi/agent/vendor/pi-rtk-optimizer
 rm -rf ~/.pi/agent/vendor
 ```

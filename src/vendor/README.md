@@ -13,9 +13,12 @@
 
 | 目录 | npm 包 | 收录版本 | 上游仓库 | License | 替代的自研扩展 | 收录日期 | 本地改动 |
 |---|---|---|---|---|---|---|---|
-| pi-subagents | [pi-subagents](https://www.npmjs.com/package/pi-subagents) | 0.53.0 | [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) | MIT | explore-agent | 2026-08-22 | 无 |
-| pi-btw | [pi-btw](https://www.npmjs.com/package/pi-btw) | 0.4.1 | [dbachelder/pi-btw](https://github.com/dbachelder/pi-btw) | MIT | btw | 2026-08-22 | 无 |
 | pi-rtk-optimizer | [pi-rtk-optimizer](https://www.npmjs.com/package/pi-rtk-optimizer) | 0.9.0 | [MasuRii/pi-rtk-optimizer](https://github.com/MasuRii/pi-rtk-optimizer) | MIT | token-saver | 2026-08-22 | 无 |
+
+## 回退记录
+
+- **pi-subagents**（2026-08-30 移除，恢复自研 explore-agent）：对纯文件探索场景过度复杂，与 perm-gate 命令审核配合时增加认知负荷；从其 scout 借鉴了结构化输出/探索纪律/低思考等级三项改进（见 commit e89847a）。
+- **pi-btw**（2026-09-07 移除，恢复自研 btw）：实测多轮追问/上下文携带有 bug，且自研版「m 转正」交互更可控；优点评估：真子会话工具面过大（bash/edit/write 与旁支问答定位不符）、Alt+/ 焦点切换成本高，均不采纳；/btw:tangent 无上下文分支思路可后续按需加。安装残留由 install.js 的 vendor 注销逻辑自动清理。
 
 ## 对齐官方更新
 

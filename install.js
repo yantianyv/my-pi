@@ -53,7 +53,7 @@ const VENDOR_DST = path.join(PI_AGENT, "vendor");
 
 // 已被官方插件替代的自研扩展（src/extensions/ 中删除源码后，install 时同步清理已安装的 stale 副本，
 // 避免与 vendor 版命令/工具冲突，如 /btw、bash 输出 hook）
-const LEGACY_REMOVED_EXTENSIONS = ["btw.ts", "explore-agent.ts", "token-saver.ts"];
+const LEGACY_REMOVED_EXTENSIONS = ["explore-agent.ts", "token-saver.ts"];
 
 const THEME_NAME = "matrix"; // 默认启用的主题（对应 static/themes/matrix.json）
 const PI_PACKAGE = "@earendil-works/pi-coding-agent"; // pi 本体包名
@@ -230,7 +230,8 @@ function copyAll(src, dst) {
 	}
 }
 
-/** 注册 vendor 包到 settings.json 的 packages（本地路径形式，幂等：已存在不重复添加）。 */
+/** 注册 vendor 包到 settings.json 的 packages（本地路径形式，幂等：已存在不重复添加）；
+ *  同时注销已从 src/vendor/ 移除的包（如回退自研版时），并清理已安装目录残留。 */
 function registerVendorPackages(pkgDirs) {
 	const settingsPath = path.join(PI_AGENT, "settings.json");
 	let settings = {};
@@ -248,13 +249,33 @@ function registerVendorPackages(pkgDirs) {
 		packages.map((p) => norm(typeof p === "string" ? p : String(p?.source ?? ""))),
 	);
 	const missing = pkgDirs.filter((dir) => !existing.has(norm(dir)));
-	if (missing.length === 0) {
-		log("settings.packages 已包含全部 vendor 包，无需修改");
+	// 注销：packages 里指向 ~/.pi/agent/vendor/<名>/ 但 src/vendor/ 已无同名目录的条目 →
+	// 从 settings 移除 + 删除已安装目录（回退自研扩展后残留会继续生效，必须同步清理）
+	const validVendorDirs = new Set(pkgDirs.map((d) => norm(d)));
+	const stale = packages.filter((p) => {
+		const s = typeof p === "string" ? p : String(p?.source ?? "");
+		const n = norm(s);
+		return !validVendorDirs.has(n) && n.startsWith(norm(VENDOR_DST + path.sep));
+	});
+	const staleDirs = stale.map((p) => (typeof p === "string" ? p : String(p?.source ?? "")));
+	const keep = packages.filter((p) => !staleDirs.includes(typeof p === "string" ? p : String(p?.source ?? "")));
+	for (const dir of staleDirs) {
+		log(`注销已移除的 vendor 包: ${dir}`);
+		if (!dryRun) {
+			try {
+				fs.rmSync(dir, { recursive: true, force: true });
+			} catch {
+				log(`警告: 删除已安装目录失败: ${dir}（可手动清理）`);
+			}
+		}
+	}
+	if (missing.length === 0 && stale.length === 0) {
+		log("settings.packages 与 src/vendor/ 一致，无需修改");
 		return;
 	}
 	for (const dir of missing) log(`注册 vendor 包: ${dir}`);
 	if (!dryRun) {
-		settings.packages = [...packages, ...missing];
+		settings.packages = [...keep, ...missing];
 		fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
 	}
 }

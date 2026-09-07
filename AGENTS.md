@@ -50,6 +50,11 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       test/         #       hud-git 路径引号解码回归测试（node src/extensions/hud/test/unquote.test.mjs）
     ask/          #     问卷（多文件扩展源码，build.js 把 index.ts 打包成单文件 ask.ts）：types.ts 数据模型/容错规范化 + store.ts 问卷文件读写（.pi/questionnaires/）+ page.ts 整屏问卷页/选择器 + tool.ts ask 工具（create 创建 / cancel 作废）+ commands.ts /answer 命令 + state.ts 状态推送/排队链；test/ask.test.mjs 回归测试（49 场景）
     btf-think.ts  #   思考折叠标签动画（Thinking... 逐帧动画，独立 UI 反馈插件）
+    btw/          #   旁支问答（多文件扩展源码，build.js 把 index.ts 打包成单文件 btw.ts）：
+                    #     config.ts 常量/系统提示词/模型设置（auto 最便宜故障转移）+ messages.ts 消息清洗 +
+                    #     render.ts markdown 渲染 + overlay.ts 浮层组件 + run.ts 后台流式问答 + index.ts 入口；
+                    #     /btw 多轮追问 + m 转正附带 + /btw-config 模型选择；只读工具；曾用官方 pi-btw 替代，
+                    #     2026-09-07 因 bug 回退（出处与借鉴评估见 src/vendor/README.md 回退记录）
     clipboard.ts #   剪贴板读写：clipboard_get 读取（可截断）+ clipboard_set 写入（空串清空）+ /clipboard 命令；
                     #   跨平台（Windows PowerShell Get/Set-Clipboard、macOS pbpaste/pbcopy、Linux xclip 退 xsel，
                     #   零依赖，统一临时文件中转规避 PS5.1 管道 UTF-16LE 编码乱码与 shell 转义；读时 CRLF→LF 归一化），
@@ -99,7 +104,11 @@ static/              #   静态部署物（无需编译，install.js 直接从�
                                    #       背景：2026-09-02 崩溃捕获到退出码 0xC0000409 fastfail，本机为骁龙 X Elite + arm64 node）
   webui/index.html  #     webui 前端单页（聊天 + 状态栏，列表/聊天双视图按 URL 分流；install.js 复制到 ~/.pi/agent/webui/）
   models.json        #     OpenRouter 路由模板：install.js 复制/深度合并到 ~/.pi/agent/models.json（见 README「OpenRouter 路由策略」节）
-  vendor/           #   官方（社区）插件源码收录区（与 extensions/ 同级）：pi-subagents（替代自研 explore-agent）/ pi-btw（替代自研 btw）/ pi-rtk-optimizer（替代自研 token-saver）；均 MIT 原样收录（含各自 LICENSE），README.md 含出处表与对齐更新流程；install.js 复制到 ~/.pi/agent/vendor/、有依赖的包补 npm install --omit=dev、本地路径注册进 settings.json 的 packages；伴随物 rtk 二进制（Apache-2.0）在 PATH 上（%APPDATA%\npm\rtk.exe，不入库）
+  vendor/           #   官方（社区）插件源码收录区（与 extensions/ 同级）：pi-rtk-optimizer（替代自研 token-saver；
+                      #   pi-subagents / pi-btw 曾收录后回退自研版，见 README 回退记录）；MIT 原样收录（含各自 LICENSE），
+                      #   README.md 含出处表与对齐更新流程；install.js 复制到 ~/.pi/agent/vendor/、有依赖的包补
+                      #   npm install --omit=dev、本地路径注册进 settings.json 的 packages（并自动注销已移除的包）；
+                      #   伴随物 rtk 二进制（Apache-2.0）在 PATH 上（%APPDATA%\npm\rtk.exe，不入库）
 dist/               # 扩展产物（build.js 生成，gitignore 不入库）：install.js 只认这里的 extensions/；每次 install 自动重建，克隆后 node install.js 即用（pi/esbuild 缺失自动装）
   extensions/       #   扩展产物：每扩展一个零耦合单文件 .ts（hud.ts 由 hud/ 合并而来）
     ask.ts          #     ask/ 合并为单文件（问卷）
@@ -114,7 +123,7 @@ dist/               # 扩展产物（build.js 生成，gitignore 不入库）：
 - **安装模型**：`install.js` 把 dist/extensions/ 产物与 static/ 静态资源（themes/sounds/models.json/webui）复制到 `~/.pi/agent/` 对应位置；改扩展源码后跑 `node install.js`（自动 build）+ pi 内 `/reload`；改静态资源（主题色、提示音）只需 `node install.js --skip-build` 重装即可，无需重新编译。
 - **扩展间联动**：展示层统一走**官方 `ctx.ui.setStatus(key, text)` 状态通道**（`task-alert` 推 `task-alert`/`task-alert-error`/`task-alert-wait` 闪烁帧、`claude-it` 推 `init` 进度、`web-tool` 推 `web-search`/`web-fetch` 状态、`workflow-mgr` 推 `workflow-mgr` 进度摘要、hud 自身推 `balance-error`/`model-switch`/`hud-bash`）；`hud/hud-core.ts` 渲染行 1 动态区时按 `STATUS_STYLE` 样式表（hud/hud-core.ts）映射颜色与优先级（数字大者胜出），TTL/闪烁由各推送方自管。扩展间零耦合：setStatus 是 pi 原生接口，各插件推状态**不依赖 hud**（hud 缺席时状态自动回落原生 footer 第 3 行 `getExtensionStatuses()`，hud 兼容该通道仅做展示）。hud 置 `globalThis.__PI_HUD_ACTIVE__`（installFooter 时 true、dispose 时 false）供依赖 hud 特有功能的扩展校验，并暴露**通用底部行接口** `__PI_HUD_API__`（`registerExtraRows`/`notifyExtraRowsUpdate`，hud-core.ts）——**当前 workflow-mgr 已依赖**：hud 存在且开启时经该接口注册渲染函数，其常驻面板内容（任务/分工/里程碑 ≈4 行，内容与样式由 workflow 自决、与面板同款）由 hud 在 footer 底部渲染（屏幕最底），面板隐藏；showPanel 关闭或 hud 关闭（`hud:state-change` 事件）时注销底部行并恢复自绘面板（hud-core.ts extraRowProviders / workflow-mgr panel.ts renderHudRows）。
 - **hud 余额适配**：`BALANCE_ADAPTERS` 注册表（hud/hud-balance.ts）按 providerId 逐一适配；DeepSeek 消耗按 `DEEPSEEK_PRICES`（hud/hud-cost.ts）官方人民币定价直算（恒 ¥，永不依赖汇率），峰谷开关 `DEEPSEEK_PEAK_PRICING`（hud/hud-cost.ts，当前 false）；其余供应商成本按原始货币 USD 记录、显示时换算。汇率三态（hud/hud-cost.ts）：实时（frankfurter→open.er-api 多源，1h 节流）→ 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`）→ 无（断网且无缓存，显示原始货币 USD，不用固定近似值）。hud 子模块**可选加载**：任一缺失时对应功能降级（余额行显「模块缺失」/ 隐藏消耗统计 / git 恒「⎇ -」），不拖垮整个 HUD。
-- **vendor 官方插件**：src/vendor/ 收录社区插件源码副本（pi-subagents 子代理舰队 / pi-btw 旁支问答 / pi-rtk-optimizer 输出压缩+rtk 命令改写），替代原自研 explore-agent/btw/token-saver；收录原则/出处/更新流程见 src/vendor/README.md。兼容性：pi-subagents 的 FleetView 用 belowEditor widget（与 workflow-mgr 面板同区可堆叠），三者均不动 footer、setStatus 键不冲突
+- **vendor 官方插件**：src/vendor/ 收录社区插件源码副本（pi-rtk-optimizer 输出压缩+rtk 命令改写；pi-subagents/pi-btw 曾收录后回退自研 explore-agent/btw，回退原因与借鉴评估见 src/vendor/README.md 回退记录）；收录原则/出处/更新流程见 src/vendor/README.md。兼容性：pi-rtk-optimizer 不动 footer、setStatus 键不冲突
 - **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；进度经 `ctx.ui.setStatus("init", …)` 推送由 hud 行 1 动态区显示。同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:61-65）。
 - **ask 问卷**：AI 侧 `ask` 工具创建问卷（single/multi/text/confirm/rating/number 六题型，选项题自动带「其他」自由输入）写入 `.pi/questionnaires/<id>.json` 并立即整屏弹出；用户 Enter 提交（答案作工具结果返回）或 Esc 搁置（草稿写回文件 status:draft，随时 /answer 续答，提交后答案经 `pi.sendUserMessage` 以 followUp 送达，文件即删）。`ask action=cancel id=xxx` 作废问错/过时的待答问卷（问卷即文件，删文件即撤回；正在整屏作答中的问卷无法作废——彼时创建调用正挂起等待）。「问卷即文件」：手写 JSON 丢进目录也能被 /answer 扫描识别。长文本（标题/题干/选项/说明）经 pi-tui `wrapTextWithAnsi` 按终端宽度折行完整展示（不截断），续行缩进对齐首行文本起点；页面垂直滚动跟随焦点。整屏页 = overlay（width/maxHeight 100% + 左上锚点 + 每行补满全宽）——pi 的 overlay 是逐行不透明合成，全屏即遮蔽聊天/HUD；高度权威值由 overlayOptions.visible 回调每帧捕获（tui.terminal.rows 可能滞后）。已知限制：regular（内联）模式下全屏 overlay 与聊天共享原生滚动缓冲，滚轮上滑会看到残影（仅美观问题，实时画面正常）；fullscreen 模式（alternate screen）下零污染。
 - **claude-it 回退**：`/rewind` 命令（navigateTree 是命令 ctx 专属能力）回退到上一条用户消息、内容放回输入框；双击 Ctrl+C（打断后 2s 窗口内）预填 `/rewind` 命令，回车执行。Ctrl+C 打断不触发 task-alert 完成提醒——task-alert 监听 agent_end，最后一条 assistant 消息 `stopReason="aborted"` 即跳过 agent_settled 提醒（零耦合，不依赖 claude-it）。

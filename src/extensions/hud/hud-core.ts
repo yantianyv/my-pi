@@ -164,6 +164,7 @@ export default async function (pi: ExtensionAPI) {
 		"kb-sync": { color: "accent", priority: 76 }, // 知识库同步进度（webdav-kb）
 		"kb-test": { color: "accent", priority: 65 }, // 知识库连通测试（webdav-kb）
 		"kb-vault": { color: "muted", priority: 62 }, // vault 解锁/锁定状态（webdav-kb）
+		"btw-transfer": { color: "muted", priority: 60 }, // btw 问答已附带提示（btw）
 	};
 	/** 检测 ctx 是否仍有效：session 替换 / reload 后旧 ctx 的所有 getter 都会抛 stale 错误。 */
 	function ctxAlive(ctx: ExtensionContext): boolean {
