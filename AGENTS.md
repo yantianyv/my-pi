@@ -54,6 +54,10 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   跨平台（Windows PowerShell Get/Set-Clipboard、macOS pbpaste/pbcopy、Linux xclip 退 xsel，
                     #   零依赖，统一临时文件中转规避 PS5.1 管道 UTF-16LE 编码乱码与 shell 转义；读时 CRLF→LF 归一化），
                     #   write 前读旧内容摘要报告覆盖、状态走 shared/status 联动 hud
+    qr.ts         #   二维码：qr_encode 编码（显示到 UI：图形终端 PNG 真图 / 普通终端半块字符 ANSI 绘制，
+                    #   可扫；PNG 可选落盘）+ qr_decode 解码（本地路径/URL，PNG/JPEG 纯 JS）+ /qr 命令；
+                    #   qrcode/jsqr/pngjs/jpeg-js 由 build.js 内联，会话回放安全（details 只存原文，
+                    #   渲染时同步重编码）；test/qr.test.mjs 回归测试（jiti 加载产物，24 场景）
     crash-log.ts  #   崩溃黑匣子：prependListener 抢在 pi 的 uncaughtException 处理器（同步 exit）之前把堆栈
                     #   同步落盘 ~/.pi/agent/pi-crash.log（含 unhandledRejection 与 exit 码），崩溃条目与会话文件按时间配对
     perm-gate.ts    #   bash 命令三级权限门：黑名单人工复核 / 白名单放行 / AI 审核（模型覆盖项仿 pi-btw：

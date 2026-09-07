@@ -29,6 +29,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `vendor/` | `pi-rtk-optimizer` — bash 输出多阶段压缩 + rtk 命令改写（替代原自研 token-saver） | `~/.pi/agent/vendor/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `qr.ts` — 二维码：`qr_encode` 编码（显示到 UI + PNG 落盘）+ `qr_decode` 解码 + `/qr` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webui/` — 本地 Web 界面：TUI 进程内 HTTP+SSE 服务，浏览器与 TUI 实时双向同步（聊天/状态栏/git 操作，复用 hud 模块），`/webui` 命令（见下） | `~/.pi/agent/extensions/` |
 | `webui/` | `index.html` — webui 前端单页（聊天 + 状态栏，轻量自写 markdown） | `~/.pi/agent/webui/` |
@@ -212,6 +213,16 @@ bash 命令三级管控（`tool_call` 事件拦截，只管 bash）：**复合�
 - **`/clipboard`**：用户自查当前剪贴板内容；`/clipboard clear` 清空。
 
 跨平台实现（均为系统自带命令，无需额外安装）：Windows 用 PowerShell `Get-Clipboard -Raw` / `Set-Clipboard -Value`，macOS 用 `pbpaste` / `pbcopy`，Linux 用 `xclip`（缺失退 `xsel`）。读写统一经 `os.tmpdir()` 临时文件中转再删（规避 PowerShell 5.1 管道输出 UTF-16LE 的编码乱码、规避命令行转义）；读时把 CRLF/CR 归一化为 LF（Windows 剪贴板物理存 CRLF，与 mac/Linux 的 `\n` 输出对齐）。
+
+## 二维码工具（src/extensions/qr.ts）
+
+为 AI 提供二维码的编码与解码能力，并把 AI 生成的二维码直接显示在用户界面：
+
+- **`qr_encode(text, ecc?, save?, pngWidth?)`**：把文本（URL、Wi-Fi 配置、名片、任意文字）编码成二维码并**直接显示在用户界面**——图形终端（kitty/iTerm2 图形协议）显示 PNG 真图；普通终端用 Unicode 半块字符（▀）显式黑白 ANSI 绘制（暗模块=黑、亮模块=白、含 4 模块静区，逐字符着色不依赖终端主题背景），1 cell 宽 × 半行高的模块近似正方形，**可直接扫码**。默认纠错级别 M（L/M/Q/H 可调），默认落盘 PNG（`os.tmpdir()/pi-qr-<时间戳>.png`，边长默认 512px，128~2048 钳制），路径随结果返回。
+- **`qr_decode(image)`**：从图片解码二维码——支持本地文件路径或 http(s) URL，PNG/JPEG（qrcode/jsqr/pngjs/jpeg-js 纯 JS 解码，由 build.js 内联进产物），自动尝试正反色、小图最近邻放大；返回码内文本与版本/尺寸元信息。
+- **`/qr <文本>`**：用户侧快速生成二维码并显示，按任意键关闭。
+- **会话回放安全**：details 只存原文（不存矩阵/PNG，会话文件不膨胀）；渲染时从原文同步重新编码，历史会话重新打开时二维码照样渲染。
+- 状态推送 `qr` 走 shared/status 联动 hud（行 1 动态区 accent 色）；回归测试 `node src/extensions/qr/test/qr.test.mjs`（esbuild bundle + jiti 加载，12 场景）。
 
 ## 人机协作任务面板（src/extensions/workflow-mgr/）
 

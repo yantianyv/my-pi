@@ -158,6 +158,7 @@ export default async function (pi: ExtensionAPI) {
 		"init": { color: "warning", priority: 80 }, // claude-it /init 进度
 		"web-search": { color: "accent", priority: 75 }, // 联网搜索状态（web-tool）
 		"web-fetch": { color: "accent", priority: 74 }, // 网页抓取状态（web-tool）
+		"qr": { color: "accent", priority: 64 }, // 二维码生成/解码状态（qr）
 		"workflow-mgr": { color: "accent", priority: 72 }, // 人机协作任务面板摘要（workflow-mgr）
 		"model-switch": { color: "accent", priority: 70 }, // 模型切换
 		"kb-sync": { color: "accent", priority: 76 }, // 知识库同步进度（webdav-kb）
