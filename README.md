@@ -29,8 +29,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `qr.ts` — 二维码：`qr_encode` 编码（显示到 UI + PNG 落盘）+ `qr_decode` 解码 + `/qr` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `webui/` — 本地 Web 界面：TUI 进程内 HTTP+SSE 服务，浏览器与 TUI 实时双向同步（聊天/状态栏/git 操作，复用 hud 模块），`/webui` 命令（见下） | `~/.pi/agent/extensions/` |
-| `webui/` | `index.html` — webui 前端单页（聊天 + 状态栏，轻量自写 markdown） | `~/.pi/agent/webui/` |
+| `extensions/` | `paste-image.ts` — 剪贴板图片直接附图粘贴：接管 Ctrl+V/Alt+V，有图直接附图、无图贴文本（见下） | `~/.pi/agent/extensions/` |
 | `patches/` | 两个 pi 补丁：ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装） | `~/.pi/agent/skills/` |
@@ -258,19 +257,17 @@ bash 命令三级管控（`tool_call` 事件拦截，只管 bash）：**复合�
 - **工具清单**：`kb_help`（守则，topic 按节筛选）/ `kb_search`（全文检索，namespace 限定）/ `kb_read`（读全文）/ `kb_write`（写/覆盖，需 overwrite:true，文本上限 50MB）/ `kb_append`（追加）/ `kb_list`（目录树，路径可不带前导 `/`）/ `kb_upload` `kb_download` `kb_lslfs`（LFS）/ `kb_move`（移动/重命名，镜像+远端+账本三方一致、vault 透明搬移）/ `kb_delete`（删除，需 confirm:true，先留 `.history` 副本再删）/ `kb_status`（同步状态）/ `kb_sync`（手动同步）/ `kb_import`（本地目录批量导入，导入后按守则重新归位）；
 - **测试**：`node src/extensions/webdav-kb/test/sync.test.mjs`（esbuild bundle + mock DAV：增量同步全场景 + `.history` 留档/命名/去重/不递归 + 空目录清理 + PROTOCOL 过滤）、`tools.test.mjs`/`search.test.mjs`/`client.test.mjs`/`crypto.test.mjs`/`panel-config.test.mjs`/`commands.test.mjs`/`lfs.test.mjs`/`panel.test.mjs`；`live-*` 为真实网盘联调脚本（不自动跑）。
 
-## 本地 Web 界面（src/extensions/webui/ + static/webui/）
+## 剪贴板图片直接附图粘贴（src/extensions/paste-image.ts）
 
-TUI 进程内的本地 Web UI：浏览器是 pi 的**另一只眼睛和手**，与 TUI **共享同一会话、实时双向同步**——不是独立进程连 session 文件，而是 webui 扩展跑在 pi 进程内：`pi.on()` 监听全部会话/agent/tool 事件经 **SSE** 实时广播给浏览器；浏览器发消息走 `pi.sendUserMessage()` 以真实用户消息注入当前会话，TUI 聊天记录同步出现；切模型/切 thinking/中止走 pi API 与 `ctx.abort()`。
+把 webui（已删除）的图片粘贴体验移植给 TUI：接管 `Ctrl+V` / `Alt+V`（扩展快捷键先于 pi 内建 `app.clipboard.pasteImage` 判定），行为统一为：
 
-- **单端口多会话（主-从架构）**：第一个启动的 pi 进程成为**主**（host）监听配置端口（默认 7741），后续进程探测到主存在（`GET /internal/ping`）→ 成为**从**（relay），不监听端口，而是作为 HTTP 客户端接入主——事件上行（`POST /internal/event`）、命令下行（attach 长连接 SSE）；**浏览器统一访问主端口**，按 pid 路由区分会话：`http://localhost:7741/`（会话列表页，5s 轮询）、`http://localhost:7741/s/<pid>/`（某会话的聊天页）；token 配置文件全会话共享，天然单凭据；**主退出自动故障转移**：从进程断线重连失败 3 次 → 抢占端口升级为新主（谁抢到谁是主，其余继续 relay）；端口被非 webui 程序占用时退随机端口孤立模式（只服务本进程）并提示；
-- **使用**：pi 内 `/reload` 后运行 `/webui` 查看本会话地址（带 token），或打开列表页挑选会话；旧无 pid 路由（`/events`、`/api/*`）301 重定向到本地会话，平滑过渡；
-- **命令**：`/webui`（状态/地址/主从模式）、`/webui on|off`、`/webui port <n>`、`/webui token`、`/webui restart`、`/webui-lan`（**局域网临时开放**：独立命令无参数，执行即开启——监听 0.0.0.0，通知里给局域网地址 `http://192.168.x.x:7741/?token=…`；**会话级临时状态不持久化，pi 退出自动关闭**，下次需要重开；token 即凭据注意安全；主从架构下所有会话经主进程端口统一暴露，列表页挑选；从模式会话执行会提示去主会话；注意故障转移后新主进程不继承 lan 状态）；
-- **聊天**：历史加载（sessionManager entries）+ 流式渲染（text/thinking delta）+ 工具卡片（图标映射 + spinner + 结果截断 2KB）+ 思考折叠 + **粘贴/拖拽图片**（预览缩略图可删、最多 5 张、base64 content array 注入；**非视觉模型发送前拦截并明确提示「当前模型不支持上传图片」**——预览条直接亮红色警告、发送按钮拦截，后端兜底校验；**TUI 侧可见性**：pi 渲染 user 消息时丢弃 image content（纯图片消息甚至整条不渲染），webui 在 user 消息持久化后（assistant message_start，此时 leafId 已指向该消息）追加一条**不进 LLM 上下文**的 CustomEntry（type:"custom"，buildSessionContext 忽略，挂在 user 消息下作为子节点、回退时随消息一起消失），由 `registerEntryRenderer("webui-images")` 渲染为「[N 张图片]」小标签紧跟用户消息下方——纯显示组件，**不污染发给模型的文本**）+ **斜杠命令**：输入 `/` 弹出补全面板（`pi.getCommands()` 命令列表：扩展命令/模板/skill，↑↓ 选择 Tab/Enter 补全），发送 `/` 开头消息自动带 `expandPromptTemplates: true` 分发执行（内置交互命令如 /model 不在其中，用顶栏胶囊替代）；发送固定走自动模式（空闲直发、运行中自动 steer 插队）；**消息操作**（hover 显示）：复制 / **编辑重发**（user）/ **重新生成**（assistant，向上找最近 user 消息回退）——回退经 `/webui fork <entryId>` 隐藏子命令分发 `ctx.fork`（command ctx 专属能力的间接通道：收编为 /webui 子参数而非独立命令，TUI `/` 列表零新增项；fork 触发 session 替换，前端从 SSE 的 `session_start(fork)` 事件感知、重建历史并把暂存原文填回输入框）；TUI 侧 `/tree` 回退与 `/compact` 压缩经 `session_tree`/`session_compact` 事件广播，webui 自动全量重建；message_end 广播附 `entryId`（leafId）供卡片绑定回退锚点；turn_end 顺带推状态快照（成本/git 实时更新）；
-- **状态侧栏**（可折叠、localStorage 记忆）：git 面板（分支/徽章/多选文件列表 + add/reset/discard/commit/push/pull/fetch）、余额卡片（复用 `BALANCE_ADAPTERS`，60s 节流）、消耗卡片（`hud-cost` 生命周期：DeepSeek 人民币直算 + 汇率三态 + 会话时长）、会话元信息；
-- **操作**：点击模型/thinking 胶囊切换、代码块复制按钮（>8KB 省略）、滚动到底悬浮钮、Esc 中止；
-- **架构**：`server.ts`（主端：路由分发 + 会话注册表 + 内部通道 + 浏览器 SSE 订阅；Node 原生 http 零依赖，`requestTimeout=0` 保长连接）、`relay.ts`（从端：attach 长连接 + 命令执行回传 + 事件上行 + 指数退避重连 + 升级为主回调）、`bridge.ts`（事件桥 + pi API 操作，broadcast 注入式——host 直广播 / relay 上行）、`state.ts`（状态快照组装，复用 hud 模块）、`config.ts`（配置持久化，`PI_WEBUI_PORT` 环境变量覆盖端口——测试隔离用）；前端单文件（列表/聊天双视图按 URL 分流）；
-- **安全**：仅本地回环监听 + 共享 token 鉴权（API/SSE/内部通道全校验，静态页免校验——HTML 壳无敏感数据）；
-- **测试**：暂无自动化测试（主-从/SSE/图片链路靠手工联调，后续可补）。
+- **有图直接附图**：剪贴板里的图片以 base64 ImageContent 直接附在下一条用户消息上——不像 pi 原生粘贴那样落临时文件、往输入框插路径、再让模型用 read 读图（多一轮往返、消息混临时路径）。最多 5 张，状态栏 `📎` 提示待附数量，Enter 随消息发送；
+- **无图回落贴文本**：走官方 `ctx.ui.pasteToEditor()`，与原生体验一致；终端右键粘贴（只送文本）不受影响；
+- **读图策略逐级回落**：① `@mariozechner/clipboard` 原生模块（pi 自带依赖，从 pi 全局安装目录定位，快）；② Windows PowerShell `[Windows.Forms.Clipboard]::GetImage()` 落盘 PNG——覆盖原生模块读不出的剪贴板来源；③ Windows PowerShell `Get-Clipboard -Format FileDropList` 识别**复制的图片文件**（CF_HDROP 文件引用——QQ/微信复制表情、资源管理器复制图片文件都是这种，①② 都看不到、浏览器粘贴却拿得到，是「webui 能贴而原生贴不了」的主因）：图片按**魔数嗅探**真实格式（QQ/微信表情常把 gif/png 存成 `.jpg` 扩展名，不可信），jpg/jpeg/png/webp/gif 原样附（**gif 转 PNG 取首帧后附**：智谱 GLM 等只收 jpg/jpeg/png/bmp，发 gif 会 400「[1210] Invalid API parameter」，视觉模型对动图也只看首帧，转码零损失）、BMP 转 PNG；统一单文件 20MB 上限；
+- **占位显示**：pi 渲染 user 消息时丢弃 image content（纯图片消息甚至整条不渲染），沿用 webui 方案——message_end(user) 收集带图消息，assistant message_start（此时 user 已持久化）追加不进 LLM 上下文的 CustomEntry，渲染为「[N 张图片]」标签紧跟消息下方，回退时随消息消失；
+- **贴进来的图片路径也能附图（终端层粘贴兑底）**：Windows Terminal 的右键/Ctrl+V 粘贴是**终端层行为**（终端把剪贴板文本直接打进输入框，按键到不了 pi），而 QQ/微信复制表情时还把**路径文本**放进剪贴板——终端就把路径贴进来了。兜底：提交消息时扫描文本中的图片文件路径（真实存在、魔数嗅探通过），**纯路径消息**整条替换为图片（复刻 webui 效果，拖拽图片进终端同理）；路径混在文字里则附图但保留原文（可能刻意要模型拿到路径）；
+- **非视觉模型警告**：附图时模型 `input` 不含 `image` 则状态栏警告 + notify 提示，但仍允许（切模型后再发）；
+- **`/paste` 命令**：无参查看待附图片（张数/体积），`/paste clear` 撤销全部。
 
 ## pi-ai usage 缺失防护补丁（patches/apply-pi-ai-usage-guard.mjs）
 
@@ -330,7 +327,7 @@ rm ~/.pi/agent/extensions/claude-it.ts
 rm ~/.pi/agent/extensions/task-alert.ts
 rm ~/.pi/agent/extensions/web-tool.ts
 rm ~/.pi/agent/extensions/webdav-kb.ts
-rm ~/.pi/agent/extensions/webui.ts
+rm ~/.pi/agent/extensions/paste-image.ts
 rm ~/.pi/agent/extensions/workflow-mgr.ts
 rm ~/.pi/agent/extensions/ask.ts
 rm ~/.pi/agent/sounds/task_complete.wav

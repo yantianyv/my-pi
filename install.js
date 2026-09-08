@@ -42,18 +42,16 @@ const EXT_SRC = path.join(DIST, "extensions");
 const SOUNDS_SRC = path.join(ROOT, "static", "sounds");
 const SKILLS_SRC = path.join(ROOT, "static", "skills");
 const MODELS_SRC = path.join(ROOT, "static", "models.json");
-const WEBUI_SRC = path.join(ROOT, "static", "webui");
 const VENDOR_SRC = path.join(ROOT, "src", "vendor");
 const THEMES_DST = path.join(PI_AGENT, "themes");
 const EXT_DST = path.join(PI_AGENT, "extensions");
 const SOUNDS_DST = path.join(PI_AGENT, "sounds");
 const SKILLS_DST = path.join(PI_AGENT, "skills");
-const WEBUI_DST = path.join(PI_AGENT, "webui");
 const VENDOR_DST = path.join(PI_AGENT, "vendor");
 
-// 已被官方插件替代的自研扩展（src/extensions/ 中删除源码后，install 时同步清理已安装的 stale 副本，
+// 已删除的自研扩展（src/extensions/ 中删除源码后，install 时同步清理已安装的 stale 副本，
 // 避免与 vendor 版命令/工具冲突，如 /btw、bash 输出 hook）
-const LEGACY_REMOVED_EXTENSIONS = ["explore-agent.ts", "token-saver.ts"];
+const LEGACY_REMOVED_EXTENSIONS = ["explore-agent.ts", "token-saver.ts", "webui.ts"];
 
 const THEME_NAME = "matrix"; // 默认启用的主题（对应 static/themes/matrix.json）
 const PI_PACKAGE = "@earendil-works/pi-coding-agent"; // pi 本体包名
@@ -471,7 +469,6 @@ async function main() {
 	copyDir(EXT_SRC, EXT_DST);
 	copyDir(SOUNDS_SRC, SOUNDS_DST, [".wav"]);
 	copyDir(SKILLS_SRC, SKILLS_DST, [".md"]);
-	copyDir(WEBUI_SRC, WEBUI_DST, [".html"]);
 	installVendor();
 	removeLegacyExtensions();
 	applySettings();
