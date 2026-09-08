@@ -29,7 +29,6 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `qr.ts` — 二维码：`qr_encode` 编码（显示到 UI + PNG 落盘）+ `qr_decode` 解码 + `/qr` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `paste-image.ts` — 剪贴板图片直接附图粘贴：接管 Ctrl+V/Alt+V，有图直接附图、无图贴文本（见下） | `~/.pi/agent/extensions/` |
 | `patches/` | 两个 pi 补丁：ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装） | `~/.pi/agent/skills/` |
@@ -257,18 +256,6 @@ bash 命令三级管控（`tool_call` 事件拦截，只管 bash）：**复合�
 - **工具清单**：`kb_help`（守则，topic 按节筛选）/ `kb_search`（全文检索，namespace 限定）/ `kb_read`（读全文）/ `kb_write`（写/覆盖，需 overwrite:true，文本上限 50MB）/ `kb_append`（追加）/ `kb_list`（目录树，路径可不带前导 `/`）/ `kb_upload` `kb_download` `kb_lslfs`（LFS）/ `kb_move`（移动/重命名，镜像+远端+账本三方一致、vault 透明搬移）/ `kb_delete`（删除，需 confirm:true，先留 `.history` 副本再删）/ `kb_status`（同步状态）/ `kb_sync`（手动同步）/ `kb_import`（本地目录批量导入，导入后按守则重新归位）；
 - **测试**：`node src/extensions/webdav-kb/test/sync.test.mjs`（esbuild bundle + mock DAV：增量同步全场景 + `.history` 留档/命名/去重/不递归 + 空目录清理 + PROTOCOL 过滤）、`tools.test.mjs`/`search.test.mjs`/`client.test.mjs`/`crypto.test.mjs`/`panel-config.test.mjs`/`commands.test.mjs`/`lfs.test.mjs`/`panel.test.mjs`；`live-*` 为真实网盘联调脚本（不自动跑）。
 
-## 剪贴板图片直接附图粘贴（src/extensions/paste-image.ts）
-
-把 webui（已删除）的图片粘贴体验移植给 TUI：接管 `Ctrl+V` / `Alt+V`（扩展快捷键先于 pi 内建 `app.clipboard.pasteImage` 判定），行为统一为：
-
-- **有图直接附图**：剪贴板里的图片以 base64 ImageContent 直接附在下一条用户消息上——不像 pi 原生粘贴那样落临时文件、往输入框插路径、再让模型用 read 读图（多一轮往返、消息混临时路径）。最多 5 张，状态栏 `📎` 提示待附数量，Enter 随消息发送；
-- **无图回落贴文本**：走官方 `ctx.ui.pasteToEditor()`，与原生体验一致；终端右键粘贴（只送文本）不受影响；
-- **读图策略逐级回落**：① `@mariozechner/clipboard` 原生模块（pi 自带依赖，从 pi 全局安装目录定位，快）；② Windows PowerShell `[Windows.Forms.Clipboard]::GetImage()` 落盘 PNG——覆盖原生模块读不出的剪贴板来源；③ Windows PowerShell `Get-Clipboard -Format FileDropList` 识别**复制的图片文件**（CF_HDROP 文件引用——QQ/微信复制表情、资源管理器复制图片文件都是这种，①② 都看不到、浏览器粘贴却拿得到，是「webui 能贴而原生贴不了」的主因）：图片按**魔数嗅探**真实格式（QQ/微信表情常把 gif/png 存成 `.jpg` 扩展名，不可信），jpg/jpeg/png/webp/gif 原样附（**gif 转 PNG 取首帧后附**：智谱 GLM 等只收 jpg/jpeg/png/bmp，发 gif 会 400「[1210] Invalid API parameter」，视觉模型对动图也只看首帧，转码零损失）、BMP 转 PNG；统一单文件 20MB 上限；
-- **占位显示**：pi 渲染 user 消息时丢弃 image content（纯图片消息甚至整条不渲染），沿用 webui 方案——message_end(user) 收集带图消息，assistant message_start（此时 user 已持久化）追加不进 LLM 上下文的 CustomEntry，渲染为「[N 张图片]」标签紧跟消息下方，回退时随消息消失；
-- **贴进来的图片路径也能附图（终端层粘贴兑底）**：Windows Terminal 的右键/Ctrl+V 粘贴是**终端层行为**（终端把剪贴板文本直接打进输入框，按键到不了 pi），而 QQ/微信复制表情时还把**路径文本**放进剪贴板——终端就把路径贴进来了。兜底：提交消息时扫描文本中的图片文件路径（真实存在、魔数嗅探通过），**纯路径消息**整条替换为图片（复刻 webui 效果，拖拽图片进终端同理）；路径混在文字里则附图但保留原文（可能刻意要模型拿到路径）；
-- **非视觉模型警告**：附图时模型 `input` 不含 `image` 则状态栏警告 + notify 提示，但仍允许（切模型后再发）；
-- **`/paste` 命令**：无参查看待附图片（张数/体积），`/paste clear` 撤销全部。
-
 ## pi-ai usage 缺失防护补丁（patches/apply-pi-ai-usage-guard.mjs）
 
 修「模型偶发无文字回答」（实测 deepseek-v4-flash，/btw 面板表现为 `（无文字回答）`，主会话同理可触发）。根因：pi-ai 的 `estimate.js` 估算上下文 token 时对每条 assistant 消息调 `calculateContextTokens(assistant.usage)`，**usage 为 undefined 时抛 TypeError**（`Cannot read properties of undefined (reading 'totalTokens')`）。该异常发生在每次 LLM 调用的**请求构建阶段**（`clampMaxTokensToContext` → `estimateContextTokens` → `getLastAssistantUsageInfo`），只要 history（含主会话上下文，compaction summary 消息常缺 usage）里混入一条缺 usage 的 assistant 消息，后续调用就**瞬时失败**（1~5ms 返回 `stopReason="error"`，请求根本没发出）——这也解释了为何失败总是“瞬时”。
@@ -327,7 +314,6 @@ rm ~/.pi/agent/extensions/claude-it.ts
 rm ~/.pi/agent/extensions/task-alert.ts
 rm ~/.pi/agent/extensions/web-tool.ts
 rm ~/.pi/agent/extensions/webdav-kb.ts
-rm ~/.pi/agent/extensions/paste-image.ts
 rm ~/.pi/agent/extensions/workflow-mgr.ts
 rm ~/.pi/agent/extensions/ask.ts
 rm ~/.pi/agent/sounds/task_complete.wav
