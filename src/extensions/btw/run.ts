@@ -11,10 +11,10 @@
  * 注意：本模块不注册任何 pi API，仅导出函数，由入口驱动。
  */
 import { createReadOnlyTools, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
+import { runAgentLoop, type AgentLoopConfig, type AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
-import { runAgentLoop, type AgentLoopConfig, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
 import type { AnyModel } from "../shared/model-select";
+import { createPiStreamFn } from "../shared/agent";
 import {
 	BTW_SYSTEM_PROMPT,
 	BTW_MAX_TOKENS,
@@ -51,16 +51,8 @@ export async function runBtwTurn(
 	const history = mergeAdjacent([...context, ...thread]).slice(-BTW_MAX_TOTAL_MESSAGES);
 	const userMessage: AgentMessage = { role: "user", content: question, timestamp: Date.now() };
 
-	// 每次 LLM 调用前从模型注册表取最新认证（兼容 OAuth 刷新）；流对象保持原生
-	const streamFn: StreamFn = async (m, c, options) => {
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
-		if (!auth.ok) throw new Error(`认证失败：${auth.error}`);
-		return streamSimple(m, c, {
-			...options,
-			apiKey: auth.apiKey ?? options?.apiKey,
-			headers: { ...auth.headers, ...options?.headers },
-		});
-	};
+	// 与主会话同源的头管道（归因/会话头）+ modelRegistry 认证，实现收敛在 shared/agent
+	const streamFn = createPiStreamFn(ctx);
 
 	let turns = 0;
 	const config: AgentLoopConfig = {

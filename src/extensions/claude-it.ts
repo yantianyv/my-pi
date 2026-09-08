@@ -160,6 +160,32 @@ interface InitRunResult {
 	summary: string;
 }
 
+/** 从消息列表倒序找第一条带正文文本的 assistant 消息（无则 null）。 */
+function findAssistantText(messages: AgentMessage[]): string | null {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		if (m.role !== "assistant") continue;
+		const text = m.content
+			.filter((b) => b.type === "text")
+			.map((b) => (b as { type: "text"; text: string }).text)
+			.join("\n")
+			.trim();
+		if (text) return text;
+	}
+	return null;
+}
+
+/** 找最后一条模型调用错误（stopReason=error）的 assistant 消息，取其 errorMessage（v1 缺陷：
+ *  agentLoop 对流式错误不抛异常而是静默返回带 stopReason=error 的 assistant 消息，
+ *  错误详情在 errorMessage 字段而非 text 块，扫描文本找不到就误报「预算用尽」）。 */
+function findLlmError(messages: AgentMessage[]): string | null {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i] as { role?: string; stopReason?: string; errorMessage?: string };
+		if (m.role === "assistant" && m.stopReason === "error" && m.errorMessage) return m.errorMessage;
+	}
+	return null;
+}
+
 async function runInitAgent(
 	ctx: ExtensionContext,
 	model: AnyModel,
@@ -175,6 +201,9 @@ async function runInitAgent(
 	];
 
 	const streamFn = createPiStreamFn(ctx);
+	// 记录上下文文件写入前的 mtime：轮数用尽/无总结时用于判断代理是否实际完成了写入
+	const contextFile = path.join(ctx.cwd, CONTEXT_FILE);
+	const mtimeBefore = fs.existsSync(contextFile) ? fs.statSync(contextFile).mtimeMs : 0;
 
 	let turns = 0;
 	const config: AgentLoopConfig = {
@@ -197,17 +226,46 @@ async function runInitAgent(
 			streamFn,
 		);
 
-		for (let i = newMessages.length - 1; i >= 0; i--) {
-			const m = newMessages[i];
-			if (m.role !== "assistant") continue;
-			const text = m.content
-				.filter((b) => b.type === "text")
-				.map((b) => (b as { type: "text"; text: string }).text)
-				.join("\n")
-				.trim();
-			if (text) return { ok: true, summary: text };
+		const summary = findAssistantText(newMessages);
+		if (summary) return { ok: true, summary };
+
+		// 没有任何文本输出：先取真实原因（模型错误 vs 轮数用尽），再兑底续问一轮拿总结
+		const llmError = findLlmError(newMessages);
+		if (!signal.aborted) {
+			try {
+				const nudge: AgentMessage = {
+					role: "user",
+					content: llmError
+						? "刚才的模型调用出现了错误。请用一两句话向用户说明：AGENTS.md 写到哪一步、遇到了什么问题。"
+						: "请立即停止工具调用，用一两句话总结你完成的工作（AGENTS.md 写入了/更新了什么；若未完成也请说明当前进度）。",
+					timestamp: Date.now(),
+				};
+				const more = await runAgentLoop(
+					[nudge],
+					{ systemPrompt: buildInitSystemPrompt(ctx.cwd), messages: newMessages, tools: [] },
+					{ model, maxTokens: INIT_MAX_TOKENS, convertToLlm, shouldStopAfterTurn: () => true },
+					() => {},
+					signal,
+					streamFn,
+				);
+				const text = findAssistantText(more);
+				if (text) {
+					if (llmError) return { ok: false, summary: `${text}（模型调用出错：${llmError}）` };
+					// 轮数用尽场景：文件确实被写入过才视为完成，否则如实告知未完成
+					const written = fs.existsSync(contextFile) && fs.statSync(contextFile).mtimeMs > mtimeBefore + 1;
+					if (written) return { ok: true, summary: text };
+					return { ok: false, summary: `${text}（已达最大轮数 ${INIT_MAX_TURNS}，未检测到 ${CONTEXT_FILE} 写入，可重跑 /init）` };
+				}
+			} catch {
+				// 兑底续问失败不掩盖主因，落到下面的如实上报
+			}
 		}
-		return { ok: false, summary: "init 代理未产出总结（可能预算用尽）" };
+		return {
+			ok: false,
+			summary: llmError
+				? `模型调用出错：${llmError}`
+				: `已达最大轮数（${INIT_MAX_TURNS} 轮）仍未产出总结，${CONTEXT_FILE} 可能未写完（可重跑 /init）`,
+		};
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);
 		return { ok: false, summary: msg.includes("abort") ? "已中止（超时或会话结束）" : msg };
