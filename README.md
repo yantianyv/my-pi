@@ -162,7 +162,7 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 
 ## 官方插件（src/vendor/，收录社区实现）
 
-目前仅收录 **[pi-rtk-optimizer](https://github.com/MasuRii/pi-rtk-optimizer)**（替代 token-saver）：bash/read/grep 输出多阶段压缩（ANSI 剥离、测试聚合、构建过滤、git 压缩、linter 聚合、搜索分组、截断）+ `/rtk stats` 节省统计 + `/rtk` 设置面板；命令改写委托外部 `rtk` 二进制（[rtk-ai/rtk](https://github.com/rtk-ai/rtk)，Apache-2.0，已装于 `%APPDATA%\npm\rtk.exe`，缺失时自动旁路仅留压缩）。
+目前仅收录 **[pi-rtk-optimizer](https://github.com/MasuRii/pi-rtk-optimizer)**（替代 token-saver）：bash/read/grep 输出多阶段压缩（ANSI 剥离、测试聚合、构建过滤、git 压缩、linter 聚合、搜索分组、截断）+ `/rtk stats` 节省统计 + `/rtk` 设置面板；命令改写委托外部 `rtk` 二进制（[rtk-ai/rtk](https://github.com/rtk-ai/rtk)，Apache-2.0，单 Rust 二进制零依赖）。rtk 不入库，由 install.js 按平台自动安装（当前 `v0.48.0`：`process.platform` + `process.arch` 现场探测选 release 资产——win32-x64 / darwin-arm64+x64 / linux-x64(musl)+arm64；GitHub 直连优先、`gh-proxy.com` 镜像回落、`checksums.txt` sha256 校验；Windows 装 `%APPDATA%\npm\`，Unix 优先 `~/.local/bin`，否则 `~/.pi/agent/bin/` 并提示加 PATH；任何失败只警告不阻塞，缺失时插件自动旁路仅留压缩）。
 
 其余两个曾收录的包均已回退自研版（pi-subagents → explore-agent，2026-08-30；pi-btw → btw，2026-09-07），出处与借鉴评估见 `src/vendor/README.md` 回退记录。
 
@@ -322,7 +322,7 @@ pi remove ~/.pi/agent/vendor/pi-rtk-optimizer
 rm -rf ~/.pi/agent/vendor
 ```
 
-（`settings.json` 里的 `"theme": "matrix"` 改回其他主题即可；`models.json` 已并入你手改的 `~/.pi/agent/models.json`（深度合并，模板键以仓库为准），要还原需手动移除模板注入的 `providers.openrouter.compat.openRouterRouting`；三个补丁打在全局 node_modules 上，重装 pi 即还原，祖冲之汉化另有 `--restore` 一键还原英文；rtk 二进制删 `%APPDATA%\npm\rtk.exe` 即可。）
+（`settings.json` 里的 `"theme": "matrix"` 改回其他主题即可；`models.json` 已并入你手改的 `~/.pi/agent/models.json`（深度合并，模板键以仓库为准），要还原需手动移除模板注入的 `providers.openrouter.compat.openRouterRouting`；三个补丁打在全局 node_modules 上，重装 pi 即还原，祖冲之汉化另有 `--restore` 一键还原英文；rtk 二进制按安装位置删（Windows `%APPDATA%\npm\rtk.exe`，Unix `~/.local/bin/rtk` 或 `~/.pi/agent/bin/rtk`）。）
 
 ## 说明
 

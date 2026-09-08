@@ -8,7 +8,10 @@
  *   3. 检测构建依赖 esbuild，缺失则自动 npm install（src/ 下）
  *   4. 自动构建扩展产物（src/build.js → dist/extensions/）
  *   5. 安装配置到 ~/.pi/agent/（扩展/主题/提示音/skills/models.json/settings）
- *   6. 安装 vendor 第三方插件（src/vendor/ → ~/.pi/agent/vendor/，有依赖的补 npm install，
+ *   6. 可选依赖 rtk 二进制（pi-rtk-optimizer 的命令改写引擎）：PATH 上缺失时询问并自动
+ *      下载安装（按平台选 release 资产，GitHub 直连优先、加速镜像回落，checksums.txt 校验；
+ *      失败不阻塞安装，插件侧安全降级）
+ *   7. 安装 vendor 第三方插件（src/vendor/ → ~/.pi/agent/vendor/，有依赖的补 npm install，
  *      并把本地路径注册进 settings.json 的 packages）；清理已被官方版替代的旧扩展文件
  *
  * 安装到 pi 全局配置目录：
@@ -57,6 +60,20 @@ const THEME_NAME = "matrix"; // 默认启用的主题（对应 static/themes/mat
 const PI_PACKAGE = "@earendil-works/pi-coding-agent"; // pi 本体包名
 const NODE_MIN = "22.19.0"; // pi 要求的最低 node 版本（package.json engines）
 
+// ── rtk（可选依赖）：pi-rtk-optimizer 的命令改写引擎（rtk-ai/rtk，Apache-2.0，单 Rust 二进制），
+//    缺失时插件自动旁路改写仅留输出压缩（安全降级），故本步失败不阻塞安装、拒绝也不中断 ──
+const RTK_VERSION = "v0.48.0"; // release tag；升级改这里（https://github.com/rtk-ai/rtk/releases）
+const RTK_REPO = "rtk-ai/rtk";
+const RTK_PROXY = "https://gh-proxy.com/"; // GitHub 直连失败时的下载加速镜像（前置前缀式，置空禁用）
+// process.platform + process.arch → release 资产名映射（零硬编码环境：运行时现场探测；rtk 出新平台资产时在此加一行）
+const RTK_ASSETS = {
+	"win32|x64": "rtk-x86_64-pc-windows-msvc.zip",
+	"darwin|arm64": "rtk-aarch64-apple-darwin.tar.gz",
+	"darwin|x64": "rtk-x86_64-apple-darwin.tar.gz",
+	"linux|x64": "rtk-x86_64-unknown-linux-musl.tar.gz", // musl 静态链接，任意发行版免依赖
+	"linux|arm64": "rtk-aarch64-unknown-linux-gnu.tar.gz", // 该平台无 musl 产物
+};
+
 const dryRun = process.argv.includes("--dry-run") || process.argv.includes("-n");
 const skipBuild = process.argv.includes("--skip-build");
 const nonInteractive = process.argv.includes("-y") || process.argv.includes("--yes");
@@ -64,6 +81,7 @@ const log = (...m) => console.log((dryRun ? "[DRY-RUN] " : "") + m.join(" "));
 
 const SRC_DIR = path.join(ROOT, "src");
 const ESBUILD_DIR = path.join(SRC_DIR, "node_modules", "esbuild");
+const crypto = require("crypto");
 
 /** 统一确认：非交互（-y / 非 TTY）/ dry-run 直接返回默认值；否则 readline 询问。 */
 function confirm(question, { defaultYes = true } = {}) {
@@ -169,6 +187,138 @@ function autoBuild() {
 	if (r.status !== 0) {
 		console.error(`\n构建失败（退出码 ${r.status}）。请检查 src/ 源码与网络后重试。`);
 		process.exit(1);
+	}
+}
+
+/** rtk 安装落点：Windows 装进 npm 全局目录（天然在 PATH）；其余优先已在 PATH 的 ~/.local/bin，
+ *  否则退 ~/.pi/agent/bin 并提示加 PATH。返回 { dir, needsPathHint }。 */
+function rtkDestDir() {
+	if (process.platform === "win32") {
+		return { dir: path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "npm"), needsPathHint: false };
+	}
+	const localBin = path.join(os.homedir(), ".local", "bin");
+	if (process.env.PATH?.split(path.delimiter).includes(localBin)) return { dir: localBin, needsPathHint: false };
+	return { dir: path.join(PI_AGENT, "bin"), needsPathHint: true };
+}
+
+/** rtk 是否已在 PATH 上可用（shell:true 让 cmd/PATH 负责解析 rtk/rtk.exe）。 */
+function rtkOnPath() {
+	try {
+		return spawnSync("rtk", ["--version"], { shell: true, encoding: "utf8", windowsHide: true }).status === 0;
+	} catch {
+		return false;
+	}
+}
+
+/** curl 下载（本仓库网络工具惯例：系统 curl 自动带代理）；失败返回 false。 */
+function rtkDownload(url, dest) {
+	try {
+		return spawnSync("curl", ["-fsSL", "-m", "300", "-o", dest, url], { encoding: "utf8", windowsHide: true }).status === 0;
+	} catch {
+		return false;
+	}
+}
+
+/** 校验下载产物的 sha256 与官方 checksums.txt 一致（sha256sum 格式：<hash>  <文件名>）。 */
+function rtkVerify(asset, file, checksumsFile) {
+	try {
+		const line = fs.readFileSync(checksumsFile, "utf8")
+			.split(/\r?\n/)
+			.find((l) => l.trimEnd().endsWith(`  ${asset}`));
+		if (!line) return false;
+		const want = line.trim().split(/\s+/)[0].toLowerCase();
+		const got = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+		return want === got;
+	} catch {
+		return false;
+	}
+}
+
+/** 解压到 dir 并返回解出的 rtk 可执行文件路径（二进制在压缩包内的位置不假设，解压后递归找 rtk/rtk.exe）。
+ *  zip 仅出现在 Windows：优先用系统自带 bsdtar（System32\tar.exe 支持 zip）；PATH 上的 tar 可能是
+ *  Git Bash 的 GNU tar（不支持 zip），失败则回落 PowerShell Expand-Archive。tar.gz 走系统 tar。 */
+function rtkExtract(archive, dir, isZip) {
+	fs.mkdirSync(dir, { recursive: true });
+	const spawn = (cmd, args) => spawnSync(cmd, args, { encoding: "utf8", windowsHide: true });
+	let r;
+	if (isZip) {
+		const bsdtar = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
+		r = spawn(bsdtar, ["-xf", archive, "-C", dir]);
+		if (r.status !== 0 || r.error) {
+			const psPath = `${archive.replace(/'/g, "''")}`;
+			const psDir = `${dir.replace(/'/g, "''")}`;
+			r = spawn("powershell", ["-NoProfile", "-Command", `Expand-Archive -LiteralPath '${psPath}' -DestinationPath '${psDir}' -Force`]);
+		}
+	} else {
+		r = spawn("tar", ["-xzf", archive, "-C", dir]);
+	}
+	if (r.status !== 0 || r.error) return null;
+	const binName = process.platform === "win32" ? "rtk.exe" : "rtk";
+	const stack = [dir];
+	while (stack.length) {
+		const cur = stack.pop();
+		for (const f of fs.readdirSync(cur, { withFileTypes: true })) {
+			const p = path.join(cur, f.name);
+			if (f.isDirectory()) stack.push(p);
+			else if (f.name === binName) return p;
+		}
+	}
+	return null;
+}
+
+/** 可选依赖：rtk 二进制安装。PATH 已有则跳过；缺失时询问 → 下载（直连→镜像）→ 校验 → 落盘。
+ *  任何失败只警告不阻塞（插件侧缺失即安全降级）。 */
+async function ensureRtk() {
+	const asset = RTK_ASSETS[`${process.platform}|${process.arch}`];
+	if (rtkOnPath()) {
+		log("rtk ✓（已在 PATH 上，pi-rtk-optimizer 命令改写可用）");
+		return;
+	}
+	if (!asset) {
+		log(`rtk 跳过（暂无 ${process.platform}/${process.arch} 官方资产，可在 ${RTK_REPO} releases 确认后手动安装）`);
+		return;
+	}
+	const { dir, needsPathHint } = rtkDestDir();
+	const destBin = path.join(dir, process.platform === "win32" ? "rtk.exe" : "rtk");
+	if (fs.existsSync(destBin)) {
+		log(`rtk ✓（已安装在 ${destBin}，不在 PATH 上——重启终端或把该目录加入 PATH 后生效）`);
+		return;
+	}
+	log("rtk 未检测到（可选依赖：pi-rtk-optimizer 的命令改写引擎，缺失时该插件自动旁路仅留输出压缩）");
+	if (!(await confirm(`  是否自动下载安装 rtk ${RTK_VERSION}（${asset}）？（Y/n）`))) {
+		log(`已跳过 rtk（不影响安装；需要时手动装：https://github.com/${RTK_REPO}/releases）`);
+		return;
+	}
+	if (dryRun) {
+		log(`[预览] 下载 ${RTK_REPO} ${RTK_VERSION}/${asset} → 校验 sha256 → 解压安装到 ${destBin}`);
+		return;
+	}
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rtk-install-"));
+	try {
+		const direct = `https://github.com/${RTK_REPO}/releases/download/${RTK_VERSION}`;
+		const urls = RTK_PROXY ? [direct, RTK_PROXY + direct] : [direct]; // 直连优先，镜像回落
+		const archive = path.join(tmp, asset);
+		let ok = false, via = "";
+		for (const u of urls) {
+			console.log(`  下载 ${asset} …（${u.startsWith("https://github.com") ? "GitHub 直连" : "镜像"}）`);
+			if ((ok = rtkDownload(`${u}/${asset}`, archive))) { via = u; break; }
+		}
+		if (!ok) throw new Error("所有下载源均失败（直连与镜像）");
+		const checksums = path.join(tmp, "checksums.txt");
+		if (!rtkDownload(`${via}/checksums.txt`, checksums)) throw new Error("checksums.txt 下载失败");
+		if (!rtkVerify(asset, archive, checksums)) throw new Error("sha256 校验不通过（文件损坏或被篡改）");
+		const bin = rtkExtract(archive, path.join(tmp, "out"), asset.endsWith(".zip"));
+		if (!bin) throw new Error("解压后未找到 rtk 可执行文件");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.copyFileSync(bin, destBin);
+		if (process.platform !== "win32") fs.chmodSync(destBin, 0o755);
+		log(`rtk ${RTK_VERSION} 已安装到 ${destBin}`);
+		if (needsPathHint) console.log(`  提示：${dir} 不在 PATH 上，请把它加入 PATH（如 ~/.bashrc / ~/.zshrc 加 export PATH="$HOME/.pi/agent/bin:$PATH"）后重启终端。`);
+	} catch (e) {
+		console.warn(`⚠ rtk 自动安装失败（${e.message}），跳过（不影响安装；pi-rtk-optimizer 会安全降级）。`);
+		console.warn(`  可稍后手动安装：https://github.com/${RTK_REPO}/releases/tag/${RTK_VERSION}`);
+	} finally {
+		try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 临时目录残留无害 */ }
 	}
 }
 
@@ -433,6 +583,7 @@ async function main() {
 	const piRootBefore = findPiGlobalRoot();
 	console.log(`  pi 本体 ${piRootBefore ? `✓ ${piRootBefore}` : `✗ 未安装（${PI_PACKAGE}）`}`);
 	console.log(`  构建依赖 esbuild ${fs.existsSync(ESBUILD_DIR) ? "✓" : "✗ 未安装"}`);
+	console.log(`  rtk（可选，pi-rtk-optimizer 命令改写）${rtkOnPath() ? "✓" : "✗ 未安装（稍后可选自动安装）"}`);
 	console.log("");
 
 	// 1. pi 本体：缺失则交互确认后自动安装
@@ -474,6 +625,9 @@ async function main() {
 	applySettings();
 	installModelsJson();
 	generateTsconfig();
+
+	// 5. 可选依赖 rtk（失败不阻塞）；dry-run 下只预览
+	await ensureRtk();
 
 	if (dryRun) {
 		console.log("\n试运行完成（未做任何修改），去掉 --dry-run 正式安装。");

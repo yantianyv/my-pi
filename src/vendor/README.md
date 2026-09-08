@@ -37,4 +37,4 @@ rsync -a --delete package/ src/vendor/pi-subagents/   # 覆盖（Windows 可用 
 
 | 伴随物 | 服务于 | 安装位置 | 来源 |
 |---|---|---|---|
-| `rtk` 二进制 v0.45.0 | pi-rtk-optimizer 的命令改写（无它时自动旁路，仅输出压缩生效） | `%APPDATA%\npm\rtk.exe`（PATH 上） | [rtk-ai/rtk](https://github.com/rtk-ai/rtk)（Apache-2.0） |
+| `rtk` 二进制 v0.48.0 | pi-rtk-optimizer 的命令改写（无它时自动旁路，仅输出压缩生效） | install.js 自动安装（跨平台资产映射与落点见 install.js 顶部配置；Windows 装 `%APPDATA%\npm\`，Unix 优先 `~/.local/bin`） | [rtk-ai/rtk](https://github.com/rtk-ai/rtk)（Apache-2.0，release 资产 + checksums.txt） |
