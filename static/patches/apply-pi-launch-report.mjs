@@ -8,6 +8,12 @@
  * 验证过），因此「abort 类原生死亡」（node 内部断言 / V8 CHECK / llhttp 崩溃）在本机
  * 原本完全零痕迹。唯一确定能抓到它的通道：abort 死前会往 stderr 打原生调用栈。
  *
+ * 崩溃取证史（单台设备环境记录，与仓库解耦后自 2026-09 迁入此处留证）：
+ * - 2026-09-02 曾捕获到退出码 0xC0000409 fastfail；当时机器为骁龙 X Elite（arm64 Windows）
+ *   + arm64 node，彼时用 pi-x64.cmd/ps1 A/B 启动器（x64 node 模拟层跑同一 cli.js）做对照排查
+ *   （未入库）；换 x64 机器后该问题未复现，A/B 启动器随之废弃
+ * - 若在其他机器复现同类崩溃，按本补丁的 stderr 落盘通道取证，机器细节记在各自现场，不回填仓库文档
+ *
  * 本补丁给 npm 生成的 pi 三个启动垫片（pi.cmd / pi.ps1 / pi）注入：
  * - --max-old-space-size=8192：排除 V8 堆上限 OOM
  * - --report-on-fatalerror：V8 致命错误诊断报告 → ~/.pi/agent/reports/

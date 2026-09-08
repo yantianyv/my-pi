@@ -8,7 +8,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 
 | 命令 | 作用 | 出处 |
 |---|---|---|
-| `node install.js` | 交互式环境安装向导：检测 node/pi 本体/esbuild → 逐步确认（pi 缺失自动 `npm i -g @earendil-works/pi-coding-agent`、esbuild 缺失自动 `npm install`）→ 构建 → 安装到 `~/.pi/agent/`（含 theme=matrix）；**`-y` 非交互全自动**（非 TTY 环境自动等价）；`--skip-build` 跳过构建、`--dry-run` 只预览不询问不修改；脚本路径自适应（任意目录下 node <绝对路径>/install.js 均可） | install.js |
+| `node install.js` | 交互式环境安装向导：检测 node/pi 本体/esbuild/rtk → 逐步确认（pi 缺失自动 `npm i -g @earendil-works/pi-coding-agent`、esbuild 缺失自动 `npm install`、rtk 缺失可选自动下载跨平台二进制）→ 构建 → 安装到 `~/.pi/agent/`（含 theme=matrix）；**`-y` 非交互全自动**（非 TTY 环境自动等价）；`--skip-build` 跳过构建、`--dry-run` 只预览不询问不修改；脚本路径自适应（任意目录下 node <绝对路径>/install.js 均可） | install.js |
 | `node install.js --dry-run`（或 `-n`） | 试运行，只打印不修改（不询问、不触发构建/安装） | install.js |
 | `node src/build.js` | 伪编译：esbuild 把 src/extensions/ 源码（含 shared/、hud/ 子模块）内联打包成 dist/extensions/ 下的零耦合单文件（hud/ → hud.ts）；静态资源不经本脚本；install.js 会自动调用，也可手动单独跑 | src/build.js |
 | `npm install` | 首次拉取构建依赖（在 src/ 下执行，esbuild 装入 src/node_modules） | src/package.json |
@@ -19,7 +19,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 ## 目录结构
 
 ```
-install.js          # 安装脚本（根目录）：交互式向导——检测并自动安装 pi 本体（npm i -g，缺失时）+ 构建依赖 esbuild（npm install）→ 执行 src/build.js 构建 → 从 dist/extensions/ 装扩展产物、从 static/ 装静态资源（themes/sounds/models.json，无需编译）→ 生成 src/config/tsconfig.json（探测 pi 全局目录）；-y 非交互全自动，--skip-build 跳过构建，--dry-run 只预览
+install.js          # 安装脚本（根目录）：交互式向导——检测并自动安装 pi 本体（npm i -g，缺失时）+ 构建依赖 esbuild（npm install）+ 可选依赖 rtk 二进制（缺失时按平台下载 GitHub release，直连优先、gh-proxy 镜像回落，checksums.txt 校验）→ 执行 src/build.js 构建 → 从 dist/extensions/ 装扩展产物、从 static/ 装静态资源（themes/sounds/models.json，无需编译）→ 生成 src/config/tsconfig.json（探测 pi 全局目录）；-y 非交互全自动，--skip-build 跳过构建，--dry-run 只预览
 .gitignore          # 忽略生成物 tsconfig.json / node_modules / dist（产物不入库）
 README.md           # 项目说明（含 HUD 图例、各扩展用法、卸载方法）
 src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（build.js 的唯一输入）
@@ -96,17 +96,15 @@ static/              #   静态部署物（无需编译，install.js 直接从�
     apply-pi-ai-usage-guard.mjs     #       pi-ai usage 缺失防护补丁：模型偶发返回无 usage 的 assistant 消息导致后续调用瞬时失败；pi 升级后需重跑
     apply-zuchongzhi-zh.mjs        #       祖冲之汉化补丁：pi 无官方 i18n，直接替换 dist 编译产物硬编码英文为中文（236 处/9 文件）；pi 升级后需重跑
     apply-pi-launch-report.mjs     #       启动垫片取证补丁 v2：给 npm 的 pi.cmd/pi.ps1/pi 注入 NODE_OPTIONS（8GB 堆 + --report-on-fatalerror）
-                                   #       + stderr 追加落盘 ~/.pi/agent/pi-stderr.log + ps1 记录 [START]/[EXIT] 退出码；背景是 pi 反复无声崩溃
-                                   #       （实测本机 WER 对 node abort 不产生事件、--report-on-fatalerror 也抓不到 abort 类死亡，
-                                   #       abort 前的 stderr 原生栈是唯一确定通道）；幂等、自动清理 v1 注入；pi 升级后需重跑
-                                   #       另有 pi-x64.cmd/ps1 A/B 启动器（x64 node 模拟层跑同一 cli.js，对照 arm64 原生崩溃；
-                                   #       背景：2026-09-02 崩溃捕获到退出码 0xC0000409 fastfail，本机为骁龙 X Elite + arm64 node）
+                                   #       + stderr 追加落盘 ~/.pi/agent/pi-stderr.log + ps1 记录 [START]/[EXIT] 退出码；背景是 pi 反复无声崩溃，
+                                   #       崩溃取证史（含当时的机器与退出码细节）见补丁文件头注释，不写入本文档（与环境解耦）
+                                   #       ；幂等、自动清理 v1 注入；pi 升级后需重跑
   models.json        #     OpenRouter 路由模板：install.js 复制/深度合并到 ~/.pi/agent/models.json（见 README「OpenRouter 路由策略」节）
   vendor/           #   官方（社区）插件源码收录区（与 extensions/ 同级）：pi-rtk-optimizer（替代自研 token-saver；
                       #   pi-subagents / pi-btw 曾收录后回退自研版，见 README 回退记录）；MIT 原样收录（含各自 LICENSE），
                       #   README.md 含出处表与对齐更新流程；install.js 复制到 ~/.pi/agent/vendor/、有依赖的包补
                       #   npm install --omit=dev、本地路径注册进 settings.json 的 packages（并自动注销已移除的包）；
-                      #   伴随物 rtk 二进制（Apache-2.0）在 PATH 上（%APPDATA%\npm\rtk.exe，不入库）
+                      #   伴随物 rtk 二进制（Apache-2.0）不入库，由 install.js 按平台自动下载（跨平台资产映射见 install.js 顶部配置）
 dist/               # 扩展产物（build.js 生成，gitignore 不入库）：install.js 只认这里的 extensions/；每次 install 自动重建，克隆后 node install.js 即用（pi/esbuild 缺失自动装）
   extensions/       #   扩展产物：每扩展一个零耦合单文件 .ts（hud.ts 由 hud/ 合并而来）
     ask.ts          #     ask/ 合并为单文件（问卷）
