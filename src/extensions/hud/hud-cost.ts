@@ -447,8 +447,9 @@ export function getTokenRate(now: number): number | null {
 // DeepSeek 官方人民币定价（元 / 百万 tokens）
 // 来源：https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
 // 峰谷定价：DEEPSEEK_PRICES 存「空闲时段」价，高峰时段 = 空闲 × 2
-//   （高峰时段 = 北京时间每日 9:00-12:00 / 14:00-18:00）：
-//   deepseek-v4-flash：缓存命中 ¥0.05，缓存未命中 ¥1.5，输出 ¥4.5（高峰 0.10 / 3.0 / 9.0）
+//   （高峰时段 = 北京时间周一至周五 9:00-12:00 / 14:00-18:00，周末全天空闲价）：
+//   deepseek-flash   ：缓存命中 ¥0.02，缓存未命中 ¥1，输出 ¥4（高峰 0.04 / 2 / 8）
+//     （V4.1-Flash；旧模型名 deepseek-v4-flash 已下线，请求由 V4.1-Flash 承接并按此价计费）
 //   deepseek-v4-pro ：缓存命中 ¥0.15，缓存未命中 ¥4.5，输出 ¥13.5（高峰 0.30 / 9.0 / 27.0）
 // 扣费规则：扣减费用 = token 消耗量 × 模型单价（命中/未命中/输出分别计价）。
 // ---------------------------------------------------------------------------
@@ -461,7 +462,7 @@ interface DeepSeekPrice {
 
 /** 新峰谷定价（空闲时段基准价；高峰 = ×2）。 */
 const DEEPSEEK_PRICES: Record<string, DeepSeekPrice> = {
-	"deepseek-v4-flash": { cacheHit: 0.05, cacheMiss: 1.5, output: 4.5 },
+	"deepseek-flash": { cacheHit: 0.02, cacheMiss: 1, output: 4 },
 	"deepseek-v4-pro": { cacheHit: 0.15, cacheMiss: 4.5, output: 13.5 },
 };
 
@@ -471,9 +472,12 @@ const DEEPSEEK_PEAK_HOURS: Array<[number, number]> = [
 	[14, 18],
 ];
 
-/** 当前是否处于 DeepSeek 官方高峰时段（北京时间）。 */
+/** 当前是否处于 DeepSeek 官方高峰时段（北京时间周一至周五 9-12 / 14-18，周末全天空闲价）。 */
 export function isDeepSeekPeakHour(ts: number): boolean {
-	const hour = new Date(ts + 8 * 3_600_000).getUTCHours(); // 北京时间 = UTC+8
+	const bj = new Date(ts + 8 * 3_600_000); // 北京时间 = UTC+8（用 UTC 口径取星期/小时）
+	const day = bj.getUTCDay();
+	if (day === 0 || day === 6) return false; // 周末全天空闲
+	const hour = bj.getUTCHours();
 	return DEEPSEEK_PEAK_HOURS.some(([start, end]) => hour >= start && hour < end);
 }
 
@@ -492,7 +496,9 @@ export function isMimoOffpeakHour(ts: number): boolean {
 }
 
 function deepseekModelKey(modelId: string): string {
-	return modelId.toLowerCase().includes("pro") ? "deepseek-v4-pro" : "deepseek-v4-flash";
+	// 官方仅两个计费档：pro 档（deepseek-v4-pro）与 flash 档（deepseek-flash，即 V4.1-Flash；
+	// 旧名 deepseek-v4-flash 已下线由其承接，同价）
+	return modelId.toLowerCase().includes("pro") ? "deepseek-v4-pro" : "deepseek-flash";
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +586,7 @@ function mimoCostCny(u: AssistantMessage["usage"], modelId: string): number {
  * 映射，因此直接用 token 数 × 官方单价即可，不走 pi 的 USD 成本、不依赖汇率。
  */
 function deepseekCostCny(u: AssistantMessage["usage"], modelId: string, ts: number): number {
-	const p = DEEPSEEK_PRICES[deepseekModelKey(modelId)] ?? DEEPSEEK_PRICES["deepseek-v4-flash"];
+	const p = DEEPSEEK_PRICES[deepseekModelKey(modelId)] ?? DEEPSEEK_PRICES["deepseek-flash"];
 	const peak = isDeepSeekPeakHour(ts) ? 2 : 1;
 	return ((p.cacheMiss * u.input + p.cacheHit * u.cacheRead + p.output * u.output) * peak) / 1_000_000;
 }
@@ -650,8 +656,10 @@ const GO_PRICES: Record<string, GoPrice> = {
 		highTier: { threshold: 256_000, cacheMiss: 2.0, cacheHit: 0.2, output: 6.0 },
 	},
 	"deepseek-v4-pro": { cacheMiss: 0.66, cacheHit: 0.022, output: 1.98 },
-	"deepseek-v4-flash": { cacheMiss: 0.22, cacheHit: 0.007, output: 0.66 },
-	"deepseek-v4-flash-vision-exp": { cacheMiss: 0.22, cacheHit: 0.007, output: 0.66 },
+	// 2026-09 随上游降价：V4 Flash 系列（含新上线的 V4.1 Flash，经 goModelKey 兑底命中本档）
+	// 空闲 $0.15/$0.60/$0.003（原 $0.22/$0.66/$0.007），高峰 ×2；V4 Flash 月额度升至 $30
+	"deepseek-v4-flash": { cacheMiss: 0.15, cacheHit: 0.003, output: 0.6 },
+	"deepseek-v4-flash-vision-exp": { cacheMiss: 0.15, cacheHit: 0.003, output: 0.6 },
 	"hy4-preview": { cacheMiss: 0.834, cacheHit: 0.042, output: 2.501 },
 	"hy3": { cacheMiss: 0.14, cacheHit: 0.035, output: 0.58 },
 };

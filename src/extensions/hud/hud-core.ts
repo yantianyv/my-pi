@@ -581,7 +581,7 @@ export default async function (pi: ExtensionAPI) {
 
 					// ---- 行 3：账户（余额 / plan）+ 消耗统计 ----
 					// 计费徽章（挂余额行末尾）：
-					// - DeepSeek：高峰/低峰时段标签（北京时间 9:00-12:00 / 14:00-18:00，高峰 = warning 橙黄、低峰 = success 绿）
+					// - DeepSeek：高峰/低峰时段标签（北京时间周一至周五 9:00-12:00 / 14:00-18:00，周末全天低峰；高峰 = warning 橙黄、低峰 = success 绿）
 					// - MiMo Token Plan：夜间优惠时段（北京时间 0:00-8:00），低峰 = success 绿（0.8x 消耗）、高峰 = 正常
 					const peakTag = (() => {
 						if (model?.provider === "deepseek" && costMod) {
