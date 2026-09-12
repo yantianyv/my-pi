@@ -15,3 +15,4 @@ src/extensions/test/.tmp-*
 
 # 问卷运行时数据（ask 扩展的草稿/答案，随答随删，类似会话状态）
 .pi/questionnaires/
+.pi/sessions/

@@ -81,6 +81,12 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   白名单规则带保鲜元数据（addedAt/lastHit/hits，命中时刷新），超 30 天未命中自动清理（启动/加白时），
                     #   /perm-gate prune 手动清理、状态行提示过期条数；旧版纯字符串配置自动归一化兼容；
                     #   ~/.pi/agent/perm-gate.json 配置 + /perm-gate 命令）
+    pair-guard.ts   #   多 pi 会话并发协作守卫：项目级会话注册表（.pi/sessions/<sid>.json，30s 心跳、5min 超时判死、
+                    #   崩溃残留扫描时顺带清理）；write/edit 记录「最近在改哪些文件」（10min 滚动窗口）；
+                    #   并发广播：peer 加入/离开/新触碰文件/标签变化以定制消息追加对话尾部（变化驱动、合并降噪、
+                    #   绝对时间戳，尾部追加不破坏前缀缓存，消息入历史可回查）；写 peer 近窗口文件时 tool_result
+                    #   追加 ⚠️ 软警告；任务标签手动 /pair label 优先、自动读 workflow-mgr 当前任务回落；
+                    #   状态行推「👥 N 并发会话」+ peer 出现/消失 notify + /pair 命令
     claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn、双击 Ctrl+C 预填 /rewind 回退
     task-alert.ts     #   多状态提醒：五状态五音效（完成/出错/等待人工 ui_prompt/空闲 60s/子代理完成，音源 ClaudeCodeInit wav/piano）+ 标题动画 + setStatus 状态推送（三状态独立 key）
     workflow-mgr/     #   人机协作任务面板（多文件扩展源码：build.js 把 index.ts 入口打包成单文件 workflow-mgr.ts）
