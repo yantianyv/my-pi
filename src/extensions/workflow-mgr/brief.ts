@@ -2,8 +2,9 @@
  * workflow-mgr 简报层：给 AI 看的文本视图（不依赖 TUI，非 TUI 模式也能用）
  *
  * - renderBrief：完整状态简报（当前任务+人机分工+交付物+完成信号、下一步、
- *   阻塞项、里程碑、最近决策、流程指令）——wf_status 的正文，也是
- *   before_agent_start 注入 systemPrompt 时 AI 参考的状态视图；
+ *   阻塞项、里程碑、最近决策）——wf_status 的正文，也是
+ *   before_agent_start 注入 systemPrompt 时 AI 参考的状态视图
+ *   （行为指引只由 before_agent_start 注入，此处不重复）；
  * - summaryLine：一行进度摘要（常驻面板底部状态条 / session_start notify）；
  * - lightState：工具 results 的轻量 details——只带状态摘要与最近记录，
  *   不把 500 条 log 全量塞进会话条目。
@@ -72,9 +73,6 @@ export function renderBrief(state: WorkflowState, derived: Derived): string {
 		}
 	}
 
-	lines.push(
-		"- 流程指令：你是流程指挥者，向用户下达当前任务的具体指令（📋 任务/🎯 目标/📌 做法/✅ 回报/🔍 验证）；任务完成后先按完成信号验证再调用 wf_switch 推进；交流中产生了后续步骤需要知晓的结论/约束时，用 wf_note 记录（会变化的状态用 kind=status）；卡住用 wf_block。",
-	);
 	return lines.join("\n");
 }
 

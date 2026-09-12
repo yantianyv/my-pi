@@ -55,9 +55,9 @@ export default function (pi: ExtensionAPI) {
 		name: "web_search",
 		label: "联网搜索",
 		description:
-			"搜索互联网，返回标题 + URL + 摘要列表。需要深读某条结果时用 web_fetch 抓取该 URL。"
-			+ "查 npm 包用 source=\"npm\"。Python 包请走默认网页搜索（如 site:pypi.org/project/）。"
-			+ "发现低质量结果（内容与标题不符/灌水/死链）时，可调用 web_dislike 对其域名记差评，累计差评会降权该域名。",
+			"搜索互联网，返回标题 + URL + 摘要列表（深读某条用 web_fetch 抓 URL）。"
+			+ "查 npm 包用 source=\"npm\"；Python 包走默认网页搜索（site:pypi.org/project/）。"
+			+ "低质量结果（文题不符/灌水/死链）用 web_dislike 记差评降权。",
 		promptSnippet: "搜索互联网：web_search(查询词[, source]) → 标题+URL+摘要列表",
 		renderCall: (args, theme) => {
 			const query = typeof args?.query === "string" ? args.query.trim() : "";
@@ -65,9 +65,8 @@ export default function (pi: ExtensionAPI) {
 			return renderToolCall("🔍", query ? `${query}${source}` : undefined, theme, "web_search");
 		},
 		promptGuidelines: [
-			"Use web_search to look up real-time or external information (GitHub issues, docs, news, prices) instead of guessing or relying on stale memory.",
-			"Pass a concrete search query; if the first result set is unsatisfying, call web_search again with a refined query.",
-			"web_search returns title + snippet only; use web_fetch to read a result URL in depth.",
+			"需要实时或外部信息（GitHub issues、文档、新闻、价格）时用 web_search，不要凭记忆猜测。",
+			"查询词要具体；首屏结果不满意就换词再搜一次。",
 		],
 		parameters: Type.Object({
 			query: Type.String({ description: "搜索查询词（可含站点限定，如 site:github.com）" }),
@@ -120,9 +119,7 @@ export default function (pi: ExtensionAPI) {
 		name: "web_fetch",
 		label: "抓取网页",
 		description:
-			"抓取网页 URL 并自动转换为 markdown（正文提取 + 去导航广告 + 截断，节约 tokens）。"
-			+ "适合深读 web_search 找到的链接、官方文档、README。抓取失败时改用 web_search 查摘要。"
-			+ `默认返回前 ${DEFAULT_MAX_CHARS} 字符，上限 ${MAX_CHARS_LIMIT} 字符。`,
+			"抓取网页 URL 转 markdown（正文提取 + 去导航广告 + 截断）。适合深读文档/README；失败时改用 web_search 查摘要。",
 		promptSnippet: "抓取网页转 markdown：web_fetch(URL[, maxChars]) → 正文",
 		renderCall: (args, theme) =>
 			renderToolCall("🌐", typeof args?.url === "string" ? args.url : undefined, theme, "web_fetch"),
@@ -175,9 +172,8 @@ export default function (pi: ExtensionAPI) {
 		name: "web_dislike",
 		label: "搜索差评",
 		description:
-			"给搜索结果中的低质量域名记差评（持久化到本地，跨会话生效）：累计差评会使该域名在后续搜索结果中降权"
-			+ "（排名靠后，x0.6/次），差评累计 5 次直接滤除。用于深读某条结果后发现内容与标题不符/灌水/死链时，"
-			+ "对其所在域名记差评。用 /web-tool-config 面板查看、Delete 键清空。",
+			"给低质量域名记差评（本地持久化、跨会话生效）：累计差评使该域名在搜索结果中降权（×0.6/次，5 次滤除）。"
+			+ "深读后发现文题不符/灌水/死链时使用。",
 		promptSnippet: "搜索差评：web_dislike(域名/URL[, reason]) → 累计差评降权该域名",
 		renderCall: (args, theme) => {
 			const domains = Array.isArray(args?.domains) ? (args.domains as string[]).slice(0, 3).join(", ") : "";

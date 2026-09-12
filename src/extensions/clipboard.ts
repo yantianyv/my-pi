@@ -164,9 +164,7 @@ function normalizeNewlines(s: string): string {
 		name: "clipboard_get",
 		label: "读取剪贴板",
 		description:
-			"读取系统剪贴板当前文本内容（用户最近复制的东西）。适合：用户说「看我复制的xxx」「读取剪贴板」、"
-			+ "或需要把用户刚复制的链接/代码/文本拿进来处理时。剪贴板为空或只含图片等非文本内容时返回提示。"
-			+ `默认最多返回 ${DEFAULT_MAX_CHARS} 字符，超长截断（可用 maxChars 调整，上限 ${MAX_CHARS_LIMIT}）。`,
+			"读取系统剪贴板文本（用户最近复制的内容）。为空或只含图片等非文本时返回提示；超长截断并提示。",
 		promptSnippet: "读取剪贴板：clipboard_get([maxChars]) → 当前剪贴板文本",
 		renderCall: (_args, theme) => renderToolCall("📋", undefined, theme, "clipboard_get"),
 		parameters: Type.Object({
@@ -220,9 +218,8 @@ function normalizeNewlines(s: string): string {
 		name: "clipboard_set",
 		label: "写入剪贴板",
 		description:
-			"把文本写入系统剪贴板（覆盖当前内容），用户随后可直接 Ctrl+V 粘贴。适合：AI 编辑/生成结果后写回剪贴板交给用户粘贴。"
-			+ "空字符串可清空剪贴板。注意：剪贴板可能存着用户刚复制的敏感内容（密码/密钥）——写入前如有疑虑，先 clipboard_get 查看旧内容；"
-			+ "本工具返回时会报告被覆盖的旧内容摘要，供确认覆盖了什么。",
+			"把文本写入系统剪贴板（覆盖现有内容），供用户直接 Ctrl+V 粘贴；空字符串 = 清空。"
+			+ "剪贴板可能存有敏感内容（密码/密钥）：写入前有疑虑先 clipboard_get 查看；返回时会报告被覆盖的旧内容摘要。",
 		promptSnippet: "写入剪贴板：clipboard_set(文本) → 覆盖当前剪贴板",
 		renderCall: (args, theme) => {
 			const c = typeof args?.content === "string" ? args.content : "";

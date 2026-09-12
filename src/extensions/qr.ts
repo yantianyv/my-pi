@@ -285,11 +285,10 @@ export default function (pi: ExtensionAPI) {
 		name: "qr_encode",
 		label: "生成二维码",
 		description:
-			"把文本（URL、Wi-Fi 配置、名片、任意文字）编码成二维码，并直接显示在用户界面（图形终端显示 PNG 真图、" +
-			"普通终端用黑白字符绘制，用户可直接扫码），同时可选保存 PNG 文件。默认纠错级别 M，可调 L/M/Q/H。",
+			"把文本（URL/Wi-Fi 配置/名片等）编码成二维码并显示到用户界面（图形终端 PNG 真图、普通终端字符绘制，可直接扫码），可选保存 PNG。",
 		promptSnippet: "生成二维码：qr_encode(text) → 显示在用户界面 + PNG 路径",
 		promptGuidelines: [
-			"需要给用户二维码（链接/Wi-Fi/文本等）时用 qr_encode，二维码会直接显示在用户终端上，用户可扫码；需要图片文件时用 save 参数",
+			"需要给用户二维码时用 qr_encode（直接显示在终端，可扫）；需要图片文件时用 save 参数",
 		],
 		renderCall: (args, theme) => {
 			const a = args as { text?: string };
@@ -368,8 +367,7 @@ export default function (pi: ExtensionAPI) {
 		name: "qr_decode",
 		label: "解码二维码",
 		description:
-			"从图片中解码二维码：支持本地文件路径或 http(s) URL，PNG / JPEG 格式（纯 JS 解码，自动尝试正反色）。" +
-			"返回码内文本与版本/尺寸元信息。适合：用户给了二维码截图/图片要读取内容时。",
+			"从图片解码二维码：本地路径或 http(s) URL，PNG/JPEG（自动尝试正反色）。返回码内文本与版本/尺寸元信息。",
 		promptSnippet: "解码二维码：qr_decode(image) → 码内文本",
 		renderCall: (args, theme) => {
 			const a = args as { image?: string };

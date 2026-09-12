@@ -160,12 +160,10 @@ export function registerTools(pi: ExtensionAPI) {
 		label: "工作流定义",
 		description:
 			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）。" +
-			"**初始化优先用 import**：新建工作流时用 write 写一份草稿 json 文件（一次性导入整份计划，远比逐条 add 省 token；add 一般只用于已有工作流的增补调整）。" +
-			"import 草稿结构：{\"mode\":\"human-ai\", \"stages\":[{\"id\":\"design\", \"name\":\"阶段名\", \"goal\":\"阶段目标\", \"tasks\":[{\"title\":\"任务标题\", \"desc\":\"目标\", \"humanTasks\":[], \"aiTasks\":[], \"deliverable\":\"\", \"doneSignal\":\"\", \"deps\":[\"0.1\"]}]}]}——id 缺省自动生成（\"<阶段序号>.<序号>\"，如 0.1/1.2），deps 可直接引用本批未来 id；当前工作流非空时拒绝导入（请先 archive/reset）。" +
-			"list 查看全量（含各任务状态）；add 新增任务（stageId 不存在自动创建阶段，id 缺省自动生成）；" +
-			"edit 修改任务任意字段（传空数组清空列表字段）；remove 删除任务（同步清理状态与空阶段）；" +
-			"archive 归档当前工作流（收尾退出视野：可带 status 描述收尾状态——完成/放弃/其他，快照保留任务真实状态，数据移入 .pi/workflow/archive/ 留档，不提供找回功能，需要时手动查看）；" +
-			"reset 清空工作流（无阶段无任务，不可逆）。",
+			"新建优先用 import：先 write 一份草稿 json 再一次性导入（比逐条 add 省 token）；add 只用于后续增补调整。" +
+			"import 草稿结构：{\"mode\":\"human-ai\", \"stages\":[{\"id\":\"design\", \"name\":\"阶段名\", \"goal\":\"阶段目标\", \"tasks\":[{\"title\":\"任务标题\", \"desc\":\"目标\", \"humanTasks\":[], \"aiTasks\":[], \"deliverable\":\"\", \"doneSignal\":\"\", \"deps\":[\"0.1\"]}]}]}——id 缺省自动生成（0.1/1.2 式），deps 可引用本批未来 id；工作流非空时拒绝导入（先 archive/reset）。" +
+			"list 查看全量；add 新增任务（stageId 不存在自动建阶段）；edit 改任意字段（空数组清空列表字段）；remove 删任务；" +
+			"archive 归档留档（快照移入 .pi/workflow/archive/，无找回）；reset 清空（不可逆）。",
 		promptSnippet: "workflow: create/update the human-AI collaboration workflow definition",
 		parameters: workflowParams,
 		async execute(_id, params: WorkflowParams, _signal, _onUpdate, ctx) {
@@ -502,11 +500,9 @@ export function registerTools(pi: ExtensionAPI) {
 		name: "wf_switch",
 		label: "切换任务",
 		description:
-			"推进工作流：一次调用完成「完成当前任务 + 开始下一个」两步。" +
-			"无参数 = 完成当前任务并自动切换到下一个满足依赖的待办任务；没有下一个则全部任务完成，进入收尾（可 wf_workflow archive 归档）；" +
-			"工作流刚开始（无当前任务）时无参数 = 开始第一个满足依赖的任务。" +
-			"taskId=X = 显式切换到 X（同时完成当前任务）；对 blocked 任务调用即解除阻塞并开始；" +
-			"complete=false = 搁置当前任务（回 todo，不标记完成）直接切换到 taskId。" +
+			"推进工作流：一次调用 = 完成当前任务 + 开始下一个。" +
+			"无参数：自动切到下一个满足依赖的待办（无当前任务则开始第一个；没有下一个则全部完成，可 wf_workflow archive 收尾）。" +
+			"taskId=X：显式切换（同时完成当前）；对 blocked 任务即解除阻塞并开始；complete=false = 搁置当前任务（回 todo）直接切换。" +
 			"调用前先按当前任务的「完成信号」验证其确实完成（检查交付物、运行验证命令等）。",
 		promptSnippet: "switch to the next workflow task (completing the current one)",
 		parameters: switchParams,
@@ -704,12 +700,10 @@ export function registerTools(pi: ExtensionAPI) {
 		name: "wf_note",
 		label: "记录",
 		description:
-			"AI 的记录工具：在工作流中，用于记录后续步骤需要用到的信息。每进入新的步骤，应当主动使用 list 动作查看已有记录，并及时 remove 不再用得到的记录。\n" +
-			"使用准则：用户明确拍板的选择、硬约束（如「不要用 X」）、需要后续遵守的重要结论 → 记（kind=fact 默认，建议带 key）；\n" +
-			"进度/收集情况/他人状态等会随时间变化的信息 → 必须 kind=status（任务切换时会提醒复核，防过时记录误导）；\n" +
-			"对话琐碎细节、任务字段已覆盖的内容（分工/交付物/完成信号）→ 不记。\n" +
-			"同一主题的信息更新时：带 key 的用同 key add 新记录（自动作废旧记录），不带 key 的用 edit 改原记录——不要并排留两条互相矛盾的记录。\n" +
-			"action：add 追加（自动 id+时间戳，可选 kind/key）/ list 查看全部生效记录 / edit 修改（按 id）/ remove 删除（按 id）。",
+			"AI 的记录工具：记录后续步骤需要知晓的信息。进入新步骤先 list 查看已有记录，不再需要的及时 remove。\n" +
+			"记：用户拍板的选择、硬约束、需后续遵守的结论（kind=fact 默认，建议带 key）；会随时间变化的信息（进度/收集情况等）必须 kind=status（任务切换时提醒复核）。\n" +
+			"不记：琐碎细节、任务字段已覆盖的内容（分工/交付物/完成信号）。\n" +
+			"同主题更新：带 key 用同 key add（自动作废旧记录），不带 key 用 edit 改原记录——不留两条互相矛盾的记录。",
 		promptSnippet: "记录当前步骤产生、后续步骤需要知晓的信息",
 		parameters: noteParams,
 		async execute(_id, params: NoteParams, _signal, _onUpdate, ctx) {

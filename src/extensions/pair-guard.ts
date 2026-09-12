@@ -10,7 +10,9 @@
  * - write/edit 工具调用记录「我最近在改哪些文件」（滚动窗口 RECENT_FILE_TTL_MS）
  * - 广播式知情：peer 加入/离开/触碰新文件/标签变化等事件以定制消息
  *   （customType=pair-guard）追加到对话历史尾部（下一轮开始前投递）——
- *   尾部追加不破坏前缀缓存，且每条广播成为历史中的即时记录，AI 可随时回查
+ *   尾部追加不破坏前缀缓存，且每条广播成为历史中的即时记录，AI 可随时回查；
+ *   事件行极筒（时间 + 短 id + 动作，标签只在加入/变更行带）、队列按事件键去重
+ *   （防 reload 快照重建出重复行）、协作约定只在首批广播附带一次
  * - 软冲突警告：write/edit 命中 peer 近窗口期内写过的文件时，tool_result 追加
  *   ⚠️ 警告文本（不阻断，AI 自行调整：先读最新内容、小步修改、告知用户）
  * - 状态栏推「👥 N 并发会话」（hud 动态区），peer 出现/消失时 notify 用户
@@ -72,8 +74,12 @@ export default function (pi: ExtensionAPI) {
 	let heartbeat: ReturnType<typeof setInterval> | undefined;
 	/** peer 快照（sessionId → 已知文件集合/标签），心跳 diff 出广播事件 */
 	let peerSnapshot = new Map<string, { files: Set<string>; label: string }>();
-	/** 待投递广播队列（before_agent_start 一次性排空合并为一条消息） */
+	/** 待投递广播队列（before_agent_start 一次性排空合并为一条消息）；
+	 *  pendingKeys 去重：同一排空窗口内同类事件只报一次（reload 快照重建等时序下防重复行） */
 	let pendingBroadcasts: string[] = [];
+	let pendingKeys = new Set<string>();
+	/** 本会话是否已投递过首批广播（协作约定只在首批附带一次，后续不重复） */
+	let conventionSent = false;
 	let lastEditPersist = 0;
 	let wfCache: { at: number; title: string } | null = null;
 
@@ -172,45 +178,52 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus(STATUS_KEY, peerCount > 0 ? `👥 ${peerCount} 并发会话` : undefined);
 	}
 
+	/** 入队一条广播（同 key 去重；队列满则丢弃新事件，防长时间不排空爆积） */
+	function pushBroadcast(key: string, line: string): void {
+		if (pendingKeys.has(key) || pendingBroadcasts.length >= 50) return;
+		pendingKeys.add(key);
+		pendingBroadcasts.push(line);
+	}
+
 	/**
 	 * peer 快照 diff → 广播事件 + 用户通知 + 状态行
-	 * 广播只报变化（加入/离开/新触碰文件/标签变化），连续编辑同一文件不重复报（降噪）
+	 * 广播只报变化（加入/离开/新触碰文件/标签变化），连续编辑同一文件不重复报；
+	 * 文本从简：标签只在加入/变更行带，事件行只留「时间 id 动作」
 	 */
-	function diffPeers(peers: SessionRecord[], ctx: ExtensionContext): void {
+	function diffPeers(peers: SessionRecord[], ctx: ExtensionContext, initial = false): void {
 		const now = Date.now();
 		const seen = new Set(peers.map((p) => p.sessionId));
 		for (const p of peers) {
 			const label = p.label || p.task;
-			const who = `会话 ${short(p.sessionId)}${label ? `（任务：${label}）` : ""}`;
 			const files = p.recentFiles.filter((f) => now - f.at < RECENT_FILE_TTL_MS).map((f) => f.path);
 			const prev = peerSnapshot.get(p.sessionId);
 			if (!prev) {
-				pendingBroadcasts.push(
-					files.length > 0
-						? `${hhmm()} ${who} 加入本项目，近 10 分钟改过：${files.slice(0, 5).join("、")}`
-					: `${hhmm()} ${who} 加入本项目，暂无文件修改记录`,
-				);
-				ctx.ui.notify(`pair-guard：新的并发会话加入（${short(p.sessionId)}${label ? `，任务：${label}` : ""}）`, "info");
+				let line = `${hhmm()} ${short(p.sessionId)} ${initial ? "已在工作" : "加入"}`;
+				if (label) line += `（任务：${label}）`;
+				if (files.length > 0) line += `，近期改过：${files.slice(0, 5).join("、")}`;
+				pushBroadcast(`join:${p.sessionId}`, line);
+				if (!initial) {
+					ctx.ui.notify(`pair-guard：新的并发会话加入（${short(p.sessionId)}${label ? `，任务：${label}` : ""}）`, "info");
+				}
 			} else {
 				for (const f of files) {
 					if (![...prev.files].some((pf) => samePath(pf, f))) {
-						pendingBroadcasts.push(`${hhmm()} ${who} 开始修改 ${f}`);
+						pushBroadcast(`file:${p.sessionId}:${f.toLowerCase()}`, `${hhmm()} ${short(p.sessionId)} 修改了 ${f}`);
 					}
 				}
-				if (label !== prev.label) {
-					pendingBroadcasts.push(`${hhmm()} ${who} 任务标签更新为「${label || "无"}」`);
+				if (label !== prev.label && label) {
+					pushBroadcast(`label:${p.sessionId}:${label}`, `${hhmm()} ${short(p.sessionId)} 任务：${label}`);
 				}
 			}
 			peerSnapshot.set(p.sessionId, { files: new Set(files), label });
 		}
 		for (const id of [...peerSnapshot.keys()]) {
 			if (!seen.has(id)) {
-				pendingBroadcasts.push(`${hhmm()} 会话 ${short(id)} 已离开`);
+				pushBroadcast(`leave:${id}`, `${hhmm()} ${short(id)} 离开`);
 				peerSnapshot.delete(id);
 				ctx.ui.notify(`pair-guard：并发会话 ${short(id)} 已结束`, "info");
 			}
 		}
-		if (pendingBroadcasts.length > 50) pendingBroadcasts.splice(0, pendingBroadcasts.length - 50); // 防长时间空闲无限累积
 		updateStatus(ctx, peers.length);
 	}
 
@@ -252,8 +265,12 @@ export default function (pi: ExtensionAPI) {
 		if (heartbeat) clearInterval(heartbeat);
 		heartbeat = setInterval(() => beat(ctx), HEARTBEAT_INTERVAL_MS);
 
-		// 初始扫描：peerSnapshot 为空，diff 自然生成全部 peer 的「加入」广播（首轮即知情）
-		diffPeers(scanPeers(), ctx);
+		// 初始扫描：peerSnapshot 为空，diff 生成「已在工作」现状行（首轮即知情；区别于中途「加入」事件）
+		const peers = scanPeers();
+		diffPeers(peers, ctx, true);
+		if (peers.length > 0) {
+			ctx.ui.notify(`pair-guard：${peers.length} 个并发会话在线（/pair 查看详情）`, "info");
+		}
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -271,6 +288,8 @@ export default function (pi: ExtensionAPI) {
 		self = null;
 		peerSnapshot.clear();
 		pendingBroadcasts = [];
+		pendingKeys.clear();
+		conventionSent = false;
 		wfCache = null;
 	});
 
@@ -329,14 +348,18 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async () => {
 		if (pendingBroadcasts.length === 0) return;
 		const lines = pendingBroadcasts.splice(0);
+		pendingKeys.clear();
+		let content = "[pair-guard] 并发会话动向：\n" + lines.map((l) => `- ${l}`).join("\n");
+		if (!conventionSent) {
+			// 协作约定只在首批广播附带一次（历史里永久可见，后续广播不再重复）
+			conventionSent = true;
+			content += "\n（协作约定：改上述会话近期文件前先重读最新内容；大改同一区域请提醒用户协调分工。后续广播不再重复本约定。）";
+		}
 		return {
 			message: {
 				customType: "pair-guard",
 				display: true,
-				content:
-					"[pair-guard 并发广播] 其他 pi 会话的实时动向：\n" +
-					lines.map((l) => `- ${l}`).join("\n") +
-					"\n（协作约定：修改上述会话近期触碰的文件前先重读最新内容、改动保持最小；涉及同一区域的实质性改动请在回复中提醒用户协调分工。）",
+				content,
 			},
 		};
 	});
