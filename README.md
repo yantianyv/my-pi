@@ -28,6 +28,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `qr.ts` — 二维码：`qr_encode` 编码（显示到 UI + PNG 落盘）+ `qr_decode` 解码 + `/qr` 命令（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `img-slim.ts` — 图片请求体预算：新图按类型瘦身（照片→JPEG、图形→优先 PNG、动图 WebP 转静态）+ 每轮请求前按总量预算省略最旧历史图片（防 DeepSeek 等上游 48MiB 请求体 413）（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `patches/` | 两个 pi 补丁：ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
@@ -228,6 +229,18 @@ bash 命令三级管控（`tool_call` 事件拦截，只管 bash）：**复合�
 - **`/qr <文本>`**：用户侧快速生成二维码并显示，按任意键关闭。
 - **会话回放安全**：details 只存原文（不存矩阵/PNG，会话文件不膨胀）；渲染时从原文同步重新编码，历史会话重新打开时二维码照样渲染。
 - 状态推送 `qr` 走 shared/status 联动 hud（行 1 动态区 accent 色）；回归测试 `node src/extensions/qr/test/qr.test.mjs`（esbuild bundle + jiti 加载，12 场景）。
+
+## 图片请求体预算（src/extensions/img-slim.ts）
+
+防止「上下文里的历史图片把请求体撑爆」导致上游 413（DeepSeek 直连/中转实测上限 ≈48 MiB：46.4MB 通过、52.6MB 失败；超限报错形态为 openresty 的 413 HTML 或中转的 `413 {"Upstream response was not valid JSON"}`）。根因是 pi 会把分支内历史图片**每轮原样重发**且无淘汰，而上下文 token 估算把每张图只记 4800 字符 ≈1200 tokens（DeepSeek-flash 窗口 1M ⇒ 要 ~820 张图才可能触发自动压缩，**请求体上限永远先到**；实测某会话 76 张/75.6MB 起连续 413、全天涨到 186 张/186.5MB，纯文字追问也一起报错）。
+
+三层防护：
+
+- **新图瘦身**（`tool_result` 钩子 + `input` 钩子）：工具（`read` 等）读入的图片与用户粘贴/`@file` 附带的图片，按类型重编码到单图预算内——照片（jpeg 源）≤900KB base64、图形/截图（png/gif/webp 源）≤1.6MB，最长边 2000px；**动图 WebP 强制取首帧转静态 PNG**（上游会 400 拒收动图 WebP，且历史重发会让后续每轮都失败）；小于 300KB 的图不碰，避免重编码抖动。
+- **总量预算**（`context` 钩子，每轮请求前）：统计仍在上下文里的历史图片总量，超过 32MB base64 就**从最旧开始**把图片换成占位文本（非破坏性：只改本次请求，会话记录不动，需要时重新 `read` 即可）；会话已积累超过 40MB 时新图按半预算处理（温和降级）。状态行显示 `🖼 24.5MB 裁2图`（走官方 `setStatus`，hud 缺席回落原生 footer）。
+- **`/img-slim`**：报告分支内图片张数/体积/预算与当前单图策略；`/img-slim on|off` 本次会话开关。
+
+取舍（实测数据，2000px 上限）：**无损重编码对 JPEG 源无解**（7.43MB 照片 → 无损 WebP 11.44MB，1.5 倍膨胀且 87s/张；JPEG 已是有损 DCT，解码后熵高）；PNG 截图转无损 WebP 只省 ~20-30% 且不能降分辨率，打不过现状的降采样。真杠杆是分辨率：1400px+JPEG q90 平均 433KB（48MiB ≈113 张）、1024px+q85 平均 198KB（≈248 张）、现状（pi 2000px）1618KB（≈30 张）。本扩展保守沿用 2000px，想更狠改文件顶部 `MAX_SIDE` / `PHOTO_MAX_B64` / `GRAPHIC_MAX_B64` 即可。已知限制：APNG（动图 PNG）在 pi 的图片嗅探层就被判为非图片（会当文本读入），钩子层拿不到 `ImageContent`，无法在此修复。
 
 ## 人机协作任务面板（src/extensions/workflow-mgr/）
 

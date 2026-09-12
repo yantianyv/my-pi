@@ -63,6 +63,12 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   可扫；PNG 可选落盘）+ qr_decode 解码（本地路径/URL，PNG/JPEG 纯 JS）+ /qr 命令；
                     #   qrcode/jsqr/pngjs/jpeg-js 由 build.js 内联，会话回放安全（details 只存原文，
                     #   渲染时同步重编码）；test/qr.test.mjs 回归测试（jiti 加载产物，24 场景）
+    img-slim.ts   #   图片请求体预算：三层防护防上游 48MiB 请求体 413——tool_result/input 钩子给新图瘦身
+                    #   （照片 ≤900KB、图形 ≤1.6MB、最长边 2000px、PNG 优先，动图 WebP 强制转静态 PNG，
+                    #   <300KB 不碰）+ context 钩子每轮请求前按 32MB 总量预算从最旧开始省略历史图片
+                    #   （只改本次请求、非破坏性，>40MB 时新图半预算温和降级）+ /img-slim 报告与开关；
+                    #   背景：pi 历史图片每轮原样重发、token 估算每图仅记 1200 tokens（1M 窗口要 820 张才
+                    #   触发压缩），请求体上限永远先到（实测会话 76 张/75.6MB 起连续 413、涨到 186 张/186.5MB）
     crash-log.ts  #   崩溃黑匣子：prependListener 抢在 pi 的 uncaughtException 处理器（同步 exit）之前把堆栈
                     #   同步落盘 ~/.pi/agent/pi-crash.log（含 unhandledRejection 与 exit 码），崩溃条目与会话文件按时间配对
     perm-gate.ts    #   bash 命令三级权限门：黑名单人工复核 / 白名单放行 / AI 审核（模型覆盖项仿 pi-btw：
@@ -124,6 +130,7 @@ dist/               # 扩展产物（build.js 生成，gitignore 不入库）：
 - **vendor 官方插件**：src/vendor/ 收录社区插件源码副本（pi-rtk-optimizer 输出压缩+rtk 命令改写；pi-subagents/pi-btw 曾收录后回退自研 explore-agent/btw，回退原因与借鉴评估见 src/vendor/README.md 回退记录）；收录原则/出处/更新流程见 src/vendor/README.md。兼容性：pi-rtk-optimizer 不动 footer、setStatus 键不冲突
 - **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；进度经 `ctx.ui.setStatus("init", …)` 推送由 hud 行 1 动态区显示。同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:61-65）。
 - **ask 问卷**：AI 侧 `ask` 工具创建问卷（single/multi/text/confirm/rating/number 六题型，选项题自动带「其他」自由输入）写入 `.pi/questionnaires/<id>.json` 并立即整屏弹出；用户 Enter 提交（答案作工具结果返回）或 Esc 搁置（草稿写回文件 status:draft，随时 /answer 续答，提交后答案经 `pi.sendUserMessage` 以 followUp 送达，文件即删）。`ask action=cancel id=xxx` 作废问错/过时的待答问卷（问卷即文件，删文件即撤回；正在整屏作答中的问卷无法作废——彼时创建调用正挂起等待）。「问卷即文件」：手写 JSON 丢进目录也能被 /answer 扫描识别。长文本（标题/题干/选项/说明）经 pi-tui `wrapTextWithAnsi` 按终端宽度折行完整展示（不截断），续行缩进对齐首行文本起点；页面垂直滚动跟随焦点。整屏页 = overlay（width/maxHeight 100% + 左上锚点 + 每行补满全宽）——pi 的 overlay 是逐行不透明合成，全屏即遮蔽聊天/HUD；高度权威值由 overlayOptions.visible 回调每帧捕获（tui.terminal.rows 可能滞后）。已知限制：regular（内联）模式下全屏 overlay 与聊天共享原生滚动缓冲，滚轮上滑会看到残影（仅美观问题，实时画面正常）；fullscreen 模式（alternate screen）下零污染。
+- **img-slim 图片预算**：三个钩子组成三层防护——`tool_result`/`input` 给新进上下文的图片瘦身（照片≤900KB、图形≤1.6MB base64、最长边 2000px、PNG 优先退 JPEG；动图 WebP 强制转静态 PNG，因为上游 400 拒收且历史重发会让后续每轮都失败），`context` 钩子每轮请求前按 32MB 总量预算从最旧开始把图片换成占位文本（非破坏性：只改本次请求，会话记录不动；`context` 事件的 messages 本就是 pi 的 structuredClone 副本，加处理器不增加拷贝成本）；状态行 `🖼 xMB 裁N图` 走 setStatus。风险模型：上游 48MiB 请求体上限 → 而 pi 的 token 估算每图仅 1200 tokens（4800 字符/4），1M 窗口要 ~820 张才触发自动压缩 ⇒ 上限永远先到（实测 76 张/75.6MB 起连续 413）。
 - **claude-it 回退**：`/rewind` 命令（navigateTree 是命令 ctx 专属能力）回退到上一条用户消息、内容放回输入框；双击 Ctrl+C（打断后 2s 窗口内）预填 `/rewind` 命令，回车执行。Ctrl+C 打断不触发 task-alert 完成提醒——task-alert 监听 agent_end，最后一条 assistant 消息 `stopReason="aborted"` 即跳过 agent_settled 提醒（零耦合，不依赖 claude-it）。
 
 ## 代码风格与约定
