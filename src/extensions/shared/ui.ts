@@ -10,8 +10,9 @@
  * - createBoxRenderer：浮层边框行渲染原语（╭╮│╰╯ 全封闭行 + 统一 "…" 截断），
  *   统一 ModelSelect / ProxyConfig / Btw 的单行边框风格，弃 webdav 系列的无右边界、
  *   Btw 的 "..." 三连点等分散实现
- * - editInput / pasteText：输入框编辑键统一（backspace/left/right/home/end/插入/粘贴），
- *   吸收 KbOverlay 的 bracketed paste 精华，弃 5 处逐字重复的手感不一实现
+ * - editInput / pasteText：输入框编辑键统一（backspace/left/right/home/end/insert/粘贴 +
+ *   ctrl+←→ 按词移动、ctrl+w 删词、grapheme 安全步进），吸收 KbOverlay 的 bracketed paste
+ *   精华，弃 5 处逐字重复的手感不一实现
  */
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -133,7 +134,9 @@ export type EditInputResult = { text: string; cursor: number } | "skip";
 
 /**
  * 统一输入框编辑键处理：backspace / left / right / home / end / delete（光标处删）/ ctrl+u（清空）/
- * 可打印字符插入 / 粘贴。
+ * ctrl+left·ctrl+right（按词移动）/ ctrl+w·alt+backspace（删前一个词）/ 可打印字符插入 / 粘贴。
+ * 光标移动按 grapheme 步进（emoji、组合符、ZWJ 序列不会被拆成半个），
+ * 故左/右键一次跨过一个用户感知字符而不是一个 UTF-16 码元。
  * 命中编辑键返回新的 { text, cursor }（backspace 在光标 0 时也返回原值，表示「已消费」）；
  * 非编辑键（escape/enter/tab/↑↓ 等）返回 "skip"，由调用方继续处理特异键。
  */
@@ -150,24 +153,40 @@ export function editInput(
 	}
 	if (matchesKey(data, "backspace")) {
 		if (cursor > 0) {
-			return { text: text.slice(0, cursor - 1) + text.slice(cursor), cursor: cursor - 1 };
+			const at = prevGraphemeStart(text, cursor);
+			return { text: text.slice(0, at) + text.slice(cursor), cursor: at };
 		}
 		return { text, cursor };
 	}
 	if (matchesKey(data, "delete")) {
 		if (cursor < text.length) {
-			return { text: text.slice(0, cursor) + text.slice(cursor + 1), cursor };
+			const at = nextGraphemeEnd(text, cursor);
+			return { text: text.slice(0, cursor) + text.slice(at), cursor };
 		}
 		return { text, cursor };
 	}
 	if (matchesKey(data, Key.ctrl("u"))) {
 		return { text: "", cursor: 0 };
 	}
+	// 按词移动 / 删词（多行简答长文本里按词跳比逐字挪快得多）
+	if (matchesKey(data, "ctrl+left")) {
+		return { text, cursor: prevWordStart(text, cursor) };
+	}
+	if (matchesKey(data, "ctrl+right")) {
+		return { text, cursor: nextWordEnd(text, cursor) };
+	}
+	if (matchesKey(data, "ctrl+w") || matchesKey(data, "alt+backspace")) {
+		if (cursor > 0) {
+			const at = prevWordStart(text, cursor);
+			return { text: text.slice(0, at) + text.slice(cursor), cursor: at };
+		}
+		return { text, cursor };
+	}
 	if (matchesKey(data, "left")) {
-		return { text, cursor: Math.max(0, cursor - 1) };
+		return { text, cursor: prevGraphemeStart(text, cursor) };
 	}
 	if (matchesKey(data, "right")) {
-		return { text, cursor: Math.min(text.length, cursor + 1) };
+		return { text, cursor: nextGraphemeEnd(text, cursor) };
 	}
 	if (matchesKey(data, "home")) {
 		return { text, cursor: 0 };
@@ -180,4 +199,60 @@ export function editInput(
 		return { text: text.slice(0, cursor) + data + text.slice(cursor), cursor: cursor + 1 };
 	}
 	return "skip";
+}
+
+// ---------------------------------------------------------------------------
+// grapheme / 词边界步进（编辑键共用）
+// ---------------------------------------------------------------------------
+
+/** Intl.Segmenter（Node 16+ 全局可用）；不可用时退化为代理对启发式 */
+const SEGMENTER: Intl.Segmenter | null =
+	typeof Intl !== "undefined" && typeof (Intl as { Segmenter?: unknown }).Segmenter === "function"
+		? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+		: null;
+
+/** 光标左侧一个 grapheme 的起始索引（emoji / 组合符 / ZWJ 序列整体跨过） */
+function prevGraphemeStart(text: string, cursor: number): number {
+	if (cursor <= 0) return 0;
+	if (!SEGMENTER) {
+		const c = text.charCodeAt(cursor - 1);
+		return c >= 0xdc00 && c <= 0xdfff && cursor >= 2 ? cursor - 2 : cursor - 1;
+	}
+	const from = Math.max(0, cursor - 64); // 只需回看一小段，避免长文本每键全量分词
+	let last = from;
+	for (const seg of SEGMENTER.segment(text.slice(from, cursor))) last = from + seg.index;
+	return last;
+}
+
+/** 光标右侧一个 grapheme 的结束索引 */
+function nextGraphemeEnd(text: string, cursor: number): number {
+	if (cursor >= text.length) return text.length;
+	if (!SEGMENTER) {
+		const c = text.charCodeAt(cursor);
+		return c >= 0xd800 && c <= 0xdbff ? cursor + 2 : cursor + 1;
+	}
+	const to = Math.min(text.length, cursor + 64);
+	for (const seg of SEGMENTER.segment(text.slice(cursor, to))) return cursor + seg.index + seg.segment.length;
+	return to;
+}
+
+/** 词字符判定（字母/数字/下划线；含 CJK——中文按整段连续汉字当一个词） */
+function isWordChar(ch: string): boolean {
+	return /[\p{L}\p{N}_]/u.test(ch);
+}
+
+/** 光标前一个词的起点（先跳过空白/标点，再跳过词） */
+function prevWordStart(text: string, cursor: number): number {
+	let p = cursor;
+	while (p > 0 && !isWordChar(text[p - 1]!)) p--;
+	while (p > 0 && isWordChar(text[p - 1]!)) p--;
+	return p;
+}
+
+/** 光标后一个词的终点 */
+function nextWordEnd(text: string, cursor: number): number {
+	let p = cursor;
+	while (p < text.length && !isWordChar(text[p]!)) p++;
+	while (p < text.length && isWordChar(text[p]!)) p++;
+	return p;
 }

@@ -10,8 +10,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { QuestionnairePage, QuestionnairePicker, type PageResult, type TermDims } from "./page";
 import { refreshPendingStatus, rememberCtx } from "./state";
 import { initStore, listQuestionnaires, removeQuestionnaire, saveQuestionnaire } from "./store";
-import { makeFullscreenOverlay } from "./tool";
-import { formatAnswersMessage } from "./types";
+import { makeFullscreenOverlay, makePageHooks } from "./tool";
+import { answeredProgress, answerableQuestions, formatAnswersMessage } from "./types";
 
 export function registerAnswerCommand(pi: ExtensionAPI): void {
 	pi.registerCommand("answer", {
@@ -33,11 +33,17 @@ export function registerAnswerCommand(pi: ExtensionAPI): void {
 				return;
 			}
 
-			// 多份时先选
+			// 多份时先选（选择器里可直接删除过时问卷：D 按两次）
 			let target = items[0]!;
 			if (items.length > 1) {
 				const picked = await ctx.ui.custom<string | null>(
-					(_tui, theme, _kb, done) => new QuestionnairePicker(theme, items, done),
+					(_tui, theme, _kb, done) =>
+						new QuestionnairePicker(theme, items, done, {
+							onDelete: (file) => {
+								removeQuestionnaire(file);
+								void refreshPendingStatus();
+							},
+						}),
 					{ overlay: true, overlayOptions: { width: "70%", minWidth: 50, maxHeight: "60%" } },
 				);
 				if (picked === null) return;
@@ -46,7 +52,7 @@ export function registerAnswerCommand(pi: ExtensionAPI): void {
 
 			const dims: TermDims = { w: 0, h: 0 };
 			const result = await ctx.ui.custom<PageResult>(
-				(tui, theme, _kb, done) => new QuestionnairePage(tui, theme, target.q, done, dims),
+				(tui, theme, _kb, done) => new QuestionnairePage(tui, theme, target.q, done, dims, makePageHooks()),
 				makeFullscreenOverlay(dims),
 			);
 
@@ -55,13 +61,27 @@ export function registerAnswerCommand(pi: ExtensionAPI): void {
 				await refreshPendingStatus();
 				// 答案作为用户消息送达（agent 忙时排为 followUp，闲时立即触发新一轮）
 				pi.sendUserMessage(formatAnswersMessage(target.q, result.answers), { deliverAs: "followUp" });
-			} else {
-				target.q.answers = result.answers;
-				target.q.status = "draft";
-				saveQuestionnaire(target.file, target.q);
-				await refreshPendingStatus();
-				ctx.ui.notify(`问卷「${target.q.title}」已搁置（草稿已保存），随时可用 /answer 继续`, "info");
+				// 提交回执：用户自己也能看到「答了什么」，不必翻回上次的问卷
+				ctx.ui.notify(
+					`✓ 已提交「${target.q.title}」（${answeredProgress(target.q, result.answers)}/${answerableQuestions(target.q).length} 题已答），答案已发送给 AI`,
+					"info",
+				);
+				return;
 			}
+
+			// 用户主动删除：删文件 + 告知（下次 /answer 不再看到）
+			if (result.action === "delete") {
+				removeQuestionnaire(target.file);
+				await refreshPendingStatus();
+				ctx.ui.notify(`已删除问卷「${target.q.title}」，不会再等待回答`, "info");
+				return;
+			}
+
+			target.q.answers = result.answers;
+			target.q.status = "draft";
+			saveQuestionnaire(target.file, target.q);
+			await refreshPendingStatus();
+			ctx.ui.notify(`问卷「${target.q.title}」已搁置（草稿已保存），随时可用 /answer 继续`, "info");
 		},
 	});
 }

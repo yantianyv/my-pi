@@ -9,11 +9,20 @@
  * 焦点模型：全部可交互行（选项行 / 其他输入行 / 文本输入行 / 评分行）拍平成行列表，
  * ↑↓（或 Tab/Shift+Tab）跨题移动，页面滚动跟随焦点。长文本（标题/题干/选项/说明）
  * 经 wrapTextWithAnsi 按终端宽度折行完整展示（不截断），续行缩进对齐首行文本起点；
- * 输入行仍单行水平滚动（renderScrollingInput）。键位（与用户拍板一致）：
+ * 输入行仍单行水平滚动（renderScrollingInput）。
+ *
+ * note 说明题：只读块（不产生焦点行、不进必答校验、不计入进度分母），正文经
+ * shared/markdown 轻渲染后挂在「│ 」左边线下展示；超过 NOTE_FOLD_LINES 行默认折叠，
+ * x 键展开/收起。长草稿审阅场景靠 Ctrl+↑/↓ 跳题 + PgUp/PgDn 翻页完成浏览。
+ *
+ * 键位（? 键可随时查看本表）：
  * - 空格：选择题选中（单选/判断选中后自动前进到下一行；多选切换勾选，受 max 限制）
  * - Enter：提交问卷（必答未完成时跳到第一题未完成项并提示）；多行文本聚焦时 Shift+Enter 换行
  * - Esc：搁置（草稿写回文件，随时 /answer 继续）
  * - 判断题快捷 y/n；选择题数字键 1-9 直选；评分 ←→ 调档或数字键直选
+ * - Ctrl+↑/↓ 上/下一题；PgUp/PgDn 按屏翻页；多行文本内 ↑↓ 行间移动（边界处才跳出本题）
+ * - Ctrl+P 答案一览（C 复制答案到剪贴板）；x 展开/收起长说明
+ * - Ctrl+D（或非输入行上的 D）删除问卷，按两次确认
  *
  * Focusable：focused 由 TUI 设置，文本行的反显光标经 renderScrollingInput 的
  * CURSOR_MARKER 透出（中文 IME 候选窗定位依赖它）。
@@ -21,10 +30,14 @@
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { TUI } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { renderAnswer } from "../shared/markdown";
 import { createBoxRenderer, editInput, renderScrollingInput } from "../shared/ui";
 import type { ListedQuestionnaire } from "./store";
 import {
 	answeredProgress,
+	answerableQuestions,
+	formatAnswersMessage,
+	formatValue,
 	isAnswered,
 	TYPE_TAGS,
 	type AnswerMap,
@@ -34,7 +47,7 @@ import {
 } from "./types";
 
 export interface PageResult {
-	action: "submit" | "shelve";
+	action: "submit" | "shelve" | "delete";
 	answers: AnswerMap;
 }
 
@@ -44,9 +57,19 @@ export interface TermDims {
 	h: number;
 }
 
+/** 页面钩子（tool/commands 注入；缺失时对应能力降级为提示） */
+export interface PageHooks {
+	/** 把文本写入系统剪贴板（pi 官方 copyToClipboard 包装） */
+	copyText?: (text: string) => Promise<void>;
+}
+
 const OTHER_LABEL = "其他（自由输入）";
 const MAX_TEXT_LENGTH = 4000;
 const MULTILINE_WINDOW = 4;
+/** 说明题正文折叠阈值（超过则默认只显示前 N 行，x 键展开） */
+const NOTE_FOLD_LINES = 20;
+/** 说明题左边线（含两侧空格） */
+const NOTE_GUTTER = " │ ";
 
 /** 拍平后的可交互行 */
 interface FocusRow {
@@ -67,6 +90,28 @@ interface QState {
 	rating: number | undefined;
 }
 
+/** 光标 index → (行号, 行内列)；供多行文本 ↑↓ 行间移动 */
+function caretLineCol(text: string, cursor: number): { line: number; col: number } {
+	let acc = 0;
+	const lines = text.split("\n");
+	for (let i = 0; i < lines.length; i++) {
+		const len = lines[i]!.length;
+		if (cursor <= acc + len) return { line: i, col: cursor - acc };
+		acc += len + 1;
+	}
+	const last = lines.length - 1;
+	return { line: last, col: lines[last]!.length };
+}
+
+/** (行号, 行内列) → 光标 index（目标行较短时贴行尾） */
+function lineColToCaret(text: string, line: number, col: number): number {
+	const lines = text.split("\n");
+	const l = Math.max(0, Math.min(line, lines.length - 1));
+	let acc = 0;
+	for (let i = 0; i < l; i++) acc += lines[i]!.length + 1;
+	return acc + Math.min(col, lines[l]!.length);
+}
+
 export class QuestionnairePage {
 	focused = false;
 
@@ -74,21 +119,33 @@ export class QuestionnairePage {
 	private theme: Theme;
 	private qn: Questionnaire;
 	private done: (r: PageResult) => void;
+	private hooks: PageHooks;
 
 	private states = new Map<string, QState>();
 	private focusIdx = 0;
 	private scroll = 0;
 	/** 提交校验失败 / 选择超限等提示（warning 色，下一次有效操作清除） */
 	private hint = "";
+	/** 操作成功短提示（复制完成 / 删除待确认，success 色，下一次有效操作清除） */
+	private flash = "";
+	/** 页面形态：form 作答 / help 键位表 / review 答案一览 */
+	private mode: "form" | "help" | "review" = "form";
+	/** 删除二次确认已就绪 */
+	private deleteArmed = false;
+	/** 说明题正文展开态 */
+	private expandNotes = false;
+	/** 是否已按焦点自动滚动（首帧保持滚到顶部：说明题从头读，不被下方焦点行拽走） */
+	private followFocus = false;
 	/** 最近一次 render 的内容窗口行数（PgUp/PgDn 步长） */
 	private lastBudget = 10;
 	private dims?: TermDims;
 
-	constructor(tui: TUI, theme: Theme, qn: Questionnaire, done: (r: PageResult) => void, dims?: TermDims) {
+	constructor(tui: TUI, theme: Theme, qn: Questionnaire, done: (r: PageResult) => void, dims?: TermDims, hooks?: PageHooks) {
 		this.tui = tui;
 		this.theme = theme;
 		this.qn = qn;
 		this.done = done;
+		this.hooks = hooks ?? {};
 		this.dims = dims;
 		this.initStates();
 		this.initFocus();
@@ -98,6 +155,10 @@ export class QuestionnairePage {
 	private initFocus(): void {
 		const answers = this.collect();
 		const rows = this.buildRows();
+		if (rows.length === 0) {
+			this.focusIdx = 0;
+			return;
+		}
 		for (const q of this.qn.questions) {
 			if (q.required === false || isAnswered(q, answers[q.id])) continue;
 			const at = rows.findIndex((r) => r.qid === q.id);
@@ -173,7 +234,7 @@ export class QuestionnairePage {
 		}
 	}
 
-	/** 拍平全部可交互行（渲染与键盘共用同一份顺序，二者必须严格一致） */
+	/** 拍平全部可交互行（渲染与键盘共用同一份顺序，二者必须严格一致）；note 只读不产生行 */
 	private buildRows(): FocusRow[] {
 		const rows: FocusRow[] = [];
 		for (const q of this.qn.questions) {
@@ -185,7 +246,7 @@ export class QuestionnairePage {
 				if (otherIdx >= 0 && st.sel.has(otherIdx)) rows.push({ qid: q.id, kind: "other" });
 			} else if (q.type === "text" || q.type === "number") {
 				rows.push({ qid: q.id, kind: "input" });
-			} else {
+			} else if (q.type === "rating") {
 				rows.push({ qid: q.id, kind: "rating" });
 			}
 		}
@@ -196,6 +257,7 @@ export class QuestionnairePage {
 	private collect(): AnswerMap {
 		const answers: AnswerMap = {};
 		for (const q of this.qn.questions) {
+			if (q.type === "note") continue;
 			const st = this.stateOf(q);
 			const opts = this.optionsFor(q);
 			const otherIdx = this.otherIndex(q);
@@ -248,8 +310,9 @@ export class QuestionnairePage {
 			this.done({ action: "submit", answers: this.collect() });
 			return;
 		}
-		const idx = this.qn.questions.indexOf(bad.q);
+		const idx = answerableQuestions(this.qn).indexOf(bad.q);
 		this.hint = `第 ${idx + 1} 题${bad.reason}${bad.q.required !== false ? "（必答）" : ""}`;
+		this.flash = "";
 		const rows = this.buildRows();
 		const at = rows.findIndex((r) => r.qid === bad.q.id);
 		if (at >= 0) this.focusIdx = at;
@@ -257,7 +320,43 @@ export class QuestionnairePage {
 	}
 
 	private moveFocus(rows: FocusRow[], delta: number): void {
+		if (rows.length === 0) return;
 		this.focusIdx = Math.max(0, Math.min(rows.length - 1, this.focusIdx + delta));
+		this.tui.requestRender();
+	}
+
+	/** Ctrl+↑/↓：跳到上/下一题的首行（长问卷 + 长说明题里免逐行滚） */
+	private jumpQuestion(rows: FocusRow[], dir: -1 | 1): void {
+		if (rows.length === 0) return;
+		const cur = rows[this.focusIdx]?.qid;
+		if (cur === undefined) return;
+		let first = this.focusIdx;
+		while (first > 0 && rows[first - 1]!.qid === cur) first--;
+		if (dir === 1) {
+			let j = first;
+			while (j < rows.length && rows[j]!.qid === cur) j++;
+			if (j < rows.length) this.focusIdx = j;
+		} else {
+			let j = first - 1;
+			if (j < 0) return;
+			const prevQid = rows[j]!.qid;
+			while (j > 0 && rows[j - 1]!.qid === prevQid) j--;
+			this.focusIdx = j;
+		}
+		this.tui.requestRender();
+	}
+
+	/** 多行文本内 ↑↓：行间移动光标；已在首/末行则把焦点移出本题 */
+	private moveMultiline(st: QState, dir: -1 | 1, rows: FocusRow[]): void {
+		const { line, col } = caretLineCol(st.text, st.cursor);
+		const total = st.text.split("\n").length;
+		const target = line + dir;
+		if (target < 0 || target >= total) {
+			this.moveFocus(rows, dir);
+			return;
+		}
+		st.cursor = lineColToCaret(st.text, target, col);
+		this.hint = "";
 		this.tui.requestRender();
 	}
 
@@ -272,28 +371,117 @@ export class QuestionnairePage {
 		if (i < rows.length) this.focusIdx = i;
 	}
 
+	/** 答案一览数据：可答题逐条列出，说明题标为只读 */
+	private reviewEntries(): { label: string; value: string; dim: boolean }[] {
+		const answers = this.collect();
+		const out: { label: string; value: string; dim: boolean }[] = [];
+		let n = 0;
+		for (const q of this.qn.questions) {
+			if (q.type === "note") {
+				out.push({ label: q.question, value: "（只读说明）", dim: true });
+				continue;
+			}
+			n++;
+			const v = answers[q.id];
+			const empty =
+				v === undefined || (typeof v === "string" && !v.trim()) || (Array.isArray(v) && v.length === 0);
+			out.push({ label: `${n}. ${q.question}`, value: empty ? "（跳过 / 未答）" : formatValue(q, v!), dim: empty });
+		}
+		return out;
+	}
+
+	/** 答案一览的纯文本（供复制；与回执同格式，说明题不占行） */
+	private reviewPlainText(): string {
+		return formatAnswersMessage(this.qn, this.collect());
+	}
+
 	// ---- 键盘 ----
 
 	handleInput(data: string): void {
-		const rows = this.buildRows();
-		if (rows.length === 0) {
-			if (matchesKey(data, Key.escape)) this.done({ action: "shelve", answers: {} });
+		// 帮助 / 答案一览是临时页面：任意键（或同一快捷键）返回作答页
+		if (this.mode === "help") {
+			this.mode = "form";
+			this.tui.requestRender();
 			return;
 		}
+		if (this.mode === "review") {
+			if (matchesKey(data, "c") || data === "C") {
+				void this.copyAnswers();
+				return;
+			}
+			this.mode = "form";
+			this.tui.requestRender();
+			return;
+		}
+
+		const rows = this.buildRows();
 		if (this.focusIdx >= rows.length) this.focusIdx = rows.length - 1;
-		const row = rows[this.focusIdx]!;
-		const q = this.qn.questions.find((x) => x.id === row.qid)!;
-		const st = this.stateOf(q);
+		const row = this.focusIdx >= 0 ? rows[this.focusIdx] : undefined;
+		const q = row ? this.qn.questions.find((x) => x.id === row.qid)! : undefined;
+		const st = q ? this.stateOf(q) : undefined;
+		/** 输入行里普通字符归输入法（?/x/D 等单字符快捷键必须让位） */
+		const typing = row?.kind === "input" || row?.kind === "other";
+		const wasArmed = this.deleteArmed;
+		this.deleteArmed = false;
+		this.flash = "";
 
 		if (matchesKey(data, Key.escape)) {
 			this.done({ action: "shelve", answers: this.collect() });
 			return;
 		}
+		if (!typing && data === "?") {
+			this.mode = "help";
+			this.hint = "";
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "ctrl+p")) {
+			this.mode = "review";
+			this.hint = "";
+			this.tui.requestRender();
+			return;
+		}
+		// 删除问卷：Ctrl+D 任意位置可用；非输入行上也可直接按 D
+		if (matchesKey(data, "ctrl+d") || (!typing && data === "D")) {
+			if (wasArmed) {
+				this.done({ action: "delete", answers: this.collect() });
+				return;
+			}
+			this.deleteArmed = true;
+			this.hint = "";
+			this.flash = "再按一次确认删除这份问卷（不可恢复）";
+			this.tui.requestRender();
+			return;
+		}
+		if (!typing && data === "x") {
+			this.expandNotes = !this.expandNotes;
+			this.hint = "";
+			this.tui.requestRender();
+			return;
+		}
+		// 以下为作答/导航类按键：恢复「滚动跟随焦点」（初始帧停在顶部，先读说明再作答）
+		this.followFocus = true;
+		if (matchesKey(data, "ctrl+up")) {
+			this.jumpQuestion(rows, -1);
+			return;
+		}
+		if (matchesKey(data, "ctrl+down")) {
+			this.jumpQuestion(rows, +1);
+			return;
+		}
 		if (matchesKey(data, Key.up) || matchesKey(data, "shift+tab")) {
+			if (row?.kind === "input" && q?.type === "text" && q.multiline === true && st) {
+				this.moveMultiline(st, -1, rows);
+				return;
+			}
 			this.moveFocus(rows, -1);
 			return;
 		}
 		if (matchesKey(data, Key.down) || matchesKey(data, Key.tab)) {
+			if (row?.kind === "input" && q?.type === "text" && q.multiline === true && st) {
+				this.moveMultiline(st, +1, rows);
+				return;
+			}
 			this.moveFocus(rows, +1);
 			return;
 		}
@@ -303,6 +491,12 @@ export class QuestionnairePage {
 		}
 		if (matchesKey(data, Key.pageDown)) {
 			this.moveFocus(rows, +this.lastBudget);
+			return;
+		}
+
+		// 纯说明问卷（无任何可交互行）：只需提交 / 删除 / 帮助
+		if (!row || !q || !st) {
+			if (matchesKey(data, Key.enter)) this.trySubmit();
 			return;
 		}
 
@@ -410,6 +604,23 @@ export class QuestionnairePage {
 		}
 	}
 
+	/** Ctrl+P 答案一览里按 C：把答案文本写入系统剪贴板 */
+	private async copyAnswers(): Promise<void> {
+		const text = this.reviewPlainText();
+		if (!this.hooks.copyText) {
+			this.flash = "当前环境不支持复制；答案会在提交后发给 AI";
+			this.tui.requestRender();
+			return;
+		}
+		try {
+			await this.hooks.copyText(text);
+			this.flash = `✓ 答案已复制到剪贴板（${text.length} 字符）`;
+		} catch (e) {
+			this.flash = `复制失败：${e instanceof Error ? e.message : String(e)}`;
+		}
+		this.tui.requestRender();
+	}
+
 	// ---- 渲染 ----
 
 	/** 单行文本输入行（单行简答/数字/其他输入） */
@@ -432,23 +643,11 @@ export class QuestionnairePage {
 		return `${prefix} ✎ ${display}`;
 	}
 
-	/** 多行文本输入块（最多 MULTILINE_WINDOW 行窗口，光标所在行反显） */
+	/** 多行文本输入块（最多 MULTILINE_WINDOW 行窗口，光标所在行反显；光标行随 ↑↓ 移动） */
 	private renderMultilineRows(st: QState, focused: boolean, W: number): string[] {
 		const th = this.theme;
 		const all = st.text.split("\n");
-		// 光标 → (行, 列)
-		let cursorLine = all.length - 1;
-		let col = 0;
-		let acc = 0;
-		for (let i = 0; i < all.length; i++) {
-			const len = all[i]!.length;
-			if (st.cursor <= acc + len) {
-				cursorLine = i;
-				col = st.cursor - acc;
-				break;
-			}
-			acc += len + 1;
-		}
+		const { line: cursorLine, col } = caretLineCol(st.text, st.cursor);
 		const start = Math.max(0, Math.min(cursorLine - 1, all.length - MULTILINE_WINDOW));
 		const lines: string[] = [];
 		if (st.text === "" && !(focused && this.focused)) {
@@ -470,23 +669,44 @@ export class QuestionnairePage {
 		return lines;
 	}
 
-	render(width: number): string[] {
+	/** note 说明题正文块（│ 左边线 + markdown 轻渲染；超长默认折叠，提示置顶以免被窗口截在下方） */
+	private renderNoteBlock(q: Question, W: number): string[] {
 		const th = this.theme;
-		const W = Math.max(24, width);
-		// 高度权威来源：overlay visible 回调捕获的真实终端高度 > tui.terminal > 兜底 24
-		const H = Math.max(10, (this.dims?.h ?? 0) > 0 ? this.dims!.h : this.tui.terminal.rows || 24);
-		// 每行补满全宽：overlay 合成只替换组件宽度内的列，右侧留白会透出下层内容
-		const padLine = (s: string): string => {
-			const w = visibleWidth(s);
-			return w >= W ? truncateToWidth(s, W) : s + " ".repeat(W - w);
-		};
+		const gutterColor = q.style === "warn" ? "warning" : q.style === "quote" ? "borderMuted" : "accent";
+		const gutter = th.fg(gutterColor, NOTE_GUTTER);
+		const bodyW = Math.max(8, W - visibleWidth(NOTE_GUTTER));
+		const full = renderAnswer(q.content ?? "", th, bodyW, { indent: "" });
+		const out: string[] = [];
+		const long = full.length > NOTE_FOLD_LINES;
+		if (long && !this.expandNotes) {
+			const hidden = full.length - NOTE_FOLD_LINES;
+			out.push(gutter + th.fg("dim", `共 ${full.length} 行说明 · 已折叠显示前 ${NOTE_FOLD_LINES} 行（x 展开全文）`));
+			out.push(...full.slice(0, NOTE_FOLD_LINES).map((l) => gutter + l));
+			out.push(gutter + th.fg("dim", `⋯ 还有 ${hidden} 行未显示（x 展开）`));
+			return out;
+		}
+		if (long) out.push(gutter + th.fg("dim", `完整说明（${full.length} 行）· x 收起`));
+		out.push(...full.map((l) => gutter + l));
+		return out;
+	}
 
-		// ---- 头部 ----
+	/** 头部：标题 + 进度条/进度 + 问卷说明 + 分隔线 */
+	private renderHeader(W: number): string[] {
+		const th = this.theme;
 		const answers = this.collect();
+		const total = answerableQuestions(this.qn).length;
 		const doneCount = answeredProgress(this.qn, answers);
 		const header: string[] = [];
 		const titleText = ` 📝 ${this.qn.title}`;
-		const progressText = `已答 ${doneCount}/${this.qn.questions.length} `;
+		let progressText: string;
+		if (total === 0) {
+			progressText = "仅说明 · Enter 确认 ";
+		} else {
+			const barW = Math.min(12, total);
+			const filled = Math.min(barW, Math.round((doneCount / total) * barW));
+			const bar = "▰".repeat(filled) + "▱".repeat(barW - filled);
+			progressText = `已答 ${doneCount}/${total} ${bar} `;
+		}
 		// 标题 + 进度一行放不下时折行完整展示（不截断）
 		if (visibleWidth(titleText) + visibleWidth(progressText) + 1 <= W) {
 			const gap = Math.max(1, W - visibleWidth(titleText) - visibleWidth(progressText));
@@ -500,6 +720,111 @@ export class QuestionnairePage {
 			}
 		}
 		header.push(th.fg("borderMuted", "─".repeat(W)));
+		return header;
+	}
+
+	/** 帮助屏：完整键位表（任意键返回） */
+	private renderHelp(W: number, H: number): string[] {
+		const th = this.theme;
+		const sections: [string, [string, string][]][] = [
+			[
+				"移动",
+				[
+					["↑ ↓ / Tab / Shift+Tab", "上/下一行（多行简答内为行间移动光标）"],
+					["Ctrl+↑ / Ctrl+↓", "上一题 / 下一题"],
+					["PgUp / PgDn", "按屏翻页"],
+				],
+			],
+			[
+				"作答",
+				[
+					["空格", "选中（单选/判断选中后自动前进；多选切换勾选）"],
+					["1-9", "数字直选第 N 个选项 / 评分档位"],
+					["y / n", "判断题快捷作答"],
+					["← →", "评分调档"],
+					["Enter", "提交（必答未完成会跳到该题）"],
+					["Shift+Enter", "多行简答内换行"],
+				],
+			],
+			[
+				"输入编辑",
+				[
+					["← → / Ctrl+← →", "光标移动（按字符 / 按词）"],
+					["Ctrl+W", "删除前一个词"],
+					["Ctrl+U", "清空当前输入"],
+					["粘贴", "直接 Ctrl+V（含多行文本）"],
+				],
+			],
+			[
+				"其他",
+				[
+					["Ctrl+P", "答案一览（一览里按 C 复制答案到剪贴板）"],
+					["x", "展开 / 收起超长说明题"],
+					["Ctrl+D / D", "删除这份问卷（按两次确认，不可恢复）"],
+					["?", "本帮助"],
+					["Esc", "搁置（存草稿，随时 /answer 继续）"],
+				],
+			],
+		];
+		const build = (spacing: boolean): string[] => {
+			const lines: string[] = [
+				th.fg("accent", " ⌨ 问卷页键位表") + th.fg("dim", `（${this.qn.questions.length} 题 · 任意键返回）`),
+			];
+			if (spacing) lines.push("");
+			for (const [title, rows] of sections) {
+				lines.push(th.fg("dim", ` ${title}`));
+				for (const [k, d] of rows) {
+					const keyCol = `   ${th.fg("accent", k.padEnd(22))}`;
+					const parts = wrapTextWithAnsi(th.fg("dim", d), Math.max(8, W - 25));
+					parts.forEach((p, i) => lines.push(i === 0 ? keyCol + p : `   ${" ".repeat(22)}${p}`));
+				}
+				if (spacing) lines.push("");
+			}
+			return lines;
+		};
+		// 先试带空行的疏排版；终端太矮时改紧凑排版（键位表要能看到底，不能被截断）
+		let out = build(true);
+		if (out.length > H) out = build(false);
+		while (out.length < H) out.push("");
+		return out.slice(0, H);
+	}
+
+	/** 答案一览屏（Ctrl+P）：C 复制、其余键返回 */
+	private renderReview(W: number, H: number): string[] {
+		const th = this.theme;
+		const lines: string[] = [
+			th.fg("accent", " 📋 答案一览") + th.fg("dim", ` ·「${this.qn.title}」`),
+			th.fg("borderMuted", "─".repeat(W)),
+		];
+		for (const e of this.reviewEntries()) {
+			const label = e.dim ? th.fg("dim", e.label) : e.label;
+			const value = e.dim ? th.fg("dim", e.value) : th.fg("success", e.value);
+			lines.push(...wrapTextWithAnsi(` ${label} → ${value}`, Math.max(8, W - 1)).map((l, i) => (i === 0 ? l : `   ${l}`)));
+		}
+		const footer = [
+			this.flash ? th.fg("success", ` ${this.flash}`) : "",
+			th.fg("dim", " C 复制答案到剪贴板 · 任意键返回作答"),
+		].filter(Boolean);
+		const body = lines.slice(0, Math.max(1, H - footer.length));
+		while (body.length < H - footer.length) body.push("");
+		return [...body, ...footer];
+	}
+
+	render(width: number): string[] {
+		const th = this.theme;
+		const W = Math.max(24, width);
+		// 高度权威来源：overlay visible 回调捕获的真实终端高度 > tui.terminal > 兜底 24
+		const H = Math.max(10, (this.dims?.h ?? 0) > 0 ? this.dims!.h : this.tui.terminal.rows || 24);
+		// 每行补满全宽：overlay 合成只替换组件宽度内的列，右侧留白会透出下层内容
+		const padLine = (s: string): string => {
+			const w = visibleWidth(s);
+			return w >= W ? truncateToWidth(s, W) : s + " ".repeat(W - w);
+		};
+
+		if (this.mode === "help") return this.renderHelp(W, H).map(padLine);
+		if (this.mode === "review") return this.renderReview(W, H).map(padLine);
+
+		const header = this.renderHeader(W);
 
 		// ---- 内容（rows 与渲染顺序严格一致，row 字段记录全局焦点行号） ----
 		const rows = this.buildRows();
@@ -514,12 +839,20 @@ export class QuestionnairePage {
 				content.push(k === 0 ? { text: prefix + p, row } : { text: " ".repeat(indent) + p });
 			});
 		};
-		this.qn.questions.forEach((q, qi) => {
+		const answerable = answerableQuestions(this.qn);
+		this.qn.questions.forEach((q) => {
 			const st = this.stateOf(q);
 			content.push({ text: "" });
-			const tag = TYPE_TAGS[q.type] + (q.required === false ? "·选填" : "");
-			pushWrapped(` ${th.fg("accent", `${qi + 1}.`)} `, `${q.question} ${th.fg("dim", `[${tag}]`)}`);
+			const num = q.type === "note" ? "" : `${answerable.indexOf(q) + 1}. `;
+			const tag = TYPE_TAGS[q.type] + (q.type === "note" ? "" : q.required === false ? "·选填" : "");
+			const icon = q.type === "note" ? "🗒 " : "";
+			pushWrapped(` ${th.fg("accent", num)}`, `${icon}${q.question} ${th.fg("dim", `[${tag}]`)}`);
 			if (q.description) pushWrapped("    ", th.fg("dim", q.description));
+
+			if (q.type === "note") {
+				content.push(...this.renderNoteBlock(q, W).map((text) => ({ text })));
+				return;
+			}
 
 			while (ri < rows.length && rows[ri]!.qid === q.id) {
 				const row = rows[ri]!;
@@ -570,48 +903,63 @@ export class QuestionnairePage {
 		});
 
 		// ---- 底部 ----
-		const missing = this.qn.questions.filter(
-			(q) => q.required !== false && !isAnswered(q, answers[q.id]),
-		).length;
-		const statusLine = this.hint
-			? th.fg("warning", ` ⚠ ${this.hint}`)
-			: missing > 0
-				? th.fg("dim", ` 还有 ${missing} 题必答未完成`)
-				: th.fg("success", " ✓ 全部必答已完成，Enter 提交");
-		const focusedRow = rows[this.focusIdx];
-		const onMultiline =
-			focusedRow?.kind === "input" &&
-			this.qn.questions.find((x) => x.id === focusedRow.qid)?.multiline === true;
+		const answers = this.collect();
+		const missing = this.qn.questions.filter((q) => q.required !== false && !isAnswered(q, answers[q.id])).length;
+		const focusedRow = this.focusIdx >= 0 ? rows[this.focusIdx] : undefined;
+		const focusedQ = focusedRow ? this.qn.questions.find((x) => x.id === focusedRow.qid) : undefined;
+		const onMultiline = focusedRow?.kind === "input" && focusedQ?.multiline === true;
+
+		// 状态行：操作提示 > 短提示 > 必答缺项 > 就绪；追加当前题号 / 光标行 / 滚动指示
+		const bits: string[] = [];
+		if (this.hint) bits.push(th.fg("warning", `⚠ ${this.hint}`));
+		else if (this.flash) bits.push(th.fg("success", `✓ ${this.flash}`));
+		else if (missing > 0) bits.push(th.fg("dim", `还有 ${missing} 题必答未完成`));
+		else if (answerable.length === 0) bits.push(th.fg("dim", "纯说明问卷 · Enter 确认"));
+		else bits.push(th.fg("success", "✓ 全部必答已完成，Enter 提交"));
+		if (focusedQ && focusedQ.type !== "note") {
+			const cur = answerable.indexOf(focusedQ) + 1;
+			bits.push(th.fg("dim", `第 ${cur}/${answerable.length} 题`));
+		}
+		if (onMultiline && focusedQ) {
+			const st = this.stateOf(focusedQ);
+			const { line } = caretLineCol(st.text, st.cursor);
+			bits.push(th.fg("dim", `第 ${line + 1}/${st.text.split("\n").length} 行`));
+		}
+		const statusLine = ` ${bits.join(th.fg("borderMuted", " · "))}`;
+
 		const keysLine = th.fg(
 			"dim",
 			onMultiline
-				? " ↑↓ 移动 · 空格 选择 · Enter 提交 · Shift+Enter 换行 · Esc 搁置"
-				: " ↑↓ 移动 · 空格 选择 · Enter 提交 · Esc 搁置",
+				? " ↑↓ 行间移动 · Shift+Enter 换行 · Enter 提交 · Ctrl+P 预览 · ? 帮助 · Esc 搁置"
+				: focusedRow?.kind === "input" || focusedRow?.kind === "other"
+					? " ←→/Ctrl+←→ 移动 · Ctrl+W 删词 · Enter 提交 · Ctrl+P 预览 · ? 帮助 · Esc 搁置"
+					: " ↑↓ 移动 · 空格 选择 · Enter 提交 · Ctrl+P 预览 · ? 帮助 · Esc 搁置",
 		);
 
 		// ---- 组装：头 + 滚动内容窗 + 底，恰好 H 行 ----
 		const budget = Math.max(1, H - header.length - 2);
 		this.lastBudget = budget;
 		const focusLine = content.findIndex((c) => c.row === this.focusIdx);
-		if (focusLine >= 0) {
+		if (this.followFocus && focusLine >= 0) {
 			if (focusLine < this.scroll) this.scroll = focusLine;
 			if (focusLine >= this.scroll + budget) this.scroll = focusLine - budget + 1;
 		}
 		const maxScroll = Math.max(0, content.length - budget);
 		this.scroll = Math.max(0, Math.min(this.scroll, maxScroll));
+		// 内容窗恒为纯内容（提示不顶掉正文）；滚动位置改由状态行右侧提示
 		const visible = content.slice(this.scroll, this.scroll + budget);
-		// 滚动指示：窗口外还有内容时在边界行提示（否则用户会以为题目缺失）
-		if (this.scroll > 0 && visible.length > 0) {
-			visible[0] = { text: th.fg("dim", `   ▲ 上方还有 ${this.scroll} 行（PgUp 翻页）`) };
-		}
 		const below = content.length - (this.scroll + visible.length);
-		if (below > 0 && visible.length > 1) {
-			visible[visible.length - 1] = { text: th.fg("dim", `   ▼ 下方还有 ${below} 行（PgDn 翻页）`) };
-		}
+		const scrollBits: string[] = [];
+		if (this.scroll > 0) scrollBits.push(`▲${this.scroll}`);
+		if (below > 0) scrollBits.push(`▼${below}`);
+		const statusWithScroll =
+			scrollBits.length > 0
+				? `${statusLine}${th.fg("dim", `  ${scrollBits.join(" ")}（PgUp/PgDn 翻页）`)}`
+				: statusLine;
 
 		const lines = [...header, ...visible.map((c) => c.text)];
 		while (lines.length < header.length + budget) lines.push("");
-		lines.push(statusLine, keysLine);
+		lines.push(statusWithScroll, keysLine);
 		return lines.slice(0, H).map(padLine);
 	}
 
@@ -620,8 +968,8 @@ export class QuestionnairePage {
 }
 
 /**
- * 问卷选择器（/answer 多份待答时）：居中小浮层，↑↓ 选择、Enter 打开、Esc 取消。
- * done(null) 表示取消，否则为选中问卷的文件路径。
+ * 问卷选择器（/answer 多份待答时）：居中小浮层，↑↓ 选择、Enter 打开、Esc 取消、
+ * D/Del 删除选中问卷（按两次确认）。done(null) 表示取消，否则为选中问卷的文件路径。
  */
 export class QuestionnairePicker {
 	focused = false;
@@ -629,19 +977,54 @@ export class QuestionnairePicker {
 	private theme: Theme;
 	private items: ListedQuestionnaire[];
 	private done: (file: string | null) => void;
+	private onDelete?: (file: string) => void;
 	private idx = 0;
+	private deleteArmed = false;
+	private flash = "";
 
 	private static MAX_ROWS = 12;
 
-	constructor(theme: Theme, items: ListedQuestionnaire[], done: (file: string | null) => void) {
+	constructor(
+		theme: Theme,
+		items: ListedQuestionnaire[],
+		done: (file: string | null) => void,
+		opts?: { onDelete?: (file: string) => void },
+	) {
 		this.theme = theme;
 		this.items = items;
 		this.done = done;
+		this.onDelete = opts?.onDelete;
 	}
 
 	handleInput(data: string): void {
+		const wasArmed = this.deleteArmed;
+		this.deleteArmed = false;
+		this.flash = "";
 		if (matchesKey(data, Key.escape)) {
 			this.done(null);
+			return;
+		}
+		const del = matchesKey(data, Key.delete) || data === "D" || matchesKey(data, "ctrl+d");
+		if (del) {
+			if (!this.onDelete) {
+				this.flash = "当前环境不支持删除";
+				return;
+			}
+			if (!wasArmed) {
+				this.deleteArmed = true;
+				this.flash = "再按一次删除选中问卷（不可恢复）";
+				return;
+			}
+			const victim = this.items[this.idx];
+			if (!victim) return;
+			this.onDelete(victim.file);
+			this.items = this.items.filter((i) => i.file !== victim.file);
+			this.flash = `已删除「${victim.q.title}」`;
+			if (this.items.length === 0) {
+				this.done(null);
+				return;
+			}
+			this.idx = Math.min(this.idx, this.items.length - 1);
 			return;
 		}
 		if (matchesKey(data, Key.up)) {
@@ -669,16 +1052,19 @@ export class QuestionnairePicker {
 		view.forEach((item, k) => {
 			const i = start + k;
 			const q = item.q;
+			const total = answerableQuestions(q).length;
 			const answered = answeredProgress(q, q.answers);
+			const when = q.createdAt.length >= 16 ? q.createdAt.slice(11, 16) : "";
 			const meta = th.fg(
 				"dim",
-				`（${q.id} · ${q.questions.length} 题${answered > 0 ? ` · 已答 ${answered}` : ""}${q.status === "draft" ? " · 草稿" : ""}）`,
+				`（${q.id} · ${q.questions.length} 题${total !== q.questions.length ? `（${total} 可答）` : ""}${answered > 0 ? ` · 已答 ${answered}` : ""}${q.status === "draft" ? " · 草稿" : ""}${when ? ` · ${when}` : ""}）`,
 			);
 			const prefix = i === this.idx ? th.fg("accent", " › ") : "   ";
 			const title = i === this.idx ? th.fg("accent", q.title) : q.title;
 			lines.push(row(`${prefix}📝 ${title} ${meta}`));
 		});
-		lines.push(row(th.fg("dim", " ↑↓ 选择 · Enter 打开 · Esc 取消")));
+		if (this.flash) lines.push(row(th.fg("warning", ` ${this.flash}`)));
+		lines.push(row(th.fg("dim", " ↑↓ 选择 · Enter 打开 · D 删除 · Esc 取消")));
 		lines.push(bottomBorder());
 		return lines;
 	}

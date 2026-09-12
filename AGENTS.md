@@ -35,8 +35,11 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
     shared/         #     共享模块：只被扩展 import，不直接部署；build.js 内联进各产物
       agent.ts      #       子代理公共件：convertToLlm 消息转换 + createPiStreamFn 认证通道（claude-it /init、workflow-mgr 审计共用）
       config.ts     #       JSON 配置读写：原子写（tmp+rename）、损坏隔离（.corrupt- 留证）、残留 tmp 清理
-      ui.ts         #       通用面板组件原语：createBoxRenderer（浮层边框渲染）/ editInput（输入编辑键统一，
-                      #       含 paste 粘贴）/ renderScrollingInput（水平滚动输入框）/ renderInputWithCursor
+      ui.ts         #       通用面板组件原语：createBoxRenderer（浮层边框渲染）/ editInput（输入编辑键统一：
+                      #       含 paste 粘贴、ctrl+←→ 按词移动、ctrl+w 删词、grapheme 安全步进）/
+                      #       renderScrollingInput（水平滚动输入框）/ renderInputWithCursor
+      markdown.ts   #       终端 markdown 轻渲染（wrapText / renderAnswer：行内样式、代码块、表格块整体渲染），
+                      #       原 btw/render.ts，ask 说明题复用后上提；btw/render.ts 保留同名转发
       model-pick.ts #       辅助 AI 任务选模型：pickAuxModel（优先列表 + 最便宜已认证兜底），hud-git / perm-gate 共用
       model-selector.ts #   通用模型选择面板：复用 pi 官方 ModelSelectorComponent（ModelRegistry.runtime 直通），perm-gate 用
       shell-split.ts  #     shell 复合命令拆段（&&/||/;/|/换行/子 shell 递归，引号转义保护），perm-gate 逐段判定用；
@@ -48,11 +51,12 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       hud-cost.ts   #       hud-cost：消耗统计 / DeepSeek 定价 / 按量付费文本 / 实时汇率
       hud-git.ts    #       hud-git：git 状态解析
       test/         #       hud-git 路径引号解码回归测试（node src/extensions/hud/test/unquote.test.mjs）
-    ask/          #     问卷（多文件扩展源码，build.js 把 index.ts 打包成单文件 ask.ts）：types.ts 数据模型/容错规范化 + store.ts 问卷文件读写（.pi/questionnaires/）+ page.ts 整屏问卷页/选择器 + tool.ts ask 工具（create 创建 / cancel 作废）+ commands.ts /answer 命令 + state.ts 状态推送/排队链；test/ask.test.mjs 回归测试（49 场景）
+    ask/          #     问卷（多文件扩展源码，build.js 把 index.ts 打包成单文件 ask.ts）：types.ts 数据模型/容错规范化（含 note 只读说明题）+ store.ts 问卷文件读写（.pi/questionnaires/）+ page.ts 整屏问卷页（进度条/跳题/答案一览/帮助屏/删除/说明题折叠）+ 选择器 + tool.ts ask 工具（create 创建 / cancel 作废）+ commands.ts /answer 命令 + state.ts 状态推送/排队链；test/ask.test.mjs 回归测试（A~Q + 渲染不变量）
     btf-think.ts  #   思考折叠标签动画（Thinking... 逐帧动画，独立 UI 反馈插件）
     btw/          #   旁支问答（多文件扩展源码，build.js 把 index.ts 打包成单文件 btw.ts）：
                     #     config.ts 常量/系统提示词/模型设置（auto 最便宜故障转移）+ messages.ts 消息清洗 +
-                    #     render.ts markdown 渲染 + overlay.ts 浮层组件 + run.ts 后台流式问答 + index.ts 入口；
+                    #     render.ts（转发 shared/markdown：markdown 渲染已上提共用）+ overlay.ts 浮层组件 +
+                    #     run.ts 后台流式问答 + index.ts 入口；
                     #     /btw 多轮追问 + m 转正附带 + /btw-config 模型选择；只读工具；曾用官方 pi-btw 替代，
                     #     2026-09-07 因 bug 回退（出处与借鉴评估见 src/vendor/README.md 回退记录）
     clipboard.ts #   剪贴板读写：clipboard_get 读取（可截断）+ clipboard_set 写入（空串清空）+ /clipboard 命令；
@@ -135,7 +139,7 @@ dist/               # 扩展产物（build.js 生成，gitignore 不入库）：
 - **hud 余额适配**：`BALANCE_ADAPTERS` 注册表（hud/hud-balance.ts）按 providerId 逐一适配；DeepSeek 消耗按 `DEEPSEEK_PRICES`（hud/hud-cost.ts）官方人民币定价直算（恒 ¥，永不依赖汇率），峰谷开关 `DEEPSEEK_PEAK_PRICING`（hud/hud-cost.ts，当前 false）；其余供应商成本按原始货币 USD 记录、显示时换算。汇率三态（hud/hud-cost.ts）：实时（frankfurter→open.er-api 多源，1h 节流）→ 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`）→ 无（断网且无缓存，显示原始货币 USD，不用固定近似值）。hud 子模块**可选加载**：任一缺失时对应功能降级（余额行显「模块缺失」/ 隐藏消耗统计 / git 恒「⎇ -」），不拖垮整个 HUD。
 - **vendor 官方插件**：src/vendor/ 收录社区插件源码副本（pi-rtk-optimizer 输出压缩+rtk 命令改写；pi-subagents/pi-btw 曾收录后回退自研 explore-agent/btw，回退原因与借鉴评估见 src/vendor/README.md 回退记录）；收录原则/出处/更新流程见 src/vendor/README.md。兼容性：pi-rtk-optimizer 不动 footer、setStatus 键不冲突
 - **claude-it /init**：fork 独立上下文后台跑 init 子代理（只读探索 + write/edit AGENTS.md），主会话零污染、期间可继续对话；进度经 `ctx.ui.setStatus("init", …)` 推送由 hud 行 1 动态区显示。同时只允许一个，超时/轮数/输出上限常量在文件顶部（claude-it.ts:61-65）。
-- **ask 问卷**：AI 侧 `ask` 工具创建问卷（single/multi/text/confirm/rating/number 六题型，选项题自动带「其他」自由输入）写入 `.pi/questionnaires/<id>.json` 并立即整屏弹出；用户 Enter 提交（答案作工具结果返回）或 Esc 搁置（草稿写回文件 status:draft，随时 /answer 续答，提交后答案经 `pi.sendUserMessage` 以 followUp 送达，文件即删）。`ask action=cancel id=xxx` 作废问错/过时的待答问卷（问卷即文件，删文件即撤回；正在整屏作答中的问卷无法作废——彼时创建调用正挂起等待）。「问卷即文件」：手写 JSON 丢进目录也能被 /answer 扫描识别。长文本（标题/题干/选项/说明）经 pi-tui `wrapTextWithAnsi` 按终端宽度折行完整展示（不截断），续行缩进对齐首行文本起点；页面垂直滚动跟随焦点。整屏页 = overlay（width/maxHeight 100% + 左上锚点 + 每行补满全宽）——pi 的 overlay 是逐行不透明合成，全屏即遮蔽聊天/HUD；高度权威值由 overlayOptions.visible 回调每帧捕获（tui.terminal.rows 可能滞后）。已知限制：regular（内联）模式下全屏 overlay 与聊天共享原生滚动缓冲，滚轮上滑会看到残影（仅美观问题，实时画面正常）；fullscreen 模式（alternate screen）下零污染。
+- **ask 问卷**：AI 侧 `ask` 工具创建问卷（single/multi/text/confirm/rating/number/**note 只读说明**七题型，选项题自动带「其他」自由输入）写入 `.pi/questionnaires/<id>.json` 并立即整屏弹出；用户 Enter 提交（答案作工具结果返回）、Esc 搁置（草稿写回文件 status:draft，随时 /answer 续答，提交后答案经 `pi.sendUserMessage` 以 followUp 送达，文件即删）或主动删除（`Ctrl+D`/非输入行 `D` 按两次确认 → 工具结果 status=deleted，AI 不再等待/不重建）。`ask action=cancel id=xxx` 是 AI 侧作废通道（问卷即文件，删文件即撤回；正在整屏作答中的问卷无法作废）。「问卷即文件」：手写 JSON 丢进目录也能被 /answer 扫描识别（有 options 推断 single、有 content 推断 note）。**note 说明题**解决「问卷里看不到 AI 拟的内容」：正文 `content` 多行保留换行、经 shared/markdown 轻渲染后挂在「│ 」左边线下展示，超 20 行默认折叠（x 展开/收起），不产生焦点行、不进进度分母、不阻塞提交、回执里不重复携带正文——AI 把待审草稿原文 + 跟进问题放进同一份问卷，用户边看边答。页面键位：↑↓/Tab 移动（多行简答内 ↑↓ 行间移动光标，边界处才跳出本题）、`Ctrl+↑/↓` 上/下一题（状态行常显「第 i/n 题」）、PgUp/PgDn 翻页、空格选中、数字键 1-9 直选、`Ctrl+P` 答案一览（一览里 `C` 经 pi 官方 `copyToClipboard` 复制答案）、`?` 全屏键位表、`x` 折叠说明、`Ctrl+D` 删除、Esc 搁置；输入行支持 Ctrl+←/→ 按词移动、Ctrl+W 删词、grapheme 安全光标。整屏页 = overlay（width/maxHeight 100% + 左上锚点 + 每行补满全宽）——pi 的 overlay 是逐行不透明合成，全屏即遮蔽聊天/HUD；高度权威值由 overlayOptions.visible 回调每帧捕获（tui.terminal.rows 可能滞后）。渲染细节：顶部进度条 ▰▰▱▱、长文本（标题/题干/选项/说明）经 `wrapTextWithAnsi` 折行完整展示不截断、续行缩进对齐首行文本起点；**首帧停在顶部不跟随焦点**（长说明题从头读），按键后恢复跟随；滚动位置提示（▲▼ 行数）只在状态行右侧，不占正文行；内容窗恒为纯内容。选择器（多份时）显示创建时间/题数/可答题数/草稿标记，支持 `D` 两次删除选中问卷。已知限制：regular（内联）模式下全屏 overlay 与聊天共享原生滚动缓冲，滚轮上滑会看到残影（仅美观问题，实时画面正常）；fullscreen 模式（alternate screen）下零污染。
 - **img-slim 图片预算**：三个钩子组成三层防护——`tool_result`/`input` 给新进上下文的图片瘦身（照片≤900KB、图形≤1.6MB base64、最长边 2000px、PNG 优先退 JPEG；动图 WebP 强制转静态 PNG，因为上游 400 拒收且历史重发会让后续每轮都失败），`context` 钩子每轮请求前按 32MB 总量预算从最旧开始把图片换成占位文本（非破坏性：只改本次请求，会话记录不动；`context` 事件的 messages 本就是 pi 的 structuredClone 副本，加处理器不增加拷贝成本）；状态行 `🖼 xMB 裁N图` 走 setStatus。风险模型：上游 48MiB 请求体上限 → 而 pi 的 token 估算每图仅 1200 tokens（4800 字符/4），1M 窗口要 ~820 张才触发自动压缩 ⇒ 上限永远先到（实测 76 张/75.6MB 起连续 413）。
 - **claude-it 回退**：`/rewind` 命令（navigateTree 是命令 ctx 专属能力）回退到上一条用户消息、内容放回输入框；双击 Ctrl+C（打断后 2s 窗口内）预填 `/rewind` 命令，回车执行。Ctrl+C 打断不触发 task-alert 完成提醒——task-alert 监听 agent_end，最后一条 assistant 消息 `stopReason="aborted"` 即跳过 agent_settled 提醒（零耦合，不依赖 claude-it）。
 

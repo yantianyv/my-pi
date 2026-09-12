@@ -17,6 +17,13 @@
  * - 场景 H：长题干/长选项说明折行完整展示（不截断，尾部标记可见）
  * - 场景 I：执行失败如实渲染真实原因（不误报「无 UI 降级」）
  * - 场景 J：title 缺省自动取第一题问句截断（不再报错）
+ * - 场景 K：note 只读说明题（不进进度分母 / 不阻塞提交 / 回执不带正文 / 纯说明问卷 Enter 确认）
+ * - 场景 L：多行简答内 ↑↓ 行间移动（边界处才跳出本题）+ Ctrl+W 删词
+ * - 场景 M：Ctrl+↑/↓ 跳上一/下一题 + 状态行当前题号
+ * - 场景 N：Ctrl+P 答案一览（含未答标记，可 C 复制——测试不按 C，避免真写系统剪贴板）
+ * - 场景 O：D 键删除问卷（二次确认）→ 工具结果 deleted + 文件删除 + 状态清除
+ * - 场景 P：/answer 选择器里 D 删除选中问卷（列表就地刷新）
+ * - 场景 Q：滚动提示移出正文（状态行 ▲▼）+ x 展开超长说明
  * - 渲染不变量：整屏页每次 render 恰好 termRows 行、每行恰好 width 列（全屏遮蔽前提）
  *
  * 用法：node src/extensions/ask/test/ask.test.mjs（仓库根目录执行）
@@ -55,6 +62,13 @@ const K = {
 	enter: "\r",
 	escape: "\x1b",
 	space: " ",
+	ctrlUp: "\x1b[1;5A",
+	ctrlDown: "\x1b[1;5B",
+	ctrlLeft: "\x1b[1;5D",
+	ctrlRight: "\x1b[1;5C",
+	ctrlW: "\x17",
+	ctrlP: "\x10",
+	shiftEnter: "\x1b[13;2u",
 };
 
 function makePi() {
@@ -501,6 +515,360 @@ async function main() {
 		const callComp = tool.renderCall({ questions: [{ question: longQ }] }, themeMock);
 		const callText = callComp.render(TERM_COLS).map((l) => l.trim()).join("");
 		check("J: renderCall 显示自动标题与标记", callText.includes("创建问卷") && callText.includes("自动标题"));
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 K：note 只读说明题 ----
+	console.log("场景 K：note 只读说明题");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const execP = tool.execute(
+			"tc11",
+			{
+				id: "note-survey",
+				title: "草稿审阅",
+				questions: [
+					{ id: "n1", type: "note", question: "待发消息草稿", content: "草稿第一行内容\n第二行**重点**内容" },
+					{ id: "q1", type: "single", question: "这样发可以吗？", options: [{ label: "可以" }, { label: "要改" }] },
+					{ id: "q2", type: "text", question: "修改意见", required: false },
+				],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		assertFullscreen(comp, "K: 说明题渲染");
+		const text = comp.render(TERM_COLS).map((l) => l.trim()).join("");
+		check("K: 说明题正文完整可见", text.includes("草稿第一行内容") && text.includes("第二行重点内容"));
+		check("K: 说明题带 [说明] 标签", text.includes("[说明]"));
+		check("K: 进度分母排除说明题（0/2）", text.includes("已答 0/2"));
+		// 说明题不可聚焦：初始焦点就在 q1 首选项，空格直接选中
+		comp.handleInput(K.space);
+		comp.handleInput(K.enter);
+		const result = await execP;
+		check("K: 说明题不阻塞提交", result.details?.status === "submitted");
+		const msg = result.content?.[0]?.text ?? "";
+		check("K: 回执含作答项", msg.includes("可以"));
+		check("K: 回执不重复携带说明正文", !msg.includes("草稿第一行内容"));
+		check("K: details.total 只计可答题", result.details?.total === 2);
+		// 纯说明问卷：Enter 即确认
+		const execP2 = tool.execute(
+			"tc12",
+			{ id: "note-only", title: "仅说明", questions: [{ type: "note", content: "只是告知一段背景，无需作答。" }] },
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp2 = openCaptured(captures);
+		assertFullscreen(comp2, "K: 纯说明问卷渲染");
+		check("K: 纯说明问卷提示进入确认态", comp2.render(TERM_COLS).map((l) => l.trim()).join("").includes("仅说明"));
+		comp2.handleInput(K.enter);
+		const result2 = await execP2;
+		check("K: 纯说明问卷 Enter 提交", result2.details?.status === "submitted");
+		check("K: 纯说明回执标明仅含说明", (result2.content?.[0]?.text ?? "").includes("仅含只读说明"));
+		// 说明题只有 content 时：标题取正文首行截断（schema 描述与实现必须一致）
+		const execP3 = tool.execute(
+			"tc18",
+			{
+				id: "note-title",
+				title: "标题容错",
+				questions: [{ type: "note", content: "这是一行超过三十个字符的说明正文首行内容用于验证自动标题截断XYZ" }],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp3 = openCaptured(captures);
+		comp3.handleInput(K.escape);
+		await execP3;
+		const noteSaved = JSON.parse(readFileSync(join(dir, ".pi", "questionnaires", "note-title.json"), "utf8"));
+		check(
+			"K: 说明题缺标题时取正文首行截断",
+			typeof noteSaved.questions[0].question === "string" &&
+				noteSaved.questions[0].question.startsWith("这是一行超过三十个字符的说明正文首行") &&
+				noteSaved.questions[0].question.endsWith("…"),
+		);
+		// 12 题上限：note 同样占额度
+		let overMsg = "";
+		try {
+			await tool.execute(
+				"tc19",
+				{
+					id: "over-limit",
+					questions: [
+						...Array.from({ length: 3 }, (_, i) => ({ type: "note", content: `说明 ${i + 1}` })),
+						...Array.from({ length: 10 }, (_, i) => ({ type: "text", question: `问题 ${i + 1}` })),
+					],
+				},
+				null,
+				null,
+				ctx,
+			);
+		} catch (e) {
+			overMsg = e.message;
+		}
+		check("K: note 计入 12 题上限", overMsg.includes("上限 12"));
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 L：多行简答内 ↑↓ 行间移动 + Ctrl+W 删词 ----
+	console.log("场景 L：多行简答行间移动与删词");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const execP = tool.execute(
+			"tc13",
+			{
+				id: "multi-survey",
+				title: "多行作答",
+				questions: [
+					{ id: "q1", type: "text", question: "详细描述", multiline: true },
+					{ id: "q2", type: "single", question: "确认？", options: [{ label: "好" }, { label: "不" }] },
+				],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		const statusText = () => comp.render(TERM_COLS).map((l) => l.trim()).join(" ");
+		check("L: 初始焦点在 q1（第 1/2 题）", statusText().includes("第 1/2 题"));
+		typeText(comp, "hello world");
+		comp.handleInput(K.ctrlW); // 删掉 world
+		comp.handleInput(K.shiftEnter); // 换行
+		typeText(comp, "第二行");
+		check("L: 光标在第 2 行", statusText().includes("第 2/2 行"));
+		comp.handleInput(K.up);
+		check("L: ↑ 回到上一行（未跳出本题）", statusText().includes("第 1/2 行") && statusText().includes("第 1/2 题"));
+		comp.handleInput(K.down);
+		comp.handleInput(K.down); // 末行再 ↓ → 跳出本题，落到 q2 首选项
+		check("L: 末行 ↓ 跳出本题到 q2", statusText().includes("第 2/2 题"));
+		comp.handleInput(K.up); // 回到 q1 输入行
+		check("L: ↑ 回到 q1 输入行", statusText().includes("第 1/2 题"));
+		comp.handleInput(K.enter); // q2 未答 → 跳转并提示
+		check("L: 必答未完成时 Enter 不提交", captures.customs.length === 1);
+		check("L: 提示指向第 2 题", statusText().includes("第 2 题尚未作答"));
+		comp.handleInput(K.space);
+		comp.handleInput(K.enter);
+		const result = await execP;
+		const msg = result.content?.[0]?.text ?? "";
+		check("L: Ctrl+W 删除的 world 未进入答案", !msg.includes("world"));
+		check("L: 多行答案完整送达（含换行后的第二行）", msg.includes("hello") && msg.includes("第二行"));
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 M：Ctrl+↑/↓ 跳题 ----
+	console.log("场景 M：Ctrl+↑/↓ 题间跳转");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const execP = tool.execute(
+			"tc14",
+			{
+				id: "jump-survey",
+				title: "跳题",
+				questions: [
+					{ id: "q1", type: "single", question: "A？", options: [{ label: "a1" }, { label: "a2" }, { label: "a3" }] },
+					{ id: "q2", type: "single", question: "B？", options: [{ label: "b1" }, { label: "b2" }] },
+					{ id: "q3", type: "single", question: "C？", options: [{ label: "c1" }, { label: "c2" }] },
+				],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		const statusText = () => comp.render(TERM_COLS).map((l) => l.trim()).join(" ");
+		check("M: 起始在第 1/3 题", statusText().includes("第 1/3 题"));
+		comp.handleInput(K.ctrlDown);
+		check("M: Ctrl+↓ 到第 2/3 题", statusText().includes("第 2/3 题"));
+		comp.handleInput(K.ctrlDown);
+		check("M: Ctrl+↓ 到第 3/3 题", statusText().includes("第 3/3 题"));
+		comp.handleInput(K.ctrlDown);
+		check("M: 末题再 Ctrl+↓ 停在原地", statusText().includes("第 3/3 题"));
+		comp.handleInput(K.ctrlUp);
+		check("M: Ctrl+↑ 回第 2/3 题", statusText().includes("第 2/3 题"));
+		comp.handleInput(K.escape);
+		await execP;
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 N：Ctrl+P 答案一览 ----
+	console.log("场景 N：Ctrl+P 答案一览");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const execP = tool.execute(
+			"tc15",
+			{
+				id: "review-survey",
+				title: "答案预览",
+				questions: [
+					{ id: "q1", type: "single", question: "选哪个方案？", options: [{ label: "方案甲" }, { label: "方案乙" }] },
+					{ id: "q2", type: "single", question: "第二问？", options: [{ label: "是" }, { label: "否" }] },
+				],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		comp.handleInput(K.space); // q1 选方案甲
+		comp.handleInput(K.ctrlP);
+		const text = comp.render(TERM_COLS).map((l) => l.trim()).join("");
+		check("N: 一览屏标题可见", text.includes("答案一览"));
+		check("N: 一览屏含已答项", text.includes("方案甲"));
+		check("N: 一览屏标出未答项", text.includes("未答") || text.includes("跳过"));
+		check("N: 一览屏提示 C 复制", text.includes("C 复制答案"));
+		assertFullscreen(comp, "N: 一览屏渲染");
+		comp.handleInput(K.escape); // 返回作答页
+		const backText = comp.render(TERM_COLS).map((l) => l.trim()).join("");
+		check("N: 返回作答页（选中后焦点已到第 2 题）", backText.includes("第 2/2 题") && !backText.includes("答案一览"));
+		// 帮助屏
+		comp.handleInput("?");
+		const helpText = comp.render(TERM_COLS).map((l) => l.trim()).join("");
+		check("N: ? 打开键位表", helpText.includes("键位表"));
+		check("N: 键位表含 Ctrl+P / x / Ctrl+D 说明", helpText.includes("Ctrl+P") && helpText.includes("Ctrl+D"));
+		assertFullscreen(comp, "N: 帮助屏渲染");
+		comp.handleInput(K.up); // 任意键返回
+		check("N: 任意键返回作答页", !comp.render(TERM_COLS).map((l) => l.trim()).join("").includes("键位表"));
+		comp.handleInput(K.escape);
+		await execP;
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 O：D 键删除问卷（二次确认）----
+	console.log("场景 O：D 键删除问卷");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const execP = tool.execute("tc16", FULL_PARAMS, null, null, ctx);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		comp.handleInput("D");
+		const armText = comp.render(TERM_COLS).map((l) => l.trim()).join("");
+		check("O: 第一次 D 仅进入确认态", armText.includes("再按一次") && captures.customs.length === 1);
+		comp.handleInput(K.up); // 其他键取消确认
+		check("O: 其他键取消确认态", !comp.render(TERM_COLS).map((l) => l.trim()).join("").includes("再按一次"));
+		comp.handleInput("D");
+		comp.handleInput("D");
+		const result = await execP;
+		check("O: details.status === deleted", result.details?.status === "deleted");
+		check("O: 工具结果告知不再追问", (result.content?.[0]?.text ?? "").includes("不要追问"));
+		check("O: 问卷文件已删除", !existsSync(join(dir, ".pi", "questionnaires", "test-survey.json")));
+		check("O: 待答状态已清除", captures.statuses.ask === undefined);
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 P：选择器里删除问卷 ----
+	console.log("场景 P：选择器删除问卷");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const qDir = join(dir, ".pi", "questionnaires");
+		mkdirSync(qDir, { recursive: true });
+		writeFileSync(
+			join(qDir, "a-first.json"),
+			JSON.stringify({ id: "a-first", title: "第一份", createdAt: "2026-01-01T00:00:00Z", questions: [{ type: "text", question: "随便说说" }] }),
+		);
+		writeFileSync(
+			join(qDir, "b-second.json"),
+			JSON.stringify({ id: "b-second", title: "第二份", createdAt: "2026-01-02T00:00:00Z", questions: [{ type: "text", question: "随便说说" }] }),
+		);
+		const cmdP = pi.commands.answer.handler("", ctx);
+		await new Promise((r) => setTimeout(r, 10));
+		const picker = openCaptured(captures, 0);
+		check("P: 选择器显示创建时间", picker.render(60).join("\n").includes("00:00"));
+		picker.handleInput("D");
+		check("P: 第一次 D 进入确认态", picker.render(60).join("\n").includes("再按一次"));
+		picker.handleInput("D");
+		check("P: 选中项文件已删除", !existsSync(join(qDir, "a-first.json")));
+		picker.handleInput(K.up); // 任意其他键清除操作提示
+		const afterDel = picker.render(60).join("\n");
+		check("P: 剩余项仍在列表", afterDel.includes("第二份") && !afterDel.includes("第一份"));
+		picker.handleInput(K.escape);
+		await cmdP;
+		check("P: 全部取消后不打开回答页", captures.customs.length === 1);
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 Q：滚动提示不遮正文 + x 展开说明 ----
+	console.log("场景 Q：滚动提示移出正文与说明展开");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const noteLines = Array.from({ length: 40 }, (_, i) => `草稿第${i + 1}行内容`).join("\n");
+		const execP = tool.execute(
+			"tc17",
+			{
+				id: "scroll-survey",
+				title: "滚动与折叠",
+				questions: [
+					{ id: "n1", type: "note", question: "长草稿", content: noteLines },
+					{ id: "q1", type: "single", question: "审阅通过？", options: [{ label: "通过" }, { label: "驳回" }] },
+				],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		const lines = comp.render(TERM_COLS);
+		const text = lines.map((l) => l.trim()).join("");
+		check("Q: 首帧停在顶部（说明正文首行可见）", text.includes("草稿第1行内容"));
+		check("Q: 旧式覆盖正文的滚动提示已移除", !text.includes("上方还有") && !text.includes("下方还有"));
+		check("Q: 折叠提示带行数与 x 展开入口", /已折叠显示前 \d+ 行（x 展开全文）/.test(text));
+		check("Q: 滚动指示在状态行（▼）", /▼\d+/.test(text));
+		comp.handleInput("x"); // 展开
+		const expanded = comp.render(TERM_COLS).map((l) => l.trim()).join("");
+		check("Q: x 展开后显示收起提示", expanded.includes("x 收起"));
+		check("Q: x 展开后折叠提示消失", !/还有 \d+ 行未显示/.test(expanded));
+		check("Q: x 展开后仍停在顶部", expanded.includes("草稿第1行内容"));
+		comp.handleInput(K.escape);
+		await execP;
 		rmSync(dir, { recursive: true, force: true });
 	}
 

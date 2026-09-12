@@ -2,12 +2,14 @@
  * ask/types：问卷数据模型、校验规范化、答案语义与格式化
  *
  * 题型：single 单选 / multi 多选 / text 简答（multiline 多行）/ confirm 是否 /
- * rating 评分 / number 数字。normalizeQuestionnaire 同时服务 AI 工具参数与手写 JSON
+ * rating 评分 / number 数字 / note 只读说明（不参与作答，供 AI 插入背景材料或
+ * 待审草稿原文——用户「先看内容再给意见」，不必搁置问卷去对话里翻）。
+ * normalizeQuestionnaire 同时服务 AI 工具参数与手写 JSON
  * （「问卷即文件」：.pi/questionnaires/*.json 可被 /answer 直接扫描识别），
- * 因此校验是容错式的：缺省值补齐、题型可按 options 有无推断、题目 id 自动分配。
+ * 因此校验是容错式的：缺省值补齐、题型可按 options/content 有无推断、题目 id 自动分配。
  */
 
-export const QUESTION_TYPES = ["single", "multi", "text", "confirm", "rating", "number"] as const;
+export const QUESTION_TYPES = ["single", "multi", "text", "confirm", "rating", "number", "note"] as const;
 export type QuestionType = (typeof QUESTION_TYPES)[number];
 
 /** 题型中文标签（页面题头 [tag] 用） */
@@ -18,7 +20,12 @@ export const TYPE_TAGS: Record<QuestionType, string> = {
 	confirm: "判断",
 	rating: "评分",
 	number: "数字",
+	note: "说明",
 };
+
+/** note 题型样式（页面左侧色条与标题取色） */
+export const NOTE_STYLES = ["info", "warn", "quote"] as const;
+export type NoteStyle = (typeof NOTE_STYLES)[number];
 
 export interface QuestionOption {
 	label: string;
@@ -30,6 +37,10 @@ export interface Question {
 	type: QuestionType;
 	question: string;
 	description?: string;
+	/** note 题正文（只读展示，保留换行；缺省时 question 标题即正文） */
+	content?: string;
+	/** note 题样式（缺省 info） */
+	style?: NoteStyle;
 	/** single/multi 的选项（confirm 可选两个自定义标签，[0]=肯定 [1]=否定） */
 	options?: QuestionOption[];
 	/** single/multi 是否自动追加「其他（自由输入）」选项，默认 true */
@@ -63,6 +74,8 @@ export interface Questionnaire {
 
 const MAX_QUESTIONS = 12;
 const MAX_OPTIONS = 8;
+/** note 说明题标题缺省时取正文首行的截断长度 */
+const NOTE_TITLE_MAX = 30;
 
 type NormalizeResult = { ok: true; q: Questionnaire } | { ok: false; error: string };
 
@@ -82,21 +95,24 @@ export function normalizeQuestionnaire(raw: unknown, opts: { fallbackId: string 
 		const rq = rawQuestions[i] as Record<string, unknown> | null;
 		if (!rq || typeof rq !== "object") return err(`第 ${i + 1} 题不是对象`);
 		const text = typeof rq.question === "string" ? rq.question.trim() : "";
-		if (!text) return err(`第 ${i + 1} 题缺少 question 文本`);
+		const content = typeof rq.content === "string" ? rq.content.replace(/\r\n?/g, "\n") : "";
 
-		// 题型缺省推断：有 options 视为单选，否则简答（手写 JSON 友好）
+		// 题型缺省推断：有 options 视为单选、有 content 视为说明，否则简答（手写 JSON 友好）
 		let type = rq.type as QuestionType | undefined;
-		if (type === undefined) type = Array.isArray(rq.options) ? "single" : "text";
+		if (type === undefined) type = Array.isArray(rq.options) ? "single" : content.trim() ? "note" : "text";
 		if (!(QUESTION_TYPES as readonly string[]).includes(type)) {
 			return err(`第 ${i + 1} 题题型无效：${String(rq.type)}（可选 ${QUESTION_TYPES.join("/")}）`);
 		}
+		// 说明题允许没有标题（正文即内容）；其余题型必须有 question
+		if (!text && type !== "note") return err(`第 ${i + 1} 题缺少 question 文本`);
+		if (!text && !content.trim()) return err(`第 ${i + 1} 题（说明）需要 question 标题或 content 正文`);
 
 		// 题目 id：缺省 q1/q2…，重复加数字后缀
 		let id = typeof rq.id === "string" && rq.id.trim() ? rq.id.trim() : `q${i + 1}`;
 		for (let n = 2; usedIds.has(id); n++) id = `${id.replace(/-\d+$/, "")}-${n}`;
 		usedIds.add(id);
 
-		const q: Question = { id, type, question: text };
+		const q: Question = { id, type, question: text || "说明" };
 		if (typeof rq.description === "string" && rq.description.trim()) q.description = rq.description.trim();
 		if (typeof rq.placeholder === "string" && rq.placeholder) q.placeholder = rq.placeholder;
 		if (typeof rq.multiline === "boolean") q.multiline = rq.multiline;
@@ -135,6 +151,18 @@ export function normalizeQuestionnaire(raw: unknown, opts: { fallbackId: string 
 				}
 				if (pair.length === 2) q.options = pair;
 			}
+		} else if (type === "note") {
+			// 只读说明：正文 content 原样保留换行；缺省时把标题当正文用（短说明无需重复写两遍）
+			const body = content.trim() ? content : text;
+			if (body.trim()) q.content = body.replace(/^\n+|\n+$/g, "");
+			// 标题缺省：取正文首行截断（免得只写 content 的说明题标题全是「说明」）
+			if (!text) {
+				const firstLine = (q.content ?? "").split("\n")[0]!.trim();
+				const chars = Array.from(firstLine);
+				q.question = chars.length > NOTE_TITLE_MAX ? `${chars.slice(0, NOTE_TITLE_MAX).join("")}…` : firstLine || "说明";
+			}
+			if (NOTE_STYLES.includes(rq.style as NoteStyle)) q.style = rq.style as NoteStyle;
+			q.required = false; // 说明题永不参与必答校验
 		} else if (type === "rating") {
 			q.min = typeof rq.min === "number" ? Math.floor(rq.min) : 1;
 			q.max = typeof rq.max === "number" ? Math.floor(rq.max) : 5;
@@ -173,8 +201,14 @@ export function normalizeQuestionnaire(raw: unknown, opts: { fallbackId: string 
 	};
 }
 
+/** 可答题（排除 note 只读说明）：进度分母、必答校验、答案回执的分母都取它 */
+export function answerableQuestions(qn: Questionnaire): Question[] {
+	return qn.questions.filter((q) => q.type !== "note");
+}
+
 /** 必答完整性判定（提交校验用；选答题跳过不算未答，由调用方先判 required） */
 export function isAnswered(q: Question, v: AnswerValue | undefined): boolean {
+	if (q.type === "note") return true; // 说明题无需作答（不阻塞提交）
 	if (v === undefined) return false;
 	switch (q.type) {
 		case "single":
@@ -191,9 +225,9 @@ export function isAnswered(q: Question, v: AnswerValue | undefined): boolean {
 	}
 }
 
-/** 进度计数：有任何实质内容即算「已答」（含选答题） */
+/** 进度计数：有任何实质内容即算「已答」（含选答题）；note 说明题不计入分母 */
 export function answeredProgress(qn: Questionnaire, answers: AnswerMap): number {
-	return qn.questions.filter((q) => {
+	return answerableQuestions(qn).filter((q) => {
 		const v = answers[q.id];
 		if (v === undefined) return false;
 		if (typeof v === "string") return v.trim().length > 0;
@@ -212,10 +246,12 @@ export function formatValue(q: Question, v: AnswerValue): string {
 	return String(v);
 }
 
-/** 提交后回传给 AI 的消息文本（工具结果 / sendUserMessage 共用） */
+/** 提交后回传给 AI 的消息文本（工具结果 / sendUserMessage 共用）；说明题不占行（AI 已知其内容） */
 export function formatAnswersMessage(qn: Questionnaire, answers: AnswerMap): string {
 	const lines = [`[问卷回答] ${qn.title}`];
-	qn.questions.forEach((q, i) => {
+	const answerable = answerableQuestions(qn);
+	if (answerable.length === 0) lines.push("（本问卷仅含只读说明，用户已确认）");
+	answerable.forEach((q, i) => {
 		const v = answers[q.id];
 		const empty =
 			v === undefined || (typeof v === "string" && !v.trim()) || (Array.isArray(v) && v.length === 0);
@@ -224,10 +260,15 @@ export function formatAnswersMessage(qn: Questionnaire, answers: AnswerMap): str
 	return lines.join("\n");
 }
 
-/** 非 TUI 环境降级：把问卷铺成纯文本，让 AI 转而在对话中逐条提问 */
+/** 非 TUI 环境降级：把问卷铺成纯文本，让 AI 转而在对话中逐条提问（说明题内容原样附上） */
 export function flattenQuestions(qn: Questionnaire): string {
 	const lines: string[] = [];
 	qn.questions.forEach((q, i) => {
+		if (q.type === "note") {
+			lines.push(`${i + 1}. [${TYPE_TAGS.note}·只读] ${q.question}`);
+			for (const ln of (q.content ?? "").split("\n")) lines.push(`   │ ${ln}`);
+			return;
+		}
 		const req = q.required === false ? "（选答）" : "";
 		lines.push(`${i + 1}. [${TYPE_TAGS[q.type]}]${req} ${q.question}`);
 		if (q.options) {

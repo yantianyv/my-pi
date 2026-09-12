@@ -10,16 +10,19 @@
  */
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
+import { copyToClipboard } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { QuestionnairePage, type PageResult, type TermDims } from "./page";
+import { QuestionnairePage, type PageHooks, type PageResult, type TermDims } from "./page";
 import { enqueueQuestionnaireUI, refreshPendingStatus, rememberCtx } from "./state";
 import { createQuestionnaire, initStore, listQuestionnaires, removeQuestionnaire, saveQuestionnaire } from "./store";
 import {
 	answeredProgress,
+	answerableQuestions,
 	flattenQuestions,
 	formatAnswersMessage,
+	NOTE_STYLES,
 	normalizeQuestionnaire,
 	QUESTION_TYPES,
 } from "./types";
@@ -45,6 +48,14 @@ export function makeFullscreenOverlay(dims: TermDims) {
 	} as const;
 }
 
+/**
+ * 页面钩子工厂（commands.ts 复用）：把 pi 官方 copyToClipboard 接进问卷页（Ctrl+P 一览里 C 键复制）。
+ * pi 根导出已含跨平台 clip 读写，不自造实现；失败由页面捕获后提示。
+ */
+export function makePageHooks(): PageHooks {
+	return { copyText: (text: string) => copyToClipboard(text) };
+}
+
 const OptionSchema = Type.Object({
 	label: Type.String({ description: "选项显示文本（简洁，1~5 个词）" }),
 	description: Type.Optional(Type.String({ description: "该选项的含义/后果说明（权衡、影响）" })),
@@ -56,11 +67,22 @@ const QuestionSchema = Type.Object({
 	// schema 层必填会让 pi 校验直接拦下本可救回的调用（容错推断形同虚设）
 	type: Type.Optional(
 		StringEnum([...QUESTION_TYPES], {
-			description: "题型：single 单选 / multi 多选 / text 简答 / confirm 是否 / rating 评分 / number 数字（漏传时自动推断：有 options 视为单选，否则简答）",
+			description:
+				"题型：single 单选 / multi 多选 / text 简答 / confirm 是否 / rating 评分 / number 数字 / note 只读说明" +
+				"（漏传时自动推断：有 options → single、有 content → note，否则 → text）。" +
+				"note 只读说明（不参与作答与必答校验，用来把背景材料或待审草稿原文放进问卷；也占 12 题额度）",
 		}),
 	),
-	question: Type.String({ description: "完整的问题文本（清晰、具体，以问号结尾）" }),
+	question: Type.String({ description: "完整的问题文本（清晰、具体，以问号结尾）；note 题作小标题，可省（省时取 content 正文首行截断）" }),
 	description: Type.Optional(Type.String({ description: "补充说明（背景、权衡），帮助用户决策" })),
+	content: Type.Optional(
+		Type.String({
+			description:
+				"note 说明题的正文（多行保留换行，支持 markdown 轻渲染；超长默认折叠、x 展开）。" +
+				"典型用途：把待用户审阅的草稿/方案原文放进问卷，让用户边看边给意见",
+		}),
+	),
+	style: Type.Optional(StringEnum([...NOTE_STYLES], { description: "note 说明题样式：info 普通（缺省）/ warn 警示 / quote 引用" })),
 	options: Type.Optional(
 		Type.Array(OptionSchema, {
 			description: "single/multi 的选项（2~8 个）；confirm 可给两个自定义标签；不要加「其他」，会自动追加",
@@ -91,7 +113,7 @@ function deriveTitle(questions: unknown[]): string {
 }
 
 interface AskDetails {
-	status: "submitted" | "shelved" | "text-fallback" | "cancelled";
+	status: "submitted" | "shelved" | "deleted" | "text-fallback" | "cancelled";
 	title: string;
 	total: number;
 	answered?: number;
@@ -103,8 +125,9 @@ export function registerAskTool(pi: ExtensionAPI): void {
 		name: "ask",
 		label: "问卷",
 		description:
-			"创建一份问卷向用户批量提问（单选/多选/简答/判断/评分/数字），或作废（action=cancel）不再需要的待答问卷。" +
-			"questions 必填（1~12 题，每题含完整问句 question，题型 type 建议明确给出——单/多选另带 options 2~8 个；type 漏传时自动推断：有 options 视为单选，否则简答）；title 建议提供，" +
+			"创建一份问卷向用户批量提问（单选/多选/简答/判断/评分/数字/只读说明），或作废（action=cancel）不再需要的待答问卷。" +
+			"questions 必填（1~12 题，每题含完整问句 question，题型 type 建议明确给出——单/多选另带 options 2~8 个；type 漏传时自动推断：有 options 视为单选，有 content 视为说明，否则简答；" +
+			"note 是只读说明题（同样占用 12 题额度），用 content 装待审草稿/背景原文，不参与作答与必答校验）；title 建议提供，" +
 				"漏传时自动取第一题问句截断，不会报错。" +
 			"适用：需要用户在多个方案中决策、或有多个问题堆积需要一次性确认。问卷会以整屏页面立即展示给用户作答：" +
 			"用户 Enter 提交（答案作为工具结果返回），或 Esc 搁置（草稿保存，用户稍后可通过 /answer 命令继续回答，" +
@@ -113,8 +136,10 @@ export function registerAskTool(pi: ExtensionAPI): void {
 		promptSnippet: "创建问卷向用户批量提问（单选/多选/简答/判断/评分/数字），或作废待答问卷",
 		promptGuidelines: [
 			"需要用户从多个方案中抉择、或有多个问题要确认时，用 ask 工具创建问卷，而不是在正文里罗列问题让用户逐条回复。",
-			"questions 必填（每题含 question 完整问句，题型 type 建议明确给出；single/multi 必带 options 2~8 个，不要加「其他」会自动追加）；type 漏传时自动推断（有 options 视为单选，否则简答），不会报错；title 建议提供（一句话概括要决定什么），漏了会自动取第一题问句，不会报错。",
+			"需要用户审阅一段原文（待发草稿/方案/长说明）再给意见时，用 type=note 的说明题把原文放进问卷（content 装全文），后面跟 single/text 题收意见——用户在问卷里能直接看到内容，不必搁置问卷去对话里翻。",
+			"questions 必填（每题含 question 完整问句，题型 type 建议明确给出；single/multi 必带 options 2~8 个，不要加「其他」会自动追加）；type 漏传时自动推断（有 options 视为单选，有 content 视为说明，否则简答），不会报错；title 建议提供（一句话概括要决定什么），漏了会自动取第一题问句，不会报错。",
 			"ask 工具一次只创建一份问卷，不要与其他 ask 调用放在同一批；用户可能搁置问卷稍后回答，收到「已搁置」结果时不要追问，简要说明后结束本轮回复。",
+			"用户在问卷页 Ctrl+D 删除问卷后会得到 status=deleted 的工具结果：说明这些信息已不再需要，不要追问、不要重建同一份问卷；确实还需要时先向用户确认。",
 		],
 		parameters: Type.Object({
 			action: Type.Optional(
@@ -129,7 +154,13 @@ export function registerAskTool(pi: ExtensionAPI): void {
 				Type.String({ description: "问卷标题（一句话概括这份问卷要决定什么；建议提供，缺省时自动取第一题问句截断）" }),
 			),
 			description: Type.Optional(Type.String({ description: "问卷整体背景说明" })),
-			questions: Type.Optional(Type.Array(QuestionSchema, { minItems: 1, maxItems: 12, description: "题目列表（create 必填，1~12 题；每题必须含 question 与 type）" })),
+			questions: Type.Optional(
+				Type.Array(QuestionSchema, {
+					minItems: 1,
+					maxItems: 12,
+					description: "题目列表（create 必填，1~12 题；每题必须含 question 与 type；note 说明题同样占 12 题额度）",
+				}),
+			),
 		}),
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -159,7 +190,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 							text: `已作废问卷「${target.q.title}」（${target.q.id}）——问卷文件已删除，用户不会再看到它。`,
 						},
 					],
-					details: { status: "cancelled", title: target.q.title, total: target.q.questions.length } satisfies AskDetails,
+					details: { status: "cancelled", title: target.q.title, total: answerableQuestions(target.q).length } satisfies AskDetails,
 				};
 			}
 
@@ -177,7 +208,8 @@ export function registerAskTool(pi: ExtensionAPI): void {
 
 			const file = createQuestionnaire(q);
 			await refreshPendingStatus();
-			const details: AskDetails = { status: "text-fallback", title: q.title, total: q.questions.length, file };
+			const total = answerableQuestions(q).length;
+			const details: AskDetails = { status: "text-fallback", title: q.title, total, file };
 
 			// 非 TUI：无法弹整屏页，退化为文本提问（文件保留，TUI 侧 /answer 仍可作答）
 			if (ctx.mode !== "tui") {
@@ -198,7 +230,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			const dims: TermDims = { w: 0, h: 0 };
 			const result = await enqueueQuestionnaireUI(() =>
 				ctx.ui.custom<PageResult>(
-					(tui, theme, _kb, done) => new QuestionnairePage(tui, theme, q, done, dims),
+					(tui, theme, _kb, done) => new QuestionnairePage(tui, theme, q, done, dims, makePageHooks()),
 					makeFullscreenOverlay(dims),
 				),
 			);
@@ -214,6 +246,23 @@ export function registerAskTool(pi: ExtensionAPI): void {
 				};
 			}
 
+			// 用户主动删除：文件删掉、不再等待回答
+			if (result.action === "delete") {
+				removeQuestionnaire(file);
+				await refreshPendingStatus();
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`用户删除了问卷「${q.title}」（问卷文件已删除）。这通常意味着这些问题已不再需要——` +
+								`请不要追问，也不要把同一份问卷重新创建一遍；若确实还需要这些信息，先向用户确认。`,
+						},
+					],
+					details: { ...details, status: "deleted" },
+				};
+			}
+
 			// 搁置：草稿写回文件，等用户 /answer
 			q.answers = result.answers;
 			q.status = "draft";
@@ -224,7 +273,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 					{
 						type: "text",
 						text:
-							`用户暂时搁置了问卷「${q.title}」（已答 ${answeredProgress(q, result.answers)}/${q.questions.length}，` +
+							`用户暂时搁置了问卷「${q.title}」（已答 ${answeredProgress(q, result.answers)}/${total}，` +
 							`草稿已保存）。用户可随时通过 /answer 命令继续作答，答案会以用户消息送达。` +
 							`请简要告知用户这一点后结束本轮回复，不要追问这些问题。`,
 					},
@@ -260,6 +309,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			if (d?.status === "submitted") msg = theme.fg("success", `✓ 用户已提交（${d.answered}/${d.total}）`);
 			else if (d?.status === "shelved")
 				msg = theme.fg("warning", `⏸ 用户已搁置（已答 ${d.answered}/${d.total} · /answer 可继续）`);
+			else if (d?.status === "deleted") msg = theme.fg("warning", `🗑 用户已删除「${d.title}」`);
 			else if (d?.status === "cancelled") msg = theme.fg("dim", `已作废「${d.title}」`);
 			else msg = theme.fg("dim", "已创建（当前环境无 UI，转为文字提问）");
 			return new Text(msg, 0, 0);
