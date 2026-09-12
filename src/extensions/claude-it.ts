@@ -456,7 +456,7 @@ export default function (pi: ExtensionAPI) {
 			if (!currentCtx.isIdle()) {
 				if (!abortPending) {
 					// 第一次 Ctrl+C：中止当前 turn（打断后 agent_end 的最后一条 assistant 消息
-					// stopReason=aborted，task-alert 据此不触发完成提醒）
+					// stopReason=aborted，status-beacon 据此不触发完成提醒）
 					abortPending = true;
 					currentCtx.abort();
 					currentCtx.ui.notify("已打断当前回合 · 打断完成后按 Ctrl+C 回退到上一条消息", "info");

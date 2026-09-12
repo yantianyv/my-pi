@@ -6,7 +6,7 @@
  * 本工具以 key 维度维护定时器：重复调用同 key 会重置旧定时器（延长展示），
  * text 传 undefined 则手动清除、不挂新定时器。
  *
- * 复杂行为（闪烁帧、多层撤销、多阶段）仍由调用方自管（如 task-alert 的闪烁）。
+ * 复杂行为（闪烁帧、多层撤销、多阶段）仍由调用方自管（如 status-beacon 的闪烁）。
  *
  * 生命周期：定时器闭包捕获调用方传入的 ctx——/reload、ctx.switchSession() 等
  * 场景下旧 ctx 会失效，到期回调再调 ctx.ui.setStatus 会抛 stale 错误（曾导致

@@ -23,7 +23,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `btf-think.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking... → Thinking....，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
 | `extensions/` | `btw/` — `/btw` 旁支问答：侧栏浮层多轮追问、`m` 转正附带、`/btw-config` 模型 auto 最便宜故障转移（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`） | `~/.pi/agent/extensions/` |
-| `extensions/` | `task-alert.ts` — 多状态提醒：五状态五音效 + 状态栏闪烁 + 标题动画（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `status-beacon.ts` — 全链路状态感知：执行中标题进度（spinner+工具活动）+ 五状态五音效 + 状态栏闪烁 + 提醒标题动画（见下；前身 task-alert） | `~/.pi/agent/extensions/` |
 | `extensions/` | `perm-gate.ts` — bash 命令三级权限门：黑名单人工复核 / 白名单放行 / AI 审核（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
@@ -104,9 +104,9 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 |---|---|---|---|
 | 指令模式 | 输入以 `!` 开头 | `⚡ 指令模式` | 100 |
 | 余额查询失败 | 余额接口报错（错误变化时才推，防刷屏） | `⚠ 余额查询失败` | 95 |
-| 任务完成 | task-alert 推送（自管闪烁帧） | `✅ 任务完成`（闪烁） | 90 |
-| 任务出错 | task-alert 推送（出错终止） | `❌ 任务出错`（闪烁） | 92 |
-| 等待人工 | task-alert 推送（ui_prompt 阻塞） | `⏳ 等待人工：权限复核`（闪烁） | 91 |
+| 任务完成 | status-beacon 推送（自管闪烁帧） | `✅ 任务完成`（闪烁） | 90 |
+| 任务出错 | status-beacon 推送（出错终止） | `❌ 任务出错`（闪烁） | 92 |
+| 等待人工 | status-beacon 推送（ui_prompt 阻塞） | `⏳ 等待人工：权限复核`（闪烁） | 91 |
 | /init 进度 | claude-it 后台 init | `⚙ init · 5` | 80 |
 | 联网搜索 | web_search 执行中 | `🔍 搜索中` | 75 |
 | 网页抓取 | web_fetch 执行中 | `⬇️ 抓取中` | 74 |
@@ -143,7 +143,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 - `/init`：对齐 Claude Code 的 `/init`——在**后台独立上下文**中分析代码库并生成上下文文件 `AGENTS.md`（独立 agentLoop + 当前会话模型，主会话零污染，期间可继续对话；状态栏显示进度，完成后通知总结）。文件已存在时会询问「合并更新 / 完全重写 / 取消」。同时兼容已有 Claude Code 项目：只有 `CLAUDE.md` 时直接重命名为 `AGENTS.md` 再继续；两者并存时合并为一份 `AGENTS.md` 并删除 `CLAUDE.md`。
 - `/exit`：与 `/quit` 等效的斜杠命令。
 - `exit`：直接输入 `exit`（不带 `/`）也能立即退出 pi，不会把该文本当作普通消息发送给模型。
-- **Ctrl+C**：当前 turn 正在生成时，按 `Ctrl+C` 会取消该轮输出（Claude Code 风格）；空闲时不拦截，保留默认行为。打断后 2 秒内**再按一次 `Ctrl+C`**：输入框预填 `/rewind`，回车即**回退到上一条用户消息**（丢弃其后的全部内容，消息文本放回输入框，可修改后重发）——回答不满意时的快速回退；打断本身**不触发 task-alert 完成提醒**（视为中断而非完成）。
+- **Ctrl+C**：当前 turn 正在生成时，按 `Ctrl+C` 会取消该轮输出（Claude Code 风格）；空闲时不拦截，保留默认行为。打断后 2 秒内**再按一次 `Ctrl+C`**：输入框预填 `/rewind`，回车即**回退到上一条用户消息**（丢弃其后的全部内容，消息文本放回输入框，可修改后重发）——回答不满意时的快速回退；打断本身**不触发 status-beacon 完成提醒**（视为中断而非完成）。
 - `/rewind`：手动回退到上一条用户消息（内容放回输入框），与双击 Ctrl+C 等价。
 
 > 注意：不带 `/` 的 `exit` 会被无条件解释为退出指令。如果你确实需要把单词 "exit" 作为普通问题发给模型，可临时加空格或换种说法，例如 `"exit" 是什么意思？`。
@@ -167,9 +167,11 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 
 其余两个曾收录的包均已回退自研版（pi-subagents → explore-agent，2026-08-30；pi-btw → btw，2026-09-07），出处与借鉴评估见 `src/vendor/README.md` 回退记录。
 
-## 多状态提醒（src/extensions/task-alert.ts）
+## 全链路状态感知（src/extensions/status-beacon.ts，前身 task-alert）
 
-移植自 ClaudeCodeInit 的 hooks 提示音方案，五种状态五种音效（钢琴音色，音源 `ClaudeCodeInit/wav/piano/`，部署到 `~/.pi/agent/sounds/`）：
+**执行中标题进度**（2026-09 新增，全链路「进行中」段）：`agent_start` → `agent_settled` 全程在终端标题显示 spinner（200ms 转帧）+ 当前活动 + 目录名——工具执行时显示工具图标+名称（`tool_execution_start` 更新，如 `⠋ ⌨️ bash — my_pi`），生成间隙显示「思考中」；等待人工提醒期间让位、应答后自动恢复；Ctrl+C 打断（abort）时还给 pi 默认标题。切到其他窗口也能从任务栏/标签页看到 pi 在跑什么。
+
+提示音与收尾提醒移植自 ClaudeCodeInit 的 hooks 提示音方案，五种状态五种音效（钢琴音色，音源 `ClaudeCodeInit/wav/piano/`，部署到 `~/.pi/agent/sounds/`）：
 
 | 状态 | 触发时机 | 音效 | 视觉 |
 |---|---|---|---|
@@ -179,9 +181,10 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 | 空闲提醒 | 完成提醒后 60 秒无任何操作 | `idle_prompt.wav` | 仅补一声，不动视觉 |
 | 子代理完成 | `subagent` 工具成功结束（`tool_execution_end` 且 `!isError`） | `subagent_complete.wav` | 仅提示音（中间事件，不打断标题/状态；失败交给 turn 级 error 统一收尾） |
 
-**Ctrl+C 打断（abort）不算完成，不触发提醒**：打断后 agent-loop 的最后一条 assistant 消息 `stopReason="aborted"`，task-alert 据此跳过。「等待人工」有 `ctx.isIdle()` 守卫：用户空闲时主动开的提示（如 `/answer` 续答问卷）不打扰。
+**Ctrl+C 打断（abort）不算完成，不触发提醒**：打断后 agent-loop 的最后一条 assistant 消息 `stopReason="aborted"`，status-beacon 据此跳过。「等待人工」有 `ctx.isIdle()` 守卫：用户空闲时主动开的提示（如 `/answer` 续答问卷）不打扰。
 
-- **状态栏闪烁**：三种需要视觉的状态各用独立 key 走官方 `ctx.ui.setStatus(key, …)` 通道（`task-alert` / `task-alert-error` / `task-alert-wait`，500ms 交替帧，本扩展自管帧切换与清除），HUD 按 `STATUS_STYLE` 映射不同颜色后在行 1 动态区闪烁。两扩展零耦合——task-alert 不知道 hud 的存在；HUD 被禁用时状态自动回落原生 footer 第 3 行，提示退化为标题栏动画；
+- **状态栏闪烁**：三种需要视觉的状态各用独立 key 走官方 `ctx.ui.setStatus(key, …)` 通道（`task-alert` / `task-alert-error` / `task-alert-wait` 三个 key 沿用旧名，HUD STATUS_STYLE 零改动；500ms 交替帧，本扩展自管帧切换与清除），HUD 按 `STATUS_STYLE` 映射不同颜色后在行 1 动态区闪烁。两扩展零耦合——status-beacon 不知道 hud 的存在；HUD 被禁用时状态自动回落原生 footer 第 3 行，提示退化为标题栏动画；
+- **标题单通道所有权**：执行中标题与提醒标题互斥（startAlert 停执行标题，stopAlert 在 agent 仍运行时恢复执行标题），两动画不互相覆盖；
 - **音频播放**：跨平台——Windows 用 PowerShell `Media.SoundPlayer`，macOS 用 `afplay`，Linux 依次尝试 `paplay`/`aplay`，全部不可用时退到终端响铃；任何失败都静默；
 - **标题栏动画**：终端标题同步闪烁，切到其他窗口也能看到。
 
@@ -324,7 +327,7 @@ rm ~/.pi/agent/themes/matrix.json
 rm ~/.pi/agent/extensions/hud.ts
 rm ~/.pi/agent/extensions/btf-think.ts
 rm ~/.pi/agent/extensions/claude-it.ts
-rm ~/.pi/agent/extensions/task-alert.ts
+rm ~/.pi/agent/extensions/status-beacon.ts
 rm ~/.pi/agent/extensions/web-tool.ts
 rm ~/.pi/agent/extensions/webdav-kb.ts
 rm ~/.pi/agent/extensions/workflow-mgr.ts

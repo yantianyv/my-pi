@@ -9,7 +9,7 @@
  *   显示动画。比 turn 级绑定更精确——工具执行期间没有模型输出，不再空转动画。
  * - **多层兜底停止**：message_end / turn_end / agent_settled 任一触发即恢复默认
  *   标签，杜绝「思考结束后动画残留」（turn_end 偶发不触发时由 agent_settled 兜底）。
- * - 原为 hud 的一部分，拆出为独立「UI 反馈」插件（与 task-alert 同类），
+ * - 原为 hud 的一部分，拆出为独立「UI 反馈」插件（与 status-beacon 同类），
  *   不依赖 hud；关闭 HUD 也能保留动画。
  * - 走官方 ctx.ui.setHiddenThinkingLabel 通道，零耦合。
  */
