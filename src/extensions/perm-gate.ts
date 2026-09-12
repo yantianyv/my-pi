@@ -16,8 +16,9 @@
  * 人工复核面板五操作：放行一次 / 放行并加白名单 / 驳回 / 驳回并加黑名单。
  * 面板为自绘 overlay（ReviewPanel）：命令**全文折行展示不截断**（PgUp/PgDn 滚动，
  * 滚动余量在分隔行指示），↑↓ 选操作、Enter 确认、1-5 直选、Esc=驳回。
- * AI 判 allow 后按 autoWhitelist 策略自动加白（默认 smart 采纳 AI 最窄候选，exact 精确段规则），
- * 常用无害命令只在首次烧一次审核 token；每次自动加白发通知，透明可查。
+ * AI 判 allow 后自动加白：采纳 AI 提炼的单条语义白名单正则（whitelistPattern，AI 按语义自选粒度），
+ * 缺失/跑偏退结构化兜底规则（^命令\s+子命令），最后才落精确段规则；
+ * 常用无害命令只在首次烧一次审核 token；每次自动加白发通知（展示 AI 概括的命令意图而非规则原文），透明可查。
  * AI 审核为「需复核」时会同时提炼指令核心特征为 1~3 个候选正则（附说明、从窄到宽），
  * 加白/加黑时弹多选面板选用（空格勾选/Enter 提交，可多选；附「精确匹配原文」兜底项——
  * 只认一模一样的命令，同类变体仍需再审；Esc 或空选提交 = 不加名单只执行本次操作）；
@@ -30,8 +31,7 @@
  *     "blacklist": ["\\bsudo\\b"],     // 正则字符串列表
  *     "whitelist": ["^git status$"],   // 正则字符串列表
  *     "aiReview": true,               // 未命中名单时是否启用 AI 审核（false = 一律转人工）
- *     "aiTimeoutMs": 15000,            // AI 审核超时
- *     "autoWhitelist": "smart"         // allow 自动加白：off / exact（精确段规则）/ smart（AI 最窄候选）
+ *     "aiTimeoutMs": 15000             // AI 审核超时
  *   }
  *
  * 命令：/perm-gate 查看状态；/perm-gate on|off 开关（持久化）；/perm-gate reload 重读配置；
@@ -91,12 +91,6 @@ interface PermGateConfig {
 	aiTimeoutMs: number;
 	/** AI 审核模型覆盖项（"provider/modelId"；null = 自动：优先列表 + 最便宜已认证兜底） */
 	model: string | null;
-	/**
-	 * AI 判 allow 后的自动加白策略：
-	 * off = 不自动加白；exact = 精确段规则入白（同一条命令以后零 token，但变体不覆盖）；
-	 * smart = 采纳 AI 候选正则最窄一条入白（同类变体也覆盖，依赖提炼质量，跑偏退 exact，默认）
-	 */
-	autoWhitelist: "off" | "exact" | "smart";
 }
 
 /** 默认配置（首次运行写入，用户可手动编辑） */
@@ -109,7 +103,6 @@ const DEFAULT_CONFIG: PermGateConfig = {
 	aiReview: true,
 	aiTimeoutMs: 15_000,
 	model: null,
-	autoWhitelist: "smart",
 };
 
 /** AI 提炼的候选名单规则（正则 + 说明） */
@@ -122,7 +115,11 @@ interface Candidate {
 interface Verdict {
 	action: "allow" | "review" | "reject";
 	reason: string;
-	/** action=review 时提炼的候选正则（加入名单用；可能为空，回落精确匹配） */
+	/** 命令意图的一句话概括（自动加白通知展示用；AI 可能漏给，兜底空串） */
+	intent: string;
+	/** action=allow 时提炼的单条语义白名单正则（自动加白用；空串 = 无法泛化，退结构化兜底） */
+	whitelistPattern: string;
+	/** action=review 时提炼的候选正则（人工面板选粒度用；可能为空，回落精确匹配） */
 	candidates: Candidate[];
 }
 
@@ -147,12 +144,7 @@ function isConfig(v: unknown): v is PermGateConfig {
 		typeof c.aiReview === "boolean" &&
 		typeof c.aiTimeoutMs === "number" &&
 		// model 为后加字段：旧配置缺失时容错（缺省 null = 自动），避免校验不过回默认丢名单
-		(c.model === undefined || c.model === null || typeof c.model === "string") &&
-		// autoWhitelist 同为后加字段：缺失时归一化为默认 exact
-		(c.autoWhitelist === undefined ||
-			c.autoWhitelist === "off" ||
-			c.autoWhitelist === "exact" ||
-			c.autoWhitelist === "smart")
+		(c.model === undefined || c.model === null || typeof c.model === "string")
 	);
 }
 
@@ -188,7 +180,6 @@ function loadConfig(): { cfg: PermGateConfig; isNew: boolean } {
 	}
 	const cfg = loadJsonConfig(CONFIG_FILE, structuredClone(DEFAULT_CONFIG), isConfig);
 	cfg.model ??= null; // 旧配置无该字段时归一化
-	cfg.autoWhitelist ??= "smart";
 	cfg.whitelist = toWhitelistRules(cfg.whitelist); // 旧纯字符串列表归一化为带保鲜元数据
 	return { cfg, isNew };
 }
@@ -258,6 +249,8 @@ function refineCandidates(candidates: Candidate[], command: string, segments: st
 		// 过短扣分（< 8 字符的模式太宽）
 		if (c.pattern.length < 8) score -= 30;
 		else if (c.pattern.length < 12) score -= 10;
+		// 刚性精确规则扣分（$ 结尾且无 .* 通配 = 只认原文、变体不覆盖，与 smart 目标相悖）
+		if (/\$$/.test(c.pattern) && !c.pattern.includes(".*")) score -= 15;
 		// 仅旗标无命令名扣分
 		if (cmdName && !c.pattern.includes(cmdName) && /^--?\w+/.test(c.pattern)) score -= 25;
 		// 字母数字过少扣分
@@ -277,8 +270,9 @@ function refineCandidates(candidates: Candidate[], command: string, segments: st
 }
 
 /**
- * 从命令结构自动生成兜底白名单规则（AI 候选全部不合格时使用）
- * 策略：提取命令名 + 子命令，生成适当宽松的锚定正则
+ * 从命令结构自动生成语义化兜底规则（^命令\s+子命令）
+ * 用途：review 候选全部不合格时补充（refineCandidates）、allow 未给 whitelistPattern 时兜底（autoWhitelist）；
+ * 精确原文规则不在此生成——人工面板有独立「精确匹配原文」兜底项，autoWhitelist 有逐段精确兜底。
  */
 function generateFallbackPatterns(command: string, segments: string[]): Candidate[] {
 	const patterns: Candidate[] = [];
@@ -289,12 +283,6 @@ function generateFallbackPatterns(command: string, segments: string[]): Candidat
 		const cmdName = parts[0];
 		if (!cmdName) continue;
 		const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-		// 精确段规则（兜底，只认一模一样的命令）
-		patterns.push({
-			pattern: exactPattern(seg),
-			note: `精确匹配「${seg.length > 30 ? seg.slice(0, 30) + "…" : seg}」`,
-		});
 
 		// 命令 + 子命令（如果有且不是旗标）
 		if (parts.length >= 2 && !parts[1]!.startsWith("-")) {
@@ -321,24 +309,30 @@ const AI_SYSTEM_PROMPT = [
 	'- "review"：仅当命令具有明显风险且无法判断意图时才需人工确认',
 	'- "reject"：仅拦截明显恶意的指令',
 	"\n===== 复合命令 =====",
-	"\n===== 候选正则提炼（candidates）=====",
-	'当 action 为 "allow" 或 "review" 时，提炼候选白名单/黑名单正则。reject 时 candidates 给空数组。',
-	"\n设计原则：",
-	"1. 命令锚定：每个正则必须包含命令名（如 git/npm/python/docker），防止误匹配其他命令；",
-	"   优先用 ^ 开头锚定命令起始位置", 
+	"\n===== 加白规则提炼 =====",
+	"设计原则（allow 与 review 共用）：",
+	"1. 命令锚定：正则必须包含命令名（如 git/npm/python/docker），优先用 ^ 锚定起始位置，防误匹配其他命令；",
 	"2. 操作语义：包含子命令或关键旗标，捕获「做什么」而非「具体怎么做」；",
 	"3. 适当宽松：允许参数顺序变化、路径/URL 等参数值不同、额外旗标存在；",
 	"4. 避免过窄：不要包含具体文件路径、分支名、URL 等会变化的参数值；",
-	"5. 避免过宽：不要只给旗标（如 --force）而不包含命令名——会误匹配无关命令。",
-	"\n三个层级（从窄到宽，每层 0~1 个，总数 1~3 个）：",
-	"- 窄：^命令\\s+子命令\\s+.*关键旗标  （如 ^git\\s+push\\s+.*--force）",
-	"- 中：^命令\\s+子命令              （如 ^git\\s+push）",
-	"- 宽：^命令.*关键旗标              （如 ^git.*--force，仅当旗标是核心风险标识时）",
+	"5. 避免过宽：不要只给旗标（如 --force）而不含命令名——会误匹配无关命令。",
 	"\n命令可能是多行（python -c \"...\" 内嵌脚本、heredoc 等）：",
 	"正则保持命令原样（不要美化成单行），跨任意内容用 .* （匹配时自动加 s 标志，可跨换行）。",
-	"\n每个候选格式：{\"pattern\":\"JavaScript 正则（不带标志）\",\"note\":\"一句话说明覆盖范围\"}",
+	'\n- action 为 "allow" 时：给 whitelistPattern——一条语义化白名单正则，覆盖这类操作的合理变体；',
+	"  无法安全泛化时给空字符串。",
+	'\n- action 为 "review" 时：给 candidates——1~3 条候选正则供人工选择加白/加黑粒度，从窄到宽：',
+	"  窄：^命令\\s+子命令\\s+.*关键旗标（如 ^git\\s+push\\s+.*--force）",
+	"  中：^命令\\s+子命令（如 ^git\\s+push）",
+	"  宽：^命令.*关键旗标（仅当旗标是核心风险标识时）",
+	'  每个候选格式：{"pattern":"JavaScript 正则（不带标志）","note":"一句话说明覆盖范围"}',
+	'\n- action 为 "reject" 时：whitelistPattern 与 candidates 都不给。',
+	"\n===== 命令意图概括（intent）=====",
+	"用一句话概括这条命令在做什么（面向用户的自然语言，如「查看 git 提交历史」「安装项目依赖」），",
+	"不复述命令原文、不含正则、不含参数细节；三种结论都要给。",
 	"\n只输出一行 JSON，不要解释、不要代码块围栏：",
-	'{"action":"allow|review|reject","reason":"一句话中文说明","candidates":[{"pattern":"...","note":"..."}]}',
+	'allow：{"action":"allow","reason":"一句话中文说明","intent":"...","whitelistPattern":"..."}',
+	'review：{"action":"review","reason":"...","intent":"...","candidates":[{"pattern":"...","note":"..."}]}',
+	'reject：{"action":"reject","reason":"...","intent":"..."}',
 ].join("\n");
 
 /** 调辅助小模型审核命令；失败（超时/无模型/网络错误/输出无法解析）返回 null（调用方降级人工复核）。segInfo 为逐段白名单命中标注（无命中段时传空串） */
@@ -366,7 +360,7 @@ async function aiReview(
 			{
 				apiKey: auth.apiKey,
 				headers: { ...auth.headers },
-				maxTokens: 400, // candidates 字段需要额外输出空间
+				maxTokens: 500, // candidates + intent 字段需要额外输出空间
 				temperature: 0,
 				signal: AbortSignal.timeout(timeoutMs),
 			},
@@ -395,9 +389,21 @@ async function aiReview(
 				candidates.push({ pattern: p, note: typeof note === "string" ? note : "" });
 			}
 		}
+		// allow 的单条语义白名单规则：可编译才采纳
+		let whitelistPattern = "";
+		if (typeof parsed.whitelistPattern === "string" && parsed.whitelistPattern.trim()) {
+			try {
+				new RegExp(parsed.whitelistPattern, REGEX_FLAGS);
+				whitelistPattern = parsed.whitelistPattern;
+			} catch {
+				/* 非法正则丢弃 */
+			}
+		}
 		return {
 			action: parsed.action,
 			reason: typeof parsed.reason === "string" ? parsed.reason : "",
+			intent: typeof parsed.intent === "string" ? parsed.intent : "",
+			whitelistPattern,
 			candidates,
 		};
 	} catch {
@@ -612,22 +618,24 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * allow 结论自动加白（autoWhitelist 策略）：
-	 * exact = 精确段规则；smart = 精炼后最优候选（评分排序，跑偏/无候选退 exact）。
-	 * 护栏：去重、不覆盖黑名单已有规则、候选经 refineCandidates 过滤评分；每次加白发通知（透明可查）。
+	 * allow 结论自动加白：采纳 AI 提炼的单条语义白名单正则（whitelistPattern）；
+	 * 缺失/跑偏时退结构化兜底规则（^命令\s+子命令），最后才落每段精确规则。
+	 * 护栏：去重、不覆盖黑名单已有规则；每次加白发通知（透明可查）。
 	 */
 	function autoWhitelist(ctx: ExtensionContext, command: string, segments: string[], verdict: Verdict): void {
-		if (cfg.autoWhitelist === "off") return;
-		const exact = (segments.length > 0 ? segments : [command]).map(exactPattern);
-		let patterns: string[] = exact;
-		if (cfg.autoWhitelist === "smart" && verdict.candidates.length > 0) {
-			const candidate = verdict.candidates[0].pattern; // 精炼后最优候选（评分排序）
+		let patterns: string[] = (segments.length > 0 ? segments : [command]).map(exactPattern); // 最后兜底
+		// 依次尝试：AI 语义规则 → 结构化语义兜底，取第一条可编译且命中原命令/段的
+		const tryList = [verdict.whitelistPattern, ...generateFallbackPatterns(command, segments).map((c) => c.pattern)];
+		for (const p of tryList) {
+			if (!p) continue;
 			try {
-				const re = new RegExp(candidate, REGEX_FLAGS);
-				if (re.test(command) || segments.some((s) => re.test(s))) patterns = [candidate];
-				// else：候选跑偏，静默退回精确规则
+				const re = new RegExp(p, REGEX_FLAGS);
+				if (re.test(command) || segments.some((s) => re.test(s))) {
+					patterns = [p];
+					break;
+				}
 			} catch {
-				/* 不可编译退精确规则（解析阶段已过滤，双保险） */
+				/* 不可编译跳过（解析阶段已过滤，双保险） */
 			}
 		}
 		const fresh = patterns.filter(
@@ -637,7 +645,9 @@ export default function (pi: ExtensionAPI) {
 		pruneWhitelist(); // 先清过期规则（与新增同批落盘）
 		cfg.whitelist.push(...fresh.map((pattern) => newWhitelistRule(pattern)));
 		saveConfig();
-		ctx.ui.notify(`perm-gate 自动加白（${cfg.autoWhitelist}）：${fresh.join("、")}`, "info");
+		// 通知展示 AI 概括的命令意图（不暴露具体正则/指令），AI 漏给时回落 reason，再兜底规则原文
+		const desc = verdict.intent || verdict.reason || fresh.join("、");
+		ctx.ui.notify(`perm-gate 自动加白：${desc}`, "info");
 	}
 
 	/**
@@ -881,8 +891,11 @@ export default function (pi: ExtensionAPI) {
 			const model = resolveReviewModel(ctx);
 			if (model) verdict = await aiReview(ctx, command, cfg.aiTimeoutMs, model, segInfo);
 			if (verdict) {
-				// 精炼候选正则：过滤不合格、评分排序、兜底补充
-				verdict = { ...verdict, candidates: refineCandidates(verdict.candidates, command, segments) };
+				// 仅 review 需要候选数组（人工面板选粒度）：过滤不合格、评分排序、兜底补充；
+				// allow 走 whitelistPattern 单条规则，无需精炼
+				if (verdict.action === "review") {
+					verdict = { ...verdict, candidates: refineCandidates(verdict.candidates, command, segments) };
+				}
 				if (verdict.action !== "review") aiCache.set(command, verdict);
 			}
 		}
@@ -899,11 +912,11 @@ export default function (pi: ExtensionAPI) {
 		return undefined; // allow
 	});
 
-	// /perm-gate 命令：状态查看 / 开关 / 重读配置 / 审核模型选择 / 自动加白策略 / 清理过期白名单
+	// /perm-gate 命令：状态查看 / 开关 / 重读配置 / 审核模型选择 / 清理过期白名单
 	// （名单编辑走配置文件，不提供管理面板）
 	pi.registerCommand("perm-gate", {
 		description:
-			"bash 命令权限门：查看状态 / on / off / reload / model [provider/id|auto] / autowhite [off|exact|smart] / prune",
+			"bash 命令权限门：查看状态 / on / off / reload / model [provider/id|auto] / prune",
 		handler: async (args, ctx) => {
 			const sub = args.trim().toLowerCase();
 			if (sub === "on" || sub === "off") {
@@ -925,17 +938,6 @@ export default function (pi: ExtensionAPI) {
 					`perm-gate：已清理 ${pruned} 条超过 ${WHITELIST_EXPIRE_DAYS} 天未命中的白名单规则，剩 ${cfg.whitelist.length} 条`,
 					"info",
 				);
-				return;
-			}
-			if (sub === "autowhite" || sub.startsWith("autowhite ")) {
-				const mode = args.trim().slice(9).trim().toLowerCase();
-				if (mode === "off" || mode === "exact" || mode === "smart") {
-					cfg.autoWhitelist = mode;
-					saveConfig();
-					ctx.ui.notify(`perm-gate 自动加白：${mode}（已持久化）`, "info");
-				} else {
-					ctx.ui.notify(`当前自动加白策略：${cfg.autoWhitelist}（用法：/perm-gate autowhite off|exact|smart）`, "info");
-				}
 				return;
 			}
 			if (sub === "model" || sub.startsWith("model ")) {
@@ -977,7 +979,7 @@ export default function (pi: ExtensionAPI) {
 			const expired = cfg.whitelist.filter((r) => r.lastHit < expiredCut).length;
 			ctx.ui.notify(
 				[
-					`perm-gate ${cfg.enabled ? "✅ 开启" : "❌ 关闭"}（AI 审核 ${cfg.aiReview ? "开" : "关"}，自动加白 ${cfg.autoWhitelist}）`,
+					`perm-gate ${cfg.enabled ? "✅ 开启" : "❌ 关闭"}（AI 审核 ${cfg.aiReview ? "开" : "关"}，自动加白 smart）`,
 					`审核模型：${cfg.model ?? "自动（优先列表 + 最便宜兜底）"}`,
 					`白名单 ${cfg.whitelist.length} 条${expired ? `（${expired} 条超过 ${WHITELIST_EXPIRE_DAYS} 天未命中，/perm-gate prune 清理）` : ""} / 黑名单 ${cfg.blacklist.length} 条`,
 					invalid.length ? `⚠️ 无效正则 ${invalid.length} 条：${invalid.join("、")}` : "",

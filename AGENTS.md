@@ -69,7 +69,9 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   /perm-gate model 复用官方 ModelSelectorComponent 面板直选，未覆盖回落 shared/model-pick 自动选；审核失败转人工；
                     #   复合命令经 shared/shell-split 拆段逐段判定（白名单每段都要命中，防「git status && rm -rf x」绕过）；
                     #   review 结论附 AI 提炼的候选正则（1~3 个、从窄到宽），加白/加黑时选用；
-                    #   allow 结论按 autoWhitelist 策略自动加白（exact 精确段规则 / smart AI 最窄候选 / off）；
+                    #   allow 结论自动加白：采纳 AI 提炼的单条语义白名单正则 whitelistPattern（AI 语义自选粒度），
+                    #   缺失/跑偏退结构化兜底/精确段规则；review 结论才提炼 1~3 候选正则供人工面板选粒度；
+                    #   自动加白通知展示 AI 概括的命令意图而非规则原文；
                     #   白名单规则带保鲜元数据（addedAt/lastHit/hits，命中时刷新），超 30 天未命中自动清理（启动/加白时），
                     #   /perm-gate prune 手动清理、状态行提示过期条数；旧版纯字符串配置自动归一化兼容；
                     #   ~/.pi/agent/perm-gate.json 配置 + /perm-gate 命令）
