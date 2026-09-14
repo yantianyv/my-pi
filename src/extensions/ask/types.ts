@@ -4,6 +4,8 @@
  * 题型：single 单选 / multi 多选 / text 简答（multiline 多行）/ confirm 是否 /
  * rating 评分 / number 数字 / note 只读说明（不参与作答，供 AI 插入背景材料或
  * 待审草稿原文——用户「先看内容再给意见」，不必搁置问卷去对话里翻）。
+ * 问卷级 context：AI 的补充背景/上一条回复原文（问卷整屏弹出会遮住聊天记录，
+ * 问题依赖刚说的内容时把它挂到问卷顶部展示），页面渲染为引用块。
  * normalizeQuestionnaire 同时服务 AI 工具参数与手写 JSON
  * （「问卷即文件」：.pi/questionnaires/*.json 可被 /answer 直接扫描识别），
  * 因此校验是容错式的：缺省值补齐、题型可按 options/content 有无推断、题目 id 自动分配。
@@ -65,6 +67,8 @@ export interface Questionnaire {
 	id: string;
 	title: string;
 	description?: string;
+	/** 问卷级背景上下文（AI 的补充信息/上一条回复原文；页面顶部引用块展示，多行保留换行） */
+	context?: string;
 	createdAt: string;
 	/** pending=未作答 / draft=搁置留草稿（answered 不留文件，提交即删） */
 	status: "pending" | "draft";
@@ -193,6 +197,8 @@ export function normalizeQuestionnaire(raw: unknown, opts: { fallbackId: string 
 			id: typeof r.id === "string" && r.id.trim() ? r.id.trim() : opts.fallbackId,
 			title: typeof r.title === "string" && r.title.trim() ? r.title.trim() : "未命名问卷",
 			description: typeof r.description === "string" && r.description.trim() ? r.description.trim() : undefined,
+			context:
+				typeof r.context === "string" && r.context.trim() ? r.context.replace(/\r\n?/g, "\n").trim() : undefined,
 			createdAt: typeof r.createdAt === "string" ? r.createdAt : new Date().toISOString(),
 			status: r.status === "draft" ? "draft" : "pending",
 			questions,
@@ -263,6 +269,11 @@ export function formatAnswersMessage(qn: Questionnaire, answers: AnswerMap): str
 /** 非 TUI 环境降级：把问卷铺成纯文本，让 AI 转而在对话中逐条提问（说明题内容原样附上） */
 export function flattenQuestions(qn: Questionnaire): string {
 	const lines: string[] = [];
+	if (qn.context) {
+		lines.push("[上下文]");
+		for (const ln of qn.context.split("\n")) lines.push(` │ ${ln}`);
+		lines.push("");
+	}
 	qn.questions.forEach((q, i) => {
 		if (q.type === "note") {
 			lines.push(`${i + 1}. [${TYPE_TAGS.note}·只读] ${q.question}`);

@@ -14,6 +14,8 @@
  * note 说明题：只读块（不产生焦点行、不进必答校验、不计入进度分母），正文经
  * shared/markdown 轻渲染后挂在「│ 」左边线下展示；超过 NOTE_FOLD_LINES 行默认折叠，
  * x 键展开/收起。长草稿审阅场景靠 Ctrl+↑/↓ 跳题 + PgUp/PgDn 翻页完成浏览。
+ * 问卷级 context（AI 补充背景/上一条回复）：标题下方的引用块，折叠与说明题共享 x 键
+ * （CONTEXT_FOLD_LINES 阈值更严，辅助信息不喧宾夺主）。
  *
  * 键位（? 键可随时查看本表）：
  * - 空格：选择题选中（单选/判断选中后自动前进到下一行；多选切换勾选，受 max 限制）
@@ -68,6 +70,8 @@ const MAX_TEXT_LENGTH = 4000;
 const MULTILINE_WINDOW = 4;
 /** 说明题正文折叠阈值（超过则默认只显示前 N 行，x 键展开） */
 const NOTE_FOLD_LINES = 20;
+/** 问卷级上下文块折叠阈值（比说明题更严：上下文是辅助信息，不能喧宾夺主） */
+const CONTEXT_FOLD_LINES = 8;
 /** 说明题左边线（含两侧空格） */
 const NOTE_GUTTER = " │ ";
 
@@ -690,7 +694,24 @@ export class QuestionnairePage {
 		return out;
 	}
 
-	/** 头部：标题 + 进度条/进度 + 问卷说明 + 分隔线 */
+	/** 问卷级上下文块（AI 的补充背景/上一条回复；引用样式 │ 左边线，超长折叠共享 x 键） */
+	private renderContextBlock(W: number): string[] {
+		const th = this.theme;
+		const gutter = th.fg("borderMuted", NOTE_GUTTER);
+		const bodyW = Math.max(8, W - visibleWidth(NOTE_GUTTER));
+		const full = renderAnswer(this.qn.context ?? "", th, bodyW, { indent: "" });
+		const long = full.length > CONTEXT_FOLD_LINES;
+		const tag = long ? (this.expandNotes ? `（${full.length} 行 · x 收起）` : `（共 ${full.length} 行 · 已折叠，x 展开）`) : "";
+		const out: string[] = [` ${th.fg("dim", "💬 上下文")}${th.fg("dim", tag)}`];
+		const shown = long && !this.expandNotes ? full.slice(0, CONTEXT_FOLD_LINES) : full;
+		out.push(...shown.map((l) => gutter + l));
+		if (long && !this.expandNotes) {
+			out.push(gutter + th.fg("dim", `⋯ 还有 ${full.length - CONTEXT_FOLD_LINES} 行（x 展开）`));
+		}
+		return out;
+	}
+
+	/** 头部：标题 + 进度条/进度 + 问卷说明 + 上下文块 + 分隔线 */
 	private renderHeader(W: number): string[] {
 		const th = this.theme;
 		const answers = this.collect();
@@ -718,6 +739,9 @@ export class QuestionnairePage {
 			for (const ln of wrapTextWithAnsi(th.fg("dim", this.qn.description), Math.max(8, W - 3))) {
 				header.push(`   ${ln}`);
 			}
+		}
+		if (this.qn.context) {
+			header.push(...this.renderContextBlock(W));
 		}
 		header.push(th.fg("borderMuted", "─".repeat(W)));
 		return header;
@@ -759,7 +783,7 @@ export class QuestionnairePage {
 				"其他",
 				[
 					["Ctrl+P", "答案一览（一览里按 C 复制答案到剪贴板）"],
-					["x", "展开 / 收起超长说明题"],
+					["x", "展开 / 收起超长说明与上下文"],
 					["Ctrl+D / D", "删除这份问卷（按两次确认，不可恢复）"],
 					["?", "本帮助"],
 					["Esc", "搁置（存草稿，随时 /answer 继续）"],

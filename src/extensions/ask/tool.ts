@@ -5,6 +5,9 @@
  * （同批多次调用经 enqueueQuestionnaireUI 排队逐个打开）→ 提交则删文件并把答案
  * 作为工具结果返回；搁置（Esc）则草稿写回文件，提示 AI 结束本轮等用户 /answer。
  * 非 TUI 环境降级：文件保留待答，工具结果携带纯文本问卷让 AI 改在对话中提问。
+ * 问卷级 context（AI 补充背景）与 includeLastMessage（自动附上上一条回复文本，
+ * 从 sessionManager 条目倒序提取、不跨用户消息）合并后挂到问卷顶部——问卷整屏
+ * 弹出会遮住聊天记录，「问卷前的那句话」用户看不到。
  * action=cancel：AI 侧作废问卷（发现问错/搁置草稿过时时）——「问卷即文件」，按 id
  * 找到文件删除即撤回；正在整屏作答中的问卷无法作废（彼时本工具调用正挂起等待）。
  */
@@ -98,6 +101,43 @@ const QuestionSchema = Type.Object({
 
 /** 自动标题最大长度（取第一题问句首行截断） */
 const AUTO_TITLE_MAX = 30;
+/** includeLastMessage 自动附带的 assistant 消息最大字符数（超长保留尾部，问卷前的那句话通常在末尾） */
+const LAST_MESSAGE_MAX = 4000;
+
+/**
+ * 提取本轮 assistant 最近一段文本（includeLastMessage=true 时用）。
+ * 问卷整屏弹出会遮住聊天记录，「问卷前的那句话」用户看不到——从会话条目里捞出来挂进问卷。
+ * 沿条目倒序扫描：收集 assistant 消息的文本块，遇到 user 消息（跨轮边界）即停；
+ * toolResult 等中间条目跳过。取最近一条含文本的 assistant 消息。
+ */
+function extractLastAssistantText(ctx: { sessionManager?: { getEntries?: () => unknown[] } }): string | undefined {
+	const getEntries = ctx.sessionManager?.getEntries;
+	if (typeof getEntries !== "function") return undefined;
+	let entries: unknown[];
+	try {
+		entries = getEntries.call(ctx.sessionManager);
+	} catch {
+		return undefined;
+	}
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i] as { type?: string; message?: { role?: string; content?: unknown } } | undefined;
+		if (e?.type !== "message" || !e.message) continue;
+		if (e.message.role === "user") break; // 不跨用户消息（避免捞到上一轮的陈旧文本）
+		if (e.message.role !== "assistant") continue;
+		const content = Array.isArray(e.message.content) ? e.message.content : [];
+		const text = content
+			.filter((c): c is { type: "text"; text: string } =>
+				Boolean(c && typeof c === "object" && (c as { type?: string }).type === "text" && typeof (c as { text?: unknown }).text === "string"),
+			)
+			.map((c) => c.text.trim())
+			.filter(Boolean)
+			.join("\n");
+		if (!text) continue; // 纯工具调用的 assistant 消息没有文本，继续往前找
+		if (text.length <= LAST_MESSAGE_MAX) return text;
+		return `……（前文省略）\n${text.slice(-LAST_MESSAGE_MAX)}`;
+	}
+	return undefined;
+}
 
 /** title 缺省兜底：取第一题问句首行截断做标题（模型偶尔漏传 title，不因小失误让整次创建失败） */
 function deriveTitle(questions: unknown[]): string {
@@ -128,12 +168,15 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			"创建一份问卷向用户批量提问（单选/多选/简答/判断/评分/数字/只读说明），或作废（action=cancel）待答问卷。" +
 			"questions 必填（1~12 题；type 漏传自动推断：有 options→单选、有 content→说明、否则→简答；" +
 			"note 说明题占 12 题额度，用 content 装待审草稿/背景原文，不参与作答与必答校验）。" +
+			"问卷整屏弹出会遮住聊天记录：问题依赖你刚发的消息时，用 context 摘要关键背景或 includeLastMessage=true 自动附上上一条回复，" +
+			"上下文会显示在问卷顶部。" +
 			"问卷立即整屏弹出：Enter 提交（答案作工具结果返回）、Esc 搁置（可 /answer 续答，答案以用户消息送达）。" +
 			"作废用 action=cancel + id（问卷即文件，删除即撤回；作答中的无法作废）。一次只创建一份。",
 		promptSnippet: "创建问卷向用户批量提问（单选/多选/简答/判断/评分/数字/说明），或作废待答问卷",
 		promptGuidelines: [
 			"需要用户从多个方案中抉择、或有多个问题要确认时，用 ask 工具创建问卷，而不是在正文里罗列问题让用户逐条回复。",
 			"需要用户审阅一段原文（待发草稿/方案/长说明）再给意见时，用 type=note 的说明题把原文放进问卷（content 装全文），后面跟 single/text 题收意见——用户在问卷里能直接看到内容，不必搁置问卷去对话里翻。",
+			"问卷整屏弹出后用户看不到你之前发的消息：问题若依赖上一条回复的内容（如「按上面的方案，选 A 还是 B」），必须附上上下文——用 includeLastMessage=true 自动带上你刚发的回复，或在 context 里手动摘要关键背景。不要假设用户记得聊天记录。",
 			"single/multi 必带 options 2~8 个，不要加「其他」（会自动追加）。",
 			"用户可能搁置问卷稍后回答：收到「已搁置」结果时不要追问，简要说明后结束本轮回复。",
 			"用户在问卷页 Ctrl+D 删除问卷后会得到 status=deleted 的工具结果：说明这些信息已不再需要，不要追问、不要重建同一份问卷；确实还需要时先向用户确认。",
@@ -151,6 +194,20 @@ export function registerAskTool(pi: ExtensionAPI): void {
 				Type.String({ description: "问卷标题（一句话概括这份问卷要决定什么；建议提供，缺省时自动取第一题问句截断）" }),
 			),
 			description: Type.Optional(Type.String({ description: "问卷整体背景说明" })),
+			context: Type.Optional(
+				Type.String({
+					description:
+						"问卷顶部展示的背景上下文（markdown 轻渲染，多行保留换行，超长折叠）。问卷整屏弹出会遮住聊天记录，" +
+						"用户看不到你刚发的消息——问题依赖你上一条回复的内容时，把关键背景摘到这里（或直接用 includeLastMessage 自动附上）",
+				}),
+			),
+			includeLastMessage: Type.Optional(
+				Type.Boolean({
+					description:
+						"true 时自动把你上一条回复的文本（问卷前的那段话）附到问卷顶部展示，与 context 合并；" +
+						"问题引用刚说的内容时推荐开启，免手动复制",
+				}),
+			),
 			questions: Type.Optional(
 				Type.Array(QuestionSchema, {
 					minItems: 1,
@@ -193,13 +250,35 @@ export function registerAskTool(pi: ExtensionAPI): void {
 
 			// ---- create（默认）----
 			if (!params.questions?.length) {
-				throw new Error("ask 创建问卷需要 questions（至少 1 题，每题含完整问句 question 与题型 type）");
+				// 回显实收字段：弱模型（实测 kimi k3）的高发失败是只传 title、questions 数组整个缺失，
+				// 且无视报错原样重发——把「你这次实际传了什么」写进错误形成自我指证，打破死循环
+				const received = Object.keys(params).filter((k) => (params as Record<string, unknown>)[k] !== undefined);
+				const detail = params.questions
+					? "questions 是空数组"
+					: `本次只收到字段：${received.join("、") || "（无）"}，questions 数组整个缺失`;
+				throw new Error(
+					`ask 创建问卷缺少 questions（${detail}）。` +
+						"questions 是 1~12 题的数组，每题含完整问句 question 与题型 type（type 可省：有 options 自动算单选）。请补上 questions 重新调用。",
+				);
 			}
 			// title 容错：模型偶尔漏传，自动取第一题问句截断，不让整次创建失败
 			const title = params.title?.trim() || deriveTitle(params.questions);
 
+			// 问卷级上下文：手动 context 与 includeLastMessage 自动提取的上一条回复合并
+			// （问卷整屏弹出会遮住聊天记录，「问卷前的那句话」用户看不到）
+			const contextParts: string[] = [];
+			if (params.includeLastMessage) {
+				const lastText = extractLastAssistantText(ctx);
+				if (lastText) contextParts.push(lastText);
+			}
+			if (params.context?.trim()) contextParts.push(params.context.trim());
+			const context = contextParts.length > 0 ? contextParts.join("\n\n") : undefined;
+
 			const fallbackId = params.id?.trim() || `survey-${Date.now().toString(36)}`;
-			const norm = normalizeQuestionnaire({ ...params, title, questions: params.questions, createdAt: new Date().toISOString() }, { fallbackId });
+			const norm = normalizeQuestionnaire(
+				{ ...params, title, context, questions: params.questions, createdAt: new Date().toISOString() },
+				{ fallbackId },
+			);
 			if (!norm.ok) throw new Error(`问卷参数无效：${norm.error}`);
 			const q = norm.q;
 

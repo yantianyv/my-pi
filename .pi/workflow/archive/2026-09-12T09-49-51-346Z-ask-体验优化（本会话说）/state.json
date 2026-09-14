@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-09-12T09:49:51.344Z",
+  "currentTaskId": null,
+  "tasks": {
+    "0.1": {
+      "status": "done",
+      "doneAt": "2026-09-12T09:34:26.085Z"
+    },
+    "0.2": {
+      "status": "done",
+      "doneAt": "2026-09-12T09:34:28.734Z"
+    },
+    "0.3": {
+      "status": "done",
+      "doneAt": "2026-09-12T09:34:30.348Z"
+    },
+    "0.4": {
+      "status": "done",
+      "doneAt": "2026-09-12T09:34:32.907Z"
+    },
+    "0.5": {
+      "status": "done",
+      "doneAt": "2026-09-12T09:49:34.401Z"
+    }
+  },
+  "milestones": {},
+  "notes": [
+    {
+      "id": "n1",
+      "ts": "2026-09-12T09:26:04.977Z",
+      "content": "用户拍板范围：ask 体验优化「全都要」（8 项：多行文本内上下键 / 人类侧删除问卷 / 滚动提示不遮正文 / 输入编辑增强 / 提交回执+复制答案 / 键位帮助浮层 / 进度条 / 题间跳转+当前题号）+ 新增 note 只读说明题（AI 可把待审草稿原文放进问卷，用户边看边答，避免\"看不到内容只能搁置\"）+ /answer 选择器增强（创建时间/题数/草稿标记/Del 删除）。",
+      "key": "ask-ux-scope"
+    },
+    {
+      "id": "n2",
+      "ts": "2026-09-12T09:26:07.384Z",
+      "content": "本会话（01a094e6）负责改 src/extensions/ask/* 与 shared；验证由用户指定的另一并发 pi 会话独立进行（工作流任务 0.5）。协作约定：验证方只读复核、不改同一批文件；AGENTS.md 由本会话最后统一更新（peer 刚提交过 pair-guard 段落，改前重读）。",
+      "key": "ask-ux-division"
+    },
+    {
+      "id": "n3",
+      "ts": "2026-09-12T09:34:36.938Z",
+      "content": "【交给另一会话的验证清单】ask 体验优化已完成（改动未提交，工作区可 git diff 审查）：\n1) 复现类：node src/extensions/ask/test/ask.test.mjs（应 118 ✓ 全绿）；npx typescript -p src/config/tsconfig.json（0 错）；node src/build.js。\n2) 独立验证点（不看我结论，自己查证据）：a. note 说明题是否真的 A 只读不可聚焦、B 不进进度分母（顶部「已答 x/y」与 details.total 应排除 note）、C 不阻塞提交（纯说明问卷 Enter 即提交）；b. 长说明（>20 行）默认折叠、x 展开/收起、首帧是否停在顶部（followFocus）；c. 多行简答内 ↑↓ 是否行间移动光标、仅在首/末行边界才跳出本题；d. Ctrl+↑/↓ 跳题、状态行「第 i/n 题」；e. Ctrl+P 一览（C 复制走 pi 官方 copyToClipboard，勿在测试中真按 C 写系统剪贴板）；f. Ctrl+D / 非输入行 D 两次确认删除 → 工具结果 status=deleted、文件删除、状态清除；g. /answer 选择器 D 删除；h. 滚动提示是否只出现在状态行（不再顶掉正文首末行）；i. shared/markdown.ts 上提后 btw 行为不变（btw/render.ts 转发）；j. shared/ui.ts editInput 的 grapheme/按词编辑是否影响 perm-gate 等输入框（perm-gate 测试有 1 项既有失败「C: ↓↓+Enter 返回驳回」，已确认与本次改动无关，修 ui.ts 前后均失败）。\n3) 反向验证建议：构造超长 note + 多题、note 在中间/末尾、手写 JSON（只有 content 无 type → 应推断 note）、导入含 12 题上限边界。",
+      "key": "ask-ux-verify-checklist"
+    },
+    {
+      "id": "n4",
+      "ts": "2026-09-12T09:49:32.061Z",
+      "content": "验证方（peer 会话）结论：通过（118 项测试复现、typecheck 0 错、perm-gate 既有失败确认无关、逐条代码自证 ①②③④⑤⑥⑦⑧ 与反向用例）。提出 2 个已修小问题：① schema 称「note 缺 question 取 content 首行」而实现固定填「说明」→ 改为按正文首行截断（30 字，types.ts NOTE_TITLE_MAX）并补断言；② 12 题上限把 note 计入 → 已在 tool.ts schema/description 三处写明「note 也占 12 题额度」并补上限断言。修后测试 120 项全绿、typecheck 0 错、已重装。验证方提醒：shared/ui.ts editInput 升级（grapheme/按词编辑/ctrl+w）波及所有用它的面板（perm-gate 等），提交信息单独点名。",
+      "key": "ask-ux-verify-result"
+    }
+  ],
+  "log": [
+    {
+      "ts": "2026-09-12T09:26:04.977Z",
+      "event": "note_add",
+      "taskId": "n1",
+      "msg": "用户拍板范围：ask 体验优化「全都要」（8 项：多行文本内上下键 / 人类侧删除问卷 / 滚动提示不遮正文 / 输入编辑增强 / 提交回执+复制答案 / 键位帮助浮层 / 进度条 / 题间跳转+当前题号）+ 新增 note 只读说明题（AI 可把待审草稿原文放进问卷，用户边看边答，避免\"看不到内容只能搁置\"）+ /answer 选择器增强（创建时间/题数/草稿标记/Del 删除）。"
+    },
+    {
+      "ts": "2026-09-12T09:26:07.384Z",
+      "event": "note_add",
+      "taskId": "n2",
+      "msg": "本会话（01a094e6）负责改 src/extensions/ask/* 与 shared；验证由用户指定的另一并发 pi 会话独立进行（工作流任务 0.5）。协作约定：验证方只读复核、不改同一批文件；AGENTS.md 由本会话最后统一更新（peer 刚提交过 pair-guard 段落，改前重读）。"
+    },
+    {
+      "ts": "2026-09-12T09:34:26.085Z",
+      "event": "task_done",
+      "taskId": "0.1",
+      "msg": "数据模型：note 说明题 + 计数分离 + 回执跳过"
+    },
+    {
+      "ts": "2026-09-12T09:34:26.085Z",
+      "event": "task_start",
+      "taskId": "0.2",
+      "msg": "交互层：page.ts 八项增强"
+    },
+    {
+      "ts": "2026-09-12T09:34:28.734Z",
+      "event": "task_done",
+      "taskId": "0.2",
+      "msg": "交互层：page.ts 八项增强"
+    },
+    {
+      "ts": "2026-09-12T09:34:28.734Z",
+      "event": "task_start",
+      "taskId": "0.3",
+      "msg": "周边接线：tool / commands / 选择器"
+    },
+    {
+      "ts": "2026-09-12T09:34:30.348Z",
+      "event": "task_done",
+      "taskId": "0.3",
+      "msg": "周边接线：tool / commands / 选择器"
+    },
+    {
+      "ts": "2026-09-12T09:34:30.348Z",
+      "event": "task_start",
+      "taskId": "0.4",
+      "msg": "回归测试补齐与全量校验"
+    },
+    {
+      "ts": "2026-09-12T09:34:32.907Z",
+      "event": "task_done",
+      "taskId": "0.4",
+      "msg": "回归测试补齐与全量校验"
+    },
+    {
+      "ts": "2026-09-12T09:34:32.907Z",
+      "event": "task_start",
+      "taskId": "0.5",
+      "msg": "独立验证（另一 pi 会话执行）"
+    },
+    {
+      "ts": "2026-09-12T09:34:36.938Z",
+      "event": "note_add",
+      "taskId": "n3",
+      "msg": "【交给另一会话的验证清单】ask 体验优化已完成（改动未提交，工作区可 git diff 审查）：\n1) 复现类：node src/extensions/ask/test/ask.test.mjs（应 118 ✓ 全绿）；npx typescript -p src/config/tsconfig.json（0 错）；node src/build.js。\n2) 独立验证点（不看我结论，自己查证据）：a. note 说明题是否真的 A 只读不可聚焦、B 不进进度分母（顶部「已答 x/y」与 details.total 应排除 note）、C 不阻塞提交（纯说明问卷 Enter 即提交）；b. 长说明（>20 行）默认折叠、x 展开/收起、首帧是否停在顶部（followFocus）；c. 多行简答内 ↑↓ 是否行间移动光标、仅在首/末行边界才跳出本题；d. Ctrl+↑/↓ 跳题、状态行「第 i/n 题」；e. Ctrl+P 一览（C 复制走 pi 官方 copyToClipboard，勿在测试中真按 C 写系统剪贴板）；f. Ctrl+D / 非输入行 D 两次确认删除 → 工具结果 status=deleted、文件删除、状态清除；g. /answer 选择器 D 删除；h. 滚动提示是否只出现在状态行（不再顶掉正文首末行）；i. shared/markdown.ts 上提后 btw 行为不变（btw/render.ts 转发）；j. shared/ui.ts editInput 的 grapheme/按词编辑是否影响 perm-gate 等输入框（perm-gate 测试有 1 项既有失败「C: ↓↓+Enter 返回驳回」，已确认与本次改动无关，修 ui.ts 前后均失败）。\n3) 反向验证建议：构造超长 note + 多题、note 在中间/末尾、手写 JSON（只有 content 无 type → 应推断 note）、导入含 12 题上限边界。"
+    },
+    {
+      "ts": "2026-09-12T09:49:32.061Z",
+      "event": "note_add",
+      "taskId": "n4",
+      "msg": "验证方（peer 会话）结论：通过（118 项测试复现、typecheck 0 错、perm-gate 既有失败确认无关、逐条代码自证 ①②③④⑤⑥⑦⑧ 与反向用例）。提出 2 个已修小问题：① schema 称「note 缺 question 取 content 首行」而实现固定填「说明」→ 改为按正文首行截断（30 字，types.ts NOTE_TITLE_MAX）并补断言；② 12 题上限把 note 计入 → 已在 tool.ts schema/description 三处写明「note 也占 12 题额度」并补上限断言。修后测试 120 项全绿、typecheck 0 错、已重装。验证方提醒：shared/ui.ts editInput 升级（grapheme/按词编辑/ctrl+w）波及所有用它的面板（perm-gate 等），提交信息单独点名。"
+    },
+    {
+      "ts": "2026-09-12T09:49:34.401Z",
+      "event": "task_done",
+      "taskId": "0.5",
+      "msg": "独立验证（另一 pi 会话执行）"
+    }
+  ],
+  "archiveStatus": "全部完成：功能实现+回归测试（120 项）+typecheck+安装+文档更新，并经另一并发会话独立验证通过（2 项小问题已修）；代码提交 569f965"
+}

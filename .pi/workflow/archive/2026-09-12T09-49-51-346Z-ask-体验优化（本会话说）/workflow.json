@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "mode": "agent",
+  "stages": [
+    {
+      "id": "impl",
+      "name": "ask 体验优化（本会话说）",
+      "goal": "按用户拍板范围改造问卷插件：8 项体验增强 + 新增 note 只读说明题（AI 可插入草稿供审阅）+ /answer 选择器增强，全程带回归测试",
+      "tasks": [
+        {
+          "id": "0.1",
+          "title": "数据模型：note 说明题 + 计数分离 + 回执跳过",
+          "desc": "types.ts 新增 note 题型（question 作标题 + content 正文 + content 可多行，required 恒 false）、计数辅助（可答题分母排除 note）、formatAnswersMessage 跳过 note、flattenQuestions 渲染 note 块；normalizeQuestionnaire 容错（note 缺 content 时可用 question 作正文）",
+          "humanTasks": [],
+          "aiTasks": [
+            "改 types.ts",
+            "补测试场景：note 题不计入进度/不阻塞提交/回执与文本降级表现"
+          ],
+          "deliverable": "types.ts 支持 note；test/ask.test.mjs 新增 note 场景通过",
+          "doneSignal": "node src/extensions/ask/test/ask.test.mjs 全绿且含 note 场景断言",
+          "deps": []
+        },
+        {
+          "id": "0.2",
+          "title": "交互层：page.ts 八项增强",
+          "desc": "① 多行文本内 ↑↓ 移动光标（边界处才跳出本题）② Ctrl+↑/↓ 跳上一/下一题 + 底部「第 i/n 题」③ 滚动提示移出正文（并入状态行）④ 进度条 ▰▰▱▱ ⑤ ? 键全屏键位帮助 ⑥ Ctrl+P 答案一览 + C 复制到剪贴板 ⑦ D 键二次确认删除问卷 ⑧ note 渲染为只读说明块（markdown 轻渲染、不参与作答与校验）",
+          "humanTasks": [],
+          "aiTasks": [
+            "改 page.ts（含 PageResult.action += delete）",
+            "补测试：多行上下键、跳题、删除二次确认、帮助屏、答案一览、note 只读不可聚焦"
+          ],
+          "deliverable": "page.ts 交互与渲染完成；测试覆盖各新键位",
+          "doneSignal": "测试全绿；渲染不变量（恰好 H 行 × W 列）仍成立",
+          "deps": [
+            "0.1"
+          ]
+        },
+        {
+          "id": "0.3",
+          "title": "周边接线：tool / commands / 选择器",
+          "desc": "tool.ts 与 commands.ts 处理新增 delete 动作（工具结果 status=deleted、命令侧删文件）、提交后 notify 一行答案回执、注入 copy 回调（pi 官方 copyToClipboard）；/answer 选择器显示创建时间/题数/草稿标记并支持 D 删除选中项；markdown 轻渲染抽到 shared/markdown.ts 供 page 复用",
+          "humanTasks": [],
+          "aiTasks": [
+            "改 tool.ts / commands.ts / store.ts（如需排序）",
+            "改 QuestionnairePicker",
+            "新增 shared/markdown.ts 并从 btw/render.ts 转出（btw 行为不变）"
+          ],
+          "deliverable": "全链路打通：AI 创建 → 用户作答/预览/复制/删除 → 回执送达",
+          "doneSignal": "ask 测试全绿 + npx typescript -p src/config/tsconfig.json 0 报错",
+          "deps": [
+            "0.2"
+          ]
+        },
+        {
+          "id": "0.4",
+          "title": "回归测试补齐与全量校验",
+          "desc": "扩充 test/ask.test.mjs（note 题、新键位、删除链路、选择器删除、进度分母、帮助屏、复制回调）+ 跑 typecheck + node src/build.js + node install.js 装到 ~/.pi/agent",
+          "humanTasks": [],
+          "aiTasks": [
+            "补测试与跑测试",
+            "typecheck / build / install",
+            "更新 AGENTS.md 的 ask 段落与 README 用法"
+          ],
+          "deliverable": "测试全绿、typecheck 0 错、安装产物与源码一致",
+          "doneSignal": "测试全绿 + typecheck 0 错 + 已装 ~/.pi/agent/extensions/ask.ts",
+          "deps": [
+            "0.3"
+          ]
+        },
+        {
+          "id": "0.5",
+          "title": "独立验证（另一 pi 会话执行）",
+          "desc": "由用户指定的另一并发会话按验证清单独立复核：源码行为与文档一致、边界场景（note 长内容/删除/复制/多行编辑）无回归；本会话不自行判定通过",
+          "humanTasks": [
+            "把验证清单转交给另一会话",
+            "回报验证结论"
+          ],
+          "aiTasks": [],
+          "deliverable": "另一会话的验证结论（通过/问题清单）",
+          "doneSignal": "另一会话明确回报「通过」或提出问题清单且已修复复核",
+          "deps": [
+            "0.4"
+          ]
+        }
+      ]
+    }
+  ]
+}

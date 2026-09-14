@@ -24,6 +24,7 @@
  * - 场景 O：D 键删除问卷（二次确认）→ 工具结果 deleted + 文件删除 + 状态清除
  * - 场景 P：/answer 选择器里 D 删除选中问卷（列表就地刷新）
  * - 场景 Q：滚动提示移出正文（状态行 ▲▼）+ x 展开超长说明
+ * - 场景 R：问卷级上下文（context 参数 + includeLastMessage 自动提取上一条回复）渲染与折叠
  * - 渲染不变量：整屏页每次 render 恰好 termRows 行、每行恰好 width 列（全屏遮蔽前提）
  *
  * 用法：node src/extensions/ask/test/ask.test.mjs（仓库根目录执行）
@@ -93,7 +94,7 @@ function makePi() {
 }
 
 /** mock ctx：ui.custom 捕获 factory 与 overlay 参数，返回 promise 由测试驱动 done 解决 */
-function makeCtx(cwd, captures) {
+function makeCtx(cwd, captures, extra = {}) {
 	return {
 		cwd,
 		hasUI: true,
@@ -110,6 +111,7 @@ function makeCtx(cwd, captures) {
 					captures.customs.push({ factory, opts, resolve });
 				}),
 		},
+		...extra,
 	};
 }
 
@@ -869,6 +871,84 @@ async function main() {
 		check("Q: x 展开后仍停在顶部", expanded.includes("草稿第1行内容"));
 		comp.handleInput(K.escape);
 		await execP;
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 R：问卷级上下文（context 参数 + includeLastMessage 自动提取） ----
+	console.log("场景 R：问卷级上下文展示与上一条回复自动附带");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		// 会话条目：user → assistant（带文本）→ assistant（纯工具调用，无文本）
+		// 提取应跳过无文本的当前消息，捞到上一条 assistant 文本，且不越过 user 边界
+		const entries = [
+			{ type: "message", message: { role: "user", content: [{ type: "text", text: "帮我看看选哪个方案" }] } },
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "我倾向方案 A：成本最低，但扩展性差。" }] } },
+			{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "ask" }] } },
+		];
+		const ctx = makeCtx(dir, captures, { sessionManager: { getEntries: () => entries } });
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const execP = tool.execute(
+			"tc18",
+			{
+				id: "ctx-survey",
+				title: "方案确认",
+				context: "补充：预算上限 5 万。",
+				includeLastMessage: true,
+				questions: [
+					{ id: "q1", type: "single", question: "按上面的分析，选哪个方案？", options: [{ label: "方案 A" }, { label: "方案 B" }] },
+				],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const saved = JSON.parse(readFileSync(join(dir, ".pi", "questionnaires", "ctx-survey.json"), "utf8"));
+		check(
+			"R: context 合并上一条回复与手动背景（自动在前）",
+			typeof saved.context === "string" &&
+				saved.context.includes("我倾向方案 A") &&
+				saved.context.includes("预算上限 5 万") &&
+				saved.context.indexOf("我倾向方案 A") < saved.context.indexOf("预算上限 5 万"),
+		);
+		const comp = openCaptured(captures);
+		const text = comp.render(TERM_COLS).map((l) => l.trim()).join("\n");
+		check("R: 页面顶部渲染上下文块", text.includes("💬 上下文") && text.includes("我倾向方案 A"));
+		check("R: 手动 context 也在页面上", text.includes("预算上限 5 万"));
+		assertFullscreen(comp, "R");
+		comp.handleInput(K.escape);
+		await execP;
+
+		// 长上下文：默认折叠 + x 展开（与说明题共享 expandNotes）
+		const longCtx = Array.from({ length: 15 }, (_, i) => `背景第${i + 1}行`).join("\n");
+		const captures2 = makeCaptures();
+		const ctx2 = makeCtx(dir, captures2);
+		const execP2 = tool.execute(
+			"tc19",
+			{
+				id: "ctx-long",
+				title: "长上下文",
+				context: longCtx,
+				questions: [{ id: "q1", type: "confirm", question: "继续吗？" }],
+			},
+			null,
+			null,
+			ctx2,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp2 = openCaptured(captures2);
+		const folded = comp2.render(TERM_COLS).map((l) => l.trim()).join("\n");
+		check("R: 长上下文默认折叠", folded.includes("已折叠") && folded.includes("背景第1行") && !folded.includes("背景第15行"));
+		comp2.handleInput("x");
+		const expanded = comp2.render(TERM_COLS).map((l) => l.trim()).join("\n");
+		check("R: x 展开后可见全部上下文", expanded.includes("背景第15行"));
+		assertFullscreen(comp2, "R-long");
+		comp2.handleInput(K.escape);
+		await execP2;
 		rmSync(dir, { recursive: true, force: true });
 	}
 
