@@ -10,18 +10,25 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { readFileSync } from "node:fs";
 import { Type, type Static } from "typebox";
 import {
+	DEFAULT_SLOT,
 	cloneWorkflow,
 	depsSatisfied,
 	findTask,
 	genTaskId,
+	getBinding,
 	getStore,
 	hasDependencyCycle,
+	invalidateBindingCache,
+	isValidSlotName,
 	logEvent,
 	nextPendingTask,
 	reconcile,
+	setBinding,
+	slotSummaries,
+	type WorkflowStore,
 } from "./store";
 import { lightState, renderBrief, summaryLine, truncate } from "./brief";
-import { updateWidget } from "./panel";
+import { hideWidget, updateWidget } from "./panel";
 import { auditCompletion } from "./audit";
 import type { NoteRecord, TaskDef, WorkflowDef, WorkflowMode, WorkflowState } from "./types";
 import { WORKFLOW_SCHEMA_VERSION } from "./types";
@@ -65,9 +72,9 @@ const milestoneParams = Type.Object({
 	newName: Type.Optional(Type.String({ description: "改名（name 存在时更新名称，保留日期/完成态）" })),
 });
 const workflowParams = Type.Object({
-	action: StringEnum(["list", "add", "edit", "remove", "archive", "reset", "import"], {
+	action: StringEnum(["list", "add", "edit", "remove", "archive", "reset", "import", "bind"], {
 		description:
-			"操作类型：list 查看全量；import 初始化一次性导入（见 wf_workflow 描述，建新工作流优先用它）；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段；remove 删除任务；archive 归档整个工作流（收尾退出视野，数据留档）；reset 清空工作流",
+			"操作类型：list 查看全量；import 初始化一次性导入（见 wf_workflow 描述，建新工作流优先用它）；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段；remove 删除任务；archive 归档整个工作流（收尾退出视野，数据留档）；reset 清空工作流；bind 绑定本会话到某个工作流（多工作流并发场景，配 slot 参数；缺省 slot 时列出可选工作流与当前绑定）",
 	}),
 	mode: Type.Optional(
 		StringEnum(["human-ai", "agent"], {
@@ -90,6 +97,12 @@ const workflowParams = Type.Object({
 	deps: Type.Optional(Type.Array(Type.String({ description: "依赖的任务 id 列表（传空数组清空）" }))),
 	path: Type.Optional(
 		Type.String({ description: "草稿 json 文件路径（仅 import 用）：初始化一次性导入，结构见工具描述中的示例" }),
+	),
+	slot: Type.Optional(
+		Type.String({
+			description:
+				"工作流槽位名（仅 bind 用）：绑定本会话到该工作流，不存在则创建空工作流；\"default\" = 项目根默认工作流；\"none\" = 本会话不使用工作流",
+		}),
 	),
 });
 
@@ -116,6 +129,20 @@ function taskDetail(
 }
 
 const err = (text: string) => ({ content: [{ type: "text" as const, text }], details: { kind: "error" as const } });
+
+/**
+ * 绑定守卫：会话未绑定（undecided）/ 明确不用工作流（none）时拒绝操作并引导 bind。
+ * 多工作流并发隔离：一个项目可存在多个命名工作流（wf_workflow bind 切换），
+ * 未绑定时操作会打在错误的槽位上，必须拦截。
+ */
+function guardBound(s: WorkflowStore) {
+	if (!s.blocked) return null;
+	return err(
+		s.blocked === "none"
+			? "本会话已设置为不使用工作流（如需启用：wf_workflow action=bind slot=<名称>）"
+			: "本会话尚未绑定工作流——先用 wf_workflow action=bind 绑定（slot 缺省时列出可选工作流与当前绑定；slot=\"none\" 表示本会话不用工作流）",
+	);
+}
 
 /** 依赖环检测（导入全图校验用）：从每个起点 DFS 沿 deps 走，回到起点即环，返回环链路 */
 function findCycle(tasks: { id: string; deps: string[] }[]): string | null {
@@ -163,11 +190,84 @@ export function registerTools(pi: ExtensionAPI) {
 			"新建优先用 import：先 write 一份草稿 json 再一次性导入（比逐条 add 省 token）；add 只用于后续增补调整。" +
 			"import 草稿结构：{\"mode\":\"human-ai\", \"stages\":[{\"id\":\"design\", \"name\":\"阶段名\", \"goal\":\"阶段目标\", \"tasks\":[{\"title\":\"任务标题\", \"desc\":\"目标\", \"humanTasks\":[], \"aiTasks\":[], \"deliverable\":\"\", \"doneSignal\":\"\", \"deps\":[\"0.1\"]}]}]}——id 缺省自动生成（0.1/1.2 式），deps 可引用本批未来 id；工作流非空时拒绝导入（先 archive/reset）。" +
 			"list 查看全量；add 新增任务（stageId 不存在自动建阶段）；edit 改任意字段（空数组清空列表字段）；remove 删任务；" +
-			"archive 归档留档（快照移入 .pi/workflow/archive/，无找回）；reset 清空（不可逆）。",
+			"archive 归档留档（快照移入该槽 archive/，无找回）；reset 清空（不可逆）。" +
+			"多工作流并发隔离：一个项目可存在多个命名工作流（default=项目根默认，其余在 slots/ 下），每个会话绑定一个；" +
+			"bind 绑定本会话（slot 缺省列出可选与当前绑定；slot=新名称创建空工作流；slot=\"none\" 本会话不用工作流）。" +
+			"其余动作一律作用于本会话绑定的工作流。",
 		promptSnippet: "workflow: create/update the human-AI collaboration workflow definition",
 		parameters: workflowParams,
 		async execute(_id, params: WorkflowParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
+
+			/* ---------- bind：会话绑定（不受绑定守卫限制——它本身就是解绑/绑定入口） ---------- */
+			if (params.action === "bind") {
+				const sid = ctx.sessionManager?.getSessionId?.() ?? "unknown";
+				if (!params.slot) {
+					const cur = getBinding(ctx.cwd, sid);
+					const curText = cur === undefined ? "（未绑定）" : cur === null ? "（不使用工作流）" : cur;
+					const sums = slotSummaries(ctx.cwd);
+					const list = sums.length
+						? sums.map((x) => `- ${x.slot}：进度 ${x.done}/${x.total}${x.current ? `｜当前：${x.current}` : ""}`).join("\n")
+						: "（暂无工作流）";
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`当前绑定：${curText}\n可选工作流：\n${list}\n\n` +
+									"绑定：wf_workflow action=bind slot=<名称>（不存在则创建空工作流；\"default\" = 项目根默认；\"none\" = 本会话不用工作流）",
+							},
+						],
+						details: { kind: "workflow-bind" },
+					};
+				}
+				const slot = params.slot.trim();
+				if (slot === "none") {
+					setBinding(ctx.cwd, sid, null);
+					invalidateBindingCache();
+					hideWidget(ctx);
+					return {
+						content: [
+							{
+								type: "text",
+								text: "本会话已设为不使用工作流（面板已隐藏；随时可 wf_workflow action=bind slot=<名称> 重新启用）",
+							},
+						],
+						details: { kind: "workflow-bind" },
+					};
+				}
+				if (slot !== DEFAULT_SLOT && !isValidSlotName(slot)) {
+					return err(`工作流名称不合法：「${slot}」（需以字母/数字/中文开头，可含 _ -，≤32 字符；default/none/archive/slots 为保留字）`);
+				}
+				setBinding(ctx.cwd, sid, slot);
+				invalidateBindingCache();
+				const s2 = getStore(ctx);
+				s2.reload();
+				updateWidget(ctx, s2);
+				if (!s2.hasWorkflowFile()) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `已绑定新工作流「${slot}」（当前为空）——用 wf_workflow import（推荐）或 add 规划阶段/任务`,
+							},
+						],
+						details: { kind: "workflow-bind" },
+					};
+				}
+				return {
+					content: [
+						{
+							type: "text",
+							text: `已绑定工作流「${slot}」\n${summaryLine(s2.getState(), s2.getDerived(), slot)}（用 wf_status 查看详情）`,
+						},
+					],
+					details: { kind: "workflow-bind", state: lightState(s2.getState()) },
+				};
+			}
+
+			const blockedErr = guardBound(s);
+			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			const derived = s.getDerived();
 			const wf = s.getWorkflow();
@@ -489,6 +589,8 @@ export function registerTools(pi: ExtensionAPI) {
 		parameters: statusParams,
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
+			const blockedErr = guardBound(s);
+			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			const derived = s.getDerived();
 			return { content: [{ type: "text", text: renderBrief(state, derived) }], details: { kind: "status", state: lightState(state) } };
@@ -508,6 +610,8 @@ export function registerTools(pi: ExtensionAPI) {
 		parameters: switchParams,
 		async execute(_id, params: SwitchParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
+			const blockedErr = guardBound(s);
+			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			const derived = s.getDerived();
 			const curId = state.currentTaskId;
@@ -628,6 +732,8 @@ export function registerTools(pi: ExtensionAPI) {
 		parameters: blockParams,
 		async execute(_id, params: BlockParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
+			const blockedErr = guardBound(s);
+			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			const derived = s.getDerived();
 			const taskId = params.taskId ?? state.currentTaskId;
@@ -658,6 +764,8 @@ export function registerTools(pi: ExtensionAPI) {
 		parameters: rollbackParams,
 		async execute(_id, params: RollbackParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
+			const blockedErr = guardBound(s);
+			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			const derived = s.getDerived();
 			const t = derived.taskMap.get(params.taskId);
@@ -708,6 +816,8 @@ export function registerTools(pi: ExtensionAPI) {
 		parameters: noteParams,
 		async execute(_id, params: NoteParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
+			const blockedErr = guardBound(s);
+			if (blockedErr) return blockedErr;
 			const state = s.getState();
 
 			if (params.action === "add") {
@@ -812,6 +922,8 @@ export function registerTools(pi: ExtensionAPI) {
 		parameters: milestoneParams,
 		async execute(_id, params: MilestoneParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
+			const blockedErr = guardBound(s);
+			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			// 删除：remove=true 移除该里程碑（不存在时报错）
 			if (params.remove) {

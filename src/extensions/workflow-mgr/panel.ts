@@ -36,6 +36,23 @@ export function unregisterHudRows(): void {
 	unregisterRows = null;
 }
 
+/**
+ * 隐藏常驻 UI（会话未绑定工作流 / 绑定为「不用工作流」时）：
+ * 注销 hud 底部行 + 移除 widget 与状态摘要。幂等，stale ctx 静默跳过。
+ */
+export function hideWidget(ctx: ExtensionContext): void {
+	if (!ctx.hasUI) return;
+	try {
+		unregisterRows?.();
+		unregisterRows = null;
+		getHudApi()?.notifyExtraRowsUpdate();
+		ctx.ui.setWidget("workflow-mgr", undefined, { placement: "belowEditor" });
+		ctx.ui.setStatus("workflow-mgr", undefined);
+	} catch {
+		/* stale ctx（reload 收尾）等场景静默跳过 */
+	}
+}
+
 /* ============================== 公共渲染层（单一来源） ============================== */
 
 /** 状态徽章：[进行中] / [已阻塞] / [待开始] */
@@ -208,7 +225,7 @@ export function updateWidget(ctx: ExtensionContext, store: WorkflowStore) {
 				placement: "belowEditor",
 			});
 			// 空工作流（无任务）不推状态摘要，避免「进度 0/0｜当前：全部完成」
-			ctx.ui.setStatus("workflow-mgr", derived.all.length > 0 ? summaryLine(state, derived) : undefined);
+			ctx.ui.setStatus("workflow-mgr", derived.all.length > 0 ? summaryLine(state, derived, store.slot) : undefined);
 		} else {
 			ctx.ui.setWidget("workflow-mgr", undefined, { placement: "belowEditor" });
 			ctx.ui.setStatus("workflow-mgr", undefined);

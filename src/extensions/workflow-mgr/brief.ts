@@ -76,11 +76,12 @@ export function renderBrief(state: WorkflowState, derived: Derived): string {
 	return lines.join("\n");
 }
 
-/** 一行进度摘要：`进度 3/7｜当前：1.2 xxx` */
-export function summaryLine(state: WorkflowState, derived: Derived): string {
+/** 一行进度摘要：`进度 3/7｜当前：1.2 xxx`（多工作流场景带槽位标签，default 不带） */
+export function summaryLine(state: WorkflowState, derived: Derived, slot?: string): string {
 	const done = derived.all.filter((t) => state.tasks[t.id]?.status === "done").length;
 	const cur = currentTask(state, derived);
-	return `进度 ${done}/${derived.all.length}｜当前：${cur ? cur.id + " " + cur.title : "全部完成"}`;
+	const tag = slot && slot !== "default" ? `「${slot}」` : "";
+	return `${tag}进度 ${done}/${derived.all.length}｜当前：${cur ? cur.id + " " + cur.title : "全部完成"}`;
 }
 
 /** 轻量状态视图：工具 results 的 details（不带完整 log） */

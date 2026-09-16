@@ -10,9 +10,15 @@
  * - 依赖环检测（add/edit 时防呆，DFS 沿依赖能否回到自身）；
  * - WorkflowStore 类持有三份缓存（单会话内存态），session_start / cwd 变化时重建。
  *
- * 路径：.pi/workflow/{workflow,state,config}.json（项目级、跨会话、可 git 审查）。
+ * 多工作流槽位（并发隔离）：一个项目可同时存在多个命名工作流——
+ * default 槽 = .pi/workflow/ 根目录三 JSON（向后兼容旧布局），命名槽 =
+ * .pi/workflow/slots/<名称>/ 下同样三 JSON（archive 亦按槽分目录）。
+ * 每个会话经 .pi/workflow/bindings.json 绑定一个槽（sessionId → 槽名 /
+ * null=明确不用工作流 / 无记录=未选择）；未选择时由 events 层按
+ * 「槽位 ≥2 或有其他活跃会话已绑定」决定自动绑定还是注入选择指引。
+ * 旧路径：.pi/workflow/{workflow,state,config}.json（项目级、跨会话、可 git 审查）。
  */
-import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadJsonConfig, saveJsonConfig } from "../shared/config";
@@ -38,17 +44,144 @@ export interface Derived {
 	mode: WorkflowMode;
 }
 
-/* ------------------------------ 路径与校验 ------------------------------ */
+/* ------------------------------ 多工作流槽位与会话绑定 ------------------------------ */
 
-function workflowPath(cwd: string): string {
-	return join(cwd, CONFIG_DIR_NAME, "workflow", "workflow.json");
+/** 默认槽位名：对应 .pi/workflow/ 根目录（向后兼容既有数据布局） */
+export const DEFAULT_SLOT = "default";
+/** 保留槽位名（与目录/命令字冲突） */
+const RESERVED_SLOTS = new Set([DEFAULT_SLOT, "none", "archive", "slots"]);
+/** 绑定记录保鲜期：超过视为失效（防重启堆积的陈旧绑定复活） */
+const BINDING_TTL_MS = 7 * 24 * 3600_000;
+
+/** 槽位名合法性：字母/数字/中文开头，可含 _ -，≤32 字符，非保留字 */
+export function isValidSlotName(name: string): boolean {
+	return /^[\p{L}\p{N}][\p{L}\p{N}_-]{0,31}$/u.test(name) && !RESERVED_SLOTS.has(name);
 }
-function statePath(cwd: string): string {
-	return join(cwd, CONFIG_DIR_NAME, "workflow", "state.json");
+
+/** 槽位目录：default → .pi/workflow/；命名槽 → .pi/workflow/slots/<名称>/（archive 随之分槽） */
+function slotDir(cwd: string, slot: string): string {
+	return slot === DEFAULT_SLOT
+		? join(cwd, CONFIG_DIR_NAME, "workflow")
+		: join(cwd, CONFIG_DIR_NAME, "workflow", "slots", slot);
 }
-function panelConfigPath(cwd: string): string {
-	return join(cwd, CONFIG_DIR_NAME, "workflow", "config.json");
+
+function workflowPath(cwd: string, slot: string): string {
+	return join(slotDir(cwd, slot), "workflow.json");
 }
+function statePath(cwd: string, slot: string): string {
+	return join(slotDir(cwd, slot), "state.json");
+}
+function panelConfigPath(cwd: string, slot: string): string {
+	return join(slotDir(cwd, slot), "config.json");
+}
+function bindingsPath(cwd: string): string {
+	return join(cwd, CONFIG_DIR_NAME, "workflow", "bindings.json");
+}
+
+/** bindings.json：sessionId → 绑定（slot=槽名 / null=本会话明确不用工作流；无记录=未选择） */
+interface BindingsFile {
+	schemaVersion: 1;
+	sessions: Record<string, { slot: string | null; at: number }>;
+}
+
+function isBindingsFile(v: unknown): v is BindingsFile {
+	const b = v as BindingsFile | null;
+	return !!b && b.schemaVersion === 1 && !!b.sessions && typeof b.sessions === "object";
+}
+
+function readBindings(cwd: string): BindingsFile {
+	return loadJsonConfig(bindingsPath(cwd), { schemaVersion: 1, sessions: {} }, isBindingsFile);
+}
+
+/** 读会话绑定：string=槽位 / null=明确不用工作流 / undefined=未选择（过期按未选择） */
+export function getBinding(cwd: string, sid: string): string | null | undefined {
+	const b = readBindings(cwd).sessions[sid];
+	if (!b || Date.now() - b.at > BINDING_TTL_MS) return undefined;
+	return b.slot;
+}
+
+/** 写会话绑定（顺带清理过期条目） */
+export function setBinding(cwd: string, sid: string, slot: string | null): void {
+	const f = readBindings(cwd);
+	const now = Date.now();
+	for (const [k, v] of Object.entries(f.sessions)) {
+		if (now - v.at > BINDING_TTL_MS) delete f.sessions[k];
+	}
+	f.sessions[sid] = { slot, at: now };
+	saveJsonConfig(bindingsPath(cwd), f);
+}
+
+/** 列出全部槽位：default（根目录有 workflow.json 才计入）+ slots/ 下各命名槽 */
+export function listSlots(cwd: string): string[] {
+	const slots: string[] = [];
+	if (existsSync(workflowPath(cwd, DEFAULT_SLOT))) slots.push(DEFAULT_SLOT);
+	try {
+		const base = join(cwd, CONFIG_DIR_NAME, "workflow", "slots");
+		for (const e of readdirSync(base, { withFileTypes: true })) {
+			if (e.isDirectory() && isValidSlotName(e.name)) slots.push(e.name);
+		}
+	} catch {
+		/* slots 目录不存在 */
+	}
+	return slots;
+}
+
+export interface SlotSummary {
+	slot: string;
+	total: number;
+	done: number;
+	current: string;
+}
+
+/** 各槽位进度摘要（绑定选择指引 / bind 无参列表用；损坏槽按 0/0 兜底） */
+export function slotSummaries(cwd: string): SlotSummary[] {
+	return listSlots(cwd).map((slot) => {
+		let total = 0;
+		let done = 0;
+		let current = "";
+		try {
+			const wf = JSON.parse(readFileSync(workflowPath(cwd, slot), "utf8")) as {
+				stages?: { tasks?: { id: string; title: string }[] }[];
+			};
+			const st = JSON.parse(readFileSync(statePath(cwd, slot), "utf8")) as {
+				currentTaskId?: string | null;
+				tasks?: Record<string, { status?: string }>;
+			};
+			const tasks = (wf.stages ?? []).flatMap((s) => s.tasks ?? []);
+			total = tasks.length;
+			done = tasks.filter((t) => st.tasks?.[t.id]?.status === "done").length;
+			current = tasks.find((t) => t.id === st.currentTaskId)?.title ?? "";
+		} catch {
+			/* 文件缺失/损坏 → 0/0 空摘要 */
+		}
+		return { slot, total, done, current };
+	});
+}
+
+/**
+ * 是否有其他「活着的」会话已绑定工作流（session_start 自动绑定判定用）：
+ * 优先借 pair-guard 注册表心跳判活（零耦合可选读，缺席/无记录时按绑定时间 24h 内视为活跃）；
+ * 绑定为 null（不用工作流）的会话不占槽，不参与判定。
+ */
+export function hasOtherLiveBinding(cwd: string, selfSid: string): boolean {
+	const now = Date.now();
+	for (const [sid, b] of Object.entries(readBindings(cwd).sessions)) {
+		if (sid === selfSid || b.slot === null || now - b.at > BINDING_TTL_MS) continue;
+		let live = now - b.at < 24 * 3600_000;
+		try {
+			const rec = JSON.parse(readFileSync(join(cwd, CONFIG_DIR_NAME, "sessions", `${sid}.json`), "utf8")) as {
+				lastBeat?: number;
+			};
+			if (typeof rec.lastBeat === "number") live = now - rec.lastBeat < 6 * 60_000;
+		} catch {
+			/* pair-guard 缺席/无该会话记录 → 按绑定时间兜底 */
+		}
+		if (live) return true;
+	}
+	return false;
+}
+
+/* ------------------------------ 空工作流与校验 ------------------------------ */
 
 /** 空工作流：无内置示例——数据缺失 / wf_workflow reset 后均为「无阶段无任务」，AI 用 wf_workflow 从零创建 */
 const EMPTY_WORKFLOW: WorkflowDef = { schemaVersion: WORKFLOW_SCHEMA_VERSION, stages: [] };
@@ -240,14 +373,23 @@ export function logEvent(state: WorkflowState, event: string, msg?: string, task
 export class WorkflowStore {
 	/** 构造时固化的工作目录：后续所有文件操作基于此值，不访问可能 stale 的 ctx */
 	readonly cwd: string;
+	/** 本 store 对应的槽位（default = 根目录布局） */
+	readonly slot: string;
+	/**
+	 * 绑定阻塞态（getStore 赋值）：undecided=会话未绑定（多槽/并发待选择）
+	 * none=本会话明确不用工作流；非 null 时工具层应拒绝操作并引导 bind。
+	 * 阻塞时 store 落在 default 槽（惰性、不主动写盘），仅作占位。
+	 */
+	blocked: "undecided" | "none" | null = null;
 	private wf: WorkflowDef | null = null;
 	private derived: Derived | null = null;
 	private state: WorkflowState | null = null;
 	private panelCfg: PanelConfig | null = null;
 
-	constructor(ctx: ExtensionContext) {
+	constructor(ctx: ExtensionContext, slot: string = DEFAULT_SLOT) {
 		// 构造时刻的 ctx 必然是新鲜的（getStore 只在事件/工具携带的新 ctx 下新建），固化后彻底解耦
 		this.cwd = ctx.cwd;
+		this.slot = slot;
 	}
 
 	/** 清空全部缓存（下次访问重新从磁盘加载） */
@@ -260,13 +402,13 @@ export class WorkflowStore {
 
 	/** 工作流定义文件是否已落盘（从未创建过工作流 → 常驻面板整体隐藏） */
 	hasWorkflowFile(): boolean {
-		return existsSync(workflowPath(this.cwd));
+		return existsSync(workflowPath(this.cwd, this.slot));
 	}
 
 	getWorkflow(): WorkflowDef {
 		if (!this.wf) {
 			// 无内置示例：文件缺失 → 空工作流（无阶段无任务），面板按 hasWorkflowFile 隐藏/显示空提示
-			this.wf = loadJsonConfig(workflowPath(this.cwd), cloneWorkflow(EMPTY_WORKFLOW), isWorkflowDef);
+			this.wf = loadJsonConfig(workflowPath(this.cwd, this.slot), cloneWorkflow(EMPTY_WORKFLOW), isWorkflowDef);
 		}
 		return this.wf;
 	}
@@ -279,7 +421,7 @@ export class WorkflowStore {
 	getState(): WorkflowState {
 		if (!this.state) {
 			const wf = this.getWorkflow();
-			this.state = loadJsonConfig(statePath(this.cwd), freshState(wf), isWorkflowState);
+			this.state = loadJsonConfig(statePath(this.cwd, this.slot), freshState(wf), isWorkflowState);
 			// 1.7 拍板：decisions → notes 替换，旧数据直接丢弃（插件未被大规模使用，不迁移）
 			const old = (this.state as WorkflowState & { decisions?: unknown }).decisions;
 			if (old !== undefined || !Array.isArray(this.state.notes)) {
@@ -293,7 +435,7 @@ export class WorkflowStore {
 
 	getPanelConfig(): PanelConfig {
 		if (!this.panelCfg) {
-			this.panelCfg = loadJsonConfig(panelConfigPath(this.cwd), { schemaVersion: PANEL_SCHEMA_VERSION, showPanel: true }, isPanelConfig);
+			this.panelCfg = loadJsonConfig(panelConfigPath(this.cwd, this.slot), { schemaVersion: PANEL_SCHEMA_VERSION, showPanel: true }, isPanelConfig);
 		}
 		return this.panelCfg;
 	}
@@ -301,7 +443,7 @@ export class WorkflowStore {
 	/** 工作流落盘 + 派生表失效（下次 getDerived 重建） */
 	commitWorkflow(): void {
 		if (this.wf) {
-			saveJsonConfig(workflowPath(this.cwd), this.wf);
+			saveJsonConfig(workflowPath(this.cwd, this.slot), this.wf);
 			this.derived = null;
 		}
 	}
@@ -309,12 +451,12 @@ export class WorkflowStore {
 	commitState(): void {
 		if (this.state) {
 			this.state.updatedAt = new Date().toISOString();
-			saveJsonConfig(statePath(this.cwd), this.state);
+			saveJsonConfig(statePath(this.cwd, this.slot), this.state);
 		}
 	}
 
 	commitPanelConfig(): void {
-		if (this.panelCfg) saveJsonConfig(panelConfigPath(this.cwd), this.panelCfg);
+		if (this.panelCfg) saveJsonConfig(panelConfigPath(this.cwd, this.slot), this.panelCfg);
 	}
 
 	/** 全量重置：清空工作流（无阶段无任务）+ 状态重建（wf_workflow reset 用） */
@@ -355,7 +497,7 @@ export class WorkflowStore {
 			this.state.currentTaskId = null;
 			this.commitState();
 		}
-		const base = join(dirname(workflowPath(this.cwd)), "archive");
+		const base = join(dirname(workflowPath(this.cwd, this.slot)), "archive");
 		const name = (this.wf?.stages[0]?.name ?? "工作流").replace(/[\\/:*?"<>|\s]+/g, "-");
 		const ts = new Date().toISOString().replace(/[:.]/g, "-");
 		const dir = join(base, `${ts}-${name}`);
@@ -369,7 +511,7 @@ export class WorkflowStore {
 				unlinkSync(src);
 			}
 		};
-		for (const p of [workflowPath(this.cwd), statePath(this.cwd), panelConfigPath(this.cwd)]) {
+		for (const p of [workflowPath(this.cwd, this.slot), statePath(this.cwd, this.slot), panelConfigPath(this.cwd, this.slot)]) {
 			if (existsSync(p)) moveFile(p, join(dir, basename(p)));
 		}
 		this.wf = null;
@@ -389,7 +531,31 @@ export class WorkflowStore {
  * 比较，session 替换后旧实例即使持有 stale ctx 引用也不触发访问，直接重建/复用。
  */
 let sessionStore: WorkflowStore | null = null;
+/** 本会话绑定缓存（rebind 后需 invalidateBindingCache 失效重建）；键含 cwd 防同 sid 跨目录串 */
+let sessionBinding: { sid: string; cwd: string; value: string | null | undefined } | null = null;
+
+/** 解析本会话绑定：string=槽位 / null=不用工作流 / undefined=未选择（会话内缓存） */
+export function resolveBinding(ctx: ExtensionContext): string | null | undefined {
+	// sessionManager 在真实 pi 中恒存在；可选链兜底测试 mock 与极端场景
+	const sid = ctx.sessionManager?.getSessionId?.() ?? "unknown";
+	if (!sessionBinding || sessionBinding.sid !== sid || sessionBinding.cwd !== ctx.cwd) {
+		sessionBinding = { sid, cwd: ctx.cwd, value: getBinding(ctx.cwd, sid) };
+	}
+	return sessionBinding.value;
+}
+
+/** 绑定缓存失效（wf_workflow bind / session_start 自动绑定后调用） */
+export function invalidateBindingCache(): void {
+	sessionBinding = null;
+}
+
 export function getStore(ctx: ExtensionContext): WorkflowStore {
-	if (!sessionStore || sessionStore.cwd !== ctx.cwd) sessionStore = new WorkflowStore(ctx);
+	const binding = resolveBinding(ctx);
+	const slot = typeof binding === "string" ? binding : DEFAULT_SLOT;
+	const blocked = binding === undefined ? ("undecided" as const) : binding === null ? ("none" as const) : null;
+	if (!sessionStore || sessionStore.cwd !== ctx.cwd || sessionStore.slot !== slot || sessionStore.blocked !== blocked) {
+		sessionStore = new WorkflowStore(ctx, slot);
+		sessionStore.blocked = blocked;
+	}
 	return sessionStore;
 }

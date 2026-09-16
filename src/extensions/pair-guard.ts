@@ -6,11 +6,16 @@
  *
  * 机制（项目级会话注册表：<cwd>/.pi/sessions/<sessionId>.json）：
  * - session_start 注册自己（sessionId/pid/启动时间），心跳周期更新 lastBeat；
- *   心跳超 PEER_TIMEOUT_MS 判定死亡（崩溃残留由其他会话扫描时顺带清理）
+ *   判死双保险：①扫描时 process.kill(pid, 0) 探测进程存活（关窗强杀走不了
+ *   session_shutdown，pid 一死下次扫描即清理，秒级）；②lastBeat 超 PEER_TIMEOUT_MS
+ *   兑底（pid 探测不可用的场景）；process.on("exit") 同步注销补漏崩溃场景
  * - write/edit 工具调用记录「我最近在改哪些文件」（滚动窗口 RECENT_FILE_TTL_MS）
  * - 广播式知情：peer 加入/离开/触碰新文件/标签变化等事件以定制消息
- *   （customType=pair-guard）追加到对话历史尾部（下一轮开始前投递）——
- *   尾部追加不破坏前缀缓存，且每条广播成为历史中的即时记录，AI 可随时回查；
+ *   （customType=pair-guard）注入对话历史——检测走双通道：turn_start 每个模型
+ *   调用边界扫一次 peer（主通道，延迟 ≈ 一次模型调用）+ 30s 心跳兑底（长单次
+ *   流式/空闲期）；检测到变化即经 sendMessage(deliverAs="steer") 在下一个工具
+ *   边界实时送达运行中的 turn，空闲时攒到 before_agent_start（先扫一次再排空，
+ *   新指令开局即最新）；尾部追加不破坏前缀缓存，每条广播成为历史中的即时记录；
  *   事件行极筒（时间 + 短 id + 动作，标签只在加入/变更行带）、队列按事件键去重
  *   （防 reload 快照重建出重复行）、协作约定只在首批广播附带一次
  * - 软冲突警告：write/edit 命中 peer 近窗口期内写过的文件时，tool_result 追加
@@ -18,8 +23,9 @@
  * - 状态栏推「👥 N 并发会话」（hud 动态区），peer 出现/消失时 notify 用户
  * - /pair 命令：查看 peer 详情 / label <文本> 设置自己的任务标签 / prune 手动清残留
  *
- * 任务标签：/pair label 手动设置优先；未设置时自动读 workflow-mgr 的
- * .pi/workflow/state.json 当前任务标题（零耦合读文件，缺失落空串）。
+ * 任务标签：仅 /pair label 手动设置（曾自动读 workflow-mgr 当前任务，但工作流是
+ * 项目级共享的——多会话并发时各会话显示同一标签，没有意义，已移除）。
+ * 多工作流并发隔离由 workflow-mgr 的会话绑定（wf_workflow bind）负责。
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
@@ -36,7 +42,6 @@ const PEER_TIMEOUT_MS = 5 * 60_000; // 心跳超时判死（崩溃残留清理�
 const RECENT_FILE_TTL_MS = 10 * 60_000; // 「最近修改」滚动窗口（注入与冲突判定共用）
 const MAX_RECENT_FILES = 20; // 每会话记录的最近文件上限
 const EDIT_PERSIST_THROTTLE_MS = 3_000; // 编辑记录落盘节流（连续编辑时）
-const WF_CACHE_TTL_MS = 30_000; // workflow 任务标题读取缓存
 const STATUS_KEY = "pair-guard";
 
 // ---------------------------------------------------------------------------
@@ -57,8 +62,6 @@ interface SessionRecord {
 	lastBeat: number;
 	/** 手动任务标签（/pair label 设置，跨 reload 保留） */
 	label: string;
-	/** 自动任务标签（workflow-mgr 当前任务标题，心跳时刷新） */
-	task: string;
 	recentFiles: RecentFile[];
 }
 
@@ -80,8 +83,9 @@ export default function (pi: ExtensionAPI) {
 	let pendingKeys = new Set<string>();
 	/** 本会话是否已投递过首批广播（协作约定只在首批附带一次，后续不重复） */
 	let conventionSent = false;
+	/** agent 是否在运行（agent_start→agent_end）：运行中心跳把广播 steer 进 turn，空闲攒到下轮注入 */
+	let agentRunning = false;
 	let lastEditPersist = 0;
-	let wfCache: { at: number; title: string } | null = null;
 
 	// ---- 小工具 ------------------------------------------------------------
 
@@ -109,37 +113,17 @@ export default function (pi: ExtensionAPI) {
 		if (self && selfFile) saveJsonConfig(selfFile, self);
 	}
 
-	/** 读取 workflow-mgr 当前任务标题（零耦合读文件，带缓存；无工作流 → 空串） */
-	function workflowTaskTitle(): string {
-		const now = Date.now();
-		if (wfCache && now - wfCache.at < WF_CACHE_TTL_MS) return wfCache.title;
-		let title = "";
+	/** 进程是否存活（ESRCH=不存在；EPERM=活着但无权限；异常按活着处理，交由心跳超时兑底） */
+	function pidAlive(pid: number): boolean {
 		try {
-			const state = JSON.parse(
-				fs.readFileSync(path.join(cwd, ".pi", "workflow", "state.json"), "utf8"),
-			) as { currentTaskId?: string | null };
-			if (state.currentTaskId) {
-				const wf = JSON.parse(
-					fs.readFileSync(path.join(cwd, ".pi", "workflow", "workflow.json"), "utf8"),
-				) as { stages?: Array<{ tasks?: Array<{ id?: string; title?: string }> }> };
-				for (const s of wf.stages ?? []) {
-					for (const t of s.tasks ?? []) {
-						if (t.id === state.currentTaskId && t.title) {
-							title = t.title;
-							break;
-						}
-					}
-					if (title) break;
-				}
-			}
-		} catch {
-			/* 无工作流或文件损坏 → 空串 */
+			process.kill(pid, 0);
+			return true;
+		} catch (e) {
+			return (e as NodeJS.ErrnoException).code !== "ESRCH";
 		}
-		wfCache = { at: now, title };
-		return title;
 	}
 
-	/** 扫描活跃 peer：读注册表，剔除自己，顺带清理心跳超时的死亡会话文件 */
+	/** 扫描活跃 peer：读注册表，剔除自己，顺带清理死亡会话文件（pid 死亡 / 心跳超时） */
 	function scanPeers(): SessionRecord[] {
 		const now = Date.now();
 		const peers: SessionRecord[] = [];
@@ -160,7 +144,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!rec || typeof rec.sessionId !== "string" || typeof rec.lastBeat !== "number") continue;
 			if (self && rec.sessionId === self.sessionId) continue;
-			if (now - rec.lastBeat > PEER_TIMEOUT_MS) {
+			// 判死①：pid 已死 = 进程不在（关窗强杀不会走 session_shutdown，靠此秒级发现）
+			// 判死②：心跳超时兑底（pid 缺失/探测受限的场景）
+			const dead =
+				typeof rec.pid === "number" && !pidAlive(rec.pid) ? true : now - rec.lastBeat > PEER_TIMEOUT_MS;
+			if (dead) {
 				try {
 					fs.unlinkSync(file); // 死亡会话残留，顺手清理
 				} catch {
@@ -185,6 +173,35 @@ export default function (pi: ExtensionAPI) {
 		pendingBroadcasts.push(line);
 	}
 
+	/** 排空广播队列 → 合并为一条消息文本（协作约定首批附带）；无待投递返回 null */
+	function drainBroadcasts(): string | null {
+		if (pendingBroadcasts.length === 0) return null;
+		const lines = pendingBroadcasts.splice(0);
+		pendingKeys.clear();
+		let content = "[pair-guard] 并发会话动向：\n" + lines.map((l) => `- ${l}`).join("\n");
+		if (!conventionSent) {
+			// 协作约定只在首批广播附带一次（历史里永久可见，后续广播不再重复）
+			conventionSent = true;
+			content += "\n（协作约定：改上述会话近期文件前先重读最新内容；大改同一区域请提醒用户协调分工。后续广播不再重复本约定。）";
+		}
+		return content;
+	}
+
+	/**
+	 * 运行中实时投递：agent 在跑且有积压广播时，经 sendMessage(deliverAs="steer")
+	 * 在下一个工具边界注入当前 turn——长 turn（几分钟级）不用等下轮才看到 peer 动向。
+	 * 空闲时不主动发（不 triggerTurn），留给 before_agent_start 排空。
+	 */
+	function flushSteer(): void {
+		if (!agentRunning) return;
+		const content = drainBroadcasts();
+		if (!content) return;
+		pi.sendMessage(
+			{ customType: "pair-guard", display: true, content },
+			{ deliverAs: "steer", triggerTurn: false },
+		);
+	}
+
 	/**
 	 * peer 快照 diff → 广播事件 + 用户通知 + 状态行
 	 * 广播只报变化（加入/离开/新触碰文件/标签变化），连续编辑同一文件不重复报；
@@ -194,7 +211,7 @@ export default function (pi: ExtensionAPI) {
 		const now = Date.now();
 		const seen = new Set(peers.map((p) => p.sessionId));
 		for (const p of peers) {
-			const label = p.label || p.task;
+			const label = p.label;
 			const files = p.recentFiles.filter((f) => now - f.at < RECENT_FILE_TTL_MS).map((f) => f.path);
 			const prev = peerSnapshot.get(p.sessionId);
 			if (!prev) {
@@ -227,15 +244,15 @@ export default function (pi: ExtensionAPI) {
 		updateStatus(ctx, peers.length);
 	}
 
-	/** 心跳：刷新自己的 lastBeat/自动标签/滚动窗口，扫描 peer 变化并生成广播 */
+	/** 心跳：刷新自己的 lastBeat/滚动窗口，扫描 peer 变化并生成广播（运行中实时 steer 投递） */
 	function beat(ctx: ExtensionContext): void {
 		if (!self) return;
 		const now = Date.now();
 		self.lastBeat = now;
-		self.task = workflowTaskTitle();
 		self.recentFiles = self.recentFiles.filter((f) => now - f.at < RECENT_FILE_TTL_MS);
 		persistSelf();
 		diffPeers(scanPeers(), ctx);
+		flushSteer();
 	}
 
 	// ---- 生命周期 ----------------------------------------------------------
@@ -258,7 +275,6 @@ export default function (pi: ExtensionAPI) {
 			startedAt: Date.now(),
 			lastBeat: Date.now(),
 			label: prevLabel,
-			task: workflowTaskTitle(),
 			recentFiles: [],
 		};
 		persistSelf();
@@ -290,7 +306,28 @@ export default function (pi: ExtensionAPI) {
 		pendingBroadcasts = [];
 		pendingKeys.clear();
 		conventionSent = false;
-		wfCache = null;
+		agentRunning = false;
+	});
+
+	// ---- agent 运行状态跟踪（决定广播是 steer 实时投递还是攒到下轮注入） -------------
+
+	pi.on("agent_start", async () => {
+		agentRunning = true;
+	});
+
+	pi.on("agent_end", async () => {
+		agentRunning = false;
+	});
+
+	// ---- turn 边界扫描（实时性主通道） ------------------------------------------------
+	// turn_start 每个模型调用边界都触发（agent 循环里每步一次），比 30s 心跳快得多：
+	// peer 事件最迟下一个 turn 边界被发现，随即 steer 注入（交付延迟 ≈ 一次模型调用）。
+	// 心跳仍保留：长单次流式（无工具调用）/ 空闲期的兜底检测与用户通知。
+
+	pi.on("turn_start", async (_event, ctx) => {
+		if (!self) return;
+		diffPeers(scanPeers(), ctx);
+		flushSteer();
 	});
 
 	// ---- 文件修改跟踪（write/edit 记录进自己的注册文件，不阻断） --------------
@@ -328,7 +365,7 @@ export default function (pi: ExtensionAPI) {
 			const hit = peer.recentFiles.find((f) => samePath(f.path, rel) && now - f.at < RECENT_FILE_TTL_MS);
 			if (!hit) continue;
 			const agoMin = Math.max(1, Math.round((now - hit.at) / 60_000));
-			const label = peer.label || peer.task;
+			const label = peer.label;
 			const who = `${short(peer.sessionId)}${label ? `（任务：${label}）` : ""}`;
 			const warn: (typeof event.content)[number] = {
 				type: "text",
@@ -342,19 +379,17 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// ---- 广播投递（下一轮开始前把累积事件合并为一条消息追加到历史尾部） ----------
-	// 尾部追加不破坏前缀缓存；消息入历史后内容不变，后续轮次自身也参与缓存命中
+	// ---- 广播投递（空闲路径：下一轮开始前把累积事件合并为一条消息追加到历史尾部） ------
+	// 尾部追加不破坏前缀缓存；消息入历史后内容不变，后续轮次自身也参与缓存命中。
+	// 运行中的实时投递见 flushSteer（turn_start/心跳里 steer 注入当前 turn）。
 
-	pi.on("before_agent_start", async () => {
-		if (pendingBroadcasts.length === 0) return;
-		const lines = pendingBroadcasts.splice(0);
-		pendingKeys.clear();
-		let content = "[pair-guard] 并发会话动向：\n" + lines.map((l) => `- ${l}`).join("\n");
-		if (!conventionSent) {
-			// 协作约定只在首批广播附带一次（历史里永久可见，后续广播不再重复）
-			conventionSent = true;
-			content += "\n（协作约定：改上述会话近期文件前先重读最新内容；大改同一区域请提醒用户协调分工。后续广播不再重复本约定。）";
-		}
+	pi.on("before_agent_start", async (_event, ctx) => {
+		// 开局即最新：注入前先扫一次 peer——空闲期积累的事件在此检测，
+		// 本轮首次模型调用就带上最新状态，不等 turn_start 边界（此时 agent 未跑，
+		// diffPeers 产的广播走下方排空而非 steer）
+		if (self) diffPeers(scanPeers(), ctx);
+		const content = drainBroadcasts();
+		if (!content) return;
 		return {
 			message: {
 				customType: "pair-guard",
@@ -379,7 +414,8 @@ export default function (pi: ExtensionAPI) {
 						const file = path.join(sessionsDir, name);
 						try {
 							const rec = JSON.parse(fs.readFileSync(file, "utf8")) as SessionRecord;
-							if (now - rec.lastBeat > PEER_TIMEOUT_MS && rec.sessionId !== self?.sessionId) {
+							const deadByPid = typeof rec.pid === "number" && !pidAlive(rec.pid);
+							if ((deadByPid || now - rec.lastBeat > PEER_TIMEOUT_MS) && rec.sessionId !== self?.sessionId) {
 								fs.unlinkSync(file);
 								removed++;
 							}
@@ -413,7 +449,7 @@ export default function (pi: ExtensionAPI) {
 			const now = Date.now();
 			const lines = peers.map((p) => {
 				const agoMin = Math.max(0, Math.round((now - p.lastBeat) / 60_000));
-				const label = p.label || p.task || "（无标签）";
+				const label = p.label || "（无标签）";
 				const files = p.recentFiles
 					.filter((f) => now - f.at < RECENT_FILE_TTL_MS)
 					.map((f) => `${f.path}（${Math.max(0, Math.round((now - f.at) / 60_000))} 分钟前）`)

@@ -66,6 +66,7 @@ function makeCtx(cwd, captures = {}) {
 		cwd,
 		hasUI: true,
 		mode: "tui",
+		sessionManager: { getSessionId: () => "test-sid" },
 		ui: {
 			setWidget: (id, factory, opts) => {
 				captures.widget = { id, factory, opts };
@@ -78,6 +79,14 @@ function makeCtx(cwd, captures = {}) {
 			},
 			custom: async (fn) => {
 				captures.custom = fn;
+			},
+			select: async (title, options) => {
+				captures.select = { title, options };
+				return captures.selectAnswer;
+			},
+			input: async (title, placeholder) => {
+				captures.input = { title, placeholder };
+				return captures.inputAnswer;
 			},
 		},
 	};
@@ -328,6 +337,7 @@ async function scenarioF() {
 	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
 	const caps = {};
 	const ctx = makeCtx(dir, caps);
+	await fireEvent(pi, ctx, "session_start"); // 真实生命周期：session_start 先行（自动绑定 default 槽）
 	await pi.commands["workflow-config"].handler("", ctx);
 	check("无参数 /workflow-config 打开统一菜单", !!caps.custom);
 	let closed = false;
@@ -365,6 +375,7 @@ async function scenarioG() {
 	const caps = {};
 	const ctx = makeCtx(dir, caps);
 	ctx.mode = "print";
+	await fireEvent(pi, ctx, "session_start");
 	await pi.commands["workflow-config"].handler("", ctx);
 	check("非 TUI 不弹浮窗", caps.custom === undefined);
 	rmSync(dir, { recursive: true, force: true });
@@ -519,6 +530,7 @@ async function scenarioJ() {
 		log: [],
 	});
 	const ctx = makeCtx(dir);
+	await fireEvent(pi, ctx, "session_start"); // 自动绑定 default 槽（真实生命周期）
 	const sw = pi.tools.find((t) => t.name === "wf_switch");
 
 	// 1. 显式切换到一个 blocked 任务：完成当前 0.2 + 解除 1.1 阻塞并开始（1.1 依赖 0.2，当前任务即将完成不算阻塞）
@@ -900,6 +912,125 @@ const DEFAULT_WORKFLOW_FIXTURE = {
 	],
 };
 
+/* ============================== 场景 R：多工作流槽位与会话绑定 ============================== */
+async function scenarioR() {
+	console.log("\n场景 R：多工作流槽位（并发隔离 + bind 绑定/拒绝/守卫）");
+	const mod = await importBundle();
+	const pi = makePi();
+	mod.default(pi);
+	// default 槽有工作流；另有命名槽 beta（slots/beta/ 下有自己的工作流）
+	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
+	const betaDir = join(dir, ".pi", "workflow", "slots", "beta");
+	mkdirSync(betaDir, { recursive: true });
+	writeFileSync(
+		join(betaDir, "workflow.json"),
+		JSON.stringify({
+			schemaVersion: 1,
+			stages: [{ id: "s0", name: "贝塔", goal: "", tasks: [{ id: "0.1", title: "贝塔任务", desc: "", humanTasks: [], aiTasks: [], deliverable: "", doneSignal: "", deps: [] }] }],
+		}),
+		"utf8",
+	);
+	const ctx = makeCtx(dir);
+	ctx.hasUI = false; // 非 TUI：session_start 不弹选择框，保持未绑定（TUI 弹窗路径在步骤 8 另测）
+	const wf = pi.tools.find((x) => x.name === "wf_workflow");
+	const st = pi.tools.find((x) => x.name === "wf_status");
+
+	// 1. 多槽时 session_start 不自动绑定 → 工具被守卫拒绝 + before_agent_start 注入选择指引（非 TUI 兜底）
+	await fireEvent(pi, ctx, "session_start");
+	const r0 = await st.execute("0", {}, undefined, undefined, ctx);
+	check("多槽未绑定：wf_status 被守卫拒绝并引导 bind", r0.details?.kind === "error" && r0.content[0].text.includes("尚未绑定"));
+	const inject = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx);
+	check("未绑定注入选择指引（含两个槽位）", inject.systemPrompt.includes("尚未绑定") && inject.systemPrompt.includes("beta") && inject.systemPrompt.includes("default"));
+
+	// 2. bind 无参 → 列出可选与当前绑定
+	const r1 = await wf.execute("1", { action: "bind" }, undefined, undefined, ctx);
+	check("bind 无参列出可选工作流", r1.content[0].text.includes("beta") && r1.content[0].text.includes("未绑定"));
+
+	// 3. 非法名拒绝
+	const r2 = await wf.execute("2", { action: "bind", slot: ".." }, undefined, undefined, ctx);
+	check("非法槽位名拒绝", r2.details?.kind === "error" && r2.content[0].text.includes("不合法"));
+
+	// 4. 绑定 beta → wf_status 读 beta 槽（贝塔任务），default 数据不受影响
+	const r3 = await wf.execute("3", { action: "bind", slot: "beta" }, undefined, undefined, ctx);
+	check("绑定 beta 成功并显示其进度", r3.content[0].text.includes("beta") && r3.content[0].text.includes("贝塔任务"));
+	const r4 = await st.execute("4", {}, undefined, undefined, ctx);
+	check("wf_status 作用于绑定槽（贝塔任务）", r4.content[0].text.includes("贝塔任务"));
+	// 推进一次 → beta 槽独立落盘；default 槽全程未被触碰（连 state.json 都不应被创建）
+	const swR = pi.tools.find((x) => x.name === "wf_switch");
+	await swR.execute("4b", {}, undefined, undefined, ctx);
+	const betaState = JSON.parse(readFile(join(betaDir, "state.json")));
+	check("beta 槽状态独立落盘（0.1 done）", betaState.tasks["0.1"]?.status === "done");
+	check("default 槽未被干扰（未创建 state.json）", !existsSync(join(dir, ".pi", "workflow", "state.json")));
+
+	// 5. 绑定持久化：同 sid 的新 ctx（模拟 /reload 后）仍绑定 beta
+	const ctx2 = makeCtx(dir);
+	const r5 = await st.execute("5", {}, undefined, undefined, ctx2);
+	// beta 槽唯一任务已在 4b 完成 → 「所有任务已完成」；若绑定丢失回落 default 会显示其待办任务
+	check("绑定跨 ctx 保持（bindings.json 持久化）", r5.details?.kind !== "error" && r5.content[0].text.includes("所有任务已完成"));
+
+	// 6. bind none → 守卫拒绝并提示「不使用工作流」
+	await wf.execute("6", { action: "bind", slot: "none" }, undefined, undefined, ctx);
+	const r6 = await st.execute("7", {}, undefined, undefined, ctx);
+	check("bind none 后工具拒绝（不使用工作流）", r6.details?.kind === "error" && r6.content[0].text.includes("不使用工作流"));
+	const inject2 = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx);
+	check("bind none 后零注入", inject2 === undefined || !inject2.systemPrompt?.includes("【工作流】"));
+
+	// 7. 并发侦测：其他活跃会话已绑定（pair-guard 注册表活心跳）→ 新会话不自动绑定
+	const dir2 = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
+	writeFileSync(
+		join(dir2, ".pi", "workflow", "bindings.json"),
+		JSON.stringify({ schemaVersion: 1, sessions: { "sid-a": { slot: "default", at: Date.now() } } }),
+		"utf8",
+	);
+	const sessDir = join(dir2, ".pi", "sessions");
+	mkdirSync(sessDir, { recursive: true });
+	writeFileSync(join(sessDir, "sid-a.json"), JSON.stringify({ sessionId: "sid-a", lastBeat: Date.now() }), "utf8");
+	const ctxB = makeCtx(dir2);
+	ctxB.hasUI = false;
+	ctxB.sessionManager = { getSessionId: () => "sid-b" };
+	await fireEvent(pi, ctxB, "session_start");
+	const r7 = await st.execute("8", {}, undefined, undefined, ctxB);
+	check("有其他活跃绑定会话时新会话不自动绑定", r7.details?.kind === "error" && r7.content[0].text.includes("尚未绑定"));
+
+	// 8. TUI 弹窗路径：多槽时 session_start 弹选择框——选「新建」+ 输入名称 → 绑定新槽
+	const dir3 = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
+	const beta3 = join(dir3, ".pi", "workflow", "slots", "beta");
+	mkdirSync(beta3, { recursive: true });
+	writeFileSync(
+		join(beta3, "workflow.json"),
+		JSON.stringify({ schemaVersion: 1, stages: [{ id: "s0", name: "贝塔", goal: "", tasks: [] }] }),
+		"utf8",
+	);
+	const caps8 = {};
+	const ctx8 = makeCtx(dir3, caps8);
+	caps8.selectAnswer = "＋ 新建工作流…";
+	caps8.inputAnswer = "gamma";
+	await fireEvent(pi, ctx8, "session_start");
+	check("多槽 TUI：session_start 弹出选择框（含各槽+新建+暂不使用）",
+		caps8.select?.options.some((o) => o.startsWith("default")) && caps8.select.options.includes("＋ 新建工作流…") && caps8.select.options.includes("⊘ 本会话不使用工作流"));
+	check("新建名称经 input 收集", caps8.input !== undefined);
+	const bound8 = JSON.parse(readFile(join(dir3, ".pi", "workflow", "bindings.json")));
+	check("选择「新建 gamma」后绑定落盘", bound8.sessions["test-sid"]?.slot === "gamma");
+	check("新建空槽 notify 引导规划", caps8.notify?.text.includes("gamma"));
+	const r8 = await st.execute("9", {}, undefined, undefined, ctx8);
+	check("绑定后 wf_status 可用（空槽引导文案）", r8.details?.kind !== "error" && r8.content[0].text.includes("工作流为空"));
+
+	// 9. TUI 弹窗 Esc（selectAnswer undefined）= 暂不使用 → 绑定 null
+	const dir4 = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
+	mkdirSync(join(dir4, ".pi", "workflow", "slots", "beta"), { recursive: true });
+	const caps9 = {};
+	const ctx9 = makeCtx(dir4, caps9);
+	await fireEvent(pi, ctx9, "session_start");
+	check("弹窗 Esc 视同暂不使用", caps9.select !== undefined && caps9.notify?.text.includes("不使用工作流"));
+	const r9 = await st.execute("10", {}, undefined, undefined, ctx9);
+	check("Esc 后工具拒绝（不使用工作流）", r9.details?.kind === "error" && r9.content[0].text.includes("不使用工作流"));
+
+	rmSync(dir, { recursive: true, force: true });
+	rmSync(dir2, { recursive: true, force: true });
+	rmSync(dir3, { recursive: true, force: true });
+	rmSync(dir4, { recursive: true, force: true });
+}
+
 /* ============================== 主流程 ============================== */
 try {
 	await scenarioA();
@@ -918,6 +1049,7 @@ try {
 	await scenarioN();
 	await scenarioO();
 	await scenarioQ();
+	await scenarioR();
 	console.log(failures === 0 ? "\n✅ 全部通过" : `\n❌ ${failures} 项失败`);
 	process.exit(failures === 0 ? 0 : 1);
 } finally {

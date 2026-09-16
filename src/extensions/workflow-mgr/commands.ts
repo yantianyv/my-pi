@@ -13,6 +13,15 @@ import { textPanel, WfmgMenuPanelComponent } from "./panel";
 export function registerCommand(pi: ExtensionAPI) {
 	const workflowConfigHandler = async (args: string, ctx: ExtensionContext) => {
 		const s = getStore(ctx);
+		if (s.blocked) {
+			ctx.ui.notify(
+				s.blocked === "none"
+					? "本会话未使用工作流（如需启用，让 AI 执行 wf_workflow action=bind）"
+					: "本会话尚未绑定工作流（多工作流并发场景，让 AI 用 wf_workflow bind 绑定）",
+				"info",
+			);
+			return;
+		}
 		const state = s.getState();
 		const derived = s.getDerived();
 
