@@ -9,7 +9,7 @@
  * 覆盖：
  * - 场景 A：短命令渲染——命令/说明/四操作完整呈现，行宽不超限
  * - 场景 B：超长命令全文折行不截断——PgDn 滚动能看到命令尾部，分隔行有滚动指示
- * - 场景 C：键位——Enter 返回当前操作、↑↓ 移动、1-4 直选、Esc 返回 null（驳回）
+ * - 场景 C：键位——Enter 返回当前操作、↑↓ 移动、1-5 直选、Esc 返回 null（驳回）
  *
  * 用法：node src/extensions/test/perm-gate.test.mjs（仓库根目录执行）
  */
@@ -147,8 +147,9 @@ async function main() {
 		panel.render(WIDTH);
 		panel.handleInput(K.down);
 		panel.handleInput(K.down);
+		panel.handleInput(K.down);
 		panel.handleInput(K.enter);
-		check("C: ↓↓+Enter 返回「驳回」", result().done && result().choice === "驳回");
+		check("C: ↓↓↓+Enter 返回「驳回」", result().done && result().choice === "驳回");
 	}
 	{
 		const { panel, result } = makePanel(mod, "git status");
