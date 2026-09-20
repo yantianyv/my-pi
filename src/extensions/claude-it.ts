@@ -25,7 +25,7 @@ import {
 	type AgentMessage,
 } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
-import { convertToLlm, createPiStreamFn } from "./shared/agent";
+import { convertToLlm, createPiStreamFn, systemMessage } from "./shared/agent";
 import { Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -217,7 +217,7 @@ async function runInitAgent(
 		const userMessage: AgentMessage = { role: "user", content: prompt, timestamp: Date.now() };
 		const newMessages = await runAgentLoop(
 			[userMessage],
-			{ systemPrompt: buildInitSystemPrompt(ctx.cwd), messages: [], tools },
+			{ messages: [systemMessage(buildInitSystemPrompt(ctx.cwd))], tools },
 			config,
 			(event) => {
 				if (event.type === "tool_execution_start") onToolCall();
@@ -242,7 +242,7 @@ async function runInitAgent(
 				};
 				const more = await runAgentLoop(
 					[nudge],
-					{ systemPrompt: buildInitSystemPrompt(ctx.cwd), messages: newMessages, tools: [] },
+					{ messages: [systemMessage(buildInitSystemPrompt(ctx.cwd)), ...newMessages], tools: [] },
 					{ model, maxTokens: INIT_MAX_TOKENS, convertToLlm, shouldStopAfterTurn: () => true },
 					() => {},
 					signal,

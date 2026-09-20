@@ -100,9 +100,14 @@ export function extractText(message: { content?: Array<{ type: string; text?: st
 		.trim();
 }
 
-/** 标准消息直通转换：agentLoop 会话里只有 user/assistant/toolResult */
+/** 标准消息直通转换：agentLoop 会话里只有 system/user/assistant/toolResult
+ * （0.86 起 system 放行：注入的 BTW_SYSTEM_PROMPT 以前导 system 消息携带，过滤会丢提示词） */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
-		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+		(m) =>
+			m.role === "system" ||
+			m.role === "user" ||
+			m.role === "assistant" ||
+			m.role === "toolResult",
 	) as Message[];
 }

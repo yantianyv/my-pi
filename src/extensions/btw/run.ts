@@ -14,7 +14,7 @@ import { createReadOnlyTools, type ExtensionCommandContext } from "@earendil-wor
 import { runAgentLoop, type AgentLoopConfig, type AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AnyModel } from "../shared/model-select";
-import { createPiStreamFn } from "../shared/agent";
+import { createPiStreamFn, systemMessage } from "../shared/agent";
 import {
 	BTW_SYSTEM_PROMPT,
 	BTW_MAX_TOKENS,
@@ -65,7 +65,7 @@ export async function runBtwTurn(
 	try {
 		const newMessages = await runAgentLoop(
 			[userMessage],
-			{ systemPrompt: BTW_SYSTEM_PROMPT, messages: history, tools },
+			{ messages: [systemMessage(BTW_SYSTEM_PROMPT), ...history], tools },
 			config,
 			(event) => {
 				if (event.type === "tool_execution_start") {

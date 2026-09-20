@@ -50,7 +50,7 @@ import {
 	listAvailableModels,
 	registerModelConfigCommand,
 } from "./shared/model-select";
-import { convertToLlm, createPiStreamFn } from "./shared/agent";
+import { convertToLlm, createPiStreamFn, systemMessage } from "./shared/agent";
 import { isModelConfig, loadJsonConfig, saveJsonConfig } from "./shared/config";
 import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
 
@@ -346,7 +346,7 @@ async function runSubAgent(
 		const userMessage: AgentMessage = { role: "user", content: task, timestamp: Date.now() };
 		const newMessages = await runAgentLoop(
 			[userMessage],
-			{ systemPrompt: buildSystemPrompt(ctx.cwd), messages: [], tools },
+			{ messages: [systemMessage(buildSystemPrompt(ctx.cwd))], tools },
 			config,
 			(event) => {
 				if (event.type === "tool_execution_start") onToolCall();

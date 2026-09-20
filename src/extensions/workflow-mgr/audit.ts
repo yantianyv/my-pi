@@ -14,7 +14,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { runAgentLoop, type AgentLoopConfig, type AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
-import { convertToLlm, createPiStreamFn } from "../shared/agent";
+import { convertToLlm, createPiStreamFn, systemMessage } from "../shared/agent";
 import type { TaskDef } from "./types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -90,7 +90,7 @@ export async function auditCompletion(ctx: ExtensionContext, task: TaskDef): Pro
 		const userMessage: AgentMessage = { role: "user", content: buildAuditPrompt(task), timestamp: Date.now() };
 		const newMessages = await runAgentLoop(
 			[userMessage],
-			{ systemPrompt: "你是严谨冷峻的独立审计者，只说证据，不给面子。", messages: [], tools },
+			{ messages: [systemMessage("你是严谨冷峻的独立审计者，只说证据，不给面子。")], tools },
 			config,
 			() => {},
 			controller.signal,

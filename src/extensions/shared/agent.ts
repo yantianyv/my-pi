@@ -13,11 +13,26 @@ import type { Message } from "@earendil-works/pi-ai";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-/** 标准消息直通转换：子代理会话里只有 user/assistant/toolResult，无需特殊处理 */
+/** 标准消息直通转换：子代理会话里只有 system/user/assistant/toolResult，无需特殊处理。
+ * 0.86 起 system 必须放行：AgentContext 不再收 systemPrompt 字段，系统提示词以
+ * 前导 system 消息的形式挂在 messages 里（TranscriptContext 归一化模型），过滤掉会丢提示词。 */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
-		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+		(m) =>
+			m.role === "system" ||
+			m.role === "user" ||
+			m.role === "assistant" ||
+			m.role === "toolResult",
 	) as Message[];
+}
+
+/**
+ * 构造前导 system 消息（0.86 TranscriptContext 模型）：AgentContext 已无 systemPrompt 字段，
+ * 子代理的系统提示词改为以 system 消息置于 context.messages 开头；工具仍走 context.tools，
+ * 由 agent-loop 的 declareToolChanges 自动声明进系统消息（空 content 重放时被跳过，无副作用）。
+ */
+export function systemMessage(content: string): AgentMessage {
+	return { role: "system", content, timestamp: Date.now() };
 }
 
 // ---------------------------------------------------------------------------
