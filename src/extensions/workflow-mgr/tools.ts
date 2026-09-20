@@ -168,6 +168,18 @@ export function commitAndRefresh(ctx: ExtensionContext): void {
 	updateWidget(ctx, s);
 }
 
+/** pair-guard 联动：把当前任务标题写入会话注册表 step（source=auto；pair-guard 缺席 / AI 手写 manual 时静默跳过） */
+function pushStepTitle(step: string): void {
+	const api = (globalThis as Record<string, unknown>).__PI_PAIR_GUARD_API__ as
+		| { setTitle?: (work: string | undefined, step: string | undefined, source: "manual" | "auto") => void }
+		| undefined;
+	try {
+		api?.setTitle?.(undefined, step, "auto");
+	} catch {
+		/* 联动是增强，故障不影响工作流 */
+	}
+}
+
 /** 时效性记录（kind=status）复核提醒：wf_switch 推进后附在结果尾部，防过时状态误导后续步骤 */
 function statusNotesReminder(state: WorkflowState): string {
 	const act = state.notes.filter((n) => !n.supersededBy && n.kind === "status");
@@ -641,6 +653,7 @@ export function registerTools(pi: ExtensionAPI) {
 				state.currentTaskId = target.id;
 				logEvent(state, "task_start", target.title, target.id);
 				commitAndRefresh(ctx);
+				pushStepTitle(target.title);
 				const stage = derived.stageOf.get(target.id)!;
 				const prevMsg =
 					cur && curSt && curId !== target.id
@@ -705,6 +718,7 @@ export function registerTools(pi: ExtensionAPI) {
 			if (!target) {
 				state.currentTaskId = null;
 				commitAndRefresh(ctx);
+				pushStepTitle(""); // 推进到头：清掉自动兑底的步骤标题（manual 值保留）
 				const allDone = derived.all.every((t) => state.tasks[t.id]?.status === "done");
 				return {
 					content: [

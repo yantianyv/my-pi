@@ -85,7 +85,7 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   白名单规则带保鲜元数据（addedAt/lastHit/hits，命中时刷新），超 30 天未命中自动清理（启动/加白时），
                     #   /perm-gate prune 手动清理、状态行提示过期条数；旧版纯字符串配置自动归一化兼容；
                     #   ~/.pi/agent/perm-gate.json 配置 + /perm-gate 命令）
-    pair-guard.ts   #   多 pi 会话并发协作守卫：项目级会话注册表（.pi/sessions/<sid>.json，30s 心跳、
+    pair-guard.ts   #   会话注册表与在场感知（多 pi 会话并发协作 + AI 自报进度标题）：项目级会话注册表（.pi/sessions/<sid>.json，30s 心跳、
                     #   判死双保险：扫描时 process.kill(pid,0) 判活——关窗强杀不走 session_shutdown，pid 一死
                     #   下次扫描即清理（秒级）；5min 心跳超时兜底；process.on("exit") 同步注销补漏崩溃场景）；write/edit 记录「最近在改哪些文件」（10min 滚动窗口）；
                     #   并发广播：peer 加入/离开/新触碰文件/标签变化以定制消息注入对话（变化驱动、事件键去重、
@@ -96,6 +96,10 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   空闲攒到 before_agent_start 排空；写 peer 近窗口文件时 tool_result
                     #   追加 ⚠️ 软警告；任务标签仅 /pair label 手动设置（曾自动读 workflow-mgr 共享工作流当前任务，
                     #   多会话下同标签无意义已移除——多工作流并发隔离由 workflow-mgr 会话绑定负责）；
+                    #   AI 自报标题：set_title({work?, step?}) 工具——work 同步 pi.setSessionName（/resume 选择器可见）
+                    #   + 注册表，step 带 stepSource=manual/auto 来源标记，标题不单独发广播（随其他事件行内捎带，
+                    #   /pair 详情完整展示）；暴露 __PI_PAIR_GUARD_API__（仿 __PI_HUD_API__ 模式）供 workflow-mgr
+                    #   wf_switch 推进后自动兜底 step=当前任务标题（manual 优先不覆盖，推进到头清 auto 值）；
                     #   状态行推「👥 N 并发会话」+ peer 出现/消失 notify + /pair 命令
     claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn、双击 Ctrl+C 预填 /rewind 回退
     status-beacon.ts  #   全链路状态感知（前身 task-alert）：执行中标题进度（agent_start→settled 全程 spinner+当前工具活动+目录名，提醒期间让位、应答后恢复）+ 五状态五音效（完成/出错/等待人工 ui_prompt/空闲 60s/子代理完成，音源 ClaudeCodeInit wav/piano）+ 提醒标题动画 + setStatus 状态推送（三状态独立 key，沿用 task-alert* 旧名）

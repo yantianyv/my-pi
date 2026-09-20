@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "mode": "human-ai",
+  "stages": [
+    {
+      "id": "pair-guard",
+      "name": "pair-guard 主体改造",
+      "goal": "pair-guard 支持 AI 自报两级标题（work/step），注册表承载，peer 可见",
+      "tasks": [
+        {
+          "id": "0.1",
+          "title": "数据模型与 set_title 工具",
+          "desc": "SessionRecord 增加 work/step/stepSource 字段；新增 set_title 工具（work → pi.setSessionName + 注册表，step → 注册表）；心跳/启动落盘时从盘上回读 work/step 合并防覆盖；头注释定位扩写为「会话注册表与在场感知」",
+          "humanTasks": [],
+          "aiTasks": [
+            "修改 src/extensions/pair-guard.ts：类型、工具注册、心跳合并逻辑、头注释"
+          ],
+          "deliverable": "pair-guard.ts 改造完成，npx typescript 类型检查通过",
+          "doneSignal": "npx typescript -p src/config/tsconfig.json 无 pair-guard 相关报错",
+          "deps": []
+        },
+        {
+          "id": "0.2",
+          "title": "peer 可见性：广播捎带与 /pair 展示",
+          "desc": "原有广播事件（加入/新文件）行内捎带 peer 的 work/step（截断防刷屏）；/pair 详情展示两级标题；globalThis.__PI_PAIR_GUARD_API__ 桥（setTitle，供 workflow-mgr 联动）",
+          "humanTasks": [],
+          "aiTasks": [
+            "修改广播行格式与 /pair 输出；暴露 __PI_PAIR_GUARD_API__"
+          ],
+          "deliverable": "广播与 /pair 展示含标题，API 桥可用",
+          "doneSignal": "类型检查通过；广播行格式保持极简（时间+短id+动作+标题捎带）",
+          "deps": [
+            "0.1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "workflow",
+      "name": "workflow-mgr 联动",
+      "goal": "wf_switch 推进后自动兜底 step 标题",
+      "tasks": [
+        {
+          "id": "1.1",
+          "title": "wf_switch 自动兜底 step",
+          "desc": "wf_switch 完成推进后，经 __PI_PAIR_GUARD_API__ 把新当前任务标题写入 step（source=auto）；仅当 stepSource 非 manual 时覆盖；pair-guard 缺席静默跳过",
+          "humanTasks": [],
+          "aiTasks": [
+            "修改 src/extensions/workflow-mgr/tools.ts 的 wf_switch 处理"
+          ],
+          "deliverable": "联动代码完成，类型检查通过",
+          "doneSignal": "npx typescript 无报错；manual 优先逻辑有注释说明",
+          "deps": [
+            "0.2"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "release",
+      "name": "验证与文档",
+      "goal": "构建安装 + 文档同步",
+      "tasks": [
+        {
+          "id": "2.1",
+          "title": "构建安装与文档更新",
+          "desc": "node src/build.js 构建 + node install.js 安装；更新 AGENTS.md（pair-guard 定位、set_title 工具、workflow 联动）与 README.md 对应节",
+          "humanTasks": [
+            "在 pi 里 /reload 后实测：设标题 → /resume 看名字；开两个会话互看 /pair"
+          ],
+          "aiTasks": [
+            "构建安装",
+            "更新文档"
+          ],
+          "deliverable": "产物安装到 ~/.pi/agent/，文档同步",
+          "doneSignal": "dist/extensions/pair-guard.ts 含 set_title；文档描述与实现一致",
+          "deps": [
+            "1.1"
+          ]
+        }
+      ]
+    }
+  ]
+}

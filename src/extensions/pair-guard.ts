@@ -1,8 +1,9 @@
 /**
- * pair-guard：多 pi 会话并发协作守卫
+ * pair-guard：会话注册表与在场感知（多 pi 会话并发协作 + AI 自报进度标题）
  *
  * 场景：多个 pi 实例同时编辑同一项目时，AI 对其他会话的存在与动向一无所知，
  * 容易互相覆盖/冲突。本扩展让每个会话互相可见，并把并发状态注入 AI 上下文。
+ * 注册表是本扩展的核心：守卫（软冲突警告）与标题互见都是其上的应用。
  *
  * 机制（项目级会话注册表：<cwd>/.pi/sessions/<sessionId>.json）：
  * - session_start 注册自己（sessionId/pid/启动时间），心跳周期更新 lastBeat；
@@ -21,6 +22,10 @@
  * - 软冲突警告：write/edit 命中 peer 近窗口期内写过的文件时，tool_result 追加
  *   ⚠️ 警告文本（不阻断，AI 自行调整：先读最新内容、小步修改、告知用户）
  * - 状态栏推「👥 N 并发会话」（hud 动态区），peer 出现/消失时 notify 用户
+ * - AI 自报标题：set_title 工具写两级标题——work（整个工作在干啥，同步
+ *   pi.setSessionName，/resume 会话选择器直接可见）+ step（当前步骤在干啥，
+ *   带 stepSource=manual/auto 来源标记，workflow-mgr 自动兜底不覆盖 AI 手写值）；
+ *   标题进注册表供 peer 互见，不单独发广播（随其他广播事件行内捎带，/pair 详情完整展示）
  * - /pair 命令：查看 peer 详情 / label <文本> 设置自己的任务标签 / prune 手动清残留
  *
  * 任务标签：仅 /pair label 手动设置（曾自动读 workflow-mgr 当前任务，但工作流是
@@ -29,6 +34,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { saveJsonConfig } from "./shared/config";
@@ -43,6 +49,7 @@ const RECENT_FILE_TTL_MS = 10 * 60_000; // 「最近修改」滚动窗口（注�
 const MAX_RECENT_FILES = 20; // 每会话记录的最近文件上限
 const EDIT_PERSIST_THROTTLE_MS = 3_000; // 编辑记录落盘节流（连续编辑时）
 const STATUS_KEY = "pair-guard";
+const MAX_TITLE_LEN = 60; // work/step 标题长度上限（超出截断，防广播行与会话选择器被刷屏）
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -62,6 +69,12 @@ interface SessionRecord {
 	lastBeat: number;
 	/** 手动任务标签（/pair label 设置，跨 reload 保留） */
 	label: string;
+	/** AI 自报：整个工作的标题（set_title work，同步 pi.setSessionName） */
+	work?: string;
+	/** AI 自报：当前步骤标题（set_title step 或 workflow-mgr 联动兜底） */
+	step?: string;
+	/** step 来源：manual=AI 显式设置（workflow 兜底不覆盖）/ auto=workflow-mgr 联动写入 */
+	stepSource?: "manual" | "auto";
 	recentFiles: RecentFile[];
 }
 
@@ -202,30 +215,39 @@ export default function (pi: ExtensionAPI) {
 		);
 	}
 
+	/** peer 的紧凑活动描述：step（带 work 前缀）优先，其次 work，再次手动 label */
+	function peerActivity(p: SessionRecord): string {
+		if (p.step) return p.work ? `${p.work}：${p.step}` : p.step;
+		return p.work ?? (p.label || "");
+	}
+
+	const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+
 	/**
 	 * peer 快照 diff → 广播事件 + 用户通知 + 状态行
 	 * 广播只报变化（加入/离开/新触碰文件/标签变化），连续编辑同一文件不重复报；
-	 * 文本从简：标签只在加入/变更行带，事件行只留「时间 id 动作」
+	 * 标题（work/step）不单独发广播，随事件行行内捎带（截断防刷屏）；/pair 详情看完整值
 	 */
 	function diffPeers(peers: SessionRecord[], ctx: ExtensionContext, initial = false): void {
 		const now = Date.now();
 		const seen = new Set(peers.map((p) => p.sessionId));
 		for (const p of peers) {
 			const label = p.label;
+			const act = trunc(peerActivity(p), 50);
 			const files = p.recentFiles.filter((f) => now - f.at < RECENT_FILE_TTL_MS).map((f) => f.path);
 			const prev = peerSnapshot.get(p.sessionId);
 			if (!prev) {
 				let line = `${hhmm()} ${short(p.sessionId)} ${initial ? "已在工作" : "加入"}`;
-				if (label) line += `（任务：${label}）`;
+				if (act) line += `（${act}）`;
 				if (files.length > 0) line += `，近期改过：${files.slice(0, 5).join("、")}`;
 				pushBroadcast(`join:${p.sessionId}`, line);
 				if (!initial) {
-					ctx.ui.notify(`pair-guard：新的并发会话加入（${short(p.sessionId)}${label ? `，任务：${label}` : ""}）`, "info");
+					ctx.ui.notify(`pair-guard：新的并发会话加入（${short(p.sessionId)}${act ? `，${act}` : ""}）`, "info");
 				}
 			} else {
 				for (const f of files) {
 					if (![...prev.files].some((pf) => samePath(pf, f))) {
-						pushBroadcast(`file:${p.sessionId}:${f.toLowerCase()}`, `${hhmm()} ${short(p.sessionId)} 修改了 ${f}`);
+						pushBroadcast(`file:${p.sessionId}:${f.toLowerCase()}`, `${hhmm()} ${short(p.sessionId)} 修改了 ${f}${act ? `（${act}）` : ""}`);
 					}
 				}
 				if (label !== prev.label && label) {
@@ -262,10 +284,10 @@ export default function (pi: ExtensionAPI) {
 		sessionsDir = path.join(cwd, ".pi", "sessions");
 		const sid = ctx.sessionManager.getSessionId();
 		selfFile = path.join(sessionsDir, `${sid}.json`);
-		// 跨 reload 保留手动标签（同一 sessionId 的旧文件还在）
-		let prevLabel = "";
+		// 跨 reload 保留手动标签与 AI 自报标题（同一 sessionId 的旧文件还在）
+		let prev: Partial<SessionRecord> = {};
 		try {
-			prevLabel = (JSON.parse(fs.readFileSync(selfFile, "utf8")) as SessionRecord).label ?? "";
+			prev = JSON.parse(fs.readFileSync(selfFile, "utf8")) as SessionRecord;
 		} catch {
 			/* 首次注册 */
 		}
@@ -274,7 +296,10 @@ export default function (pi: ExtensionAPI) {
 			pid: process.pid,
 			startedAt: Date.now(),
 			lastBeat: Date.now(),
-			label: prevLabel,
+			label: prev.label ?? "",
+			work: prev.work,
+			step: prev.step,
+			stepSource: prev.stepSource,
 			recentFiles: [],
 		};
 		persistSelf();
@@ -302,6 +327,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		self = null;
+		delete (globalThis as Record<string, unknown>).__PI_PAIR_GUARD_API__;
 		peerSnapshot.clear();
 		pendingBroadcasts = [];
 		pendingKeys.clear();
@@ -365,8 +391,8 @@ export default function (pi: ExtensionAPI) {
 			const hit = peer.recentFiles.find((f) => samePath(f.path, rel) && now - f.at < RECENT_FILE_TTL_MS);
 			if (!hit) continue;
 			const agoMin = Math.max(1, Math.round((now - hit.at) / 60_000));
-			const label = peer.label;
-			const who = `${short(peer.sessionId)}${label ? `（任务：${label}）` : ""}`;
+			const act = trunc(peerActivity(peer), 30);
+			const who = `${short(peer.sessionId)}${act ? `（${act}）` : ""}`;
 			const warn: (typeof event.content)[number] = {
 				type: "text",
 				text:
@@ -397,6 +423,70 @@ export default function (pi: ExtensionAPI) {
 				content,
 			},
 		};
+	});
+
+	// ---- set_title 工具（AI 自报进度标题） ------------------------------------------
+
+	/** 应用标题变更并落盘：work 同步 pi.setSessionName，step 带来源标记；返回变更描述行 */
+	function applyTitle(work: string | undefined, step: string | undefined, source: "manual" | "auto"): string[] {
+		if (!self) return [];
+		const changed: string[] = [];
+		if (work !== undefined) {
+			const w = work.trim().slice(0, MAX_TITLE_LEN);
+			self.work = w || undefined;
+			if (w) pi.setSessionName(w); // 会话显示名：/resume 选择器直接可见（pi 原生持久化）
+			changed.push(w ? `工作标题已设为「${w}」` : "工作标题已清除");
+		}
+		if (step !== undefined) {
+			const s = step.trim().slice(0, MAX_TITLE_LEN);
+			self.step = s || undefined;
+			self.stepSource = s ? source : undefined;
+			changed.push(s ? `步骤标题已设为「${s}」` : "步骤标题已清除");
+		}
+		if (changed.length > 0) persistSelf();
+		return changed;
+	}
+
+	/** 跨扩展联动桥：workflow-mgr 经此写入自动兜底的 step 标题（仿 __PI_HUD_API__ 模式） */
+	(globalThis as Record<string, unknown>).__PI_PAIR_GUARD_API__ = {
+		setTitle: (work: string | undefined, step: string | undefined, source: "manual" | "auto"): void => {
+			if (!self) return;
+			if (source === "auto") {
+				// AI 手写的 step 优先：manual 值不被自动兑底覆盖；无变化不落盘
+				if (step === undefined || self.stepSource === "manual" || step === self.step) return;
+			}
+			applyTitle(work, step, source);
+		},
+	};
+
+	pi.registerTool({
+		name: "set_title",
+		label: "自报进度标题",
+		description:
+			"给当前会话设置两级标题，讲述自己正在干啥。" +
+			"work=整个工作的标题（如「重构 HUD 余额模块」）：同步为会话显示名，用户在 /resume 恢复会话时直接看到，" +
+			"也写入会话注册表供同项目的其他并发 pi 会话互见；开始一项新工作时设置一次，工作转向时更新。" +
+			"step=当前步骤的标题（如「正在改 hud-balance 适配器」）：随工作推进及时更新，" +
+			"其他并发会话据此了解你的实时进度、避免冲突。" +
+			"两者至少传一个；传空字符串清除对应标题。",
+		promptSnippet:
+			"自报进度：set_title({work?, step?}) → work=整体工作标题（/resume 可见），step=当前步骤（并发会话互见）",
+		parameters: Type.Object({
+			work: Type.Optional(Type.String({ description: "整个工作的标题（空串清除）；开始新工作时设置" })),
+			step: Type.Optional(Type.String({ description: "当前步骤的标题（空串清除）；推进到不同步骤时更新" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			if (!self) {
+				return { content: [{ type: "text", text: "会话尚未注册（session_start 未触发），稍后再试" }], details: {} };
+			}
+			const work = typeof params.work === "string" ? params.work : undefined;
+			const step = typeof params.step === "string" ? params.step : undefined;
+			if (work === undefined && step === undefined) {
+				return { content: [{ type: "text", text: "work 与 step 至少传一个" }], details: {} };
+			}
+			const changed = applyTitle(work, step, "manual");
+			return { content: [{ type: "text", text: changed.join("；") }], details: {} };
+		},
 	});
 
 	// ---- /pair 命令 ------------------------------------------------------------
@@ -450,11 +540,12 @@ export default function (pi: ExtensionAPI) {
 			const lines = peers.map((p) => {
 				const agoMin = Math.max(0, Math.round((now - p.lastBeat) / 60_000));
 				const label = p.label || "（无标签）";
+				const titles = (p.work ? `\n  工作：${p.work}` : "") + (p.step ? `\n  步骤：${p.step}` : "");
 				const files = p.recentFiles
 					.filter((f) => now - f.at < RECENT_FILE_TTL_MS)
 					.map((f) => `${f.path}（${Math.max(0, Math.round((now - f.at) / 60_000))} 分钟前）`)
 					.join("、");
-				return `会话 ${short(p.sessionId)}（pid ${p.pid}，${agoMin} 分钟前活跃）\n  任务：${label}\n  最近修改：${files || "无"}`;
+				return `会话 ${short(p.sessionId)}（pid ${p.pid}，${agoMin} 分钟前活跃）${titles}\n  任务：${label}\n  最近修改：${files || "无"}`;
 			});
 			ctx.ui.notify(`pair-guard：${peers.length} 个并发会话\n${lines.join("\n")}`, "info");
 		},

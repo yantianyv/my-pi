@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-09-20T08:57:24.422Z",
+  "currentTaskId": null,
+  "tasks": {
+    "0.1": {
+      "status": "done",
+      "doneAt": "2026-09-20T08:41:10.027Z"
+    },
+    "0.2": {
+      "status": "done",
+      "doneAt": "2026-09-20T08:43:29.967Z"
+    },
+    "1.1": {
+      "status": "done",
+      "doneAt": "2026-09-20T08:45:25.419Z"
+    },
+    "2.1": {
+      "status": "done",
+      "doneAt": "2026-09-20T08:48:41.632Z"
+    }
+  },
+  "milestones": {},
+  "notes": [],
+  "log": [
+    {
+      "ts": "2026-09-20T08:41:10.027Z",
+      "event": "task_done",
+      "taskId": "0.1",
+      "msg": "数据模型与 set_title 工具"
+    },
+    {
+      "ts": "2026-09-20T08:41:10.027Z",
+      "event": "task_start",
+      "taskId": "0.2",
+      "msg": "peer 可见性：广播捎带与 /pair 展示"
+    },
+    {
+      "ts": "2026-09-20T08:43:29.967Z",
+      "event": "task_done",
+      "taskId": "0.2",
+      "msg": "peer 可见性：广播捎带与 /pair 展示"
+    },
+    {
+      "ts": "2026-09-20T08:43:29.967Z",
+      "event": "task_start",
+      "taskId": "1.1",
+      "msg": "wf_switch 自动兜底 step"
+    },
+    {
+      "ts": "2026-09-20T08:45:25.419Z",
+      "event": "task_done",
+      "taskId": "1.1",
+      "msg": "wf_switch 自动兜底 step"
+    },
+    {
+      "ts": "2026-09-20T08:45:25.419Z",
+      "event": "task_start",
+      "taskId": "2.1",
+      "msg": "构建安装与文档更新"
+    },
+    {
+      "ts": "2026-09-20T08:48:41.632Z",
+      "event": "task_done",
+      "taskId": "2.1",
+      "msg": "构建安装与文档更新"
+    }
+  ],
+  "archiveStatus": "全部完成：set_title 双级标题（work→/resume 可见，step→peer 互见）+ workflow-mgr 自动兜底，实测通过"
+}
