@@ -21,6 +21,7 @@
  *   static/sounds/     → ~/.pi/agent/sounds/      （提示音）
  *   static/skills/     → ~/.pi/agent/skills/      （pi skills：目录含 SKILL.md 被递归发现）
  *   static/models.json → ~/.pi/agent/models.json  （OpenRouter 路由等模型配置，已存在则深度合并）
+ *   static/AGENTS.md   → ~/.pi/agent/AGENTS.md    （全局输出受众纪律：标记块合并，块外用户手写内容保留）
  * 并把 settings.json 的 theme 设为本项目主题。
  *
  * 用法：
@@ -45,6 +46,7 @@ const EXT_SRC = path.join(DIST, "extensions");
 const SOUNDS_SRC = path.join(ROOT, "static", "sounds");
 const SKILLS_SRC = path.join(ROOT, "static", "skills");
 const MODELS_SRC = path.join(ROOT, "static", "models.json");
+const AGENTS_SRC = path.join(ROOT, "static", "AGENTS.md");
 const VENDOR_SRC = path.join(ROOT, "src", "vendor");
 const THEMES_DST = path.join(PI_AGENT, "themes");
 const EXT_DST = path.join(PI_AGENT, "extensions");
@@ -525,6 +527,50 @@ function installModelsJson() {
 	if (!dryRun) fs.writeFileSync(dstPath, JSON.stringify(merged, null, 2) + "\n", "utf8");
 }
 
+// 全局 AGENTS.md 标记块：本脚本只管理标记之间的内容，块外用户手写规则原样保留（幂等可重装）
+const AGENTS_MARK_BEGIN = "<!-- my_pi:begin -->";
+const AGENTS_MARK_END = "<!-- my_pi:end -->";
+
+/**
+ * 安装/合并全局 AGENTS.md：static/AGENTS.md 的内容包进 my_pi 标记块写入 ~/.pi/agent/AGENTS.md。
+ * - 目标不存在 → 直接写入；
+ * - 已有标记块 → 替换块内内容（用户块外手写内容保留）；
+ * - 已存在但无标记块 → 交互询问是否追加到末尾（-y / 非 TTY 默认追加）。
+ */
+async function installAgentsMd() {
+	if (!fs.existsSync(AGENTS_SRC)) {
+		log(`跳过全局 AGENTS.md（模板不存在）: ${AGENTS_SRC}`);
+		return;
+	}
+	const dstPath = path.join(PI_AGENT, "AGENTS.md");
+	const block = `${AGENTS_MARK_BEGIN}\n${fs.readFileSync(AGENTS_SRC, "utf8").trim()}\n${AGENTS_MARK_END}`;
+	if (!fs.existsSync(dstPath)) {
+		log(`写入全局 AGENTS.md（${dstPath}）`);
+		if (!dryRun) fs.writeFileSync(dstPath, block + "\n", "utf8");
+		return;
+	}
+	const existing = fs.readFileSync(dstPath, "utf8");
+	const bi = existing.indexOf(AGENTS_MARK_BEGIN);
+	const ei = existing.indexOf(AGENTS_MARK_END);
+	if (bi !== -1 && ei !== -1 && ei > bi) {
+		const merged = existing.slice(0, bi) + block + existing.slice(ei + AGENTS_MARK_END.length);
+		if (merged === existing) {
+			log("全局 AGENTS.md 已是最新，无需修改");
+			return;
+		}
+		log(`更新全局 AGENTS.md 标记块（${dstPath}）`);
+		if (!dryRun) fs.writeFileSync(dstPath, merged, "utf8");
+		return;
+	}
+	// 已存在用户手写的全局 AGENTS.md（无标记块）：询问后追加，不覆盖
+	if (!(await confirm(`检测到已有全局 AGENTS.md（无 my_pi 标记块），是否把输出受众纪律追加到末尾？（Y/n）`))) {
+		log(`跳过全局 AGENTS.md（保留用户既有文件）: ${dstPath}`);
+		return;
+	}
+	log(`追加全局 AGENTS.md 标记块到既有文件末尾（${dstPath}）`);
+	if (!dryRun) fs.writeFileSync(dstPath, existing.replace(/\n*$/, "\n\n") + block + "\n", "utf8");
+}
+
 function applySettings() {
 	const settingsPath = path.join(PI_AGENT, "settings.json");
 	if (!fs.existsSync(settingsPath)) {
@@ -624,6 +670,7 @@ async function main() {
 	removeLegacyExtensions();
 	applySettings();
 	installModelsJson();
+	await installAgentsMd();
 	generateTsconfig();
 
 	// 5. 可选依赖 rtk（失败不阻塞）；dry-run 下只预览

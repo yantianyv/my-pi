@@ -19,7 +19,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 ## 目录结构
 
 ```
-install.js          # 安装脚本（根目录）：交互式向导——检测并自动安装 pi 本体（npm i -g，缺失时）+ 构建依赖 esbuild（npm install）+ 可选依赖 rtk 二进制（缺失时按平台下载 GitHub release，直连优先、gh-proxy 镜像回落，checksums.txt 校验）→ 执行 src/build.js 构建 → 从 dist/extensions/ 装扩展产物、从 static/ 装静态资源（themes/sounds/models.json，无需编译）→ 生成 src/config/tsconfig.json（探测 pi 全局目录）；-y 非交互全自动，--skip-build 跳过构建，--dry-run 只预览
+install.js          # 安装脚本（根目录）：交互式向导——检测并自动安装 pi 本体（npm i -g，缺失时）+ 构建依赖 esbuild（npm install）+ 可选依赖 rtk 二进制（缺失时按平台下载 GitHub release，直连优先、gh-proxy 镜像回落，checksums.txt 校验）→ 执行 src/build.js 构建 → 从 dist/extensions/ 装扩展产物、从 static/ 装静态资源（themes/sounds/models.json/AGENTS.md，无需编译）→ 生成 src/config/tsconfig.json（探测 pi 全局目录）；-y 非交互全自动，--skip-build 跳过构建，--dry-run 只预览
 .gitignore          # 忽略生成物 tsconfig.json / node_modules / dist（产物不入库）
 README.md           # 项目说明（含 HUD 图例、各扩展用法、卸载方法）
 src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（build.js 的唯一输入）
@@ -114,6 +114,9 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
     web-tool/         #   联网工具（多文件扩展源码，build.js 把 index.ts 打包成单文件 web-tool.ts：http.ts 网络层/代理 + search.ts 搜索评分 + fetch.ts 抓取 + dislike.ts 差评 + panel.ts 面板 + index.ts 入口）：web_search 多源搜索（bing + 360 + baidu 三源并行，结果逐条评分合并去重取前 15：标题/URL/摘要权重计分 + 完整短语命中加成，评分 0 滤除；npm 垂类，零 key 零费用，无 AI 总结；第三源选型实测否决 DDG 202 反爬/Jina 不可达/Mojeek 403，见 search.ts 头注释）+ web_dislike 差评降权（AI 对低质量域名记差评，持久化黑名单跨会话生效，×0.6/次、5 次滤除）+ web_fetch 抓网页转 markdown（正文提取 + 截断；turndown/domino/gfm 由 build.js 内联；GitHub blob URL 重写 raw 直取防源码被当标签吞；正文极短（JS 空壳）用 Googlebot UA 重试一次）+ /web-tool-config 代理设置面板（含 blacklist 差评查看/清空）；直连与降级（系统 curl 自动带代理 / 无 curl 退 Node CONNECT 隧道）并行竞速，谁先成功用谁、404 等确定性错误立即判死
     webdav-kb/        #   知识库（WebDAV 云网盘）：14 个 kb_* 工具（help/search/read/write/append/list/upload/download/lslfs/move/delete/status/sync/import）+ /kb /kb-config /kb-sync 命令；本地镜像 + 增量同步（etag/mtime 比对、冲突 .conflict- 副本、同步后自动清理本地空目录）+ 同步健壮性（借鉴 pi-sync：.kb-sync.lock 互斥锁（活锁拒绝/死进程 30min 回收）+ .kb-sync-journal.json 中断恢复 + 上传前 secret 扫描拦截（secrets.ts 高精度模式，allowSecretUpload 兜底）+ delRemote 404 幂等）+ vault 加密区 + LFS 大文件区 + /.history 历史副本区（改动/删除自动留档：结构镜像根、文件名 _yymmddhhmmss 后缀、同秒重名叠 _hash、同内容跳过、自身不递归、不参与列表/检索，恢复走 WebDAV 客户端）；纯文本多格式全文索引（md/txt/csv/tsv/json/jsonl/yaml/yml/toml/html/xml，csv/tsv 表头加权，frontmatter 仅 md 强制）；分类层级守则：/命名空间/用途/自由层级（用途=文档功能六值判定硬约束，自由层级 AI 管理软约束，见 PROTOCOL.md「五、分类层级」）；PROTOCOL.md 守则对 kb_list/kb_status 不透明（走 kb_help 专用通道，kb_search 保留索引兜底；源码默认版 protocol.ts，远端用户可手动迭代）；只读模式（`readOnly`，/kb-config 面板切换、默认关、下次会话生效）：session_start 一次性隐藏 6 个写工具（write/append/upload/import/delete/move，kb_sync 保留），syncAll 随 cfg.readOnly 自适应为仅下载（本地删除→重新下载、本地新建/修改留本地），ensureProtocol 跳过
 static/              #   静态部署物（无需编译，install.js 直接从这装到 ~/.pi/agent/，见 README 各补丁节；仓库根目录）
+  AGENTS.md          #     全局输出受众纪律（解释进对话/注释不记变更史/文案受众自查）：install.js 包进
+                      #     <!-- my_pi:begin/end --> 标记块写入 ~/.pi/agent/AGENTS.md，块外用户手写内容保留、
+                      #     已有无标记块文件时交互询问追加（-y 默认追加）
   themes/matrix.json  #     黑客帝国荧光绿主题
   sounds/task_complete.wav  #     任务完成提示音
   patches/            #     pi 补丁脚本
