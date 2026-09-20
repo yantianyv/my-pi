@@ -87,7 +87,8 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   ~/.pi/agent/perm-gate.json 配置 + /perm-gate 命令）
     pair-guard.ts   #   会话注册表与在场感知（多 pi 会话并发协作 + AI 自报进度标题）：项目级会话注册表（.pi/sessions/<sid>.json，30s 心跳、
                     #   判死双保险：扫描时 process.kill(pid,0) 判活——关窗强杀不走 session_shutdown，pid 一死
-                    #   下次扫描即清理（秒级）；5min 心跳超时兜底；process.on("exit") 同步注销补漏崩溃场景）；write/edit 记录「最近在改哪些文件」（10min 滚动窗口）；
+                    #   下次扫描即清理（秒级）；5min 心跳超时兜底；session_shutdown 按 reason 分流（reload 保留注册表，
+                    #   quit/new/resume/fork 才注销——否则每次 /reload 都会冲掉标题与标签）；write/edit 记录「最近在改哪些文件」（10min 滚动窗口）；
                     #   并发广播：peer 加入/离开/新触碰文件/标签变化以定制消息注入对话（变化驱动、事件键去重、
                     #   极简直播格式、协作约定仅首批附带；绝对时间戳，尾部追加不破坏前缀缓存，消息入历史可回查）；
                     #   投递分两路：agent 运行中经 sendMessage(deliverAs="steer") 实时送达（检测也走双通道：

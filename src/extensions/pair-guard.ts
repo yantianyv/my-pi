@@ -9,7 +9,9 @@
  * - session_start 注册自己（sessionId/pid/启动时间），心跳周期更新 lastBeat；
  *   判死双保险：①扫描时 process.kill(pid, 0) 探测进程存活（关窗强杀走不了
  *   session_shutdown，pid 一死下次扫描即清理，秒级）；②lastBeat 超 PEER_TIMEOUT_MS
- *   兑底（pid 探测不可用的场景）；process.on("exit") 同步注销补漏崩溃场景
+ *   兑底（pid 探测不可用的场景）；
+ *   session_shutdown 按 reason 分流：quit/new/resume/fork 注销自己（会话真实结束），
+ *   reload 保留注册表（进程未变、会话延续，work/step/label 靠它跨 reload 存活）
  * - write/edit 工具调用记录「我最近在改哪些文件」（滚动窗口 RECENT_FILE_TTL_MS）
  * - 广播式知情：peer 加入/离开/触碰新文件/标签变化等事件以定制消息
  *   （customType=pair-guard）注入对话历史——检测走双通道：turn_start 每个模型
@@ -330,14 +332,17 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (event) => {
+		const reason = (event as { reason?: string }).reason;
 		if (heartbeat) {
 			clearInterval(heartbeat);
 			heartbeat = undefined;
 		}
-		if (selfFile) {
+		if (selfFile && reason !== "reload") {
+			// reload 保留注册表（进程未变、会话延续，work/step/label 靠它跨 reload 存活）；
+			// 其余情况（quit/new/resume/fork）会话真实结束，注销自己（崩溃时靠心跳超时由 peer 清理）
 			try {
-				fs.unlinkSync(selfFile); // 注销自己；崩溃时靠心跳超时由 peer 清理
+				fs.unlinkSync(selfFile);
 			} catch {
 				/* 已不存在 */
 			}
