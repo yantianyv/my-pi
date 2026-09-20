@@ -25,6 +25,8 @@
  * - AI 自报标题：set_title 工具写两级标题——work（整个工作在干啥，同步
  *   pi.setSessionName，/resume 会话选择器直接可见）+ step（当前步骤在干啥，
  *   带 stepSource=manual/auto 来源标记，workflow-mgr 自动兜底不覆盖 AI 手写值）；
+ *   step 同时推送到执行中 Working 行（ctx.ui.setWorkingMessage：manual 显「正在…」，
+ *   auto 显「正在推进「任务」…」，step 清空恢复默认）；
  *   标题进注册表供 peer 互见，不单独发广播（随其他广播事件行内捎带，/pair 详情完整展示）
  * - /pair 命令：查看 peer 详情 / label <文本> 设置自己的任务标签 / prune 手动清残留
  *
@@ -96,6 +98,8 @@ export default function (pi: ExtensionAPI) {
 	let pendingKeys = new Set<string>();
 	/** 本会话是否已投递过首批广播（协作约定只在首批附带一次，后续不重复） */
 	let conventionSent = false;
+	/** 已推送到 Working 行的 step 值（null=尚未推送过；变化检测防重复调用） */
+	let lastPushedStep: string | undefined | null = null;
 	/** agent 是否在运行（agent_start→agent_end）：运行中心跳把广播 steer 进 turn，空闲攒到下轮注入 */
 	let agentRunning = false;
 	let lastEditPersist = 0;
@@ -223,6 +227,17 @@ export default function (pi: ExtensionAPI) {
 
 	const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 
+	/** 把当前 step 同步到 pi 的 Working 加载行（streaming 时替代默认「Working」）；step 清空时恢复默认 */
+	function syncWorkingMessage(ctx: ExtensionContext): void {
+		const cur = self?.step;
+		if (cur === lastPushedStep) return;
+		lastPushedStep = cur;
+		// manual 是 AI 写的动词短语（工具描述要求不带「正在」）；auto 是工作流任务标题（名词短语，加「推进」）
+		ctx.ui.setWorkingMessage(
+			cur ? (self?.stepSource === "auto" ? `正在推进「${cur}」…` : `正在${cur}…`) : undefined,
+		);
+	}
+
 	/**
 	 * peer 快照 diff → 广播事件 + 用户通知 + 状态行
 	 * 广播只报变化（加入/离开/新触碰文件/标签变化），连续编辑同一文件不重复报；
@@ -273,6 +288,7 @@ export default function (pi: ExtensionAPI) {
 		self.lastBeat = now;
 		self.recentFiles = self.recentFiles.filter((f) => now - f.at < RECENT_FILE_TTL_MS);
 		persistSelf();
+		syncWorkingMessage(ctx); // API 桥（workflow-mgr 兑底）无 ctx，统一在这里检出变化后推送
 		diffPeers(scanPeers(), ctx);
 		flushSteer();
 	}
@@ -327,6 +343,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		self = null;
+		lastPushedStep = null;
 		delete (globalThis as Record<string, unknown>).__PI_PAIR_GUARD_API__;
 		peerSnapshot.clear();
 		pendingBroadcasts = [];
@@ -352,6 +369,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("turn_start", async (_event, ctx) => {
 		if (!self) return;
+		syncWorkingMessage(ctx); // turn 边界即推送：Working 行本就只有 streaming 时可见，零感知延迟
 		diffPeers(scanPeers(), ctx);
 		flushSteer();
 	});
@@ -473,9 +491,14 @@ export default function (pi: ExtensionAPI) {
 			"自报进度：set_title({work?, step?}) → work=整体工作标题（/resume 可见），step=当前步骤（并发会话互见）",
 		parameters: Type.Object({
 			work: Type.Optional(Type.String({ description: "整个工作的标题（空串清除）；开始新工作时设置" })),
-			step: Type.Optional(Type.String({ description: "当前步骤的标题（空串清除）；推进到不同步骤时更新" })),
+			step: Type.Optional(
+				Type.String({
+					description:
+						"当前步骤的标题（空串清除）；推进到不同步骤时更新。用简短动词短语（如「改 hud-balance 适配器」），不要带「正在」前缀——本会话执行中的 Working 行会显示为「正在…」",
+				}),
+			),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!self) {
 				return { content: [{ type: "text", text: "会话尚未注册（session_start 未触发），稍后再试" }], details: {} };
 			}
@@ -485,6 +508,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: "work 与 step 至少传一个" }], details: {} };
 			}
 			const changed = applyTitle(work, step, "manual");
+			syncWorkingMessage(ctx); // 立即生效，不等下个 turn 边界
 			return { content: [{ type: "text", text: changed.join("；") }], details: {} };
 		},
 	});

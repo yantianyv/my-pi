@@ -98,7 +98,8 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   多会话下同标签无意义已移除——多工作流并发隔离由 workflow-mgr 会话绑定负责）；
                     #   AI 自报标题：set_title({work?, step?}) 工具——work 同步 pi.setSessionName（/resume 选择器可见）
                     #   + 注册表，step 带 stepSource=manual/auto 来源标记，标题不单独发广播（随其他事件行内捎带，
-                    #   /pair 详情完整展示）；暴露 __PI_PAIR_GUARD_API__（仿 __PI_HUD_API__ 模式）供 workflow-mgr
+                    #   /pair 详情完整展示）；step 还推送到执行中 Working 行（ctx.ui.setWorkingMessage，manual 显
+                    #   「正在…」/ auto 显「正在推进「任务」…」，清空恢复默认）；暴露 __PI_PAIR_GUARD_API__（仿 __PI_HUD_API__ 模式）供 workflow-mgr
                     #   wf_switch 推进后自动兜底 step=当前任务标题（manual 优先不覆盖，推进到头清 auto 值）；
                     #   状态行推「👥 N 并发会话」+ peer 出现/消失 notify + /pair 命令
     claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn、双击 Ctrl+C 预填 /rewind 回退
