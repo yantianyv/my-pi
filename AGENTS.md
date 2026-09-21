@@ -85,7 +85,7 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   白名单规则带保鲜元数据（addedAt/lastHit/hits，命中时刷新），超 30 天未命中自动清理（启动/加白时），
                     #   /perm-gate prune 手动清理、状态行提示过期条数；旧版纯字符串配置自动归一化兼容；
                     #   ~/.pi/agent/perm-gate.json 配置 + /perm-gate 命令）
-    pair-guard.ts   #   会话注册表与在场感知（多 pi 会话并发协作 + AI 自报进度标题）：项目级会话注册表（.pi/sessions/<sid>.json，30s 心跳、
+    pair-guard.ts   #   会话注册表与在场感知（多 pi 会话并发协作 + AI 自报工作标题）：项目级会话注册表（.pi/sessions/<sid>.json，30s 心跳、
                     #   判死双保险：扫描时 process.kill(pid,0) 判活——关窗强杀不走 session_shutdown，pid 一死
                     #   下次扫描即清理（秒级）；5min 心跳超时兜底；session_shutdown 按 reason 分流（reload 保留注册表，
                     #   quit/new/resume/fork 才注销——否则每次 /reload 都会冲掉标题与标签）；write/edit 记录「最近在改哪些文件」（10min 滚动窗口）；
@@ -97,14 +97,13 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   空闲攒到 before_agent_start 排空；写 peer 近窗口文件时 tool_result
                     #   追加 ⚠️ 软警告；任务标签仅 /pair label 手动设置（曾自动读 workflow-mgr 共享工作流当前任务，
                     #   多会话下同标签无意义已移除——多工作流并发隔离由 workflow-mgr 会话绑定负责）；
-                    #   AI 自报标题：set_title({work?, step?}) 工具——work 同步 pi.setSessionName（/resume 选择器可见）
-                    #   + 注册表，step 带 stepSource=manual/auto 来源标记，标题不单独发广播（随其他事件行内捎带，
-                    #   /pair 详情完整展示）；step 还推送到执行中 Working 行（ctx.ui.setWorkingMessage，manual 显
-                    #   「正在…」/ auto 显「正在推进「任务」…」，清空恢复默认）；暴露 __PI_PAIR_GUARD_API__（仿 __PI_HUD_API__ 模式）供 workflow-mgr
-                    #   wf_switch 推进后自动兜底 step=当前任务标题（manual 优先不覆盖，推进到头清 auto 值）；
+                    #   AI 自报标题：set_title({work?}) 工具——work 同步 pi.setSessionName（/resume 选择器可见）
+                    #   + 注册表，标题不单独发广播（随其他事件行内捎带，/pair 详情完整展示）；step 概念已删（
+                    #   「在等什么」由 status-beacon 事件驱动，无需 AI 自报步骤）；
+                    #   执行中 Working 行由 status-beacon 负责，本扩展不写；
                     #   状态行推「👥 N 并发会话」+ peer 出现/消失 notify + /pair 命令
     claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn、双击 Ctrl+C 预填 /rewind 回退
-    status-beacon.ts  #   全链路状态感知（前身 task-alert）：执行中标题进度（agent_start→settled 全程 spinner+当前工具活动+目录名，提醒期间让位、应答后恢复）+ 五状态五音效（完成/出错/等待人工 ui_prompt/空闲 60s/子代理完成，音源 ClaudeCodeInit wav/piano）+ 提醒标题动画 + setStatus 状态推送（三状态独立 key，沿用 task-alert* 旧名）
+    status-beacon.ts  #   全链路状态感知（前身 task-alert）：执行中标题进度（agent_start→settled 全程 spinner+当前工具活动+目录名，提醒期间让位、应答后恢复）+ 接管执行中 Working 行（独占 setWorkingMessage 写入，按「在等什么」分层：等人工（ui_prompt 阻塞，ask/perm-gate 经 __PI_STATUS_BEACON_API__.wait 登记具体文本，如「等你：回答问卷「方案确认」」）> 等工具/子代理完成 > 生成中显廉价 AI 概括的当前动作短语（message_end 触发异步概括，pickAuxModel 选最便宜已认证模型，仿 perm-gate completeSimple 路线，/beacon model 经 shared/model-selector 官方面板或 provider/id 直选，覆写 status-beacon.json，缺省自动；无则退注册表 work，再退 pi 默认「Working」）；run 开局重置防残留）+ 五状态五音效（完成/出错/等待人工 ui_prompt/空闲 60s/子代理完成，音源 ClaudeCodeInit wav/piano）+ 提醒标题动画 + setStatus 状态推送（三状态独立 key，沿用 task-alert* 旧名）
     workflow-mgr/     #   人机协作任务面板（多文件扩展源码：build.js 把 index.ts 入口打包成单文件 workflow-mgr.ts）
       index.ts        #     插件主体（组装薄壳）：tools.ts（7 个工具 wf_workflow/status/switch/block/rollback/note/milestone，含 import 一次性导入）+ commands.ts（/workflow-config 只留无参）+ events.ts（session 钩子 + hud 联动 + 条件注入）+ 事件钩子
       tools.ts       #     工具注册：wf_switch（完成+推进一步到位，complete=false 搁置；推进后附 status 记录复核提醒）/ wf_note（AI 记录，对用户透明：kind=fact/status 时效分类 + key 主题键顶替防决策打架，status 记录切换任务时提醒复核）/ wf_milestone（增删改）等 7 工具；wf_workflow import 初始化一次性导入（草稿 json，id 自动生成 + 全图环检测带链路，非空拒绝）；wf_workflow bind 会话绑定（slot 缺省列出可选+当前绑定，新名称建空槽，"none" 本会话不用工作流）；未绑定/不用工作流时其余 6 工具被 guardBound 守卫拒绝

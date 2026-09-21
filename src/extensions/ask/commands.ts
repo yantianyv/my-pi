@@ -8,7 +8,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { QuestionnairePage, QuestionnairePicker, type PageResult, type TermDims } from "./page";
-import { refreshPendingStatus, rememberCtx } from "./state";
+import { refreshPendingStatus, rememberCtx, setWorkingWait } from "./state";
 import { initStore, listQuestionnaires, removeQuestionnaire, saveQuestionnaire } from "./store";
 import { makeFullscreenOverlay, makePageHooks } from "./tool";
 import { answeredProgress, answerableQuestions, formatAnswersMessage } from "./types";
@@ -51,10 +51,16 @@ export function registerAnswerCommand(pi: ExtensionAPI): void {
 			}
 
 			const dims: TermDims = { w: 0, h: 0 };
-			const result = await ctx.ui.custom<PageResult>(
-				(tui, theme, _kb, done) => new QuestionnairePage(tui, theme, target.q, done, dims, makePageHooks()),
-				makeFullscreenOverlay(dims),
-			);
+			setWorkingWait(`回答问卷「${target.q.title}」`);
+			let result: PageResult;
+			try {
+				result = await ctx.ui.custom<PageResult>(
+					(tui, theme, _kb, done) => new QuestionnairePage(tui, theme, target.q, done, dims, makePageHooks()),
+					makeFullscreenOverlay(dims),
+				);
+			} finally {
+				setWorkingWait(null);
+			}
 
 			if (result.action === "submit") {
 				removeQuestionnaire(target.file);

@@ -16,5 +16,7 @@ src/extensions/test/.tmp-*
 # 问卷运行时数据（ask 扩展的草稿/答案，随答随删，类似会话状态）
 .pi/questionnaires/
 .pi/sessions/
+# pair-guard 临时排障日志（本机运行时数据）
+.pi/pair-*.log
 # 工作流会话绑定表（workflow-mgr：sessionId→槽，本机会话级运行时数据）
 .pi/workflow/bindings.json

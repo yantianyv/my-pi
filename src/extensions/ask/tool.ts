@@ -18,7 +18,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { QuestionnairePage, type PageHooks, type PageResult, type TermDims } from "./page";
-import { enqueueQuestionnaireUI, refreshPendingStatus, rememberCtx } from "./state";
+import { enqueueQuestionnaireUI, refreshPendingStatus, rememberCtx, setWorkingWait } from "./state";
 import { createQuestionnaire, initStore, listQuestionnaires, removeQuestionnaire, saveQuestionnaire } from "./store";
 import {
 	answeredProgress,
@@ -302,14 +302,20 @@ export function registerAskTool(pi: ExtensionAPI): void {
 				};
 			}
 
-			// TUI：整屏打开问卷页（排队链保证同批多份逐个打开）
+			// TUI：整屏打开问卷页（排队链保证同批多份逐个打开）；登记 Working 行等待文本
 			const dims: TermDims = { w: 0, h: 0 };
-			const result = await enqueueQuestionnaireUI(() =>
-				ctx.ui.custom<PageResult>(
-					(tui, theme, _kb, done) => new QuestionnairePage(tui, theme, q, done, dims, makePageHooks()),
-					makeFullscreenOverlay(dims),
-				),
-			);
+			setWorkingWait(`回答问卷「${q.title}」`);
+			let result: PageResult;
+			try {
+				result = await enqueueQuestionnaireUI(() =>
+					ctx.ui.custom<PageResult>(
+						(tui, theme, _kb, done) => new QuestionnairePage(tui, theme, q, done, dims, makePageHooks()),
+						makeFullscreenOverlay(dims),
+					),
+				);
+			} finally {
+				setWorkingWait(null);
+			}
 
 			if (result.action === "submit") {
 				removeQuestionnaire(file);

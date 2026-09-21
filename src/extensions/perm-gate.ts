@@ -768,11 +768,21 @@ export default function (pi: ExtensionAPI) {
 		const result = new Promise<{ block: true; reason: string } | undefined>((resolve) => {
 			panelChain = panelChain.then(async () => {
 				const title = source === "blacklist" ? "⚠️ 命中黑名单，需人工复核" : "🛡 AI 建议人工复核";
-				// 自绘复核面板：命令全文折行展示不截断（PgUp/PgDn 滚动），Esc/「驳回」= 驳回
-				const choice = await ctx.ui.custom<string | null>(
-					(tui, theme, _kb, done) => new ReviewPanel(tui, theme, title, command, detail, done),
-					{ overlay: true, overlayOptions: { width: "92%", minWidth: 60, maxHeight: "80%" } },
-				);
+				// 自绘复核面板：命令全文折行展示不截断（PgUp/PgDn 滚动），Esc/「驳回」= 驳回；
+				// 登记 Working 行等待文本（status-beacon 桥，缺席静默）
+				const waitApi = (globalThis as Record<string, unknown>).__PI_STATUS_BEACON_API__ as
+					| { wait?: (t: string | null) => void }
+					| undefined;
+				waitApi?.wait?.(`复核 bash 命令：${command.trim().split("\n")[0].slice(0, 40)}`);
+				let choice: string | null;
+				try {
+					choice = await ctx.ui.custom<string | null>(
+						(tui, theme, _kb, done) => new ReviewPanel(tui, theme, title, command, detail, done),
+						{ overlay: true, overlayOptions: { width: "92%", minWidth: 60, maxHeight: "80%" } },
+					);
+				} finally {
+					waitApi?.wait?.(null);
+				}
 				switch (choice) {
 					case "放行一次":
 						resolve(undefined);

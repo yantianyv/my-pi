@@ -7,6 +7,11 @@
  *   执行中（agent_start → agent_settled）
  *     → 标题 spinner（200ms 转帧）+ 当前活动（工具执行时显示工具图标+名称，生成时显示「思考中」）+ 目录名
  *     → 如「⠋ ⌨️ bash — my_pi」；ui_prompt 阻塞时让位给等待人工提醒，应答后自动恢复
+ *     → 同时接管执行中 Working 行（pi setWorkingMessage，本扩展独占写入），按「在等什么」分层：
+ *       等人工（ui_prompt 阻塞：ask 问卷/perm-gate 复核，文本可由扩展经 __PI_STATUS_BEACON_API__ 登记）
+ *       > 等工具/子代理完成 > 生成中显廉价 AI 概括的当前动作短语（message_end 触发后台异步概括，
+ *       仿 perm-gate 审核的 pickAuxModel 路线；无则退注册表 work，再退 pi 默认「Working」）；
+ *       run 开局重置，防上一 run 文案残留
  *   任务完成（agent_settled 正常结束）→ task_complete.wav + ✅ 标题/状态栏闪烁
  *   出错终止（末条 assistant stopReason="error"）→ error.wav + ❌ 闪烁
  *   等待人工（ui_prompt_start；perm-gate 人工复核 / ask 问卷等阻塞提示）→ attention.wav + ⏳ 闪烁，
@@ -31,6 +36,11 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { Message } from "@earendil-works/pi-ai";
+import { pickAuxModel, type AnyModel } from "./shared/model-pick";
+import { pickModelViaSelector } from "./shared/model-selector";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -99,6 +109,24 @@ const WORK_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /** 执行中标题转帧间隔（比提醒闪烁快，一眼看出「在跑」） */
 const WORK_TITLE_INTERVAL_MS = 200;
 
+/** Working 行：廉价 AI 概括「正在干什么」短语的超时与节流（概括是增强，失败静默保留旧短语） */
+const STEP_PHRASE_MAX_CHARS = 16;
+const STEP_PHRASE_TIMEOUT_MS = 15_000;
+const STEP_PHRASE_MIN_INTERVAL_MS = 12_000;
+const STEP_PHRASE_MAX_CHARS_INPUT = 1500;
+
+/** 概括模型覆盖项配置（/beacon model 写入；缺省 = 自动：最便宜已认证模型） */
+const BEACON_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "status-beacon.json");
+
+function loadBeaconModel(): string | undefined {
+	try {
+		const j = JSON.parse(fs.readFileSync(BEACON_CONFIG_FILE, "utf8")) as { model?: string };
+		return typeof j.model === "string" && j.model.trim() ? j.model : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** 常见工具的标题图标映射（未命中退 🔧）；只装饰，活动文本仍以工具名为准 */
 const TOOL_ICON: Record<string, string> = {
 	bash: "⌨️",
@@ -117,11 +145,39 @@ const TOOL_ICON: Record<string, string> = {
 	kb_write: "📚",
 };
 
-/** 工具名 → 标题活动文案（图标 + 截断工具名） */
+/** 工具名 → 标题图标+短名（未命中退 🔧） */
 function toolLabel(name: string): string {
 	const icon = TOOL_ICON[name] ?? "🔧";
 	const short = name.length > 16 ? name.slice(0, 16) + "…" : name;
 	return `${icon} ${short}`;
+}
+
+/** ui_prompt kind → 人话（扩展未登记等待文本、事件也无 title 时兜底） */
+function promptKindLabel(kind: string): string {
+	switch (kind) {
+		case "select":
+			return "选择";
+		case "confirm":
+			return "确认";
+		case "input":
+			return "输入";
+		case "editor":
+			return "编辑";
+		default:
+			return "处理交互提示";
+	}
+}
+
+/** 从 pair-guard 注册表读本会话 work（AI 自报的工作标题）；注册表缺席/损坏返回 undefined */
+function readWork(ctx: ExtensionContext): string | undefined {
+	try {
+		const sid = ctx.sessionManager.getSessionId();
+		const raw = fs.readFileSync(path.join(ctx.cwd, ".pi", "sessions", `${sid}.json`), "utf8");
+		const w = (JSON.parse(raw) as { work?: string }).work;
+		return typeof w === "string" && w.trim() ? w : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** 取 turn 末条 assistant 消息的 stopReason（无 assistant 消息返回 undefined） */
@@ -158,6 +214,101 @@ export default function (pi: ExtensionAPI) {
 	let agentRunning = false;
 	/** 当前正在执行的工具活动文案（null = 模型生成中，显示「思考中」） */
 	let currentTool: string | null = null;
+
+	// ---- Working 行「在等什么」（本扩展独占 setWorkingMessage 写入） ----------------
+	let promptKind: string | null = null; // ui_prompt 阻塞中的 kind（等人工层级用）
+	let promptTitle: string | undefined; // ui_prompt 事件的 title（custom 类通常缺失）
+	let promptWaitText: string | undefined; // 阻塞 UI 的扩展登记的具体等待文本（ask/perm-gate）
+	let stepPhrase: string | undefined; // 廉价 AI 概括的「正在干什么」短语（生成中显示）
+	let stepInFlight = false;
+	let stepLastAt = 0;
+	let beaconModel = loadBeaconModel(); // 概括模型覆盖项（provider/id）；undefined = 自动最便宜
+
+	/** 概括用模型：手动覆盖优先（不可用时静默退自动），自动 = 最便宜已认证模型 */
+	function resolveStepModel(ctx: ExtensionContext): AnyModel | undefined {
+		if (beaconModel) {
+			const slash = beaconModel.indexOf("/");
+			const m = slash > 0 ? ctx.modelRegistry.find(beaconModel.slice(0, slash), beaconModel.slice(slash + 1)) : undefined;
+			if (m && ctx.modelRegistry.hasConfiguredAuth(m)) return m;
+		}
+		return pickAuxModel(ctx, []);
+	}
+
+	/** Working 行文案分层：等你 X > 等 X 完成 > 正在（廉价 AI 短语 > work > pi 默认） */
+	function workingLineText(ctx: ExtensionContext): string | undefined {
+		if (promptKind) {
+			const detail = promptWaitText ?? promptTitle ?? promptKindLabel(promptKind);
+			return `等你：${detail}`;
+		}
+		if (currentTool) return `等 ${currentTool} 完成…`;
+		if (stepPhrase) return `正在${stepPhrase}…`;
+		const work = readWork(ctx);
+		return work ? `正在${work}…` : undefined;
+	}
+
+	/** 把当前分层文案推到 Working 行（agent 未运行/无 UI 时不写） */
+	function applyWorking(ctx: ExtensionContext): void {
+		if (!agentRunning || !ctx.hasUI) return;
+		ctx.ui.setWorkingMessage(workingLineText(ctx));
+	}
+
+	/** 廉价 AI 概括「正在干什么」：最新 assistant 回复 → ≤16 字动词短语（异步、节流、失败静默） */
+	function summarizeStep(ctx: ExtensionContext, assistantText: string): void {
+		if (stepInFlight || Date.now() - stepLastAt < STEP_PHRASE_MIN_INTERVAL_MS) return;
+		const model = resolveStepModel(ctx);
+		if (!model) return;
+		void (async () => {
+			stepInFlight = true;
+			stepLastAt = Date.now();
+			try {
+				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+				if (!auth.ok) return;
+				const work = readWork(ctx);
+				const truncated =
+					assistantText.length > STEP_PHRASE_MAX_CHARS_INPUT
+						? assistantText.slice(0, STEP_PHRASE_MAX_CHARS_INPUT) + "\n…(已截断)"
+						: assistantText;
+				const messages: Message[] = [
+					{
+						role: "user",
+						content: `工作标题：${work ?? "（未设）"}\n\nAI 助手最新回复：\n${truncated}`,
+						timestamp: Date.now(),
+					},
+				];
+				const result = await completeSimple(
+					model,
+					{
+						systemPrompt:
+							"你是实时进度观察员。根据 AI 助手的最新回复，用一个不超过 16 字的动词短语概括它当前正在执行的步骤（如「排查图片超限问题」「重构锁等待逻辑」）。只输出短语本身，不要主语、句号或任何解释。",
+						messages,
+					},
+					{
+						apiKey: auth.apiKey,
+						headers: { ...auth.headers },
+						maxTokens: 64,
+						temperature: 0,
+						signal: AbortSignal.timeout(STEP_PHRASE_TIMEOUT_MS),
+					},
+				);
+				const text = result.content
+					.filter((b) => b.type === "text")
+					.map((b) => (b as { type: "text"; text: string }).text)
+					.join("")
+					.trim()
+					.split("\n")[0]
+					.trim()
+					.slice(0, STEP_PHRASE_MAX_CHARS);
+				if (text && text !== stepPhrase) {
+					stepPhrase = text;
+					applyWorking(ctx); // 生成中/空闲工具态立即热更
+				}
+			} catch {
+				/* 概括是增强：失败静默，保留旧短语 */
+			} finally {
+				stepInFlight = false;
+			}
+		})();
+	}
 
 	function clearTimers() {
 		if (titleTimer) clearInterval(titleTimer);
@@ -296,28 +447,52 @@ export default function (pi: ExtensionAPI) {
 	pi.on("ui_prompt_start", async (event, ctx) => {
 		if (ctx.isIdle()) return;
 		waitingDepth++;
-		// 提示标题截断进状态文案（如「⏳ 等待人工：权限复核」）
-		const title = event.title?.replace(/\s+/g, " ").trim();
+		// 提示标题截断进状态文案（如「⏳ 等待人工：权限复核」）；扩展登记的等待文本优先
+		const title = (promptWaitText ?? event.title)?.replace(/\s+/g, " ").trim();
 		const suffix = title ? `：${title.length > 12 ? title.slice(0, 12) + "…" : title}` : "";
 		startAlert("waiting", ctx, suffix);
+		promptKind = event.kind;
+		promptTitle = event.title;
+		applyWorking(ctx);
 	});
 
 	pi.on("ui_prompt_end", async (_event, ctx) => {
 		waitingDepth = Math.max(0, waitingDepth - 1);
 		if (waitingDepth === 0 && alertKind === "waiting") stopAlert(ctx);
+		if (waitingDepth === 0) {
+			promptKind = null;
+			promptTitle = undefined;
+			applyWorking(ctx);
+		}
 	});
 
-	// 工具执行开始 → 执行中标题显示当前工具活动（提醒期间让位，不抢标题）
-	pi.on("tool_execution_start", async (event) => {
+	// 工具执行开始 → 执行中标题显示当前工具活动（提醒期间让位，不抢标题）；
+	// Working 行切换到「等 X 完成…」层级
+	pi.on("tool_execution_start", async (event, ctx) => {
 		currentTool = toolLabel(event.toolName);
 		if (workTimer && currentCtx?.hasUI) currentCtx.ui.setTitle(workTitleText());
+		applyWorking(ctx);
 	});
 
 	// 工具执行结束 → 回到「思考中」；子代理完成补一声提示音（中间事件，不动标题/状态），
 	// 失败交给 turn 级 error 统一收尾
-	pi.on("tool_execution_end", async (event) => {
+	pi.on("tool_execution_end", async (event, ctx) => {
 		currentTool = null;
+		applyWorking(ctx);
 		if (event.toolName === "subagent" && !event.isError) playSound(SOUNDS.subagent);
+	});
+
+	// assistant 消息完结 → 触发廉价 AI 异步概括「正在干什么」（节流，静默失败）
+	pi.on("message_end", async (event, ctx) => {
+		if (!agentRunning) return;
+		const m = event.message;
+		if (m.role !== "assistant") return;
+		const text = m.content
+			.filter((b) => b.type === "text")
+			.map((b) => (b as { type: "text"; text: string }).text)
+			.join("\n")
+			.trim();
+		if (text) summarizeStep(ctx, text);
 	});
 
 	// 新任务开始 → 撤掉上一提醒 + 启动执行中标题
@@ -328,6 +503,10 @@ export default function (pi: ExtensionAPI) {
 		agentRunning = true;
 		currentCtx = ctx;
 		startWorkTitle(ctx);
+		// Working 行 run 开局重置：清上一 run 的工具/短语残留，先显 work 兑底
+		currentTool = null;
+		stepPhrase = undefined;
+		applyWorking(ctx);
 	});
 	pi.on("input", async (_event, ctx) => {
 		stopAlert(ctx);
@@ -350,5 +529,48 @@ export default function (pi: ExtensionAPI) {
 		clearTimers();
 		inputHookUnsubscribe?.();
 		inputHookUnsubscribe = undefined;
+		delete (globalThis as Record<string, unknown>).__PI_STATUS_BEACON_API__;
 	});
+
+	// /beacon 命令：概括模型选择（无参官方面板 / auto / provider/id），配置持久化 status-beacon.json
+	pi.registerCommand("beacon", {
+		description: "status-beacon：Working 行「正在干什么」概括模型（选面板 / auto / provider/id）",
+		handler: async (args, ctx) => {
+			const arg = args.trim();
+			if (arg === "auto") {
+				beaconModel = undefined;
+			} else if (arg) {
+				const slash = arg.indexOf("/");
+				const m = slash > 0 ? ctx.modelRegistry.find(arg.slice(0, slash), arg.slice(slash + 1)) : undefined;
+				if (!m) {
+					ctx.ui.notify(`status-beacon：找不到模型 ${arg}（格式 provider/modelId）`, "error");
+					return;
+				}
+				beaconModel = `${m.provider}/${m.id}`;
+			} else {
+				if (!ctx.hasUI) {
+					ctx.ui.notify("用法：/beacon model <provider>/<modelId> ｜ /beacon model auto", "info");
+					return;
+				}
+				const picked = await pickModelViaSelector(ctx);
+				if (!picked) return; // Esc 取消
+				beaconModel = `${picked.provider}/${picked.id}`;
+			}
+			try {
+				fs.writeFileSync(BEACON_CONFIG_FILE, JSON.stringify({ model: beaconModel }, null, "\t"));
+			} catch {
+				/* 持久化失败不阻断 */
+			}
+			ctx.ui.notify(`status-beacon 概括模型：${beaconModel ?? "自动（最便宜已认证兑底）"}（已持久化）`, "info");
+		},
+	});
+
+	/** 跨扩展登记桥：阻塞 UI 的扩展（ask/perm-gate）在弹窗时登记具体等待文本，
+	 *  Working 行「等你：X」层级优先显示（仿 __PI_HUD_API__ 模式） */
+	(globalThis as Record<string, unknown>).__PI_STATUS_BEACON_API__ = {
+		wait: (text: string | null): void => {
+			promptWaitText = text || undefined;
+			if (currentCtx) applyWorking(currentCtx);
+		},
+	};
 }
