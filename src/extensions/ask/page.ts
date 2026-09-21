@@ -14,8 +14,10 @@
  * note 说明题：只读块（不产生焦点行、不进必答校验、不计入进度分母），正文经
  * shared/markdown 轻渲染后挂在「│ 」左边线下展示；超过 NOTE_FOLD_LINES 行默认折叠，
  * x 键展开/收起。长草稿审阅场景靠 Ctrl+↑/↓ 跳题 + PgUp/PgDn 翻页完成浏览。
- * 问卷级 context（AI 补充背景/上一条回复）：标题下方的引用块，折叠与说明题共享 x 键
- * （CONTEXT_FOLD_LINES 阈值更严，辅助信息不喧宾夺主）。
+ * 问卷级 context（AI 补充背景/上一条回复）：渲染为引用块放在**可滚动内容区**开头
+ * （首帧 scroll=0 时即在顶部，视觉与原先固定头部一致），折叠与说明题共享 x 键
+ * （CONTEXT_FOLD_LINES 阈值更严，辅助信息不喧宾夺主）。展开后随内容区滚动，
+ * 不再受固定头部截断；鼠标滚轮直接滚动内容窗（handleMouse wheel，不挪焦点）。
  *
  * 键位（? 键可随时查看本表）：
  * - 空格：选择题选中（单选/判断选中后自动前进到下一行；多选切换勾选，受 max 限制）
@@ -30,7 +32,7 @@
  * CURSOR_MARKER 透出（中文 IME 候选窗定位依赖它）。
  */
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { TUI } from "@earendil-works/pi-tui";
+import type { TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { renderAnswer } from "../shared/markdown";
 import { createBoxRenderer, editInput, renderScrollingInput } from "../shared/ui";
@@ -142,6 +144,8 @@ export class QuestionnairePage {
 	private followFocus = false;
 	/** 最近一次 render 的内容窗口行数（PgUp/PgDn 步长） */
 	private lastBudget = 10;
+	/** 答案一览的滚动位置（滚轮） */
+	private reviewScroll = 0;
 	private dims?: TermDims;
 
 	constructor(tui: TUI, theme: Theme, qn: Questionnaire, done: (r: PageResult) => void, dims?: TermDims, hooks?: PageHooks) {
@@ -441,6 +445,7 @@ export class QuestionnairePage {
 		}
 		if (matchesKey(data, "ctrl+p")) {
 			this.mode = "review";
+			this.reviewScroll = 0;
 			this.hint = "";
 			this.tui.requestRender();
 			return;
@@ -608,6 +613,21 @@ export class QuestionnairePage {
 		}
 	}
 
+	/** 鼠标滚轮：直接滚动内容窗（不挪焦点，下次方向键导航时视图再吸附焦点行）；
+	 *  整屏 overlay 吞掉滚轮事件，避免穿透滚动底层聊天 */
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+		if (this.mode === "review") {
+			this.reviewScroll = Math.max(0, this.reviewScroll + event.wheelDelta);
+			return { handled: true };
+		}
+		if (this.mode === "form") {
+			this.scroll += event.wheelDelta; // 上界由 render 按 maxScroll 收敛
+			return { handled: true };
+		}
+		return { handled: true };
+	}
+
 	/** Ctrl+P 答案一览里按 C：把答案文本写入系统剪贴板 */
 	private async copyAnswers(): Promise<void> {
 		const text = this.reviewPlainText();
@@ -711,7 +731,7 @@ export class QuestionnairePage {
 		return out;
 	}
 
-	/** 头部：标题 + 进度条/进度 + 问卷说明 + 上下文块 + 分隔线 */
+	/** 头部：标题 + 进度条/进度 + 问卷说明 + 分隔线（上下文块在可滚动内容区开头，见 render） */
 	private renderHeader(W: number): string[] {
 		const th = this.theme;
 		const answers = this.collect();
@@ -740,9 +760,6 @@ export class QuestionnairePage {
 				header.push(`   ${ln}`);
 			}
 		}
-		if (this.qn.context) {
-			header.push(...this.renderContextBlock(W));
-		}
 		header.push(th.fg("borderMuted", "─".repeat(W)));
 		return header;
 	}
@@ -756,7 +773,7 @@ export class QuestionnairePage {
 				[
 					["↑ ↓ / Tab / Shift+Tab", "上/下一行（多行简答内为行间移动光标）"],
 					["Ctrl+↑ / Ctrl+↓", "上一题 / 下一题"],
-					["PgUp / PgDn", "按屏翻页"],
+					["PgUp / PgDn / 滚轮", "按屏翻页 / 滚动页面（长上下文·长说明）"],
 				],
 			],
 			[
@@ -813,7 +830,7 @@ export class QuestionnairePage {
 		return out.slice(0, H);
 	}
 
-	/** 答案一览屏（Ctrl+P）：C 复制、其余键返回 */
+	/** 答案一览屏（Ctrl+P）：C 复制、滚轮滚动、其余键返回 */
 	private renderReview(W: number, H: number): string[] {
 		const th = this.theme;
 		const lines: string[] = [
@@ -827,10 +844,16 @@ export class QuestionnairePage {
 		}
 		const footer = [
 			this.flash ? th.fg("success", ` ${this.flash}`) : "",
-			th.fg("dim", " C 复制答案到剪贴板 · 任意键返回作答"),
+			th.fg("dim", " C 复制答案到剪贴板 · 滚轮滚动 · 任意键返回作答"),
 		].filter(Boolean);
-		const body = lines.slice(0, Math.max(1, H - footer.length));
-		while (body.length < H - footer.length) body.push("");
+		const budget = Math.max(1, H - footer.length);
+		this.reviewScroll = Math.max(0, Math.min(this.reviewScroll, lines.length - budget));
+		const above = this.reviewScroll;
+		const below = lines.length - (this.reviewScroll + Math.min(budget, lines.length - this.reviewScroll));
+		const body = lines.slice(this.reviewScroll, this.reviewScroll + budget);
+		if (above > 0) body[0] = th.fg("dim", ` ▲ 上方还有 ${above} 行`);
+		if (below > 0) body[body.length - 1] = th.fg("dim", ` ▼ 下方还有 ${below} 行`);
+		while (body.length < budget) body.push("");
 		return [...body, ...footer];
 	}
 
@@ -854,6 +877,10 @@ export class QuestionnairePage {
 		const rows = this.buildRows();
 		if (this.focusIdx >= rows.length) this.focusIdx = rows.length - 1;
 		const content: { text: string; row?: number }[] = [];
+		// 问卷级上下文放内容区开头：展开后随窗口滚动可达全文，不被固定头部截断
+		if (this.qn.context) {
+			content.push(...this.renderContextBlock(W).map((text) => ({ text })));
+		}
 		let ri = 0;
 		/** 长逻辑行折行推入 content：prefix（含 ANSI）定首行起点与续行缩进，body 折行不截断；row 焦点标记只挂在首行 */
 		const pushWrapped = (prefix: string, body: string, row?: number): void => {
@@ -978,7 +1005,7 @@ export class QuestionnairePage {
 		if (below > 0) scrollBits.push(`▼${below}`);
 		const statusWithScroll =
 			scrollBits.length > 0
-				? `${statusLine}${th.fg("dim", `  ${scrollBits.join(" ")}（PgUp/PgDn 翻页）`)}`
+				? `${statusLine}${th.fg("dim", `  ${scrollBits.join(" ")}（滚轮 / PgUp/PgDn 滚动）`)}`
 				: statusLine;
 
 		const lines = [...header, ...visible.map((c) => c.text)];

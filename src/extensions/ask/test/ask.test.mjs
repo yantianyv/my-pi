@@ -952,6 +952,52 @@ async function main() {
 		rmSync(dir, { recursive: true, force: true });
 	}
 
+	// ---- 场景 S：超长上下文展开后滚轮滚动可达全文（不截断、可回滚） ----
+	console.log("场景 S：超长上下文滚轮滚动");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const longCtx = Array.from({ length: 40 }, (_, i) => `背景第${i + 1}行`).join("\n");
+		const execP = tool.execute(
+			"tc20",
+			{
+				id: "ctx-wheel",
+				title: "超长上下文",
+				context: longCtx,
+				questions: [{ id: "q1", type: "confirm", question: "继续吗？" }],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		const text = () => comp.render(TERM_COLS).map((l) => l.trim()).join("\n");
+		const wheel = (delta) => comp.handleMouse({
+			type: "wheel", button: "none", x: 0, y: 0, screenX: 0, screenY: 0,
+			width: TERM_COLS, height: TERM_ROWS, shift: false, alt: false, ctrl: false, wheelDelta: delta,
+		});
+		comp.handleInput("x"); // 展开全部 40 行上下文（超出一屏）
+		const top = text();
+		check("S: 展开后首帧在顶部（背景第1行可见）", top.includes("背景第1行"));
+		check("S: 展开后尾部不在首屏（未被截断进画面）", !top.includes("背景第40行"));
+		check("S: 滚轮事件被页面消费", wheel(30)?.handled === true);
+		const scrolled = text();
+		check("S: 滚轮下滑后可见上下文尾部", scrolled.includes("背景第40行"));
+		check("S: 状态行出现上滚指示（▲）", /▲\d+/.test(scrolled));
+		wheel(-30);
+		check("S: 滚轮回滚后重返顶部", text().includes("背景第1行"));
+		assertFullscreen(comp, "S");
+		comp.handleInput(K.escape);
+		await execP;
+		rmSync(dir, { recursive: true, force: true });
+	}
+
 	console.log(failures === 0 ? "\n全部通过 ✓" : `\n${failures} 项失败 ✗`);
 	process.exit(failures === 0 ? 0 : 1);
 }
