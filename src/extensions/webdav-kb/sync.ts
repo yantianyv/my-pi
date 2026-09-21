@@ -17,9 +17,11 @@
  * 并发策略：远端遍历与批量下载各带并发上限（避免国产盘并发超限被限流）。
  * 上传前自动补齐远端父目录（MKCOL 链）。
  *
- * 健壮性（借鉴 pi-sync）：syncAll 持 .kb-sync.lock 互斥锁（活锁拒绝、进程死/超时 30min
- * 自动回收）；.kb-sync-journal.json 记录计划与阶段，成功才删除——中断后下次同步报告并
- * 靠重跑差异比对收敛（各操作幂等：重下/重传/重删安全，删本地前必有 .history 留档）。
+ * 健壮性（借鉴 pi-sync）：syncAll 持 .kb-sync.lock 互斥锁——持锁方每 10s 心跳续期，后到者
+ * 按「pid 已死/心跳超时」回收残锁（无心跳的旧格式锁回退 30min 判定）；lockWaitMs > 0 时
+ * 锁被占先轮询等待（等待期可见对方阶段进度），到点才报错。.kb-sync-journal.json 记录计划
+ * 与阶段，成功才删除——中断后下次同步报告并靠重跑差异比对收敛（各操作幂等：重下/重传/
+ * 重删安全，删本地前必有 .history 留档）。
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -51,8 +53,16 @@ const UPLOAD_CONCURRENCY = 1;
 const LOCK_NAME = ".kb-sync.lock";
 /** 恢复日志：记录上次同步的计划与中断阶段 */
 const JOURNAL_NAME = ".kb-sync-journal.json";
-/** 锁超过该时长视为残留（持有进程已死/挂起），安全回收 */
+/** 持锁心跳间隔：每该时长重写心跳时间戳，向等待方证明持有方仍在推进 */
+const LOCK_HEARTBEAT_MS = 10_000;
+/** 心跳超过该时长未续期 = 持有进程已死/挂起，锁可回收（活进程的大同步再久也不会被误杀） */
+const LOCK_HEARTBEAT_STALE_MS = 45_000;
+/** 等待锁释放的轮询间隔 */
+const LOCK_POLL_MS = 2_000;
+/** 旧格式锁（升级前遗留、无心跳字段）超过该时长仍视为残留 */
 const LOCK_STALE_MS = 30 * 60_000;
+/** 手动同步（kb_sync 工具 / /kb-sync 命令）锁被占时的默认等待上限：大导入/长同步期间后到者先排队而非立刻失败 */
+export const SYNC_LOCK_WAIT_MS = 120_000;
 
 interface SyncJournal {
 	startedAt: string;
@@ -74,50 +84,162 @@ function pidAlive(pid: number): boolean {
 	}
 }
 
-/** 获取同步锁（wx 独占创建）。成功返 release；失败（活锁持有中）抛 DavError；残留锁（进程死/超时）安全回收。 */
-function acquireSyncLock(mirrorDir: string): { release: () => void } {
+/** 锁文件元数据（等待方读之展示持有方/进度并判定残锁） */
+interface SyncLockMeta {
+	pid: number;
+	/** 持有开始时间（ISO） */
+	startedAt: string;
+	/** 最近心跳（毫秒时间戳）；缺省 = 升级前旧格式锁 */
+	heartbeat?: number;
+	/** 持有方最近上报的进度 */
+	progress?: string;
+}
+
+/** 同步锁句柄 */
+interface SyncLock {
+	/** 释放锁并停止心跳（同步结束/异常的 finally 必经） */
+	release: () => void;
+	/** 进度上报：写进锁文件供等待方观察（顺带续心跳） */
+	report: (progress: string) => void;
+	/** 阶段边界校验：锁被其他实例接管（本进程曾挂起/休眠致心跳过期被回收）即抛错，防双实例互踩 */
+	assertOwned: () => void;
+}
+
+/** 读锁文件元数据：null = 不存在（含被原子替换的瞬间空窗）；"corrupt" = 半截 JSON（旧版非原子写遗留） */
+function readLockMeta(lockPath: string): SyncLockMeta | null | "corrupt" {
+	try {
+		return JSON.parse(fs.readFileSync(lockPath, "utf8")) as SyncLockMeta;
+	} catch (e) {
+		return (e as NodeJS.ErrnoException).code === "ENOENT" ? null : "corrupt";
+	}
+}
+
+/** 锁是否已残：持有进程死 / 心跳超时（旧格式锁回退 startedAt+30min 判定） */
+function isLockStale(meta: SyncLockMeta): boolean {
+	if (!meta.pid || !pidAlive(meta.pid)) return true;
+	if (meta.heartbeat != null) return Date.now() - meta.heartbeat > LOCK_HEARTBEAT_STALE_MS;
+	const started = meta.startedAt ? Date.parse(meta.startedAt) : Number.NaN;
+	return !Number.isFinite(started) || Date.now() - started > LOCK_STALE_MS;
+}
+
+/** 原子写锁文件（tmp + rename：等待方要么读到旧完整版要么读到新完整版，永不读到半截） */
+function writeLockMeta(lockPath: string, meta: SyncLockMeta): void {
+	const tmp = `${lockPath}.tmp-${process.pid}`;
+	fs.writeFileSync(tmp, JSON.stringify(meta), "utf8");
+	fs.renameSync(tmp, lockPath);
+}
+
+/** 可取消 sleep：signal 中止时抛「同步已取消」 */
+function sleepCancellable(ms: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) return Promise.reject(new DavError("同步已取消", undefined, "SYNC"));
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(new DavError("同步已取消", undefined, "SYNC"));
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+/**
+ * 获取同步锁（wx 独占创建 + 持锁心跳）。锁被占时按 opts.waitMs 轮询等待（每 LOCK_POLL_MS 一次，
+ * 经 opts.onWait 报告持有方与进度），到点仍拿不到才抛 DavError（method="SYNC_LOCKED"）；残锁随时
+ * 回收。持锁期间每 LOCK_HEARTBEAT_MS 续期心跳——活进程的大同步再久也不会被误回收，真挂死 45s 内可接管。
+ */
+async function acquireSyncLock(
+	mirrorDir: string,
+	opts: { waitMs?: number; onWait?: (msg: string) => void; signal?: AbortSignal } = {},
+): Promise<SyncLock> {
 	const lockPath = path.join(mirrorDir, LOCK_NAME);
 	fs.mkdirSync(mirrorDir, { recursive: true });
-	for (let attempt = 0; ; attempt++) {
+	const waitMs = opts.waitMs ?? 0;
+	const deadline = Date.now() + waitMs;
+	let staleRetries = 0;
+	for (;;) {
+		const meta: SyncLockMeta = { pid: process.pid, startedAt: new Date().toISOString(), heartbeat: Date.now() };
 		try {
 			const fd = fs.openSync(lockPath, "wx");
-			fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+			fs.writeFileSync(fd, JSON.stringify(meta), "utf8");
 			fs.closeSync(fd);
-			return {
-				release: () => {
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+			// 锁已存在：读持有者；残锁复认后回收（限次），活锁等待或报错
+			const first = readLockMeta(lockPath);
+			if (first === null) continue; // 刚消失（释放/原子替换空窗）→ 直接抢锁
+			if (first === "corrupt" || isLockStale(first)) {
+				// 50ms 后复认仍残才回收——防把「心跳原子替换瞬间」的活跃锁误判成残锁
+				await sleepCancellable(50, opts.signal);
+				const again = readLockMeta(lockPath);
+				const stillBad = again === "corrupt" || (again !== null && isLockStale(again));
+				if (stillBad && ++staleRetries <= 3) {
+					try {
+						fs.unlinkSync(lockPath);
+					} catch {
+						/* 被竞态抢走也无妨，下轮 wx 判定 */
+					}
+					continue;
+				}
+			}
+			const holder =
+				first === "corrupt"
+					? "未知持有者（锁文件残缺）"
+					: `PID ${first.pid}（始于 ${first.startedAt}${first.progress ? `，${first.progress}` : ""}）`;
+			if (Date.now() >= deadline) {
+				throw new DavError(
+					`另一个实例正在同步：${holder}。对方活跃期间锁自动续期、结束后自动释放` +
+						`（异常退出会被秒级回收）；仅当确认对方进程已挂死且锁长期未释放时，才需手动删除 ${lockPath}`,
+					undefined,
+					"SYNC_LOCKED",
+				);
+			}
+			if (first !== "corrupt") {
+				opts.onWait?.(
+					`等待另一实例释放同步锁（${holder}），已等 ${Math.round((waitMs - (deadline - Date.now())) / 1000)}s…`,
+				);
+			}
+			await sleepCancellable(LOCK_POLL_MS, opts.signal);
+			continue;
+		}
+		// 拿到锁：心跳定时器 + 句柄
+		const timer = setInterval(() => {
+			meta.heartbeat = Date.now();
+			writeLockMeta(lockPath, meta);
+		}, LOCK_HEARTBEAT_MS);
+		timer.unref();
+		let released = false;
+		return {
+			report: (progress) => {
+				meta.progress = progress;
+				meta.heartbeat = Date.now();
+				if (!released) writeLockMeta(lockPath, meta);
+			},
+			assertOwned: () => {
+				const cur = readLockMeta(lockPath);
+				if (cur !== null && cur !== "corrupt" && cur.pid !== process.pid) {
+					throw new DavError(
+						"同步锁已被其他实例接管（本实例可能曾挂起/休眠致心跳过期被回收），中止本次同步以防两侧同时写镜像",
+						undefined,
+						"SYNC_LOCKED",
+					);
+				}
+			},
+			release: () => {
+				released = true;
+				clearInterval(timer);
+				const cur = readLockMeta(lockPath);
+				if (cur !== null && cur !== "corrupt" && cur.pid === process.pid) {
 					try {
 						fs.unlinkSync(lockPath);
 					} catch {
 						/* 已消失也无妨 */
 					}
-				},
-			};
-		} catch (e) {
-			if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-		}
-		// 锁已存在：读持有者信息，活且未超时 → 拒；否则回收重试一次
-		let holder = "未知持有者";
-		let stale = false;
-		try {
-			const meta = JSON.parse(fs.readFileSync(lockPath, "utf8")) as { pid?: number; startedAt?: string };
-			holder = `PID ${meta.pid}（始于 ${meta.startedAt}）`;
-			const age = meta.startedAt ? Date.now() - Date.parse(meta.startedAt) : Number.POSITIVE_INFINITY;
-			stale = !meta.pid || !pidAlive(meta.pid) || age > LOCK_STALE_MS;
-		} catch {
-			stale = true; // 锁文件读不出 = 写了一半的残锁，回收
-		}
-		if (!stale || attempt > 0) {
-			throw new DavError(
-				`另一个同步正在进行：${holder}。若确认无其他 pi 在同步，删除镜像目录下的 ${LOCK_NAME} 即可`,
-				undefined,
-				"SYNC",
-			);
-		}
-		try {
-			fs.unlinkSync(lockPath);
-		} catch {
-			/* 被竞态抢走也无妨，下轮 wx 判定 */
-		}
+				}
+			},
+		};
 	}
 }
 
@@ -159,8 +281,10 @@ function clearJournal(mirrorDir: string): void {
 
 export interface SyncOptions {
 	signal?: AbortSignal;
-	/** 进度回调（label 如 "遍历远端" / "下载 3/12" / "上传 1/2"） */
+	/** 进度回调（label 如 "遍历远端" / "下载 3/12" / "上传 1/2"；锁等待消息也经此回调） */
 	onProgress?: (label: string) => void;
+	/** 锁被占时的最长等待毫秒数；0/缺省 = 立即报错。等待期间每 2s 轮询并经 onProgress 报告对方进度 */
+	lockWaitMs?: number;
 }
 
 export interface SyncStats {
@@ -325,11 +449,16 @@ function safeLocal(mirrorDir: string, rel: string): string {
 }
 
 /**
- * 增量同步（带锁 + 恢复日志）：多会话并发时后到者直接报错；上次中断（journal 残留）
- * 报告后经重跑差异比对自然收敛——下载/上传/删除均幂等（删除前已有 .history 留档）。
+ * 增量同步（带锁 + 恢复日志）：锁被占按 opts.lockWaitMs 等待后仍拿不到才报错；上次中断
+ * （journal 残留）报告后经重跑差异比对自然收敛——下载/上传/删除均幂等（删除前已有 .history 留档）。
  */
 export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOptions = {}): Promise<SyncStats> {
-	const lock = acquireSyncLock(mirrorDir);
+	const lock = await acquireSyncLock(mirrorDir, {
+		waitMs: opts.lockWaitMs,
+		signal: opts.signal,
+		// 等待消息走进度通道：工具/命令/后台同步无需新增回调即可呈现「等待对方」
+		onWait: (msg) => opts.onProgress?.(`⏳ ${msg}`),
+	});
 	try {
 		const stale = recoverJournal(mirrorDir);
 		if (stale) {
@@ -337,24 +466,29 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 				`检测到上次同步中断于「${stale.phase}」阶段（${stale.startedAt}）；操作幂等，重跑差异比对即可收敛`,
 			);
 		}
-		return await syncAllInner(cfg, mirrorDir, opts);
+		return await syncAllInner(cfg, mirrorDir, opts, lock);
 	} finally {
 		lock.release();
 	}
 }
 
-/** 增量同步主体 */
-async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions = {}): Promise<SyncStats> {
+/** 增量同步主体（lock：acquireSyncLock 句柄，用于进度上报与阶段边界接管校验） */
+async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions = {}, lock: SyncLock): Promise<SyncStats> {
 	const stats: SyncStats = { downloaded: 0, uploaded: 0, deleted: 0, conflicts: 0, unchanged: 0, errors: [] };
 	const signal = opts.signal;
 	const client = new WebDavClient(cfg.baseUrl!, cfg.username!, cfg.password!, {
 		proxyUrl: cfg.proxyUrl,
 	});
 	const ledger = loadLedger(mirrorDir);
+	// 进度统一走此包装：回调调用方的同时写进锁文件，等待方可见持有方实时进度
+	const progress = (label: string) => {
+		opts.onProgress?.(label);
+		lock.report(label);
+	};
 
 	// 1) 远端遍历
-	opts.onProgress?.("遍历远端…");
-	const { files: remote, failedDirs } = await walkRemote(client, opts.onProgress, signal);
+	progress("遍历远端…");
+	const { files: remote, failedDirs } = await walkRemote(client, progress, signal);
 
 	// 2) 本地扫描 + 差异比对
 	const local = scanLocal(mirrorDir);
@@ -429,6 +563,7 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 		delRemote,
 	};
 	writeJournal(mirrorDir, journal);
+	lock.assertOwned(); // 阶段边界校验：锁若已被接管（本进程曾挂起），到此为止
 
 	// 3) 下载（并发）
 	await mapLimit(toDownload, DOWNLOAD_CONCURRENCY, async (p) => {
@@ -448,12 +583,13 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 		} catch (e) {
 			stats.errors.push(`下载 ${p}: ${e instanceof Error ? e.message : String(e)}`);
 		}
-		opts.onProgress?.(`下载 ${stats.downloaded}/${toDownload.length}`);
+		progress(`下载 ${stats.downloaded}/${toDownload.length}`);
 	});
 
 	// 4) 冲突处理：保留远端为权威，本地版存 .conflict-<时间戳>.md（仅本地，不参与上传）
 	journal.phase = "conflict";
 	writeJournal(mirrorDir, journal);
+	lock.assertOwned();
 	for (const p of conflicts) {
 		if (signal?.aborted) throw new DavError("同步已取消", undefined, "SYNC");
 		try {
@@ -479,6 +615,7 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 	// 5) 上传（并发 + 父目录补齐）
 	journal.phase = "upload";
 	writeJournal(mirrorDir, journal);
+	lock.assertOwned();
 	await mapLimit(toUpload, UPLOAD_CONCURRENCY, async (p) => {
 		if (signal?.aborted) return;
 		try {
@@ -503,13 +640,14 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 		} catch (e) {
 			stats.errors.push(`上传 ${p}: ${e instanceof Error ? e.message : String(e)}`);
 		}
-		opts.onProgress?.(`上传 ${stats.uploaded}/${toUpload.length}`);
+		progress(`上传 ${stats.uploaded}/${toUpload.length}`);
 	});
 
 	// 6) 删除：远端删本地文件；本地删远端文件（不删远端目录，目录由服务器自管）
 	// 远端已删（delLocal）：本地是最后的副本 → 先留 .history 历史再删，防远端误删
 	journal.phase = "delete";
 	writeJournal(mirrorDir, journal);
+	lock.assertOwned();
 	for (const p of delLocal) {
 		try {
 			const abs = safeLocal(mirrorDir, p);

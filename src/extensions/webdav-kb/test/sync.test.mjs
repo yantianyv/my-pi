@@ -4,7 +4,8 @@
  *
  * 覆盖：首次全量下载、无变化幂等、远端改/删、本地新建/改/删、冲突（保留远端 +
  * 本地 .conflict 副本且不回传）、父目录自动创建、账本跨实例持久化、离线写入兜底补传、
- * .history 历史副本（远端删除留档/命名规则/不自我递归）、空目录清理、PROTOCOL 过滤。
+ * .history 历史副本（远端删除留档/命名规则/不自我递归）、空目录清理、PROTOCOL 过滤、
+ * 同步锁（活锁拒绝/心跳与旧格式残锁回收/等待接管/超时报错/锁内进度上报）。
  *
  * 用法：node src/extensions/webdav-kb/test/sync.test.mjs（仓库根目录执行）
  */
@@ -165,6 +166,61 @@ try {
 	check("listNotes 跳过 .history 与 PROTOCOL", !listing2.some((f) => f.path.startsWith("/.history") || f.path === "/PROTOCOL.md"), JSON.stringify(listing2));
 	// PROTOCOL.md 仍可被 kb_help 读取（readNote 不经 listNotes）
 	check("PROTOCOL.md 仍可直读", readNote(mirrorDir, "/PROTOCOL.md") === "# 守则\n");
+
+	// ---- 16) 同步锁：活锁拒绝 / 心跳与旧格式残锁回收 / 等待接管 / 超时报错 / 进度上报 ----
+	const lockPath = join(mirrorDir, ".kb-sync.lock");
+	const writeLock = (meta) => writeFileSync(lockPath, JSON.stringify(meta));
+
+	// 活锁（pid 活 + 心跳新鲜）+ 无等待 → 立即拒绝，报错含锁绝对路径
+	writeLock({ pid: process.pid, startedAt: new Date().toISOString(), heartbeat: Date.now() });
+	let lockErr = null;
+	try { await syncAll(cfg, mirrorDir); } catch (e) { lockErr = e; }
+	check("活锁无等待立即拒绝", lockErr !== null && lockErr.method === "SYNC_LOCKED", String(lockErr));
+	check("报错含锁绝对路径", lockErr !== null && lockErr.message.includes(lockPath), lockErr && lockErr.message);
+
+	// 心跳过期（pid 活但 60s 未续期）→ 残锁回收，同步正常完成
+	writeLock({ pid: process.pid, startedAt: new Date(Date.now() - 60_000).toISOString(), heartbeat: Date.now() - 60_000 });
+	s = await syncAll(cfg, mirrorDir);
+	check("心跳过期残锁被回收", !existsSync(lockPath), "锁文件仍在");
+
+	// 旧格式锁（无心跳）：pid 活 + startedAt 新 → 仍拒绝；超 30min → 回收
+	writeLock({ pid: process.pid, startedAt: new Date().toISOString() });
+	let legacyErr = null;
+	try { await syncAll(cfg, mirrorDir); } catch (e) { legacyErr = e; }
+	check("旧格式活锁仍拒绝", legacyErr !== null && legacyErr.method === "SYNC_LOCKED", String(legacyErr));
+	writeLock({ pid: process.pid, startedAt: new Date(Date.now() - 31 * 60_000).toISOString() });
+	s = await syncAll(cfg, mirrorDir);
+	check("旧格式超时残锁被回收", !existsSync(lockPath), "锁文件仍在");
+
+	// 等待接管：对方 1s 后释放，lockWaitMs 内等到并完成同步，等待期有进度报告
+	const waitLabels = [];
+	writeLock({ pid: process.pid, startedAt: new Date().toISOString(), heartbeat: Date.now() });
+	setTimeout(() => rmSync(lockPath, { force: true }), 1_000);
+	s = await syncAll(cfg, mirrorDir, { lockWaitMs: 8_000, onProgress: (l) => waitLabels.push(l) });
+	check("等待期内接管同步成功", !existsSync(lockPath), "锁文件仍在");
+	check("等待期报告对方与进度", waitLabels.some((l) => l.includes("等待另一实例释放同步锁")), JSON.stringify(waitLabels));
+
+	// 等待超时：对方不释放 → 到点抛 SYNC_LOCKED（且确实轮询等待过）
+	writeLock({ pid: process.pid, startedAt: new Date().toISOString(), heartbeat: Date.now() });
+	let timeoutErr = null;
+	const t0 = Date.now();
+	try { await syncAll(cfg, mirrorDir, { lockWaitMs: 3_000 }); } catch (e) { timeoutErr = e; }
+	check("等待超时抛锁占用", timeoutErr !== null && timeoutErr.method === "SYNC_LOCKED", String(timeoutErr));
+	check("超时前确实轮询等待", Date.now() - t0 >= 2_900, String(Date.now() - t0));
+	rmSync(lockPath, { force: true });
+
+	// 同步期间锁文件携带进度与心跳，完成后释放且不留 tmp 原子写残留
+	dav.seed("/notes/lock-probe.md", "# 锁进度探针\n");
+	let lockMeta = null;
+	s = await syncAll(cfg, mirrorDir, { onProgress: () => {
+		if (lockMeta && lockMeta.progress) return;
+		try {
+			const m = JSON.parse(readFileSync(lockPath, "utf8"));
+			if (m && typeof m.progress === "string") lockMeta = m;
+		} catch { /* 原子替换空窗，下个进度点再读 */ }
+	}});
+	check("同步期间锁文件上报进度与心跳", lockMeta !== null && typeof lockMeta.heartbeat === "number", JSON.stringify(lockMeta));
+	check("同步完成锁已释放且无 tmp 残留", !existsSync(lockPath) && readdirSync(mirrorDir).every((f) => !f.includes(".kb-sync.lock.tmp")), "锁或 tmp 残留");
 } finally {
 	dav.close();
 	rmSync(tmp, { recursive: true, force: true });

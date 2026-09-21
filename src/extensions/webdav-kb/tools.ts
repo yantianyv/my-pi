@@ -17,7 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { setStatusWithTTL } from "../shared/status";
 import { loadConfig, isConfigured, defaultMirrorDir, agentConfigDir } from "./store";
-import { readNote, readNoteBytes, listNotes, ensureRemoteDirs, loadLedger, saveLedger, syncAll, backupToHistory } from "./sync";
+import { readNote, readNoteBytes, listNotes, ensureRemoteDirs, loadLedger, saveLedger, syncAll, backupToHistory, SYNC_LOCK_WAIT_MS } from "./sync";
 import { getIndex } from "./search";
 import { vaultPutNote, vaultReadNote, isUnlocked, isVaultPath, encryptPath, decryptPath } from "./crypto";
 import { DEFAULT_PROTOCOL } from "./protocol";
@@ -805,7 +805,11 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			const mirror = mirrorOf();
 			status(ctx, "kb-sync", "🔄 同步中", 30_000);
 			try {
-				const stats = await syncAll(cfg, mirror, { signal });
+				const stats = await syncAll(cfg, mirror, {
+					signal,
+					lockWaitMs: SYNC_LOCK_WAIT_MS,
+					onProgress: (label) => status(ctx, "kb-sync", `🔄 ${label}`, 30_000),
+				});
 				const parts: string[] = [];
 				if (stats.downloaded) parts.push(`下载 ${stats.downloaded}`);
 				if (stats.uploaded) parts.push(`上传 ${stats.uploaded}`);
@@ -822,7 +826,9 @@ export function registerKbTools(pi: ExtensionAPI): void {
 					errors: stats.errors.length,
 				});
 			} catch (e) {
-				return text(`同步失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
+				const msg = e instanceof Error ? e.message : String(e);
+				const locked = e instanceof DavError && e.method === "SYNC_LOCKED";
+				return text(locked ? `同步暂缓：${msg}` : `同步失败：${msg}`, { error: msg, locked });
 			}
 		},
 	});

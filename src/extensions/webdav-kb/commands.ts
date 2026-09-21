@@ -11,7 +11,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { setStatusWithTTL } from "../shared/status";
 import { loadConfig, isConfigured, defaultMirrorDir, agentConfigDir } from "./store";
-import { syncAll } from "./sync";
+import { syncAll, SYNC_LOCK_WAIT_MS } from "./sync";
 import { isUnlocked } from "./crypto";
 import { KbConfigOverlay } from "./panel-config";
 
@@ -76,6 +76,7 @@ export function registerKbCommands(pi: ExtensionAPI): void {
 				push("🔄 同步中", 30_000);
 				const stats = await syncAll(cfg, mirrorDir, {
 					onProgress: (label) => push(`🔄 ${label}`, 30_000),
+					lockWaitMs: SYNC_LOCK_WAIT_MS,
 				});
 				const parts: string[] = [];
 				if (stats.downloaded) parts.push(`下载 ${stats.downloaded}`);

@@ -15,6 +15,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { setStatusWithTTL, clearStatusTimers } from "../shared/status";
 import { loadConfig, isConfigured, defaultMirrorDir, agentConfigDir } from "./store";
 import { syncAll, putNote, readNote } from "./sync";
+import { DavError } from "./client";
 import { getIndex } from "./search";
 import { unlockVault, unlockVaultWithKey, isUnlocked, vaultReadNote, VaultAuthError } from "./crypto";
 import { registerKbTools } from "./tools";
@@ -102,7 +103,12 @@ async function runBackgroundSync(ctx: ExtensionContext, cfg: ReturnType<typeof l
 			push(`⚠ 同步 ${stats.errors.length} 个文件失败`, 10_000);
 		}
 	} catch (e) {
-		push(`⚠ 同步失败：${e instanceof Error ? e.message : String(e)}`, 10_000);
+		if (e instanceof DavError && e.method === "SYNC_LOCKED") {
+			// 锁被占 ≠ 同步失败：另一实例正在同步，镜像读写照常可用，明示后跳过、不自动重试
+			push("📚 另一实例同步中，本次跳过（镜像读写照常可用）", 15_000);
+		} else {
+			push(`⚠ 同步失败：${e instanceof Error ? e.message : String(e)}`, 10_000);
+		}
 	}
 }
 
