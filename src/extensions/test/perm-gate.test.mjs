@@ -3,13 +3,14 @@
  * perm-gate 回归测试（复用 ask 测试基建模式）
  *
  * 原理：esbuild（src/node_modules 构建依赖）把 perm-gate.ts bundle 成单文件 ESM 再 import；
- * 只测模块级导出的 ReviewPanel 复核面板（不触发默认导出函数，避免读写真实
+ * 只测模块级导出的 ReviewPanel 确认面板与纯函数（不触发默认导出函数，避免读写真实
  * ~/.pi/agent/perm-gate.json）。theme mock 纯文本透传，不干扰宽度计算。
  *
  * 覆盖：
- * - 场景 A：短命令渲染——命令/说明/四操作完整呈现，行宽不超限
+ * - 场景 A：信息区完整（一句解读/影响面/命中原因）+ 选项与键位提示，行宽不超限
  * - 场景 B：超长命令全文折行不截断——PgDn 滚动能看到命令尾部，分隔行有滚动指示
- * - 场景 C：键位——Enter 返回当前操作、↑↓ 移动、1-5 直选、Esc 返回 null（驳回）
+ * - 场景 C：键位与默认项——Enter = 当前项（默认「允许一次」）、↑↓ 移动、数字直选、Esc = 拒绝
+ * - 场景 D：无「永久允许」可选时（canRemember=false）选项收敛为两项
  *
  * 用法：node src/extensions/test/perm-gate.test.mjs（仓库根目录执行）
  */
@@ -56,11 +57,18 @@ function panelText(lines) {
 		.join("");
 }
 
-function makePanel(mod, command, detail = "") {
+function makePanel(mod, command, info) {
 	let result = { done: false, choice: undefined };
-	const panel = new mod.ReviewPanel(makeTui(), themeMock, "⚠️ 命中黑名单，需人工复核", command, detail, (choice) => {
-		result = { done: true, choice };
-	});
+	const panel = new mod.ReviewPanel(
+		makeTui(),
+		themeMock,
+		"⚠ 需要你确认这条命令",
+		command,
+		info ?? { summary: "这条命令没命中已知规则，请你确认是否执行。", impact: [], canRemember: true, intent: "查看 git 状态" },
+		(choice) => {
+			result = { done: true, choice };
+		},
+	);
 	panel.focused = true;
 	return { panel, result: () => result };
 }
@@ -87,19 +95,29 @@ async function main() {
 	const mod = await import(`${pathToFileURL(BUNDLE).href}?t=${Date.now()}`);
 	check("ReviewPanel 已导出", typeof mod.ReviewPanel === "function");
 
-	// ---- 场景 A：短命令完整渲染 ----
-	console.log("场景 A：短命令渲染");
+	// ---- 场景 A：人话信息区 + 选项 + 键位 ----
+	console.log("场景 A：信息区与选项");
 	{
-		const { panel } = makePanel(mod, "git status", "命中黑名单规则：\\bsudo\\b");
+		const { panel } = makePanel(mod, "git push origin main --force", {
+			summary: "把本地提交强推覆盖远端分支，可能导致他人提交丢失。",
+			impact: ["联网：github.com", "改写远端分支：main"],
+			hitLabel: "命中关注项（整条命令）",
+			canRemember: true,
+			intent: "强推远端分支",
+		});
 		const lines = panel.render(100);
 		let bad = 0;
 		for (const line of lines) if (visibleWidth(line) > 100) bad++;
 		check("A: 每行 ≤ 100 列（违例 " + bad + " 行）", bad === 0);
 		const text = panelText(lines);
-		check("A: 含命令全文", text.includes("git status"));
-		check("A: 含说明", text.includes("命中黑名单规则"));
-		check("A: 含四个操作", ["放行一次", "放行并加白名单", "驳回", "驳回并加黑名单"].every((a) => text.includes(a)));
-		check("A: 含键位提示", text.includes("Esc 驳回"));
+		check("A: 含一句话解读", text.includes("强推覆盖远端分支"));
+		check("A: 含影响面", text.includes("影响面：联网：github.com；改写远端分支：main"));
+		check("A: 含命中原因", text.includes("命中关注项"));
+		check("A: 含命令全文", text.includes("git push origin main --force"));
+		check("A: 三个操作齐全", ["允许一次", "允许并永久记住这类操作", "拒绝"].every((a) => text.includes(a)));
+		check("A: 永久允许旁标出将被记住的意图", text.includes("强推远端分支"));
+		check("A: 键位说明 Esc 语义", text.includes("Esc 拒绝（不执行）"));
+		check("A: 不暴露正则原文", !/\\s\+|\\b/.test(text));
 		check("A: 短命令无滚动指示", !text.includes("▼") && !text.includes("▲"));
 		checkWidth(panel.render(WIDTH), "A: 窄宽度（60）");
 	}
@@ -113,7 +131,11 @@ async function main() {
 			" && echo " +
 			tail +
 			"\nsecond line 也是一段不短的后续命令";
-		const { panel } = makePanel(mod, longCmd);
+		const { panel } = makePanel(mod, longCmd, {
+			summary: "运行一段内嵌 Python 脚本并回显结果。",
+			impact: ["无副作用"],
+			canRemember: false,
+		});
 		const first = panel.render(WIDTH);
 		checkWidth(first, "B: 首页");
 		check("B: 首页分隔行有 ▼ 滚动指示", panelText(first).includes("▼") || first.join("").includes("▼"));
@@ -128,40 +150,63 @@ async function main() {
 		check("B: PgDn 滚动后命令尾部完整可见（未截断）", seen.includes(tail));
 		checkWidth(panel.render(WIDTH), "B: 滚动后");
 		check("B: 滚动后分隔行有 ▲ 指示", seen.includes("▲"));
+		check("B: 信息区不随滚动消失（解读始终可见）", seen.includes("运行一段内嵌 Python 脚本"));
 		// PgUp 回到顶部
 		for (let i = 0; i < hops + 1; i++) panel.handleInput(K.pageUp);
 		const backTop = panelText(panel.render(WIDTH));
 		check("B: PgUp 回到顶部（python 开头可见）", backTop.includes("python -c"));
 	}
 
-	// ---- 场景 C：键位 ----
-	console.log("场景 C：键位");
+	// ---- 场景 C：键位与默认项 ----
+	console.log("场景 C：键位与默认项");
 	{
 		const { panel, result } = makePanel(mod, "git status");
 		panel.render(WIDTH);
 		panel.handleInput(K.enter);
-		check("C: Enter 返回「放行一次」", result().done && result().choice === "放行一次");
+		check("C: Enter 默认选「允许一次」", result().done && result().choice === "允许一次");
 	}
 	{
 		const { panel, result } = makePanel(mod, "git status");
 		panel.render(WIDTH);
 		panel.handleInput(K.down);
 		panel.handleInput(K.down);
-		panel.handleInput(K.down);
 		panel.handleInput(K.enter);
-		check("C: ↓↓↓+Enter 返回「驳回」", result().done && result().choice === "驳回");
+		check("C: ↓↓+Enter 返回「拒绝」", result().done && result().choice === "拒绝");
 	}
 	{
 		const { panel, result } = makePanel(mod, "git status");
 		panel.render(WIDTH);
 		panel.handleInput("2");
-		check("C: 数字键 2 直选「放行并加白名单」", result().done && result().choice === "放行并加白名单");
+		check("C: 数字键 2 直选「允许并永久记住这类操作」", result().done && result().choice === "允许并永久记住这类操作");
 	}
 	{
 		const { panel, result } = makePanel(mod, "git status");
 		panel.render(WIDTH);
 		panel.handleInput(K.escape);
-		check("C: Esc 返回 null（驳回）", result().done && result().choice === null);
+		check("C: Esc 返回 null（拒绝，不执行）", result().done && result().choice === null);
+	}
+	{
+		const { panel, result } = makePanel(mod, "git status");
+		panel.render(WIDTH);
+		panel.handleInput(K.up); // 首项再 ↓ 上滚不动
+		panel.handleInput(K.enter);
+		check("C: 首项再 ↑ 不越界", result().choice === "允许一次");
+	}
+
+	// ---- 场景 D：无法泛化时不提供「永久允许」 ----
+	console.log("场景 D：无可泛化规则");
+	{
+		const { panel, result } = makePanel(mod, "some-command --flag", {
+			summary: "未知命令。",
+			impact: [],
+			canRemember: false,
+		});
+		const text = panelText(panel.render(WIDTH));
+		check("D: 不出现「永久允许」选项", !text.includes("允许并永久记住"));
+		check("D: 只有两项（Enter 允许 / ↓ 拒绝）", text.includes("1-2 直选"));
+		panel.handleInput(K.down);
+		panel.handleInput(K.enter);
+		check("D: 第二项是「拒绝」", result().choice === "拒绝");
 	}
 
 	console.log(failures === 0 ? "\n全部通过 ✓" : `\n${failures} 项失败 ✗`);
