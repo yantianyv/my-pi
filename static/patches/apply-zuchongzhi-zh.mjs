@@ -9,7 +9,7 @@
  * 因此汉化只能直接替换全局安装 dist 编译产物里的硬编码字符串。
  *
  * 覆盖范围（首批高频可见文案，按文件定向替换）：
- *   - settings-selector.js   /settings 界面全部标题/描述/按钮（~99 条）
+ *   - settings-selector.js   /settings 界面全部标题/描述/按钮（~103 条）
  *   - session-selector.js    /resume 会话选择器
  *   - tree-selector.js       /tree 树选择器（标签提示 + 消息前缀）
  *   - model-selector.js      /model 模型选择器
@@ -17,7 +17,7 @@
  *   - trust-selector.js      项目信任选择器
  *   - config-selector.js     /config 资源配置器（扩展/技能/主题等节名）
  *   - footer.js              底部状态栏（no-model / thinking off / sub / auto）
- *   - interactive-mode.js    命令反馈、usage 信息面板、警告提示（~90 条）
+ *   - interactive-mode.js    命令反馈、usage 信息面板、警告提示（~152 条，含底部快捷键提示）
  *   - session-share.js       /share 会话分享（gh gist 上传流程，0.85.1 从
  *                            interactive-mode.js 拆出的新文件）
  *
@@ -168,6 +168,9 @@ const PATCHES = {
 	],
 	// ---- /share 会话分享：0.85.1 把 gh gist 相关文案从 interactive-mode.js 拆到这里 ----
 	"session-share.js": [
+		["Pi session", "Pi 会话"],
+		["Unknown error", "未知错误"],
+		["Uploading to Radius...", "正在上传到 Radius……"],
 		["GitHub CLI (gh) is not installed. Install it from https://cli.github.com/", "未安装 GitHub CLI（gh）。请从 https://cli.github.com/ 安装"],
 		["Failed to parse gist ID from gh output", "无法从 gh 输出解析 gist ID"],
 		["Creating gist...", "正在创建 gist..."],
@@ -194,6 +197,8 @@ const PATCHES = {
 	],
 	// ---- /tree 树选择器 ----
 	"components/tree-selector.js": [
+		["context edit", "上下文编辑"],
+		["label time", "标签时间"],
 		["Label (empty to remove):", "标签（留空删除）："],
 		["Type to search:", "输入搜索："],
 		["branch summary", "分支摘要"],
@@ -202,6 +207,7 @@ const PATCHES = {
 	],
 	// ---- /model 模型选择器 ----
 	"components/model-selector.js": [
+		["Model refresh timed out; showing cached models.", "模型刷新超时；正在显示缓存的模型。"],
 		["Model catalogs refreshed.", "模型目录已刷新。"],
 		["Only showing models from configured providers. Use /login to add providers.", "仅显示已配置提供商的模型。使用 /login 添加提供商。"],
 		["Scope: ", "范围："],
@@ -209,6 +215,8 @@ const PATCHES = {
 	],
 	// ---- 登录对话框：keyHint 的英文 fallback（快捷键找不到时显示），替换后为 "(esc 取消)" 形式 ----
 	"components/login-dialog.js": [
+		["Cmd+click to open", "Cmd+单击打开"],
+		["Ctrl+click to open", "Ctrl+单击打开"],
 		["to cancel,", "取消，"],
 		["Login cancelled", "登录已取消"],
 		["to cancel", "取消"],
@@ -219,6 +227,10 @@ const PATCHES = {
 	"components/trust-selector.js": [["Project trust", "项目信任"]],
 	// ---- /config 资源配置器：节名标题 ----
 	"components/config-selector.js": [
+		["Built-in (project override)", "内置（项目覆盖）"],
+		["Built-in", "内置"],
+		["cycle inherit/+/-", "循环 inherit/+/-"],
+		["switch mode", "切换模式"],
 		["Project Local Resources", "项目本地资源"],
 		["Global Resources", "全局资源"],
 		["Project settings", "项目设置"],
@@ -239,6 +251,52 @@ const PATCHES = {
 	],
 	// ---- interactive-mode.js：命令反馈 / usage 信息面板 / 警告提示（长串在前保证子串安全）----
 	"interactive-mode.js": [
+		["A bash command is already running. Press Esc to cancel it first.", "已有 bash 命令正在运行，请先按 Esc 取消。"],
+		["Branch summary", "分支摘要"],
+		["Cache Warming", "缓存预热"],
+		["Cache miss penalty:", "缓存未命中开销："],
+		["Clipboard file path contains control characters", "剪贴板文件路径包含控制字符"],
+		["Completed compaction is missing from the session context", "已完成的压缩不在会话上下文中"],
+		["Inactive (cache warming unavailable)", "未启用（缓存预热不可用）"],
+		["Model refresh timed out; searching cached models.", "模型刷新超时；正在检索缓存的模型。"],
+		["Model refresh timed out; showing cached models.", "模型刷新超时；正在显示缓存的模型。"],
+		["No account providers available.", "没有可用的账户提供商。"],
+		["No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.", "没有可移除的已存凭据。/logout 只移除 /login 保存的凭据；环境变量与 models.json 配置不受影响。"],
+		["Radius is a service crafted for Pi by the builders of Pi, Earendil Works", "Radius 是由 Pi 的开发者 Earendil Works 为 Pi 打造的服务"],
+		["Refresh cost:", "刷新开销："],
+		["Reloaded keybindings, extensions, skills, prompts, themes, and context files; saved project trust", "已重载快捷键、扩展、技能、提示词、主题与上下文文件；已保存项目信任"],
+		["Reloaded keybindings, extensions, skills, prompts, themes, and context files", "已重载快捷键、扩展、技能、提示词、主题与上下文文件"],
+		["Reloading keybindings, extensions, skills, prompts, themes, and context files...", "正在重载快捷键、扩展、技能、提示词、主题与上下文文件……"],
+		["Startup is still in progress", "启动仍在进行中"],
+		["Summarize branch?", "总结分支？"],
+		["Usage: /import <path.jsonl>", "用法：/import <path.jsonl>"],
+		["Usage: /name <name>", "用法：/name <名称>"],
+		["Wait for the current compaction or tree navigation to finish before navigating the session tree.", "请等待当前压缩或树导航完成后再浏览会话树。"],
+		["What's New", "更新日志"],
+		["You can also use an AWS profile, IAM keys, or role-based credentials.", "也可以使用 AWS profile、IAM 密钥或基于角色的凭据。"],
+		["not set", "未设置"],
+		["thinking blocks", "思考块"],
+		["thinking block", "思考块"],
+		["to paste files on macOS, images, or text", "粘贴文件（macOS）、图片或文本"],
+		["to edit all queued messages", "编辑全部排队消息"],
+		["to cycle thinking level", "循环切换思考级别"],
+		["to run bash (no context)", "运行 bash（不带上下文）"],
+		["to cycle models", "循环切换模型"],
+		["to queue follow-up", "排队后续消息"],
+		["to delete to end", "删到行尾"],
+		["to expand thinking", "展开思考"],
+		["to expand tools", "展开工具"],
+		["to select model", "选择模型"],
+		["to exit (empty)", "退出（输入为空时）"],
+		["to interrupt", "打断"],
+		["to run bash", "运行 bash"],
+		["to suspend", "挂起"],
+		["to attach", "以附加"],
+		["to clear", "清空"],
+		["to exit", "退出"],
+		["drop files", "拖入文件"],
+		["for external editor", "外部编辑器"],
+		["for commands", "命令"],
 		["Close active overlays before changing TUI mode", "切换 TUI 模式前请关闭活动浮层"],
 		["Suspend to background is not supported on Windows", "Windows 不支持挂起到后台"],
 		["Wait for compaction to finish before reloading.", "请等待压缩完成后再重新加载。"],
