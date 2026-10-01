@@ -69,7 +69,7 @@ const PATCHES = {
 		["Clear empty rows when content shrinks (may cause flicker)", "内容收缩时清除空行（可能闪烁）"],
 		["Color theme for the interface", "界面颜色主题"],
 		["Default filter when opening /tree", "打开 /tree 时的默认过滤器"],
-		["Disable verbose printing at startup", "启动时禁用冗长输出"],
+		["Disable verbose printing at startup (header: keep only the startup header)", "启动时禁用冗长输出（header：仅保留启动头）"],
 		["Double-escape action", "双击 Esc 的动作"],
 		["Editor padding", "编辑器内边距"],
 		["Enable or disable individual warnings", "启用或禁用单项警告"],
@@ -93,7 +93,7 @@ const PATCHES = {
 		["Horizontal padding for input editor (0-3)", "输入编辑器的水平内边距（0-3）"],
 		["Light/dark detection requires terminal support.", "浅色/深色检测需要终端支持。"],
 		["Log in to a provider or configure an API key first", "请先登录提供商或配置 API 密钥"],
-		["Interface layout; fullscreen mode is experimental", "界面布局；全屏模式为实验性"],
+		["Interface layout; regular mode uses the terminal's normal scrollback", "界面布局；常规模式使用终端常规滚动缓冲"],
 		["Fullscreen copy on select", "全屏模式选中即复制"],
 		["Fullscreen exit output", "全屏模式退出时输出"],
 		["No models available", "没有可用模型"],
@@ -239,7 +239,6 @@ const PATCHES = {
 		["Model catalogs refreshed.", "模型目录已刷新。"],
 		["Model selection saved to settings", "模型选择已保存到设置"],
 		["No API key providers available.", "没有可用的 API 密钥提供商。"],
-		["No subscription providers available.", "没有可用的订阅提供商。"],
 		["No login methods available.", "没有可用的登录方式。"],
 		["No login providers available.", "没有可用的登录提供商。"],
 		["No agent messages to copy yet.", "还没有可复制的助手消息。"],
@@ -356,6 +355,13 @@ function main() {
 			console.log("没有备份目录，无需还原。");
 			return;
 		}
+		const piVersion = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
+		const stampPath = path.join(tmpDir, "version.json");
+		const stamped = fs.existsSync(stampPath) ? JSON.parse(fs.readFileSync(stampPath, "utf8")).version : null;
+		if (stamped && stamped !== piVersion) {
+			console.error(`✘ 备份来自 pi ${stamped}，当前为 ${piVersion}：还原会把旧版文件盖回新版 dist，已拒绝。请全局重装 pi 恢复原文件。`);
+			process.exit(1);
+		}
 		let restored = 0;
 		for (const rel of fs.readdirSync(backupDir, { recursive: true })) {
 			const from = path.join(backupDir, rel);
@@ -381,6 +387,15 @@ function main() {
 	const backupDir = path.join(tmpDir, "backup");
 	const statePath = path.join(tmpDir, "state.json");
 	if (!dryRun) fs.mkdirSync(backupDir, { recursive: true });
+	const piVersion = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
+	const stampPath = path.join(tmpDir, "version.json");
+	const stamped = fs.existsSync(stampPath) ? JSON.parse(fs.readFileSync(stampPath, "utf8")).version : null;
+	if (stamped && stamped !== piVersion && fs.existsSync(backupDir)) {
+		// pi 升级后旧备份是上个版本的原文，--restore 会把旧文件盖回新版 dist，废弃重建
+		fs.rmSync(backupDir, { recursive: true, force: true });
+		fs.rmSync(statePath, { force: true });
+		console.log(`检测到 pi 版本变化（${stamped} → ${piVersion}），已废弃旧版备份，将按当前版本重新备份。`);
+	}
 	const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf8")) : {};
 
 	let totalReplaced = 0;
@@ -461,6 +476,7 @@ function main() {
 	}
 
 	if (!dryRun) fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
+	if (!dryRun) fs.writeFileSync(stampPath, JSON.stringify({ version: piVersion }), "utf8");
 
 	console.log("");
 	if (dryRun) {
