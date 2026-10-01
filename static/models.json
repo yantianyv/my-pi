@@ -15,13 +15,29 @@
       "api": "openai-completions",
       "apiKey": "$VOLCENGINE_CODING_API_KEY",
       "compat": {
-        "supportsDeveloperRole": false
+        "supportsDeveloperRole": false,
+        "supportsLongCacheRetention": false,
+        "supportsStore": false
       },
       "models": [
         { "id": "ark-code-latest", "name": "Ark Code Auto", "contextWindow": 256000 },
         { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "reasoning": true, "contextWindow": 1048576 },
         { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "reasoning": true, "contextWindow": 1048576 }
-      ]
+      ],
+      "modelOverrides": {
+        "deepseek-v4-flash": {
+          "compat": {
+            "thinkingFormat": "deepseek",
+            "requiresReasoningContentOnAssistantMessages": true
+          }
+        },
+        "deepseek-v4-pro": {
+          "compat": {
+            "thinkingFormat": "deepseek",
+            "requiresReasoningContentOnAssistantMessages": true
+          }
+        }
+      }
     },
     "sensenova": {
       "baseUrl": "https://token.sensenova.cn/v1",
