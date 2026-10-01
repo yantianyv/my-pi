@@ -292,19 +292,18 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Working 行文案分层：等你 X > 等 X 完成 > 正在（廉价 AI 短语 > work > pi 默认）。
-	 * 行首带执行中动画帧（与终端标题同一个 spinner 与 200ms 节拍）——动画显示在本扩展的
-	 * 显示位上，而不是去改 pi 的折叠思考标签（那个交回默认静态「Thinking...」）。
+	 * 只给文案、不自带 spinner：pi 的 Working 指示器本身就在行首转（默认盲文帧 80ms），
+	 * 再拼一个帧就是两支并排转圈。
 	 */
 	function workingLineText(ctx: ExtensionContext): string | undefined {
-		const spinner = WORK_SPINNER_FRAMES[workFrame % WORK_SPINNER_FRAMES.length];
 		if (promptKind) {
 			const detail = promptWaitText ?? promptTitle ?? promptKindLabel(promptKind);
-			return `${spinner} 等你：${detail}`;
+			return `等你：${detail}`;
 		}
-		if (currentTool) return `${spinner} 等 ${currentTool} 完成…`;
-		if (stepPhrase) return `${spinner} 正在${stepPhrase}…`;
+		if (currentTool) return `等 ${currentTool} 完成…`;
+		if (stepPhrase) return `正在${stepPhrase}…`;
 		const work = readWork(ctx);
-		return work ? `${spinner} 正在${work}…` : `${spinner} 工作中…`;
+		return work ? `正在${work}…` : `工作中…`;
 	}
 
 	/** 把当前分层文案推到 Working 行（agent 未运行/无 UI 时不写） */
@@ -399,7 +398,6 @@ export default function (pi: ExtensionAPI) {
 		workTimer = setInterval(() => {
 			workFrame++;
 			ctx.ui.setTitle(workTitleText());
-			applyWorking(ctx); // Working 行同步转帧（同一时钟，不额外起定时器）
 		}, WORK_TITLE_INTERVAL_MS);
 	}
 

@@ -196,7 +196,7 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 - **全局去重**：出声前抢一次跨进程名额（独占创建 + 超龄回收），多实例同时收尾**只有第一个出声**，视觉提醒仍各窗口各闪；
 - 查看与调参：`/beacon status` 报告当前判定与读数；阈值可在 `~/.pi/agent/status-beacon.json` 覆盖（`presenceGate:false` 关闭门控、`activeIdleMs` / `awayIdleMs` / `dedupeMs`）。
 
-**执行中动画的位置**：动画只出现在本扩展自己的显示位上——终端标题的 spinner（200ms 转帧）与 **Working 行行首的同一帧**（`⠋ 正在重构 HUD…` / `⠋ 等 bash 完成…`），共用同一个时钟不额外起定时器；pi 的折叠思考标签不再被改写，交回默认静态 `Thinking...`。
+**执行中动画的位置**：终端标题的 spinner（200ms 转帧）由本扩展驱动；**Working 行行首那支转圈是 pi 指示器自带的**（默认盲文帧 80ms），本扩展只提供「在等什么」文案（`正在重构 HUD…` / `等 bash 完成…`）——文案里不再拼第二支 spinner。pi 的折叠思考标签不再被改写，交回默认静态 `Thinking...`。
 
 **Ctrl+C 打断（abort）不算完成，不触发提醒**：打断后 agent-loop 的最后一条 assistant 消息 `stopReason="aborted"`，status-beacon 据此跳过。「等待人工」有 `ctx.isIdle()` 守卫：用户空闲时主动开的提示（如 `/answer` 续答问卷）不打扰。
 

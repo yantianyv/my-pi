@@ -195,9 +195,8 @@ async function bundle(entry, name) {
 		await fire("agent_start");
 		await fire("tool_execution_start", { toolName: "bash", args: {} });
 		const last = workingMessages[workingMessages.length - 1];
-		const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-		check("E: Working 行带执行中动画帧", typeof last === "string" && frames.includes(last[0]), JSON.stringify(last));
-		check("E: Working 行保留「在等什么」信息", typeof last === "string" && last.includes("bash"));
+		check("E: Working 行保留「在等什么」信息", typeof last === "string" && last.includes("bash"), JSON.stringify(last));
+		check("E: Working 行不自带 spinner（行首交给 pi 的指示器）", typeof last === "string" && !/^[⠀-⣿]/.test(last), JSON.stringify(last));
 		check("E: 不再改写折叠思考标签", hiddenLabelCalls.length === 0);
 		await fire("agent_settled");
 		check("E: 收尾后仍不碰折叠思考标签", hiddenLabelCalls.length === 0);
