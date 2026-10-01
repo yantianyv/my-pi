@@ -92,6 +92,7 @@ function compactLines(state: WorkflowState, derived: Derived, th: Theme, width: 
 	const blocked = blockedList(state, derived);
 	const doneCount = derived.all.filter((t) => state.tasks[t.id]?.status === "done").length;
 	const empty = derived.all.length === 0;
+	const allDone = !empty && doneCount === derived.all.length;
 	const lines: string[] = [];
 
 	// 行 1：左侧 = 当前任务（最显眼）+ 阶段（dim）；右侧 = 进度条（右对齐）
@@ -106,7 +107,11 @@ function compactLines(state: WorkflowState, derived: Derived, th: Theme, width: 
 		const next = nextPendingTask(state, derived);
 		taskPart = next
 			? th.fg("text", `${next.id} ${truncate(next.title, 32)}`)
-			: th.fg("success", "全部任务已完成");
+			: blocked.length
+				? th.fg("warning", "无待办（有阻塞项）")
+				: allDone
+					? th.fg("success", "全部任务已完成")
+					: th.fg("muted", "无待办任务");
 	}
 	const stageDone = curStage ? curStage.tasks.filter((t) => state.tasks[t.id]?.status === "done").length : 0;
 	const stagePart = curStage ? th.fg("dim", `${curStage.name} ${stageDone}/${curStage.tasks.length}`) : "";
@@ -289,7 +294,7 @@ export class WfmgMenuPanelComponent {
 		cfg.showPanel = !cfg.showPanel;
 		this.store.commitPanelConfig();
 		updateWidget(this.ctx, this.store);
-		this.ctx.ui.notify(`常驻面板已${cfg.showPanel ? "开启" : "关闭"}（/workflow-config toggle 可再切换）`, "info");
+		this.ctx.ui.notify(`常驻面板已${cfg.showPanel ? "开启" : "关闭"}（再次打开 /workflow-config 可切换）`, "info");
 	}
 
 	handleInput(data: string): void {
@@ -345,7 +350,7 @@ export class WfmgMenuPanelComponent {
 			// overview：当前任务+分工+进度+里程碑（widget 里被精简掉的信息在这里完整呈现）
 			for (const line of this.overviewLines()) content.push(pad(line));
 			content.push(pad(""));
-			content.push(pad(th.fg("dim", " 按任意键返回菜单")));
+			content.push(pad(th.fg("dim", " 按任意键返回菜单（Esc 再按一次关闭）")));
 		}
 
 		// 包边框（createBoxRenderer 统一圆角；borderMuted 暗色保持浮窗低调）
@@ -364,7 +369,7 @@ export class WfmgMenuPanelComponent {
 		const derived = this.store.getDerived();
 		const lines: string[] = [];
 		if (derived.all.length === 0) {
-			lines.push(th.fg("muted", " 工作流为空：让 AI 用 wf_workflow 规划阶段/任务"));
+			lines.push(th.fg("muted", " 工作流为空：让 AI 用 wf_workflow 规划阶段与任务（含分工、交付物、完成信号、依赖）"));
 			return lines;
 		}
 		const cur = currentTask(state, derived);
@@ -392,7 +397,7 @@ export class WfmgMenuPanelComponent {
 export function textPanel(state: WorkflowState, derived: Derived): string[] {
 	const lines: string[] = [summaryLine(state, derived), ""];
 	if (derived.all.length === 0) {
-		lines.push("工作流为空：让 AI 用 wf_workflow 规划阶段/任务");
+		lines.push("工作流为空：让 AI 用 wf_workflow 规划阶段与任务（含分工、交付物、完成信号、依赖）");
 		return lines;
 	}
 	const seen = new Set<string>();
@@ -412,7 +417,12 @@ export function textPanel(state: WorkflowState, derived: Derived): string[] {
 	const msEntries = Object.entries(state.milestones);
 	if (msEntries.length) {
 		lines.push("");
-		lines.push(`里程碑：${msEntries.map(([n, m]) => `${n}${m.done ? "✓" : ""}`).join("  ")}`);
+		// 与面板同一套三态：✓ 已完成 / ▶ 下一里程碑 / ○ 未完成
+		const curMsIdx = msEntries.findIndex(([, m]) => !m.done);
+		const msText = msEntries
+			.map(([n, m], i) => `${m.done ? "✓" : i === curMsIdx ? "▶" : "○"}${n}${m.date ? `(${m.date})` : ""}`)
+			.join("  ");
+		lines.push(`里程碑（✓已完成 ▶下一 ○未完成）：${msText}`);
 	}
 	lines.push(`记录：${state.notes.filter((n) => !n.supersededBy).length} 条`);
 	return lines;

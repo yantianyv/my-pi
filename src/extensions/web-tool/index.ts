@@ -73,7 +73,7 @@ export default function (pi: ExtensionAPI) {
 			source: Type.Optional(
 				Type.Union(
 					[
-						Type.Literal("web", { description: "通用网页搜索（bing + 360 双源合并，条目级评分排序）" }),
+						Type.Literal("web", { description: "通用网页搜索（Bing、360、百度多源合并，按相关度评分排序）" }),
 						Type.Literal("npm", { description: "npm 包搜索（npm registry JSON API）" }),
 					],
 					{ description: "搜索源类型，默认 web" },
@@ -205,9 +205,9 @@ export default function (pi: ExtensionAPI) {
 				: "没有有效的域名/URL";
 			const hint =
 				added.some((a) => a.count >= DISLIKE_BAN_THRESHOLD)
-					? "；已达封禁阈值，该域名条目将被滤除"
+					? `；已累计 ${DISLIKE_BAN_THRESHOLD} 次差评，该域名不再出现在搜索结果里（要恢复就在 /web-tool-config 面板的「搜索结果黑名单」里删掉这条）`
 					: added.length
-						? "；后续搜索该域名将按次数降权（/web-tool-config 面板可查看）"
+						? `；该域名在搜索结果中的排名已按次数降低（累计 ${DISLIKE_BAN_THRESHOLD} 次后完全隐藏；/web-tool-config 面板可查看与删除）`
 						: "";
 			return {
 				content: [{ type: "text", text: `已差评：${detail}${hint}` }],
@@ -216,10 +216,10 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ---- /web-tool-config：配置 web_fetch/web_search 被墙自动重试的代理地址；搜索差评管理在面板内（Delete 清空） ----
+	// ---- /web-tool-config：配置 web_fetch/web_search 被墙自动重试的代理地址；搜索差评管理在面板内（Del 删除选中项） ----
 	pi.registerCommand("web-tool-config", {
 		description:
-			"配置 web_fetch/web_search 被墙自动重试的代理：无参数打开设置面板输入 http:// 代理地址（面板内同时展示搜索差评列表，Delete 键清空）；`/web-tool-config <url>` 直接设置；`/web-tool-config off` 清除",
+			"配置 web_fetch/web_search 被墙自动重试的代理：无参数打开设置面板输入 http:// 代理地址（面板内同时展示搜索差评列表，Tab 切换、Del 删除选中项）；`/web-tool-config <url>` 直接设置；`/web-tool-config off` 清除；`/web-tool-config show` 查看当前值",
 		handler: async (args, ctx) => {
 			const arg = (args ?? "").trim();
 

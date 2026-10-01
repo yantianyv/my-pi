@@ -264,7 +264,9 @@ async function main() {
 		const caps2 = makeCaptures();
 		const ctx2 = makeCtx(caps2);
 		const p = handler(` Hello QR `, ctx2);
-		await new Promise((r) => setTimeout(r, 20));
+		// buildQr 为异步且首次调用要等 jiti 编译，固定短延时必现抖动：轮询到组件弹开为止
+		const deadline = Date.now() + 5_000;
+		while (caps2.customs.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
 		check("K: custom 组件已弹出", caps2.customs.length === 1);
 		let resolved = false;
 		const done = () => {

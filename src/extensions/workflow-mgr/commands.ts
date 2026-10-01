@@ -16,8 +16,10 @@ export function registerCommand(pi: ExtensionAPI) {
 		if (s.blocked) {
 			ctx.ui.notify(
 				s.blocked === "none"
-					? "本会话未使用工作流（如需启用，让 AI 执行 wf_workflow action=bind）"
-					: "本会话尚未绑定工作流（多工作流并发场景，让 AI 用 wf_workflow bind 绑定）",
+					? "本会话已明确不使用工作流（如需启用，让 AI 执行 wf_workflow action=bind）"
+					: s.blocked === "auto"
+						? "本会话暂不启用工作流（是否使用由 AI 依任务判断；也可让 AI 用 wf_workflow bind 指定）"
+						: "本会话尚未选择工作流（多工作流并发场景，让 AI 用 wf_workflow bind 选定）",
 				"info",
 			);
 			return;

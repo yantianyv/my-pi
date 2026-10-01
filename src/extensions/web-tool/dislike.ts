@@ -12,7 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { loadJsonConfig, saveJsonConfig } from "../shared/config";
 
-/** 搜索结果差评（动态黑名单）持久化文件（web_dislike 写入，跨会话生效；/web-tool-config 面板查看，Delete 清空） */
+/** 搜索结果差评（动态黑名单）持久化文件（web_dislike 写入，跨会话生效；/web-tool-config 面板查看与删除） */
 const DISLIKE_FILE = path.join(os.homedir(), ".pi", "agent", "web-search-blacklist.json");
 
 /** 差评降权衰减系数：score × DISLIKE_DECAY^count（1 次 ×0.6，2 次 ×0.36，3 次 ×0.22…） */

@@ -10,6 +10,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { readFileSync } from "node:fs";
 import { Type, type Static } from "typebox";
 import {
+	BINDING_AUTO,
 	DEFAULT_SLOT,
 	cloneWorkflow,
 	depsSatisfied,
@@ -101,7 +102,7 @@ const workflowParams = Type.Object({
 	slot: Type.Optional(
 		Type.String({
 			description:
-				"工作流槽位名（仅 bind 用）：绑定本会话到该工作流，不存在则创建空工作流；\"default\" = 项目根默认工作流；\"none\" = 本会话不使用工作流",
+				"工作流槽位名（仅 bind 用）：绑定本会话到该工作流，不存在则创建空工作流；\"default\" = 项目根默认工作流；\"auto\" = 暂不启用（是否使用由你判断）；\"none\" = 明确不用工作流",
 		}),
 	),
 });
@@ -131,16 +132,20 @@ function taskDetail(
 const err = (text: string) => ({ content: [{ type: "text" as const, text }], details: { kind: "error" as const } });
 
 /**
- * 绑定守卫：会话未绑定（undecided）/ 明确不用工作流（none）时拒绝操作并引导 bind。
- * 多工作流并发隔离：一个项目可存在多个命名工作流（wf_workflow bind 切换），
+ * 绑定守卫：会话未绑定（undecided）/ 暂不启用（auto，由 AI 判断）/ 明确不用（none）时
+ * 拒绝操作并引导 bind。多工作流并发隔离：一个项目可存在多个命名工作流（wf_workflow bind 切换），
  * 未绑定时操作会打在错误的槽位上，必须拦截。
  */
 function guardBound(s: WorkflowStore) {
 	if (!s.blocked) return null;
+	if (s.blocked === "auto")
+		return err(
+			"本会话暂不启用工作流（是否使用由你判断）：需要就用 wf_workflow action=bind 选定/新建工作流后再操作（slot 缺省时列出可选）；不需要则无需调用 wf_* 工具。",
+		);
 	return err(
 		s.blocked === "none"
-			? "本会话已设置为不使用工作流（如需启用：wf_workflow action=bind slot=<名称>）"
-			: "本会话尚未绑定工作流——先用 wf_workflow action=bind 绑定（slot 缺省时列出可选工作流与当前绑定；slot=\"none\" 表示本会话不用工作流）",
+			? "本会话已明确不使用工作流（如需启用：wf_workflow action=bind slot=<名称>）"
+			: "本会话尚未选择工作流——先用 wf_workflow action=bind 选定（slot 缺省时列出可选工作流与当前绑定；slot=\"none\" = 明确不用；slot=\"auto\" = 暂不启用）",
 	);
 }
 
@@ -192,7 +197,7 @@ export function registerTools(pi: ExtensionAPI) {
 			"list 查看全量；add 新增任务（stageId 不存在自动建阶段）；edit 改任意字段（空数组清空列表字段）；remove 删任务；" +
 			"archive 归档留档（快照移入该槽 archive/，无找回）；reset 清空（不可逆）。" +
 			"多工作流并发隔离：一个项目可存在多个命名工作流（default=项目根默认，其余在 slots/ 下），每个会话绑定一个；" +
-			"bind 绑定本会话（slot 缺省列出可选与当前绑定；slot=新名称创建空工作流；slot=\"none\" 本会话不用工作流）。" +
+			"bind 绑定本会话（slot 缺省列出可选与当前绑定；slot=新名称创建空工作流；slot=\"auto\" 暂不启用、是否使用交给你判断；slot=\"none\" 明确不用）。" +
 			"其余动作一律作用于本会话绑定的工作流。",
 		promptSnippet: "workflow: create/update the human-AI collaboration workflow definition",
 		parameters: workflowParams,
@@ -204,7 +209,8 @@ export function registerTools(pi: ExtensionAPI) {
 				const sid = ctx.sessionManager?.getSessionId?.() ?? "unknown";
 				if (!params.slot) {
 					const cur = getBinding(ctx.cwd, sid);
-					const curText = cur === undefined ? "（未绑定）" : cur === null ? "（不使用工作流）" : cur;
+					const curText =
+						cur === undefined ? "（未绑定）" : cur === BINDING_AUTO ? "（暂不启用，由 AI 判断）" : cur === null ? "（明确不用）" : cur;
 					const sums = slotSummaries(ctx.cwd);
 					const list = sums.length
 						? sums.map((x) => `- ${x.slot}：进度 ${x.done}/${x.total}${x.current ? `｜当前：${x.current}` : ""}`).join("\n")
@@ -215,13 +221,27 @@ export function registerTools(pi: ExtensionAPI) {
 								type: "text",
 								text:
 									`当前绑定：${curText}\n可选工作流：\n${list}\n\n` +
-									"绑定：wf_workflow action=bind slot=<名称>（不存在则创建空工作流；\"default\" = 项目根默认；\"none\" = 本会话不用工作流）",
+									"绑定：wf_workflow action=bind slot=<名称>（不存在则创建空工作流；\"default\" = 项目根默认；\"auto\" = 暂不启用；\"none\" = 明确不用）",
 							},
 						],
 						details: { kind: "workflow-bind" },
 					};
 				}
 				const slot = params.slot.trim();
+				if (slot === BINDING_AUTO) {
+					setBinding(ctx.cwd, sid, BINDING_AUTO);
+					invalidateBindingCache();
+					hideWidget(ctx);
+					return {
+						content: [
+							{
+								type: "text",
+								text: "已记下「暂不启用」：是否使用工作流由你视任务判断（不需要就不必调用 wf_* 工具；需要时用 wf_workflow action=bind slot=<名称> 选定或新建）",
+							},
+						],
+						details: { kind: "workflow-bind" },
+					};
+				}
 				if (slot === "none") {
 					setBinding(ctx.cwd, sid, null);
 					invalidateBindingCache();
@@ -230,7 +250,7 @@ export function registerTools(pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text: "本会话已设为不使用工作流（面板已隐藏；随时可 wf_workflow action=bind slot=<名称> 重新启用）",
+								text: "本会话已明确不使用工作流（面板已隐藏；随时可 wf_workflow action=bind slot=<名称> 重新启用）",
 							},
 						],
 						details: { kind: "workflow-bind" },
@@ -666,13 +686,24 @@ export function registerTools(pi: ExtensionAPI) {
 			// 完成推进前派全新上下文的只读+bash 子代理核验完成信号，不通过则打回（任务保持 doing）。
 			// 审计自身故障（超时/异常）放行——增强不是门禁，基础设施故障不卡死工作流。
 			if (complete && cur && curSt && curSt.status !== "done" && cur.doneSignal && s.getPanelConfig().auditOnComplete) {
-				if (ctx.hasUI) ctx.ui.setStatus("workflow-mgr", `🔍 独立审计「${cur.title}」…`);
+				if (ctx.hasUI) ctx.ui.setStatus("workflow-mgr", `🔍 正在独立审计完成信号（最长 90 秒）…`);
 				const verdict = await auditCompletion(ctx, cur);
-				if (ctx.hasUI) ctx.ui.setStatus("workflow-mgr", undefined);
+				updateWidget(ctx, s); // 恢复常规进度摘要（审计期间占用的是同一条状态）
 				if (!verdict.pass) {
+					const head =
+						verdict.kind === "format"
+							? "⛔ 独立审计未能得出结论（输出无法解析，按保守策略视为未通过），任务保持进行中："
+							: "⛔ 独立审计认为证据不足，任务保持进行中：";
 					return err(
-						`⛔ 独立审计未通过，任务「${cur.title}」保持进行中：\n${verdict.reason}\n\n` +
-							`请按审计意见补齐后再次 wf_switch。（审计可在 .pi/workflow/config.json 设 auditOnComplete:false 关闭）`,
+						`${head}\n` +
+							`任务：${cur.id} ${cur.title}\n` +
+							`交付物：${cur.deliverable || "（未定义）"}\n` +
+							`完成信号：${cur.doneSignal}\n` +
+							`审计意见：${verdict.reason}\n\n` +
+							(verdict.kind === "format"
+								? "这是审计输出格式问题、不一定代表任务未完成：请对照完成信号自查后再次 wf_switch（重跑会有新的审计）。"
+								: "请按审计意见补齐交付物/证据后再次 wf_switch。") +
+							`\n（审计是独立子代理做的证据核验；可在 .pi/workflow/config.json 设 auditOnComplete:false 关闭）`,
 					);
 				}
 			}

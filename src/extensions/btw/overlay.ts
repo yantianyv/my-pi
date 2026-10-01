@@ -277,8 +277,8 @@ export class BtwOverlay {
 			else statusStr = th.fg("error", `✗ ${this.errorText}`);
 
 			const hints: string[] = [];
-			if (!this.currentQuestion) hints.push("Enter 提问", "m 转正");
-			else if (this.isSettled()) hints.push("Enter 追问", "m 转正");
+			if (!this.currentQuestion) hints.push("Enter 提问", "m 附带进下一条消息");
+			else if (this.isSettled()) hints.push("Enter 追问", "m 附带进下一条消息");
 			hints.push("Esc 关闭");
 			if (contentLines.length > budget) hints.push("↑↓ 滚动");
 			lines.push(row(statusStr));

@@ -151,6 +151,7 @@ class QrDisplay implements Component {
 		private readonly full: boolean[][], // 含静区
 		private readonly pngBase64: string | undefined,
 		private readonly theme: Theme,
+		private readonly pngPath?: string, // 已落盘的 PNG 路径（终端太窄时指给用户）
 	) {}
 
 	invalidate(): void {
@@ -180,7 +181,8 @@ class QrDisplay implements Component {
 		const n = this.full.length;
 		if (n > width - 2) {
 			// 终端太窄放不下（模块数 > 可用列数）：二维码无法缩小（会扫不出），如实提示
-			return [this.theme.fg("warning", `（终端宽度不足，无法显示 ${n}×${n} 模块的二维码，请使用 PNG 文件）`)];
+			const hint = this.pngPath ? `可打开 PNG：${this.pngPath}` : "可重新生成并保存 PNG（save=true）";
+			return [this.theme.fg("warning", `（终端宽度不足，无法显示 ${n}×${n} 模块的二维码；${hint}）`)];
 		}
 		const left = Math.max(0, Math.floor((width - n) / 2));
 		const pad = " ".repeat(left);
@@ -212,7 +214,7 @@ function qrResultComponent(details: QrEncodeDetails, theme: Theme): Container {
 	// 手工生成（模块放大 8px + 静区，与 toBuffer 视觉一致，仅用于显示，不落盘）。
 	const png = encodePngSync(details.text, details.ecc);
 	const full = withQuietZone(buildMatrixSync(details.text, details.ecc));
-	c.addChild(new QrDisplay(full, png, theme));
+	c.addChild(new QrDisplay(full, png, theme, details.pngPath));
 	if (details.pngPath) {
 		c.addChild(new Text(theme.fg("dim", `PNG：${details.pngPath}`), 0, 0));
 	}
@@ -285,7 +287,7 @@ export default function (pi: ExtensionAPI) {
 		name: "qr_encode",
 		label: "生成二维码",
 		description:
-			"把文本（URL/Wi-Fi 配置/名片等）编码成二维码并显示到用户界面（图形终端 PNG 真图、普通终端字符绘制，可直接扫码），可选保存 PNG。",
+			"把文本（URL/Wi-Fi 配置/名片等）编码成二维码并显示到用户界面（图形终端 PNG 真图、普通终端字符绘制，可直接扫码），默认同时保存 PNG（save=false 则不落盘）。",
 		promptSnippet: "生成二维码：qr_encode(text) → 显示在用户界面 + PNG 路径",
 		promptGuidelines: [
 			"需要给用户二维码时用 qr_encode（直接显示在终端，可扫）；需要图片文件时用 save 参数",
@@ -438,7 +440,15 @@ export default function (pi: ExtensionAPI) {
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
 				push("🔳 解码失败", 6_000);
-				return { content: [{ type: "text", text: `解码二维码失败：${msg}` }], details: { error: msg, source: params.image } };
+				return {
+					content: [
+						{
+							type: "text",
+							text: `解码二维码失败：${msg}\n请确认路径/URL 可访问、图片为清晰完整的 PNG/JPEG（含留白、单张二维码），必要时裁剪后重试。`,
+						},
+					],
+					details: { error: msg, source: params.image },
+				};
 			}
 		},
 	});
@@ -449,7 +459,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx: ExtensionContext) => {
 			const text = (args ?? "").trim();
 			if (!text) {
-				ctx.ui.notify("用法：/qr <文本>——把文本编码成二维码并显示，按任意键关闭", "info");
+				ctx.ui.notify("用法：/qr <文本>——把文本编码成二维码并显示（终端内显示，不落盘），按任意键关闭", "info");
 				return;
 			}
 			try {
@@ -457,7 +467,7 @@ export default function (pi: ExtensionAPI) {
 				const full = withQuietZone(built.matrix);
 				const pngBase64 = built.png ? built.png.toString("base64") : encodePngSync(text, DEFAULT_ECC);
 				if (typeof ctx.ui.custom !== "function") {
-					ctx.ui.notify(`当前环境无 UI，无法显示二维码（文本：${text}）`, "warning");
+					ctx.ui.notify(`当前环境无 UI，无法显示二维码（文本：${text.slice(0, 60)}${text.length > 60 ? "…" : ""}）；可改用 qr_encode(save=true) 获取 PNG 路径`, "warning");
 					return;
 				}
 				await ctx.ui.custom<void>((_tui, theme, _kb, done) => {

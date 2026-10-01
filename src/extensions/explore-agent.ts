@@ -198,7 +198,8 @@ const EXPLORE_PARAMS = Type.Object({
 		description:
 			"每个任务派一个子代理（任务数 = 子代理数）。任务可按探索问题拆分，也可把大量文件/目录按批次分治，" +
 			"只要各任务范围与目标互不重叠（避免子代理重复探索同一区域）、粒度尽量均匀（各任务耗时相近，" +
-			"别让个别重型任务拖慢整批并行）。一次至少 2 个、最多 ${MAX_TASKS} 个任务" +
+			"别让个别重型任务拖慢整批并行）。一次至少 2 个、最多 " +
+			`${MAX_TASKS} 个任务` +
 			"（超出上限的调用会被拒绝，任务过多可拆成多批调用）。",
 		minItems: 2,
 		maxItems: MAX_TASKS,
@@ -214,7 +215,7 @@ function buildExploreToolDefinition(
 		name: "explore",
 		label: "探索子代理",
 		description:
-			"并行派出 2~${MAX_TASKS} 个只读子代理探索代码库并返回结构化报告（一个任务 = 一个子代理）。" +
+			`并行派出 2~${MAX_TASKS} 个只读子代理探索代码库并返回结构化报告（一个任务 = 一个子代理）。` +
 			"每个子代理拥有 read/ls/grep/find 工具，自主决定阅读哪些文件，你只负责分配任务；任务描述要具体可回答。" +
 			visionNote +
 			"适合：了解陌生模块结构、定位功能实现、梳理调用链——比主 agent 逐文件 read 更省上下文、更快、更便宜。" +
@@ -524,7 +525,7 @@ async function executeExplore(
 		r.ok ? `## 任务：${r.task}\n${r.report}` : `## 任务：${r.task}\n⚠ ${r.error}`,
 	);
 	const text = [
-		`探索完成：${succeeded}/${results.length} 个任务成功（子模型 ${modelName}）${truncatedNote}`,
+		`探索完成：${succeeded}/${results.length} 个任务成功${results.length - succeeded > 0 ? `（失败 ${results.length - succeeded} 个，可重新调用 explore 重试）` : ""}（子模型 ${modelName}）${truncatedNote}`,
 		"",
 		...sections,
 	].join("\n\n");

@@ -170,7 +170,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			"note 说明题占 12 题额度，用 content 装待审草稿/背景原文，不参与作答与必答校验）。" +
 			"问卷整屏弹出会遮住聊天记录：问题依赖你刚发的消息时，用 context 摘要关键背景或 includeLastMessage=true 自动附上上一条回复，" +
 			"上下文会显示在问卷顶部。" +
-			"问卷立即整屏弹出：Enter 提交（答案作工具结果返回）、Esc 搁置（可 /answer 续答，答案以用户消息送达）。" +
+			"问卷立即整屏弹出：必答全部完成才能 Enter 提交（答案作为本工具结果返回）；Esc 存草稿搁置（可用 /answer 续答，续答提交的答案以用户消息送达）。用户也可在问卷页删除问卷（你会收到 status=deleted，不要再追问或重建）。" +
 			"作废用 action=cancel + id（问卷即文件，删除即撤回；作答中的无法作废）。一次只创建一份。",
 		promptSnippet: "创建问卷向用户批量提问（单选/多选/简答/判断/评分/数字/说明），或作废待答问卷",
 		promptGuidelines: [

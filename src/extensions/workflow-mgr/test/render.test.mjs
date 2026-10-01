@@ -703,7 +703,7 @@ async function scenarioM() {
 	// wf_status 简报无「用户负责」行
 	const st = pi.tools.find((t) => t.name === "wf_status");
 	const r = await st.execute("1", {}, undefined, undefined, ctx);
-	check("wf_status 无「用户负责」行", !r.content[0].text.includes("用户负责") && r.content[0].text.includes("AI）负责"));
+	check("wf_status 无「用户负责」行", !r.content[0].text.includes("用户负责") && r.content[0].text.includes("AI 负责："));
 
 	// widget 渲染无「你:」行、有「AI:」行
 	const caps = {};
@@ -938,10 +938,9 @@ async function scenarioR() {
 	// 1. 多槽时 session_start 不自动绑定 → 工具被守卫拒绝 + before_agent_start 注入选择指引（非 TUI 兜底）
 	await fireEvent(pi, ctx, "session_start");
 	const r0 = await st.execute("0", {}, undefined, undefined, ctx);
-	check("多槽未绑定：wf_status 被守卫拒绝并引导 bind", r0.details?.kind === "error" && r0.content[0].text.includes("尚未绑定"));
+	check("多槽未绑定：wf_status 被守卫拒绝并引导 bind", r0.details?.kind === "error" && r0.content[0].text.includes("尚未选择工作流"));
 	const inject = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx);
 	check("未绑定注入选择指引（含两个槽位）", inject.systemPrompt.includes("尚未绑定") && inject.systemPrompt.includes("beta") && inject.systemPrompt.includes("default"));
-
 	// 2. bind 无参 → 列出可选与当前绑定
 	const r1 = await wf.execute("1", { action: "bind" }, undefined, undefined, ctx);
 	check("bind 无参列出可选工作流", r1.content[0].text.includes("beta") && r1.content[0].text.includes("未绑定"));
@@ -965,8 +964,8 @@ async function scenarioR() {
 	// 5. 绑定持久化：同 sid 的新 ctx（模拟 /reload 后）仍绑定 beta
 	const ctx2 = makeCtx(dir);
 	const r5 = await st.execute("5", {}, undefined, undefined, ctx2);
-	// beta 槽唯一任务已在 4b 完成 → 「所有任务已完成」；若绑定丢失回落 default 会显示其待办任务
-	check("绑定跨 ctx 保持（bindings.json 持久化）", r5.details?.kind !== "error" && r5.content[0].text.includes("所有任务已完成"));
+	// beta 槽唯一任务已在 4b 完成 → 「全部任务已完成」；若绑定丢失回落 default 会显示其待办任务
+	check("绑定跨 ctx 保持（bindings.json 持久化）", r5.details?.kind !== "error" && r5.content[0].text.includes("全部任务已完成"));
 
 	// 6. bind none → 守卫拒绝并提示「不使用工作流」
 	await wf.execute("6", { action: "bind", slot: "none" }, undefined, undefined, ctx);
@@ -990,7 +989,7 @@ async function scenarioR() {
 	ctxB.sessionManager = { getSessionId: () => "sid-b" };
 	await fireEvent(pi, ctxB, "session_start");
 	const r7 = await st.execute("8", {}, undefined, undefined, ctxB);
-	check("有其他活跃绑定会话时新会话不自动绑定", r7.details?.kind === "error" && r7.content[0].text.includes("尚未绑定"));
+	check("有其他活跃绑定会话时新会话不自动绑定", r7.details?.kind === "error" && r7.content[0].text.includes("尚未选择工作流"));
 
 	// 8. TUI 弹窗路径：多槽时 session_start 弹选择框——选「新建」+ 输入名称 → 绑定新槽
 	const dir3 = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
@@ -1006,8 +1005,8 @@ async function scenarioR() {
 	caps8.selectAnswer = "＋ 新建工作流…";
 	caps8.inputAnswer = "gamma";
 	await fireEvent(pi, ctx8, "session_start");
-	check("多槽 TUI：session_start 弹出选择框（含各槽+新建+暂不使用）",
-		caps8.select?.options.some((o) => o.startsWith("default")) && caps8.select.options.includes("＋ 新建工作流…") && caps8.select.options.includes("⊘ 本会话不使用工作流"));
+	check("多槽 TUI：session_start 弹出选择框（首位默认=暂不启用，后跟各槽+新建）",
+		caps8.select?.options[0].startsWith("暂不启用") && caps8.select.options.some((o) => o.startsWith("default")) && caps8.select.options.includes("＋ 新建工作流…"));
 	check("新建名称经 input 收集", caps8.input !== undefined);
 	const bound8 = JSON.parse(readFile(join(dir3, ".pi", "workflow", "bindings.json")));
 	check("选择「新建 gamma」后绑定落盘", bound8.sessions["test-sid"]?.slot === "gamma");
@@ -1015,15 +1014,39 @@ async function scenarioR() {
 	const r8 = await st.execute("9", {}, undefined, undefined, ctx8);
 	check("绑定后 wf_status 可用（空槽引导文案）", r8.details?.kind !== "error" && r8.content[0].text.includes("工作流为空"));
 
-	// 9. TUI 弹窗 Esc（selectAnswer undefined）= 暂不使用 → 绑定 null
+	// 9. TUI 弹窗 Esc（selectAnswer undefined）= 暂不启用 → 绑定 "auto"（不占槽、是否使用交由 AI）
 	const dir4 = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
-	mkdirSync(join(dir4, ".pi", "workflow", "slots", "beta"), { recursive: true });
+	const beta4 = join(dir4, ".pi", "workflow", "slots", "beta");
+	mkdirSync(beta4, { recursive: true });
+	writeFileSync(
+		join(beta4, "workflow.json"),
+		JSON.stringify({ schemaVersion: 1, stages: [{ id: "s0", name: "贝塔", goal: "", tasks: [{ id: "0.1", title: "贝塔任务", desc: "", humanTasks: [], aiTasks: [], deliverable: "", doneSignal: "", deps: [] }] }] }),
+		"utf8",
+	);
 	const caps9 = {};
 	const ctx9 = makeCtx(dir4, caps9);
 	await fireEvent(pi, ctx9, "session_start");
-	check("弹窗 Esc 视同暂不使用", caps9.select !== undefined && caps9.notify?.text.includes("不使用工作流"));
+	const bound9 = JSON.parse(readFile(join(dir4, ".pi", "workflow", "bindings.json")));
+	check("弹窗 Esc 视同暂不启用", caps9.select !== undefined && caps9.notify?.text.includes("暂不启用"));
+	check("暂不启用绑定值为 auto（不占槽位）", bound9.sessions["test-sid"]?.slot === "auto");
 	const r9 = await st.execute("10", {}, undefined, undefined, ctx9);
-	check("Esc 后工具拒绝（不使用工作流）", r9.details?.kind === "error" && r9.content[0].text.includes("不使用工作流"));
+	check("auto 态工具拒绝并说明由 AI 判断是否使用",
+		r9.details?.kind === "error" && r9.content[0].text.includes("暂不启用") && r9.content[0].text.includes("action=bind"));
+	const inject9 = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx9);
+	check("auto 态零注入（不打扰 AI 自行判断）", inject9 === undefined || !inject9.systemPrompt?.includes("【工作流】"));
+	// AI 自行决定使用工作流：bind 具体槽位即可（无需用户再拍板）
+	await wf.execute("10b", { action: "bind", slot: "beta" }, undefined, undefined, ctx9);
+	const r9b = await st.execute("10c", {}, undefined, undefined, ctx9);
+	check("auto 态下 AI 可自行 bind 启用", r9b.details?.kind !== "error");
+	const inject9b = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx9);
+	check("自行 bind 后恢复注入", inject9b.systemPrompt?.includes("【工作流】"));
+
+	// 10. bind auto（非 TUI 路径：AI 用 ask 问卷问到「暂不启用」后落盘）
+	await wf.execute("11", { action: "bind", slot: "auto" }, undefined, undefined, ctx9);
+	const bound10 = JSON.parse(readFile(join(dir4, ".pi", "workflow", "bindings.json")));
+	check("bind auto 落盘且工具回到拒绝态", bound10.sessions["test-sid"]?.slot === "auto");
+	const r10 = await wf.execute("12", { action: "bind" }, undefined, undefined, ctx9);
+	check("bind 无参回显「暂不启用」", r10.content[0].text.includes("暂不启用"));
 
 	rmSync(dir, { recursive: true, force: true });
 	rmSync(dir2, { recursive: true, force: true });

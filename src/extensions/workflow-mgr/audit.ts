@@ -30,6 +30,9 @@ const AUDIT_MAX_TOKENS = 2048;
 export interface AuditVerdict {
 	pass: boolean;
 	reason: string;
+	/** 不通过的种类：evidence=证据不足（审计读到了东西但不足以支撑完成）；
+	 *  format=审计输出无法解析（保守视为不通过）；infra=审计基础设施故障（此类放行，不产生 pass=false） */
+	kind?: "evidence" | "format" | "infra";
 }
 
 function buildAuditPrompt(task: TaskDef): string {
@@ -58,12 +61,13 @@ function parseVerdict(text: string): AuditVerdict {
 			return {
 				pass: j.pass === true,
 				reason: typeof j.reason === "string" ? j.reason : "（无理由）",
+				kind: j.pass === true ? undefined : "evidence",
 			};
 		} catch {
 			/* fallthrough */
 		}
 	}
-	return { pass: false, reason: "审计输出未包含合法结论 JSON（保守视为不通过）" };
+	return { pass: false, reason: "审计输出未包含合法结论 JSON（保守视为不通过）", kind: "format" };
 }
 
 /**
@@ -79,9 +83,9 @@ export async function auditCompletion(ctx: ExtensionContext, task: TaskDef): Pro
 		model,
 		maxTokens: AUDIT_MAX_TOKENS,
 		convertToLlm,
-		shouldStopAfterTurn: (() => {
+		finishTurn: (() => {
 			let turns = 0;
-			return () => ++turns >= AUDIT_MAX_TURNS;
+			return () => (++turns >= AUDIT_MAX_TURNS ? { action: "end" as const } : undefined);
 		})(),
 	};
 	const controller = new AbortController();

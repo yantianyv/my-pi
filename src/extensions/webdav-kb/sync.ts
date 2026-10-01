@@ -197,9 +197,9 @@ async function acquireSyncLock(
 				);
 			}
 			if (first !== "corrupt") {
-				opts.onWait?.(
-					`等待另一实例释放同步锁（${holder}），已等 ${Math.round((waitMs - (deadline - Date.now())) / 1000)}s…`,
-				);
+				const waited = Math.round((waitMs - (deadline - Date.now())) / 1000);
+				const budget = Math.round(waitMs / 1000);
+				opts.onWait?.(`等待另一实例释放同步锁（${holder}），已等 ${waited}s，最多等 ${budget}s…`);
 			}
 			await sleepCancellable(LOCK_POLL_MS, opts.signal);
 			continue;
@@ -296,10 +296,50 @@ export interface SyncStats {
 	deleted: number;
 	/** 冲突数（保留远端 + 本地 .conflict 副本） */
 	conflicts: number;
+	/** 冲突文件路径（用于向用户指出哪些文件产生了副本） */
+	conflictFiles: string[];
+	/** 遍历失败、内容未纳入同步的远端目录（权限/网络） */
+	failedDirs: string[];
 	/** 无变化文件数 */
 	unchanged: number;
 	/** 单个文件失败（不影响其它文件，汇总上报） */
 	errors: string[];
+}
+
+/**
+ * 同步摘要（单一渲染源，命令/工具/面板/后台同步共用）：计数全人话，0 值省略；
+ * 无任何变化时返回「已是最新」。附带说明行（冲突副本、失败明细、不可达目录）另由 formatSyncNotes 给出。
+ */
+export function formatSyncSummary(stats: SyncStats): string {
+	const parts: string[] = [];
+	if (stats.downloaded) parts.push(`下载 ${stats.downloaded}`);
+	if (stats.uploaded) parts.push(`上传 ${stats.uploaded}`);
+	if (stats.deleted) parts.push(`删除 ${stats.deleted}`);
+	if (stats.conflicts) parts.push(`冲突 ${stats.conflicts}`);
+	if (parts.length === 0) parts.push("已是最新");
+	if (stats.errors.length) parts.push(`失败 ${stats.errors.length}`);
+	return parts.join(" · ");
+}
+
+/**
+ * 同步摘要的补充说明（给用户看的细节）：冲突副本落位/处理方式、失败明细、不可达目录。
+ * 返回逐行文本（已带前缀），调用方自行决定放进 notify 正文或状态条。
+ */
+export function formatSyncNotes(stats: SyncStats, maxErrors = 3): string[] {
+	const notes: string[] = [];
+	if (stats.conflictFiles.length) {
+		const shown = stats.conflictFiles.slice(0, 3).join("、");
+		const more = stats.conflictFiles.length > 3 ? ` 等 ${stats.conflictFiles.length} 个` : "";
+		notes.push(
+			`冲突 ${shown}${more}：本地版本已另存为同目录 .conflict-<时间> 副本，远端版本已就位（核对后可直接删除副本）`,
+		);
+	}
+	if (stats.failedDirs.length) {
+		notes.push(`⚠ ${stats.failedDirs.length} 个远端目录未能读取（权限或网络），本次同步结果可能不完整`);
+	}
+	for (const err of stats.errors.slice(0, maxErrors)) notes.push(`⚠ ${err}`);
+	if (stats.errors.length > maxErrors) notes.push(`⚠ …另有 ${stats.errors.length - maxErrors} 条失败明细`);
+	return notes;
 }
 
 interface RemoteFile {
@@ -462,8 +502,15 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 	try {
 		const stale = recoverJournal(mirrorDir);
 		if (stale) {
+			const phaseName: Record<string, string> = {
+				download: "下载",
+				conflict: "冲突处理",
+				upload: "上传",
+				delete: "删除",
+			};
+			const when = stale.startedAt ? new Date(stale.startedAt).toLocaleString() : "上次";
 			opts.onProgress?.(
-				`检测到上次同步中断于「${stale.phase}」阶段（${stale.startedAt}）；操作幂等，重跑差异比对即可收敛`,
+				`上次同步（${when}）在「${phaseName[stale.phase] ?? stale.phase}」阶段被中断，正在自动继续（不会重复覆盖）`,
 			);
 		}
 		return await syncAllInner(cfg, mirrorDir, opts, lock);
@@ -474,7 +521,16 @@ export async function syncAll(cfg: KbConfig, mirrorDir: string, opts: SyncOption
 
 /** 增量同步主体（lock：acquireSyncLock 句柄，用于进度上报与阶段边界接管校验） */
 async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions = {}, lock: SyncLock): Promise<SyncStats> {
-	const stats: SyncStats = { downloaded: 0, uploaded: 0, deleted: 0, conflicts: 0, unchanged: 0, errors: [] };
+	const stats: SyncStats = {
+		downloaded: 0,
+		uploaded: 0,
+		deleted: 0,
+		conflicts: 0,
+		conflictFiles: [],
+		failedDirs: [],
+		unchanged: 0,
+		errors: [],
+	};
 	const signal = opts.signal;
 	const client = new WebDavClient(cfg.baseUrl!, cfg.username!, cfg.password!, {
 		proxyUrl: cfg.proxyUrl,
@@ -489,6 +545,7 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 	// 1) 远端遍历
 	progress("遍历远端…");
 	const { files: remote, failedDirs } = await walkRemote(client, progress, signal);
+	stats.failedDirs = failedDirs;
 
 	// 2) 本地扫描 + 差异比对
 	const local = scanLocal(mirrorDir);
@@ -607,9 +664,11 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 				localMtime: fs.statSync(abs).mtimeMs,
 			};
 			stats.conflicts++;
+			stats.conflictFiles.push(p);
 		} catch (e) {
 			stats.errors.push(`冲突处理 ${p}: ${e instanceof Error ? e.message : String(e)}`);
 		}
+		progress(`冲突处理 ${stats.conflicts}/${conflicts.length}`);
 	}
 
 	// 5) 上传（并发 + 父目录补齐）
@@ -625,7 +684,9 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 			if (!cfg.allowSecretUpload) {
 				const hits = scanSecrets(data.toString("utf8"));
 				if (hits.length) {
-					stats.errors.push(`上传 ${p}: 含疑似密钥（${hits.join("、")}），已拦截上传，本地文件保留`);
+					stats.errors.push(
+						`上传 ${p}: 含疑似密钥（${hits.join("、")}），已拦截上传，本地文件保留；确认无敏感信息后可移除密钥再同步，或把配置项 allowSecretUpload 设为 true 放行全部`,
+					);
 					return;
 				}
 			}
@@ -662,7 +723,9 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 		} catch (e) {
 			stats.errors.push(`删除本地 ${p}: ${e instanceof Error ? e.message : String(e)}`);
 		}
+		progress(`删除远端已删的文件 ${stats.deleted}/${delLocal.length}`);
 	}
+	let remoteDeleted = 0;
 	for (const p of delRemote) {
 		try {
 			await client.delete(p);
@@ -676,6 +739,7 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 			}
 			stats.errors.push(`删除远端 ${p}: ${e instanceof Error ? e.message : String(e)}`);
 		}
+		progress(`删除本地已删的远端文件 ${++remoteDeleted}/${delRemote.length}`);
 	}
 
 	// 6.5) 清理本地镜像空目录（删文件后的残留；.kb- 与镜像根保留）

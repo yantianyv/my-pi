@@ -235,7 +235,7 @@ export default function (pi: ExtensionAPI) {
 			const files = p.recentFiles.filter((f) => now - f.at < RECENT_FILE_TTL_MS).map((f) => f.path);
 			const prev = peerSnapshot.get(p.sessionId);
 			if (!prev) {
-				let line = `${hhmm()} ${short(p.sessionId)} ${initial ? "已在工作" : "加入"}`;
+				let line = `${hhmm()} 会话 ${short(p.sessionId)} ${initial ? "已在工作" : "加入"}`;
 				if (act) line += `（${act}）`;
 				if (files.length > 0) line += `，近期改过：${files.slice(0, 5).join("、")}`;
 				pushBroadcast(`join:${p.sessionId}`, line);
@@ -245,18 +245,18 @@ export default function (pi: ExtensionAPI) {
 			} else {
 				for (const f of files) {
 					if (![...prev.files].some((pf) => samePath(pf, f))) {
-						pushBroadcast(`file:${p.sessionId}:${f.toLowerCase()}`, `${hhmm()} ${short(p.sessionId)} 修改了 ${f}${act ? `（${act}）` : ""}`);
+						pushBroadcast(`file:${p.sessionId}:${f.toLowerCase()}`, `${hhmm()} 会话 ${short(p.sessionId)} 修改了 ${f}${act ? `（${act}）` : ""}`);
 					}
 				}
 				if (label !== prev.label && label) {
-					pushBroadcast(`label:${p.sessionId}:${label}`, `${hhmm()} ${short(p.sessionId)} 任务：${label}`);
+					pushBroadcast(`label:${p.sessionId}:${label}`, `${hhmm()} 会话 ${short(p.sessionId)} 任务标签：${label}`);
 				}
 			}
 			peerSnapshot.set(p.sessionId, { files: new Set(files), label });
 		}
 		for (const id of [...peerSnapshot.keys()]) {
 			if (!seen.has(id)) {
-				pushBroadcast(`leave:${id}`, `${hhmm()} ${short(id)} 离开`);
+				pushBroadcast(`leave:${id}`, `${hhmm()} 会话 ${short(id)} 离开`);
 				peerSnapshot.delete(id);
 				ctx.ui.notify(`pair-guard：并发会话 ${short(id)} 已结束`, "info");
 			}
@@ -399,7 +399,8 @@ export default function (pi: ExtensionAPI) {
 					`2) 后续修改此文件前建议先重新读取最新内容；\n` +
 					`3) 若涉及同一区域的实质性改动，请在回复中提醒用户存在并发编辑，由用户协调两个会话的分工。`,
 			};
-			return { content: [...event.content, warn] };
+			// structuredContent 随 content 一起返回：runner 见到 content 替换而未带 structuredContent 时会丢弃它
+			return { content: [...event.content, warn], structuredContent: event.structuredContent };
 		}
 	});
 
@@ -511,12 +512,12 @@ export default function (pi: ExtensionAPI) {
 			const lines = peers.map((p) => {
 				const agoMin = Math.max(0, Math.round((now - p.lastBeat) / 60_000));
 				const label = p.label || "（无标签）";
-				const titles = (p.work ? `\n  工作：${p.work}` : "");
+				const titles = (p.work ? `\n  工作标题：${p.work}` : "");
 				const files = p.recentFiles
 					.filter((f) => now - f.at < RECENT_FILE_TTL_MS)
 					.map((f) => `${f.path}（${Math.max(0, Math.round((now - f.at) / 60_000))} 分钟前）`)
 					.join("、");
-				return `会话 ${short(p.sessionId)}（pid ${p.pid}，${agoMin} 分钟前活跃）${titles}\n  任务：${label}\n  最近修改：${files || "无"}`;
+				return `会话 ${short(p.sessionId)}（pid ${p.pid}，${agoMin} 分钟前活跃）${titles}\n  任务标签：${label}\n  最近修改：${files || "无"}`;
 			});
 			ctx.ui.notify(`pair-guard：${peers.length} 个并发会话\n${lines.join("\n")}`, "info");
 		},

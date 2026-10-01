@@ -145,24 +145,28 @@ export class ProxyConfigOverlay {
 		});
 		lines.push(row(` ${th.fg("accent", "❯")} ${inputDisplay}`));
 
-		// 搜索差评（拉黑管理，面板唯一入口）：不显示 reason（那是给 AI 追踪的，人看只会添乱）
+		// 搜索结果黑名单（AI 差评累积而成，面板是唯一管理入口）：不显示 reason（那是给 AI 追踪的，人看只会添乱）
 		const dislike = loadDislikeData();
 		const dislikeKeys = this.sortedDislikeKeys(dislike);
-		lines.push(row(` ${th.fg("warning", "🔨 搜索差评")} ${th.fg("dim", `(${dislikeKeys.length} 个)`)}`));
+		lines.push(
+			row(
+				` ${th.fg("warning", "🚫 搜索结果黑名单")} ${th.fg("dim", `(${dislikeKeys.length} 个域名，累计 ${DISLIKE_BAN_THRESHOLD} 次自动隐藏)`)}`,
+			),
+		);
 		if (dislikeKeys.length) {
 			for (let i = 0; i < dislikeKeys.length; i++) {
 				const k = dislikeKeys[i]!;
 				const rec = dislike[k]!;
 				const state =
 					rec.count >= DISLIKE_BAN_THRESHOLD
-						? th.fg("warning", "已滤除")
-						: th.fg("dim", `降权×${Math.pow(DISLIKE_DECAY, rec.count).toFixed(2)}`);
-				let text = `   ${k} ${th.fg("accent", `×${rec.count}`)} ${state}`;
+						? th.fg("warning", "已隐藏")
+						: th.fg("dim", `已差评 ${rec.count} 次（排名降低约 ${Math.round((1 - Math.pow(DISLIKE_DECAY, rec.count)) * 100)}%）`);
+				let text = `   ${k} ${state}`;
 				if (this.focus === "dislike" && i === this.selected) text = `\x1b[7m${text}\x1b[27m`; // 选中项反显
 				lines.push(row(text));
 			}
 		} else {
-			lines.push(row(` ${th.fg("dim", "无记录")}`));
+			lines.push(row(` ${th.fg("dim", "暂无记录：AI 给低质量域名记差评后会出现在这里")}`));
 		}
 
 		// 错误 / 操作反馈 / 提示（error 优先于 statusMsg；常驻一行操作提示）

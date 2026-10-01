@@ -39,18 +39,18 @@ export function renderBrief(state: WorkflowState, derived: Derived): string {
 		lines.push("- 工作流为空：请用 wf_workflow add 规划阶段/任务（含人机分工、交付物、完成信号、依赖）");
 	} else if (cur) {
 		const stage = derived.stageOf.get(cur.id);
-		lines.push(
-			`- 当前阶段：${stage?.name ?? "?"}｜当前任务：${cur.id} ${cur.title}（${state.tasks[cur.id]?.status === "doing" ? "进行中" : "待开始"}）`,
-		);
+		const st = state.tasks[cur.id]?.status ?? "todo";
+		const statusText = st === "doing" ? "进行中" : st === "blocked" ? "已阻塞（等外部条件）" : st === "done" ? "已完成" : "待开始";
+		lines.push(`- 当前阶段：${stage?.name ?? "?"}｜当前任务：${cur.id} ${cur.title}（${statusText}）`);
 		// agent 模式（纯 agent 自动驾驶）不显示人类分工（0.3 拍板）
 		if (derived.mode !== "agent") lines.push(`- 用户负责：${cur.humanTasks.join("；") || "（暂无）"}`);
-		lines.push(`- 你（AI）负责：${cur.aiTasks.join("；") || "（暂无）"}`);
+		lines.push(`- AI 负责：${cur.aiTasks.join("；") || "（暂无）"}`);
 		lines.push(`- 交付物：${cur.deliverable || "（未定义）"}`);
 		lines.push(`- 完成信号：${cur.doneSignal || "（未定义）"}`);
 	} else if (next) {
 		lines.push(`- 下一个任务：${next.id} ${next.title}（${derived.stageOf.get(next.id)?.name ?? "?"}）`);
 	} else {
-		lines.push("- 所有任务已完成");
+		lines.push("- 全部任务已完成");
 	}
 
 	const blocked = blockedList(state, derived);

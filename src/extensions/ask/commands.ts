@@ -15,7 +15,7 @@ import { answeredProgress, answerableQuestions, formatAnswersMessage } from "./t
 
 export function registerAnswerCommand(pi: ExtensionAPI): void {
 	pi.registerCommand("answer", {
-		description: "回答待处理的问卷（多份时先选择；Enter 提交 / Esc 搁置）",
+		description: "回答待处理的问卷（多份时先在选择器里选；问卷页 Enter 提交 / Esc 存草稿搁置）",
 		handler: async (_args, ctx) => {
 			rememberCtx(ctx);
 			initStore(ctx.cwd);

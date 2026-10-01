@@ -665,7 +665,7 @@ async function main() {
 		check("L: ↑ 回到 q1 输入行", statusText().includes("第 1/2 题"));
 		comp.handleInput(K.enter); // q2 未答 → 跳转并提示
 		check("L: 必答未完成时 Enter 不提交", captures.customs.length === 1);
-		check("L: 提示指向第 2 题", statusText().includes("第 2 题尚未作答"));
+		check("L: 提示指向第 2 题", statusText().includes("第 2/2 题：尚未作答"));
 		comp.handleInput(K.space);
 		comp.handleInput(K.enter);
 		const result = await execP;
@@ -748,12 +748,13 @@ async function main() {
 		const text = comp.render(TERM_COLS).map((l) => l.trim()).join("");
 		check("N: 一览屏标题可见", text.includes("答案一览"));
 		check("N: 一览屏含已答项", text.includes("方案甲"));
-		check("N: 一览屏标出未答项", text.includes("未答") || text.includes("跳过"));
+		check("N: 一览屏标出未答项", text.includes("必答 · 未完成") || text.includes("跳过"));
+		check("N: 一览屏声明不提交", text.includes("此页不提交"));
 		check("N: 一览屏提示 C 复制", text.includes("C 复制答案"));
 		assertFullscreen(comp, "N: 一览屏渲染");
 		comp.handleInput(K.escape); // 返回作答页
 		const backText = comp.render(TERM_COLS).map((l) => l.trim()).join("");
-		check("N: 返回作答页（选中后焦点已到第 2 题）", backText.includes("第 2/2 题") && !backText.includes("答案一览"));
+		check("N: 返回作答页（选中后焦点已到第 2 题）", backText.includes("第 2/2 题") && !backText.includes("📋 答案一览"));
 		// 帮助屏
 		comp.handleInput("?");
 		const helpText = comp.render(TERM_COLS).map((l) => l.trim()).join("");
@@ -995,6 +996,67 @@ async function main() {
 		assertFullscreen(comp, "S");
 		comp.handleInput(K.escape);
 		await execP;
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	// ---- 场景 T：校验口径（选「其他」未填 / 评分越界 / 进度条必答口径） ----
+	console.log("场景 T：校验与进度口径");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-test-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const execP = tool.execute(
+			"tc20",
+			{
+				id: "validation-survey",
+				title: "校验口径",
+				questions: [
+					{
+						id: "q1",
+						type: "single",
+						question: "必答单选？",
+						options: [{ label: "甲" }, { label: "乙" }],
+					},
+					{ id: "q2", type: "single", question: "选填单选？", required: false, options: [{ label: "丙" }, { label: "丁" }] },
+					{ id: "q3", type: "rating", question: "评分？", min: 2, max: 4, required: false },
+				],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		const statusText = () => comp.render(TERM_COLS).map((l) => l.trim()).join(" ");
+		const pageText = () => comp.render(TERM_COLS).map((l) => l.trim()).join("\n");
+
+		// 选中 q1 的「其他（自由输入）」但不填内容 → 提交时精准提示，而不是笼统「尚未作答」
+		comp.handleInput(K.down);
+		comp.handleInput(K.down); // 甲 → 乙 → 其他
+		comp.handleInput(K.space);
+		comp.handleInput(K.enter);
+		check("T: 勾「其他」未填内容时提示精准且带题号分母", /第 1\/3 题：选了「其他」但未填写内容/.test(statusText()));
+
+		// 评分越界（min=2，按 1 应给反馈）
+		comp.handleInput(K.ctrlDown);
+		comp.handleInput(K.ctrlDown);
+		check("T: 已到第 3/3 题（评分行）", statusText().includes("第 3/3 题"));
+		check("T: 评分行提示带范围", pageText().includes("数字直选 2-4"));
+		comp.handleInput("1");
+		check("T: 评分越界给出范围反馈", statusText().includes("本评分范围是 2-4"));
+		comp.handleInput("3");
+		check("T: 评分合法后清除提示", !statusText().includes("本评分范围是"));
+
+		// 必答未完成时进度条不声称可以提交；必答齐后选填未答仍标「余为选填」
+		comp.handleInput(K.ctrlUp);
+		comp.handleInput(K.escape);
+		const shelved = await execP;
+		check("T: Esc 置为搁置并保留草稿（status=shelved）", shelved.details?.status === "shelved");
+		check("T: 搁置回执带已答进度", typeof shelved.details?.answered === "number" && shelved.details.answered >= 1);
 		rmSync(dir, { recursive: true, force: true });
 	}
 

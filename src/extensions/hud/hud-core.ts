@@ -165,6 +165,7 @@ export default async function (pi: ExtensionAPI) {
 		"kb-test": { color: "accent", priority: 65 }, // 知识库连通测试（webdav-kb）
 		"kb-vault": { color: "muted", priority: 62 }, // vault 解锁/锁定状态（webdav-kb）
 		"btw-transfer": { color: "muted", priority: 60 }, // btw 问答已附带提示（btw）
+		"img-slim": { color: "warning", priority: 76 }, // 图片预算：本轮已省略 N 张旧图（img-slim）
 	};
 	/** 检测 ctx 是否仍有效：session 替换 / reload 后旧 ctx 的所有 getter 都会抛 stale 错误。 */
 	function ctxAlive(ctx: ExtensionContext): boolean {
@@ -282,7 +283,7 @@ export default async function (pi: ExtensionAPI) {
 		const b = balance;
 		if (b.loading) return "余额：查询中…";
 		if (b.moduleMissing) return "余额：余额模块未加载";
-		if (b.unsupported) return `余额：${b.providerId ?? "?"} 暂不支持余额查询`;
+		if (b.unsupported) return `余额：${b.providerId ?? "?"} 暂无余额接口（可在供应商控制台查看）`;
 		if (b.error) return `余额：获取失败（${b.error}）`;
 		if (b.data) {
 			const amount = formatAmount(b.data.amount);
@@ -341,10 +342,14 @@ export default async function (pi: ExtensionAPI) {
 			if (gitTimer) clearInterval(gitTimer);
 			gitTimer = setInterval(() => void refreshGitStats(ctx), GIT_REFRESH_INTERVAL_MS);
 
-			// 行布局辅助：左侧固定左对齐，右侧固定右对齐，中间用空格撑开
+			// 行布局辅助：左侧固定左对齐，右侧固定右对齐，中间用空格撑开。
+			// 左侧超长时先截左段（不是整行截断）——否则右侧消耗/刷新时间会被整段吃掉且无任何提示
 			const layout = (left: string, right: string, width: number): string => {
-				const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
-				return left + pad + right;
+				const rightW = visibleWidth(right);
+				const budget = Math.max(1, width - rightW - 1);
+				const l = visibleWidth(left) > budget ? truncateToWidth(left, budget) : left;
+				const pad = " ".repeat(Math.max(1, width - visibleWidth(l) - rightW));
+				return l + pad + right;
 			};
 			const padTo = (str: string, w: number): string => str + " ".repeat(Math.max(0, w - visibleWidth(str)));
 			// 右对齐：内容紧贴分隔线
@@ -371,8 +376,8 @@ export default async function (pi: ExtensionAPI) {
 				const b = balance;
 				const label = theme.fg("dim", "余额");
 				if (b.loading) return `${label} 查询中…`;
-				if (b.moduleMissing) return `${label} ${theme.fg("warning", "模块缺失")}`;
-				if (b.unsupported) return `${label} ${b.providerId ?? "?"} 未适配`;
+				if (b.moduleMissing) return `${label} ${theme.fg("warning", "模块未加载")}`;
+				if (b.unsupported) return `${label} ${b.providerId ?? "?"} 暂无接口`;
 				if (b.error) return `${label} 获取失败（${b.error}）`;
 				if (b.data) {
 					const color = b.data.status === "ok" ? "success" : b.data.status === "warning" ? "warning" : "error";
@@ -427,16 +432,16 @@ export default async function (pi: ExtensionAPI) {
 			};
 
 			const renderGitLine = (): string => {
-				// hud-git 子模块缺失：明确提示，而非误导性的「⎇ -」（后者会被误认为非 git 仓库）
-				if (!gitMod) return theme.fg("warning", "⎇ -");
-				if (!gitStats) return theme.fg("dim", "⎇ -");
+				// hud-git 子模块缺失：与「非 git 仓库」区分开，否则用户无法判断是坏了还是本来就不是仓库
+				if (!gitMod) return theme.fg("warning", "⎇ git模块未加载");
+				if (!gitStats) return theme.fg("dim", "⎇ -（非 git 仓库）");
 				const g = gitStats;
 				const badge = theme.fg("accent", `⎇ ${g.branch ?? "HEAD"}`);
 				const parts: string[] = [];
-				// 计数符号制（借鉴 pi-statusline）：⇡领先 ⇣落后 +暂存 ~修改 ?未跟踪；
-				// 紧凑显示：零值不显示、计数间只留空格（⎇ master ⇡1 ~2 ?1）
-				if (g.ahead) parts.push(theme.fg("dim", `⇡${g.ahead}`));
-				if (g.behind) parts.push(theme.fg("dim", `⇣${g.behind}`));
+				// 计数符号制（与 /git 面板一致）：↑领先 ↓落后 +暂存 ~修改 ?未跟踪；
+				// 紧凑显示：零值不显示、计数间只留空格（⎇ master ↑1 ~2 ?1）
+				if (g.ahead) parts.push(theme.fg("dim", `↑${g.ahead}`));
+				if (g.behind) parts.push(theme.fg("dim", `↓${g.behind}`));
 				if (g.staged) parts.push(theme.fg("success", `+${g.staged}`));
 				if (g.unstaged) parts.push(theme.fg("warning", `~${g.unstaged}`));
 				if (g.untracked) parts.push(theme.fg("muted", `?${g.untracked}`));
@@ -611,7 +616,7 @@ export default async function (pi: ExtensionAPI) {
 								.map((p) => theme.fg((p.color ?? "muted") as never, p.text))
 								.join(" ")
 						: "";
-					const timeText = balance.fetchedAt ? theme.fg("dim", fmtTime(balance.fetchedAt)) : "";
+					const timeText = balance.fetchedAt ? theme.fg("dim", `↻ ${fmtTime(balance.fetchedAt)}`) : "";
 					const right3 =
 						timeText || rateText
 							? `${padLeft(rateText, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(timeText, RIGHT_TOTAL - RIGHT_SEG1 - 3)}`

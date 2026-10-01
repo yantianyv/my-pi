@@ -24,11 +24,12 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `btw/` — `/btw` 旁支问答：侧栏浮层多轮追问、`m` 转正附带、`/btw-config` 模型 auto 最便宜故障转移（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`） | `~/.pi/agent/extensions/` |
 | `extensions/` | `status-beacon.ts` — 全链路状态感知：执行中标题进度（spinner+工具活动）+ 五状态五音效 + 状态栏闪烁 + 提醒标题动画（见下；前身 task-alert） | `~/.pi/agent/extensions/` |
-| `extensions/` | `perm-gate.ts` — bash 命令三级权限门：黑名单人工复核 / 白名单放行 / AI 审核（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `perm-gate.ts` — bash 命令权限门：硬拒绝 / 关注项 / 已记住的操作（意图缓存）+ AI 审核与人工确认面板（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `qr.ts` — 二维码：`qr_encode` 编码（显示到 UI + PNG 落盘）+ `qr_decode` 解码 + `/qr` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `img-slim.ts` — 图片请求体预算：新图按类型瘦身（照片→JPEG、图形→优先 PNG、动图 WebP 转静态）+ 每轮请求前按总量预算省略最旧历史图片（防 DeepSeek 等上游 48MiB 请求体 413）（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `crash-log.ts` — 崩溃黑匣子：崩溃堆栈同步落盘 `~/.pi/agent/pi-crash.log`，`/crash-log` 报告最近一条崩溃与取证路径（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `patches/` | 两个 pi 补丁：ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
@@ -76,8 +77,8 @@ pi 内置供应商无火山引擎（volcengine/ark/doubao），模板通过 pi �
 
 ```
 ⎇ main +1 ~2 ?3                            📁 my_pi
-[DeepSeek] ・ deepseek-v4-pro 思考high         ↑212k ↓79.7k 12.3/s  上下文[█▊        ] 1m
-余额 ¥49.09 + 10.00 ・ 低峰                   消耗≈¥0.020/min │ 17:17:35
+[DeepSeek] deepseek-v4-pro (high)         ↑212k ↓79.7k 12.3/s  [█▊        ] 1m
+余额 ¥49.09 +10.00 ・ 低峰                   ¥0.015/min ¥1.20 │ ↻ 17:17
 ```
 
 **图例：**
@@ -88,13 +89,14 @@ pi 内置供应商无火山引擎（volcengine/ark/doubao），模板通过 pi �
 | 行1 `+N`（绿） | 已 git add 还没 commit 的文件数 |
 | 行1 `~N`（黄） | 改过但没 add 的文件数 |
 | 行1 `?N`（灰） | 新文件还没 add 的文件数 |
-| 行1 `⇡N ⇣N` | 本地比远程多/少 N 个提交（零值不显示） |
+| 行1 `↑N ↓N` | 本地比远程多/少 N 个提交（零值不显示；与 `/git` 面板同一套箭头） |
 | 行2 `↑212k ↓79.7k 12.3/s` | 本会话已消耗的输入、输出 token + 输出 token 生成速率（tok/s，EMA 平滑：历史 80% + 新 turn 20%，首轮直接采用） |
-| 行2 `上下文[█████▎] 64k` | 进度条=上下文窗口占用率（绿→黄→红），64k=窗口总量 |
+| 行2 `[█▊ 1m]` | 进度条=上下文窗口占用率（绿→黄→红），尾部=窗口总量（占用率高时百分比会顶掉尾部数字，如 `[█████████▏] 90%`） |
 | 行3 `余额 ¥49.09 + 10.00` | 账户余额（主金额=充值余额，`+ X.XX`=赠送余额，无赠送则省略） |
 | 行3 `订阅 周 123/500` | 订阅额度余量（Kimi Code 周额度 / 小时频限） |
-| 行3 `消耗≈¥0.020/min` | 最近 10 分钟平均每分钟消耗（仅按量付费供应商显示） |
-| 行3 `・ 低峰`（绿）/ `・ 高峰`（橙黄） | DeepSeek 官方高峰/低峰时段徽章（北京时间每日 9:00-12:00 / 14:00-18:00 为高峰），挂在余额行末尾，仅显示当前状态。纯时段判断，与计价开关 `DEEPSEEK_PEAK_PRICING` 无关，仅 DeepSeek 供应商显示 |
+| 行3 `¥0.015/min ¥1.20` | 最近 10 分钟平均每分钟消耗（估算值）+ 本会话累计消耗，仅按量付费供应商显示（订阅制显示会话 token 数，积分制显示 🪙） |
+| 行3 `↻ 17:17` | 余额数据刷新时间（不是当前时间） |
+| 行3 `・ 低峰`（绿）/ `・ 高峰`（橙黄） | DeepSeek / OpenCode Go 官方高峰/低峰时段徽章（北京时间每日 9:00-12:00 / 14:00-18:00 为高峰）。高峰时段按官方 2 倍计价（已生效，与徽章一致） |
 
 git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 git 可视化面板（分支/暂存/修改/未跟踪，`s` 键一键同步：fetch→pull→push，无冲突全自动，冲突时可选「让 AI 处理冲突」或「放弃同步」）；`/hud` 开关 HUD。
 
@@ -103,7 +105,8 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | 槽位 | 触发 | 示例 | 优先级 |
 |---|---|---|---|
 | 指令模式 | 输入以 `!` 开头 | `⚡ 指令模式` | 100 |
-| 余额查询失败 | 余额接口报错（错误变化时才推，防刷屏） | `⚠ 余额查询失败` | 95 |
+| 余额查询失败 | 余额接口报错（错误变化时才推，防刷屏） | `⚠ 余额查询失败` | 78 |
+| 图片预算 | img-slim 省略历史图片时 | `🖼 34.2MB · 已省略3张旧图` | 76 |
 | 任务完成 | status-beacon 推送（自管闪烁帧） | `✅ 任务完成`（闪烁） | 90 |
 | 任务出错 | status-beacon 推送（出错终止） | `❌ 任务出错`（闪烁） | 92 |
 | 等待人工 | status-beacon 推送（ui_prompt 阻塞） | `⏳ 等待人工：权限复核`（闪烁） | 91 |
@@ -112,7 +115,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | 网页抓取 | web_fetch 执行中 | `⬇️ 抓取中` | 74 |
 | 短反馈 | 搜索完成 / 模型切换 | `🔍 5 条`、`⇄ gpt-5` | 70 |
 
-各扩展只负责 `setStatus(key, text)`，不知道 hud 的存在；`key` 与样式表约定在 `hud/hud-core.ts` 的 `STATUS_STYLE`（未登记 key 默认灰字、不参与竞争）。hud 被 `/hud` 关闭时，这些状态自动回落**原生 footer 第 3 行**显示（官方 `getExtensionStatuses()` 通道），信息屏B 无缝接管。
+各扩展只负责 `setStatus(key, text)`，不知道 hud 的存在；`key` 与样式表约定在 `hud/hud-core.ts` 的 `STATUS_STYLE`（未登记的 key 平时以灰字显示，一旦有已登记状态就自动让位）。hud 被 `/hud` 关闭时，这些状态自动回落**原生 footer 第 3 行**显示（官方 `getExtensionStatuses()` 通道），信息屏B 无缝接管。
 
 **注意**：setStatus 是 pi 原生接口，各插件推状态**不依赖 hud**（hud 缺席时原生 footer 自动展示）；hud 兼容该通道仅做行 1 动态区呈现。hud 加载时置 `globalThis.__PI_HUD_ACTIVE__` 仅供未来真正依赖 hud 特有功能的扩展校验（当前无插件依赖，未在插件侧做存在性检测）。
 
@@ -127,9 +130,13 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | MiMo Token Plan CN | `xiaomi-token-plan-cn` | 无 API | 显示控制台链接 |
 | 火山方舟 Coding | `volcengine-coding` | 无 API | 显示控制台查询链接 |
 | Z.AI Coding CN | `zai-coding-cn` | `GET /api/monitor/usage/quota/limit` | MCP月/周/5h 积分额度条（大周期在前）+ 积分速率（🪙，不换算 ¥/$） |
+| MiMo 按量付费 | `xiaomi` | 无 API | 只显示控制台查询链接 + ¥/min 消耗 |
+| OpenRouter | `openrouter` | `GET /api/v1/credits` + `/api/v1/key` | 账户总余额 + 单 Key 限额进度条 |
+| SenseNova Token Plan | `sensenova` | 无 API | 显示控制台链接 + 会话 token 累计（免费公测） |
+| OpenCode Go | `opencode-go` | `GET /zen/go/v1/usage` | 月/周/5h 订阅额度条 + 等效消耗（¥/min，有汇率时） |
 
 - 余额：官方 `GET /user/balance`（DeepSeek：充值 + 赠送）或 `GET /v1/usages`（Kimi：加油包 + 订阅额度），低余额/额度耗尽变色警示。余额行精简格式：主金额 = 充值/现金余额，赠送以 `+ X.XX` 追加（无赠送省略）。
-- 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot / OpenRouter 等按量付费显示 `¥/min + 累计`；Kimi / MiMo 等订阅制仅显示会话 token 累计。DeepSeek 按官方人民币定价直算（`hud/cost.ts` 的 `DEEPSEEK_PRICES`：缓存命中 ¥0.02/0.025、未命中 ¥1/3、输出 ¥2/6 每百万 tokens），不再经 USD×汇率；峰谷定价（高峰 2 倍）已预留开关 `DEEPSEEK_PEAK_PRICING`，官方生效后改为 true（生效前 HUD 行 3 的「高峰/低峰」徽章仍如实显示当前时段，见上图例，仅提醒不参与计价）。其余供应商成本内部按**原始货币 USD** 记录，显示时按汇率换算 RMB。**汇率三态**（`hud/cost.ts`）：① 实时（多源拉取 frankfurter(ECB) → open.er-api，每日快照、免 key，随余额刷新 1h 节流一次）→ ② 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`，拉取失败时读缓存）→ ③ 无汇率（断网且无缓存，显示原始货币 USD，**不使用任何固定近似汇率**）。OpenRouter 余额：有汇率时换算 RMB（明细附原始 USD + 汇率，缓存标注「(缓存)」），无汇率时直接显示 USD 原始值。所有供应商在 HUD 第 2 行统一显示 `↑input ↓output rate/s` 的输出 token 速率；该速率为 EMA 平滑值（历史 80% + 新 turn 20%，首轮直接采用），基于 `output token / turn 实际耗时`，比长期平均更能反映当前生成速度，但不是严格的逐 chunk 实时流式速率。
+- 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot / OpenRouter 等按量付费显示 `¥/min + 累计`；Kimi / MiMo 等订阅制仅显示会话 token 累计。DeepSeek 按官方人民币定价直算（`hud/cost.ts` 的 `DEEPSEEK_PRICES`：缓存命中 ¥0.02/0.025、未命中 ¥1/3、输出 ¥2/6 每百万 tokens），不再经 USD×汇率；峰谷定价（高峰 2 倍）已按官方规则生效（HUD 行 3 的「高峰/低峰」徽章与实际计价一致，见上图例）。其余供应商成本内部按**原始货币 USD** 记录，显示时按汇率换算 RMB。**汇率三态**（`hud/cost.ts`）：① 实时（多源拉取 frankfurter(ECB) → open.er-api，每日快照、免 key，随余额刷新 1h 节流一次）→ ② 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`，拉取失败时读缓存）→ ③ 无汇率（断网且无缓存，显示原始货币 USD，**不使用任何固定近似汇率**）。OpenRouter 余额：有汇率时换算 RMB（明细附原始 USD + 汇率，缓存标注「(缓存)」），无汇率时直接显示 USD 原始值。所有供应商在 HUD 第 2 行统一显示 `↑input ↓output rate/s` 的输出 token 速率；该速率为 EMA 平滑值（历史 80% + 新 turn 20%，首轮直接采用），基于 `output token / turn 实际耗时`，比长期平均更能反映当前生成速度，但不是严格的逐 chunk 实时流式速率。
 - 思考折叠：默认折叠（`settings.json` 的 `hideThinkingBlock: true`），折叠标签为动画 `Thinking.` → `Thinking..` → `Thinking...` → `Thinking....`（4 帧循环，随思考过程增长），`Ctrl+T` 切换展开。
 - 命令：`/balance` 手动刷新余额；`/git` 打开 git 可视化面板；`/hud` 开关 HUD。
 - **额外底部行接口**：通用 `__PI_HUD_API__`（`registerExtraRows(provider)` / `notifyExtraRowsUpdate()`）——workflow-mgr 等扩展注册渲染函数，hud 只把返回的行追加到 footer 底部（屏幕最底），**内容与样式由注册方决定**。当前 workflow-mgr 使用：其常驻面板内容（任务/分工/里程碑 ≈4 行，12 格进度条 + selectedBg 底色与面板同款）在底部渲染，面板隐藏；`/hud` 关闭时置 `__PI_HUD_ACTIVE__=false` 并派发 `hud:state-change`，workflow-mgr 自动注销底部行、恢复自绘面板。
@@ -177,9 +184,17 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 |---|---|---|---|
 | 任务完成 | `agent_settled` 正常结束（不会再自动重试/压缩/续跑） | `task_complete.wav` | 状态栏 + 标题动画（✅/✨ 闪烁） |
 | 任务出错 | `agent_settled` 且末条 assistant `stopReason="error"` | `error.wav` | 状态栏 + 标题动画（❌/⚠️ 闪烁，HUD 红色） |
-| 等待人工 | `ui_prompt_start`（pi 0.84.4 新增事件）且 agent 运行中被阻塞——perm-gate 人工复核、ask 问卷等 | `attention.wav` | 状态栏 + 标题动画（⏳/🔔 闪烁，HUD 黄色，附提示标题）；**应答（`ui_prompt_end`）自动撤，按键不撤**（用户需要按键回答提示本身） |
-| 空闲提醒 | 完成提醒后 60 秒无任何操作 | `idle_prompt.wav` | 仅补一声，不动视觉 |
-| 子代理完成 | `subagent` 工具成功结束（`tool_execution_end` 且 `!isError`） | `subagent_complete.wav` | 仅提示音（中间事件，不打断标题/状态；失败交给 turn 级 error 统一收尾） |
+| 等待人工 | `ui_prompt_start`（pi 0.84.4 新增事件）且 agent 运行中被阻塞——perm-gate 人工确认、ask 问卷等 | `attention.wav` | 状态栏 + 标题动画（⏳/🔔 闪烁，HUD 黄色，附提示标题）；**应答（`ui_prompt_end`）自动撤，按键不撤**（用户需要按键回答提示本身） |
+| 空闲提醒 | 完成提醒后 60 秒仍无人应答**且判定人已离开** | `idle_prompt.wav` | 仅补一声，不动视觉 |
+| 子代理完成 | 子代理工具成功结束（`explore` / `subagent` / `Task`，`tool_execution_end` 且 `!isError`） | `subagent_complete.wav` | 仅提示音（中间事件，不打断标题/状态；失败交给 turn 级 error 统一收尾） |
+
+**提示音的在场门控（跨实例协调，`shared/presence.ts`）**：提示音不再由单个实例说了算，避免「人明明在电脑前却被提示音打断」和「多个 pi 同时收尾变成提示音交响乐」：
+
+- **系统级空闲**：Windows 用 `GetLastInputInfo`（常驻 PowerShell 进程每 2s 上报，不反复起进程）、macOS 用 `ioreg HIDIdleTime`、Linux 用 `xprintidle`；取不到时退用跨实例信号；
+- **跨实例输入**：每个 pi 实例把自己的「最后一次用户输入时刻」写进 `~/.pi/agent/presence/<sessionId>.json`（一实例一文件、原子替换，无写冲突；死进程/陈旧档自动忽略），判定取所有活实例里最近的一次；
+- **判定**：系统空闲 < 20s（或任一实例 20s 内有输入）→ 判为**人在操作**，只闪标题不出声；所有信号都超过 5 分钟 → 判为**已离开**，第二声空闲提醒才会响；
+- **全局去重**：出声前抢一次跨进程名额（独占创建 + 超龄回收），多实例同时收尾**只有第一个出声**，视觉提醒仍各窗口各闪；
+- 查看与调参：`/beacon status` 报告当前判定与读数；阈值可在 `~/.pi/agent/status-beacon.json` 覆盖（`presenceGate:false` 关闭门控、`activeIdleMs` / `awayIdleMs` / `dedupeMs`）。
 
 **Ctrl+C 打断（abort）不算完成，不触发提醒**：打断后 agent-loop 的最后一条 assistant 消息 `stopReason="aborted"`，status-beacon 据此跳过。「等待人工」有 `ctx.isIdle()` 守卫：用户空闲时主动开的提示（如 `/answer` 续答问卷）不打扰。
 
@@ -192,13 +207,14 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 
 ## 命令权限门（src/extensions/perm-gate.ts）
 
-bash 命令三级管控（`tool_call` 事件拦截，只管 bash）：**复合命令先拆段**（`shared/shell-split.ts`：按 `&&`/`||`/`;`/`|`/换行拆分，`$()`/反引号子 shell 递归拆出，引号/转义保护）→ **黑名单**（整串或任一子命令段命中即转人工复核，面板带 ⚠️ 警告并指出命中段）→ **白名单**（**逐段判定：每个子命令段都要命中白名单才放行**，防止「git status && rm -rf x」被前半段规则连带放行；黑名单优先于白名单，安全兜底）→ **AI 审核**（未命中名单的命令交给辅助小模型，给出放行 / 人工复核 / 驳回三类结论；AI 审核失败——超时/无模型/网络错误/输出无法解析——一律降级人工复核）。
+bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合命令先拆段**（`shared/shell-split.ts`：按 `&&`/`||`/`;`/`|`/换行拆分，`$()`/反引号子 shell 递归拆出，引号/转义保护）→ **硬拒绝 deny**（命中即拒、不询问，默认覆盖 `rm -rf /`、`mkfs`、`dd` 写块设备、`curl|sh`、`chmod -R 777 /`）→ **已记住的操作 remembered**（**逐段判定：每个子命令段都要命中才放行**，防「git status && rm -rf x」被前半段连带放行）→ **关注项 watch**（命中不打断，只是把命令标记给 AI 要求从严：宁可确认一次也别放过）→ **AI 审核**（未命中名单的命令交给辅助小模型；AI 不可用——超时/无模型/网络错误/输出无法解析——降级为人工确认，文案说明是降级而非任务失败）。
 
-- **人工复核面板**（自绘 `ReviewPanel` overlay，替代原生 `ctx.ui.select`）：**命令全文折行展示不截断**（多行命令逐行折行，超出可视区 PgUp/PgDn 滚动，滚动余量在分隔行指示），↑↓ 移动、Enter 确认、1-4 直选、Esc 驳回。四操作：放行一次 / 放行并加白名单 / 驳回 / 驳回并加黑名单。AI 审核为「需复核」时会同时提炼命令核心特征为 **1~3 个候选正则**（附说明、从窄到宽排列，逐条校验可编译才采纳），加白/加黑时：单候选直接用、多候选弹面板选（附「精确匹配该命令」兜底项——复合命令拆段后**每段子命令各加一条精确规则**，与逐段判定语义对齐；Esc = 不加名单只执行本次操作）、无候选回落精确匹配；选中的正则既不匹配整串也不匹配任何子命令段时警告（AI 提炼可能有误）但不阻止加入；并行工具批里多个待复核命令经 Promise 链串行弹面板，避免对话框互相覆盖；无 UI（`-p` 等）时需复核的命令直接阻断；
-- **allow 自动加白**（`autoWhitelist` 策略，避免常用无害命令反复烧审核 token）：`exact`（默认）= AI 判 allow 后把该命令的精确段规则自动入白，同一条命令以后零 token；`smart` = 采纳 AI 候选正则最窄一条自动入白（同类变体也覆盖，候选跑偏/无候选自动退 exact）；`off` = 关闭。护栏：黑名单永远优先、去重、不覆盖黑名单已有规则、每次自动加白发通知（透明可查，也可随时 `/perm-gate` 查看名单或编辑配置文件）；`/perm-gate autowhite off|exact|smart` 切换；**保鲜机制（防无限膨胀）**：白名单规则带保鲜元数据（`addedAt`/`lastHit`/`hits`，每次命中刷新），超过 30 天未命中的规则在启动/加白时自动清理，`/perm-gate prune` 手动清理，状态行显示过期条数；旧版纯字符串配置（如历史 1832 条）加载时自动归一化为保鲜规则；
+- **人工确认面板**（自绘 `ReviewPanel` overlay）：**默认高亮「允许一次」**，三选项——允许一次 / 允许并永久记住这类操作（旁标将被记住的操作意图）/ 拒绝，`Esc` = 拒绝（不执行）；`↑↓` 选择、`Enter` 确认、`1-3` 直选。面板顶部是**人话信息区**（不随滚动消失）：AI 一句话解读 + 影响面（写/删/联网/凭证等）+ 命中原因（「命中关注项」等分类标签，**不展示正则原文**）；命令全文折行展示不截断，超出可视区 PgUp/PgDn 滚动，滚动余量在分隔行指示；并行工具批里多个待确认命令经 Promise 链串行弹面板。无可泛化规则时只剩两项（允许一次 / 拒绝）。
+- **allow 自动记住意图**（意图缓存，避免常用无害命令反复烧审核 token）：AI 每次 `allow` 都会把「这类操作」写进 `remembered`——规则优先生效 AI 提炼的语义正则（用 `<*>` 占位可变参数，落库前校验必须能命中当前命令，否则退结构化兜底 `^命令\s+子命令`，多段命令退整串精确匹配）；护栏：硬拒绝/关注项永远优先、去重、不覆盖已有规则；每次记住都发通知且**展示人话意图而非正则**（如「已记住「查看 git 提交历史」，以后同类命令直接放行」）；**保鲜机制**：记忆规则带 `addedAt`/`lastHit`/`hits`，命中时刷新，超 30 天未命中在启动/记住时自动清理，`/perm-gate prune` 手动清理（**过期≠失效：清理前仍生效**，状态行会写明）；旧配置（`blacklist`/`whitelist`）自动迁移为 `watch`/`remembered`。
 - **AI 审核**：选模型仿 pi-btw 覆盖项语义——`/perm-gate model` 打开**官方模型选择面板**（`shared/model-selector.ts` 直接复用 pi 导出的 `ModelSelectorComponent`，与内置 `/model` 同组件：搜索/scoped 切换/目录刷新；`ModelRegistry.runtime` 直通组件所需的 ModelRuntime），`/perm-gate model <provider>/<id>|auto` 直接设置；未覆盖时走共享模块 `shared/model-pick.ts` 自动选（与 hud-git 的 AI 提交信息同款「优先列表 + 最便宜已认证兜底」，优先 `deepseek/deepseek-v4-flash`），覆盖模型不可用/未认证时自动回落；`completeSimple` 单次调用不占主会话上下文；进度经官方 `setStatus("perm-gate", …)` 通道推送（hud 行 1 动态区，未登记 key 默认灰字）；allow/reject 结论会话级缓存（同一精确命令不重复审核），review 不缓存（每次由人决定）；
-- **配置**：`~/.pi/agent/perm-gate.json`（首次运行自动写默认配置；手动编辑，无管理面板）——`enabled` 总开关、`blacklist` 正则字符串列表、`whitelist` 保鲜规则列表（`{pattern, addedAt, lastHit, hits}`，兼容旧纯字符串写法自动归一化）、`aiReview`（false = 未命中名单一律转人工）、`aiTimeoutMs`；无效正则跳过并在 `/perm-gate` 状态里提示；
-- **命令**：`/perm-gate` 查看状态（开关/审核模型/自动加白策略/名单条数含过期提示/无效正则/配置路径）、`/perm-gate on|off` 开关（持久化）、`/perm-gate reload` 重读配置（手动改完配置后用）、`/perm-gate model` 选审核模型、`/perm-gate autowhite` 自动加白策略、`/perm-gate prune` 手动清理过期白名单。
+- **sudo 授权通道（密码即授权，仅当次有效）**：AI 在 bash 里直接写 `sudo` 会被拦截打回并引导改用 `sudo_exec` 工具（`command` 不带 sudo 前缀，整条以 root 执行）；调用时弹整屏授权面板——命令全文折行展示（PgUp/PgDn 滚动）+ 掩码密码框（提示写明「密码仅用于本次执行，每次提权都需重新输入」），Enter 授权 / Esc 拒绝，密码错误原地重试共 3 次；扩展内 `sudo -kS` 从 stdin 喂密执行，`-k` 使凭据不被缓存（收尾再补 `sudo -k` 双保险），**每次调用必重新弹窗授权**；密码只经扩展内存，不进会话历史/工具结果/磁盘；NOPASSWD 免密账户退化为确认弹窗（仍逐次授权）；`requiretty` 或未装 sudo 时明确报错请用户手动执行；`/perm-gate sudo on|off` 开关（配置项 `sudoExec`，默认开）；
+- **配置**：`~/.pi/agent/perm-gate.json`（首次运行自动写默认配置；手动编辑，无管理面板）——`enabled` 总开关、`deny` 硬拒绝正则列表、`watch` 关注项正则列表、`remembered` 已记住的操作（`{pattern, intent, addedAt, lastHit, hits}`）、`aiReview`（false = 未命中名单一律转人工确认）、`aiTimeoutMs`、`sudoExec`、`model`；无效正则跳过并在 `/perm-gate` 状态里提示（附配置路径）；
+- **命令**：`/perm-gate` 查看状态（开关/审核模型/sudo 通道/已记住条数含过期提示/关注项与硬拒绝条数/无效正则/配置路径）、`/perm-gate on|off` 开关（持久化）、`/perm-gate sudo on|off` sudo 通道开关（持久化）、`/perm-gate reload` 重读配置、`/perm-gate model` 选审核模型（`<provider>/<id>|auto` 直接设置）、`/perm-gate prune` 清理过期记忆。
 
 ## 联网工具（src/extensions/web-tool/）
 
@@ -254,8 +270,9 @@ bash 命令三级管控（`tool_call` 事件拦截，只管 bash）：**复合�
 - **常驻面板**：输入框下方背景色区块，3~5 行——当前任务（最显眼）+ 阶段 + 右对齐进度条（`▓`实心/`░`空心，附 完成数/总数）、分工两行 `你:/AI:`（多项「、」连接，agent 模式隐藏「你:」）、阻塞 warning 提示、里程碑三态（`▶`当前目标/`○`未完成/`✓`已完成）；宽度自适应（`visibleWidth`：中文=2 列、块元素=1 列），窗口 resize 自动重排；空工作流显示「无任务，请先让 AI 用 wf_workflow 规划」；**hud 接管**：hud 存在且开启时，面板内容改由 hud 在 footer 底部渲染（屏幕最底，任务/分工/里程碑 ≈4 行），常驻面板隐藏——经 hud 通用接口 `__PI_HUD_API__.registerExtraRows` 注册渲染函数（**内容与样式由 workflow 自决**，与常驻面板同款：12 格进度条 + selectedBg 底色，确保体验一致），`notifyExtraRowsUpdate` 请求重绘，零耦合零 import；**常驻面板开关联动**：`showPanel=false` 时 hud 底部行一并隐藏；`/hud` 关闭后自动恢复自绘面板（`hud:state-change` 事件驱动）；
 - **工具（7 个）**：`wf_workflow`（list/import/add/edit/remove/archive/reset——**初始化优先 import**：用 write 写一份草稿 json（`{stages:[{name,goal,tasks:[{title,deps,...}]}]}`，id 自动生成如 0.1/1.2、deps 可直接引用本批未来 id）一次性导入整份计划，远比逐条 add 省 token，add 只用于已有工作流增补调整；非空时拒绝导入；add 时 stageId 不存在自动建阶段、id 自动生成如 1.2、防依赖环（导入含全图环检测带链路）；可带 `mode` 设工作流级协作模式；remove 同步清状态、空阶段自动移除；**archive 归档工作流**：可带 `status` 描述收尾状态（完成/放弃/其他），**归档 ≠ 完成**——快照保留任务真实状态、不做强制 done 标记，数据移入 `.pi/workflow/archive/` 留档可 git 审查，不提供找回功能需时手动查看；reset 清空工作流）、`wf_status`（当前任务+分工+交付物+完成信号+下一步+阻塞+里程碑+最近记录）、`wf_switch`（**推进核心**：一次调用替代 start+done——无参=完成当前任务并自动开始下一个依赖满足的任务，无下一个则全部完成；`taskId=X` 显式切换；`complete=false` 搁置当前任务回 todo 直接转移；switch 到 blocked 任务即解除阻塞；**独立审计**（借鉴 pi-goal-x completion auditor）：`.pi/workflow/config.json` 设 `auditOnComplete:true` 后，完成推进前派全新上下文的只读+bash 子代理核验完成信号（不信宣布者、自己查证据），不通过则打回任务保持 doing；审计自身故障放行——增强不是门禁）、`wf_block`（阻塞+原因）、`wf_rollback`（回退 todo/doing，输出依赖警告清单不自动回退下游）、`wf_note`（**AI 记录，对用户透明**：交流中的重要结论/约束/偏好，增删读改 {id,ts,content}，作为跨会话记忆）、`wf_milestone`（增/改/删/改名里程碑）；
 - **命令**：`/workflow-config` 轻量功能浮窗（居中浮窗：显示详细信息/常驻面板开关，↑↓ 选择 Enter 执行 Esc 关闭；详细信息页任意键返回）——**只留无参**（0.4 拍板：人无需管理工作流，管理是 AI 的事）；
-- **AI 角色注入（条件注入，0.2 拍板）**：`before_agent_start` 按三态把指南追加进 systemPrompt（不进对话、不膨胀会话文件）：无工作流/空工作流 → **零注入**（简单任务不被引导，AI 靠工具描述按需发现）；`human-ai` → 完整指挥者角色（下达指令格式 📋任务/🎯目标/📌做法/✅回报/🔍验证、完成信号验证后 `wf_switch`、重要结论用 `wf_note` 记录）；`agent` → 轻量自动驾驶执行者（连续 `wf_switch` 直到完成并 archive，障碍 `wf_block` 停下报告）；
-- **渲染回归测试**：`node src/extensions/workflow-mgr/test/render.test.mjs`（test/ 下 node_modules junction 指向 pi 全局包；esbuild bundle 扩展 + mock pi/ctx → 15 场景 A-O：三态渲染断言、工具流程、switch 语义、mode、注入三态、wf_note 增删读改、archive 自动完成）。
+- **会话工作流选择（多工作流并发隔离）**：一个项目可并存多个命名工作流。多槽或其他活跃会话已绑定时，启动会话会弹选择框——**「暂不启用（AI 自动判断）」居首位并默认高亮**：不指定工作流、也不关掉，是否使用交由 AI 视任务判断（需要时它自行绑定，不需要则零打扰）；也可选某个已有工作流或「＋ 新建工作流…」自建，Esc 同暂不启用；单槽/无槽仍自动绑定，零打扰。
+- **AI 角色注入（条件注入，0.2 拍板）**：`before_agent_start` 按三态把指南追加进 systemPrompt（不进对话、不膨胀会话文件）：暂不启用（`auto`）/明确不用（`none`）→ **零注入**（前者是否使用由 AI 自行判断，需要时它自己 `wf_workflow bind`，不反复提示用户）；无工作流/空工作流 → **零注入**（简单任务不被引导，AI 靠工具描述按需发现）；`human-ai` → 完整指挥者角色（下达指令格式 📋任务/🎯目标/📌做法/✅回报/🔍验证、完成信号验证后 `wf_switch`、重要结论用 `wf_note` 记录）；`agent` → 轻量自动驾驶执行者（连续 `wf_switch` 直到完成并 archive，障碍 `wf_block` 停下报告）；
+- **渲染回归测试**：`node src/extensions/workflow-mgr/test/render.test.mjs`（test/ 下 node_modules junction 指向 pi 全局包；esbuild bundle 扩展 + mock pi/ctx → 17 场景 A-O、Q、R：三态渲染断言、工具流程、switch 语义、mode、注入三态、wf_note 增删读改、archive 自动完成、import 一次性导入、多槽绑定与「暂不启用」）。
 
 ## 知识库（src/extensions/webdav-kb/）
 
@@ -263,7 +280,7 @@ bash 命令三级管控（`tool_call` 事件拦截，只管 bash）：**复合�
 
 - **四命名空间**：`/notes`（永久知识）/ `/references`（文档摘录，markitdown 产出）/ `/scratch`（临时草稿，可随时清理）/ `/vault`（加密区：需口令解锁、口令只存内存、密文仅 kb 工具可读写，口令忘了=数据永久丢失）；路径必须分层 `/命名空间/用途/自由层级/文件名`（至少 4 段，禁止命名空间/用途下放裸文件）；
 - **分类层级守则（PROTOCOL.md）**：`/references` 第 2 层按文档功能**六值判定**（知识文献/规范文书/操作指南/数据名录/表单模板/素材资源，互斥判整体体裁），`/notes` 按知识主题类判定（技术笔记/研究笔记/方法总结/工作职业/生活管理/兴趣创作）；自由层级由 AI 管理（<3 个文件并入相近层、长期 <2 个文件的层并入、层级名禁项目名/来源形态/编号前缀）。守则本体 = 网盘根 `PROTOCOL.md`（跨设备同步、用户可直接编辑迭代，`kb_help` 优先读它、缺失回退内嵌默认版 protocol.ts）；`PROTOCOL.md` 对 `kb_list`/`kb_status` **不透明**（守则走 `kb_help` 专用通道，不混入内容浏览，`kb_search` 保留索引作兜底旁路）；
-- **本地镜像 + 增量同步**：所有读操作（搜索/面板/AI 工具）打在本地镜像（毫秒级、离线可用）；同步账本 `.kb-sync.json` 记录 etag + 本地 mtime 快照，增量比对——远端 etag 变+本地未动→下载、本地 mtime 变+远端未动→上传、远端删+本地未动→删本地、本地删+远端未动→删远端、两侧都变→**冲突**（保留远端为权威，本地版存 `.conflict-<时间戳>` 副本、仅本地不回传）；上传前自动补齐远端父目录（MKCOL 链，123 云盘对并发 MKCOL 敏感、串行+重试最稳）；**同步健壮性**（借鉴 pi-sync）：`.kb-sync.lock` 互斥锁防多会话并发互踩（活锁拒绝、死进程/30 分钟超时安全回收）、`.kb-sync-journal.json` 记录中断阶段（成功才删除，下次同步报告并靠幂等重跑收敛）、**上传前 secret 扫描**（高精度密钥模式命中即拦截上传、本地保留，配置 `allowSecretUpload:true` 可关）、远端删除 404 幂等；**同步后自动清理本地镜像空目录**（`.kb-` 隐藏项与镜像根保留）；AI 写入（`kb_write`/`kb_append`）本地原子落盘 + 立即 PUT 远端，离线失败留账本下次同步补传；
+- **本地镜像 + 增量同步**：所有读操作（搜索/面板/AI 工具）打在本地镜像（毫秒级、离线可用）；同步账本 `.kb-sync.json` 记录 etag + 本地 mtime 快照，增量比对——远端 etag 变+本地未动→下载、本地 mtime 变+远端未动→上传、远端删+本地未动→删本地、本地删+远端未动→删远端、两侧都变→**冲突**（保留远端为权威，本地版存 `.conflict-<时间戳>` 副本、仅本地不回传）；上传前自动补齐远端父目录（MKCOL 链，123 云盘对并发 MKCOL 敏感、串行+重试最稳）；**同步健壮性**（借鉴 pi-sync）：`.kb-sync.lock` 互斥锁防多会话并发互踩（活锁拒绝、死进程/30 分钟超时安全回收）、`.kb-sync-journal.json` 记录中断阶段（成功才删除，下次同步报告并靠幂等重跑收敛）、**上传前 secret 扫描**（高精度密钥模式命中即拦截上传、本地保留，配置 `allowSecretUpload:true` 可关）、远端删除 404 幂等；**同步结果统一呈现**：计数全人话（下载/上传/删除/冲突/失败，0 值省略），并附说明行——冲突列出具体文件与 `.conflict-` 副本处理办法、遍历不到（权限/网络）的目录、失败明细（含 secret 拦截的解除方式）；锁等待提示带等待预算，401/403/404/网络类失败直接给出下一步（改凭据/目录/代理）；**同步后自动清理本地镜像空目录**（`.kb-` 隐藏项与镜像根保留）；AI 写入（`kb_write`/`kb_append`）本地原子落盘 + 立即 PUT 远端，离线失败留账本下次同步补传；
 - **只读模式**：适配 WebDAV 账号只有读权限的场景；`/kb-config` 面板切换（默认关，下次会话生效）。开启后：AI 只见只读工具（`kb_write`/`kb_append`/`kb_upload`/`kb_import`/`kb_delete`/`kb_move` 在 session_start 一次性隐藏，`kb_sync` 保留）、同步自适应为仅下载（本地删过的远端文件重新下载回本地，本地新建/修改留在本地不上传）、首次引导的 PROTOCOL.md 写入跳过；
 - **全文检索**：零依赖零向量（中文 bigram 滑动窗口 + 英文分词 + BM25），增量索引持久化 `.kb-index.json`（按 mtime 只重读变更文件）；纯文本多格式（md/txt/csv/tsv/json/jsonl/yaml/yml/toml/html/xml），csv/tsv 表头加权、frontmatter 仅 md 强制；vault 未解锁时加密区内容不可见（密文仅内存索引）；
 - **vault 加密区**：口令只存内存，密文落盘 `.enc` 后缀，读写经解密/加密（列表/检索按明文路径对齐）；未解锁写入报错；

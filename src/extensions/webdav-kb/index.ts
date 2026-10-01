@@ -14,8 +14,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { setStatusWithTTL, clearStatusTimers } from "../shared/status";
 import { loadConfig, isConfigured, defaultMirrorDir, agentConfigDir } from "./store";
-import { syncAll, putNote, readNote } from "./sync";
-import { DavError } from "./client";
+import { syncAll, formatSyncSummary, formatSyncNotes, putNote, readNote } from "./sync";
+import { DavError, describeSyncError } from "./client";
 import { getIndex } from "./search";
 import { unlockVault, unlockVaultWithKey, isUnlocked, vaultReadNote, VaultAuthError } from "./crypto";
 import { registerKbTools } from "./tools";
@@ -92,22 +92,16 @@ async function runBackgroundSync(ctx: ExtensionContext, cfg: ReturnType<typeof l
 		const stats = await syncAll(cfg, mirrorDir, {
 			onProgress: (label) => push(`🔄 ${label}`, 30_000),
 		});
-		const parts: string[] = [];
-		if (stats.downloaded > 0) parts.push(`↓${stats.downloaded}`);
-		if (stats.uploaded > 0) parts.push(`↑${stats.uploaded}`);
-		if (stats.deleted > 0) parts.push(`×${stats.deleted}`);
-		if (stats.conflicts > 0) parts.push(`⚠冲突${stats.conflicts}`);
-		const summary = parts.length > 0 ? parts.join(" ") : "最新";
+		const summary = formatSyncSummary(stats);
+		const notes = formatSyncNotes(stats, 1);
 		push(`📚 ${summary}`, 8_000);
-		if (stats.errors.length > 0) {
-			push(`⚠ 同步 ${stats.errors.length} 个文件失败`, 10_000);
-		}
+		if (notes.length > 0) push(`⚠ ${notes[0]}`, 12_000);
 	} catch (e) {
 		if (e instanceof DavError && e.method === "SYNC_LOCKED") {
 			// 锁被占 ≠ 同步失败：另一实例正在同步，镜像读写照常可用，明示后跳过、不自动重试
 			push("📚 另一实例同步中，本次跳过（镜像读写照常可用）", 15_000);
 		} else {
-			push(`⚠ 同步失败：${e instanceof Error ? e.message : String(e)}`, 10_000);
+			push(`⚠ 同步失败：${describeSyncError(e).split("\n")[0]}`, 10_000);
 		}
 	}
 }

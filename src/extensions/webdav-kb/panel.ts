@@ -14,7 +14,7 @@ import { matchesKey, Text, type TUI } from "@earendil-works/pi-tui";
 import { createBoxRenderer, editInput, renderScrollingInput } from "../shared/ui";
 import { loadConfig, defaultMirrorDir, agentConfigDir } from "./store";
 import { getIndex, type SearchResult } from "./search";
-import { vaultReadNote } from "./crypto";
+import { vaultReadNote, isUnlocked } from "./crypto";
 
 /** 列表一次最多展示的结果数 */
 const SEARCH_LIMIT = 15;
@@ -201,7 +201,14 @@ export class KbOverlay {
 		if (this.query.trim() === "") {
 			lines.push(row(t.fg("dim", "  输入关键词检索知识库（webdav 云盘本地镜像）")));
 		} else if (this.results.length === 0) {
-			lines.push(row(t.fg("warning", "  无匹配结果")));
+			// 区分「库是空的/没同步」与「只是这次没搜到」，否则用户无法判断下一步
+			const idxEmpty = getIndex(this.mirrorDir).size === 0;
+			const hint = idxEmpty
+				? "知识库为空（尚未同步或同步失败）：先跑 /kb-sync，或用 /kb-config 检查配置"
+				: !isUnlocked()
+					? "无匹配结果；vault 加密区未解锁，其中的笔记不在检索范围内（/kb-config 输口令解锁）"
+					: "无匹配结果，试试更短的关键词或换个说法（Esc 返回）";
+			lines.push(row(t.fg("warning", `  ${hint}`)));
 		}
 		for (let i = 0; i < Math.min(rows, this.results.length); i++) {
 			const idx = this.scrollOffset + i;
@@ -314,7 +321,13 @@ export function registerKbPanel(pi: ExtensionAPI): void {
 			}
 			const results = getIndex(mirrorDir).search(query, { limit: 8 });
 			if (results.length === 0) {
-				ctx.ui.notify(`知识库未找到与「${query}」相关的内容。`, "info");
+				const idxEmpty = getIndex(mirrorDir).size === 0;
+				ctx.ui.notify(
+					idxEmpty
+						? "知识库为空（尚未同步或同步失败）：先跑 /kb-sync；还没配置则用 /kb-config 设置 WebDAV。"
+						: `知识库未找到与「${query}」相关的内容。可试试更短的关键词或换个说法，或用 kb_list 浏览目录。`,
+					"info",
+				);
 				return;
 			}
 			const lines = results.map(

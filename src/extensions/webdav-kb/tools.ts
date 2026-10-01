@@ -17,11 +17,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { setStatusWithTTL } from "../shared/status";
 import { loadConfig, isConfigured, defaultMirrorDir, agentConfigDir } from "./store";
-import { readNote, readNoteBytes, listNotes, ensureRemoteDirs, loadLedger, saveLedger, syncAll, backupToHistory, SYNC_LOCK_WAIT_MS } from "./sync";
+import { readNote, readNoteBytes, listNotes, ensureRemoteDirs, loadLedger, saveLedger, syncAll, formatSyncSummary, formatSyncNotes, backupToHistory, SYNC_LOCK_WAIT_MS } from "./sync";
 import { getIndex } from "./search";
 import { vaultPutNote, vaultReadNote, isUnlocked, isVaultPath, encryptPath, decryptPath } from "./crypto";
 import { DEFAULT_PROTOCOL } from "./protocol";
-import { WebDavClient, DavError } from "./client";
+import { WebDavClient, DavError, describeSyncError } from "./client";
 import {
 	isLfsPath,
 	getLfsFiles,
@@ -810,23 +810,19 @@ export function registerKbTools(pi: ExtensionAPI): void {
 					lockWaitMs: SYNC_LOCK_WAIT_MS,
 					onProgress: (label) => status(ctx, "kb-sync", `🔄 ${label}`, 30_000),
 				});
-				const parts: string[] = [];
-				if (stats.downloaded) parts.push(`下载 ${stats.downloaded}`);
-				if (stats.uploaded) parts.push(`上传 ${stats.uploaded}`);
-				if (stats.deleted) parts.push(`删除 ${stats.deleted}`);
-				if (stats.conflicts) parts.push(`冲突 ${stats.conflicts}（已保留 .conflict 副本）`);
-				if (parts.length === 0) parts.push("已是最新");
-				if (stats.errors.length) parts.push(`失败 ${stats.errors.length}`);
-				status(ctx, "kb-sync", `📚 ${parts.join("，")}`, 8_000);
-				return text(`✓ 同步完成：${parts.join("，")}`, {
+				const summary = formatSyncSummary(stats);
+				const notes = formatSyncNotes(stats);
+				status(ctx, "kb-sync", `📚 ${summary}`, 8_000);
+				return text(`✓ 同步完成：${summary}${notes.length ? `\n${notes.join("\n")}` : ""}`, {
 					downloaded: stats.downloaded,
 					uploaded: stats.uploaded,
 					deleted: stats.deleted,
 					conflicts: stats.conflicts,
+					conflictFiles: stats.conflictFiles,
 					errors: stats.errors.length,
 				});
 			} catch (e) {
-				const msg = e instanceof Error ? e.message : String(e);
+				const msg = describeSyncError(e);
 				const locked = e instanceof DavError && e.method === "SYNC_LOCKED";
 				return text(locked ? `同步暂缓：${msg}` : `同步失败：${msg}`, { error: msg, locked });
 			}

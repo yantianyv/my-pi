@@ -34,6 +34,7 @@ const PASS = "test-pass";
 const tmp = mkdtempSync(join(tmpdir(), "kb-sync-test-"));
 const dav = await startMockDav();
 let syncAll, putNote, readNote, listNotes, loadLedger, backupToHistory;
+let formatSyncSummary, formatSyncNotes;
 try {
 	// bundle sync.ts（连带 client/store 内联）
 	const outfile = join(tmp, "sync.mjs");
@@ -54,6 +55,32 @@ try {
 	listNotes = m.listNotes;
 	loadLedger = m.loadLedger;
 	backupToHistory = m.backupToHistory;
+	formatSyncSummary = m.formatSyncSummary;
+	formatSyncNotes = m.formatSyncNotes;
+
+	// ---- 0) 摘要与错误翻译（单一渲染源：命令/工具/面板共用同一份文案） ----
+	{
+		const empty = { downloaded: 0, uploaded: 0, deleted: 0, conflicts: 0, conflictFiles: [], failedDirs: [], unchanged: 3, errors: [] };
+		check("摘要：无变化显示「已是最新」", formatSyncSummary(empty) === "已是最新");
+		check(
+			"摘要：计数全人话且 0 值省略",
+			formatSyncSummary({ ...empty, downloaded: 3, uploaded: 1, conflicts: 2, errors: ["a"] }) === "下载 3 · 上传 1 · 冲突 2 · 失败 1",
+		);
+		check("摘要：无变化时没有冲突/失败细节", formatSyncNotes(empty).length === 0);
+		const notes = formatSyncNotes({
+			...empty,
+			conflictFiles: ["/notes/a.md", "/notes/b.md"],
+			failedDirs: ["/private"],
+			errors: [
+				"上传 /notes/x.md: 含疑似密钥（API key），已拦截上传，本地文件保留；确认无敏感信息后可移除密钥再同步，或把配置项 allowSecretUpload 设为 true 放行全部",
+			],
+		});
+		check("说明：冲突给出路径与副本处理办法", notes[0].includes("/notes/a.md") && notes[0].includes(".conflict-"));
+		check("说明：不可达目录提醒结果可能不完整", notes.some((n) => n.includes("未能读取")));
+		check("说明：失败明细原文带可操作指引", notes.some((n) => n.includes("已拦截上传") && n.includes("allowSecretUpload")));
+		const many = formatSyncNotes({ ...empty, errors: ["e1", "e2", "e3", "e4", "e5"] }, 3);
+		check("说明：明细超限时折叠计数", many.length === 4 && many[3].includes("另有 2 条"));
+	}
 
 	const mirrorDir = join(tmp, "mirror");
 	const cfg = { baseUrl: dav.baseUrl, username: USER, password: PASS };

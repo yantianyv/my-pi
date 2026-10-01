@@ -15,8 +15,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createBoxRenderer, editInput, renderInputWithCursor } from "../shared/ui";
 import { loadConfig, saveConfig, isConfigured, defaultMirrorDir, agentConfigDir, type KbConfig } from "./store";
-import { syncAll } from "./sync";
-import { WebDavClient } from "./client";
+import { syncAll, formatSyncSummary, formatSyncNotes } from "./sync";
+import { WebDavClient, describeSyncError } from "./client";
 import { createVault, unlockVault, lockVault, isUnlocked, storeVaultKey, persistCurrentKey } from "./crypto";
 
 // ---------------------------------------------------------------------------
@@ -94,18 +94,50 @@ const FIELDS: Field[] = [
 interface Action {
 	key: ActionKey;
 	label: string;
+	/** 焦点时的作用说明（一行） */
+	desc: string;
 	visible(cfg: KbConfig): boolean;
 }
 
 const ACTIONS: Action[] = [
-	{ key: "test", label: "① 测试连通", visible: () => true },
-	{ key: "sync", label: "② 立即同步", visible: () => true },
-	{ key: "vault-change", label: "③ 修改 vault 口令", visible: (c) => Boolean(c.vault) },
-	{ key: "vault-remember", label: "④ 记住口令：关", visible: (c) => Boolean(c.vault) && !c.persistVault },
-	{ key: "vault-remember-off", label: "④ 记住口令：开", visible: (c) => Boolean(c.vault) && Boolean(c.persistVault) },
-	{ key: "vault-lock", label: "⑤ 锁定 vault", visible: () => isUnlocked() },
-	{ key: "readonly", label: "⑥ 只读模式：关", visible: (c) => !c.readOnly },
-	{ key: "readonly-off", label: "⑥ 只读模式：开", visible: (c) => Boolean(c.readOnly) },
+	{ key: "test", label: "① 测试连通", desc: "用当前凭据请求一次，验证地址/账号/密码是否正确", visible: () => true },
+	{ key: "sync", label: "② 立即同步", desc: "立即做一次增量同步（同 /kb-sync）：只传有差异的文件，无差异则不动", visible: () => true },
+	{
+		key: "vault-change",
+		label: "③ 修改 vault 口令",
+		desc: "设置新的加密区口令（存量密文不会自动迁移，需自行处理）",
+		visible: (c) => Boolean(c.vault),
+	},
+	{
+		key: "vault-remember",
+		label: "④ 记住口令：关",
+		desc: "打开后，口令存本地并随会话自动解锁 vault（不必每次输入）",
+		visible: (c) => Boolean(c.vault) && !c.persistVault,
+	},
+	{
+		key: "vault-remember-off",
+		label: "④ 记住口令：开",
+		desc: "关闭后，磁盘与内存中的口令都被清除，下次使用 vault 需重新输入",
+		visible: (c) => Boolean(c.vault) && Boolean(c.persistVault),
+	},
+	{
+		key: "vault-lock",
+		label: "⑤ 锁定 vault",
+		desc: "立即清除内存与磁盘中的口令，加密区回到不可读写状态",
+		visible: () => isUnlocked(),
+	},
+	{
+		key: "readonly",
+		label: "⑥ 只读模式：关",
+		desc: "开启后：隐藏写入类工具，同步只下载不上传（下次会话生效）",
+		visible: (c) => !c.readOnly,
+	},
+	{
+		key: "readonly-off",
+		label: "⑥ 只读模式：开",
+		desc: "关闭后恢复写入类工具与双向同步（下次会话生效）",
+		visible: (c) => Boolean(c.readOnly),
+	},
 ];
 
 /** 统计镜像 /vault/ 下存量密文数量（改口令警告用；目录不存在/读取失败返回 0） */
@@ -379,7 +411,7 @@ export class KbConfigOverlay {
 			await client.ping();
 			this.result = "✅ 连通正常，凭据有效";
 		} catch (e) {
-			this.result = `❌ 连通失败：${e instanceof Error ? e.message : String(e)}`;
+			this.result = `❌ 连通失败：${describeSyncError(e)}`;
 		}
 		this.working = null;
 		this.tui.requestRender();
@@ -395,11 +427,11 @@ export class KbConfigOverlay {
 					this.tui.requestRender();
 				},
 			});
-			const parts = [`↓${stats.downloaded} ↑${stats.uploaded} ×${stats.deleted} ⚠${stats.conflicts}`];
-			if (stats.errors.length) parts.push(`失败 ${stats.errors.length}`);
-			this.result = `同步完成：${parts.join("，")}`;
+			const summary = formatSyncSummary(stats);
+			const notes = formatSyncNotes(stats);
+			this.result = [`同步完成：${summary}`, ...notes].join("\n");
 		} catch (e) {
-			this.result = `同步失败：${e instanceof Error ? e.message : String(e)}`;
+			this.result = `同步失败：${describeSyncError(e)}`;
 		}
 		this.working = null;
 		this.tui.requestRender();
@@ -444,12 +476,13 @@ export class KbConfigOverlay {
 			lines.push(focused ? row(`\x1b[7m${fieldRow}\x1b[27m`) : row(t.fg("text", fieldRow)));
 		});
 
-		// 动作行
+		// 动作行（焦点行把作用说明接在同一行，给用户看）
 		lines.push(divider());
 		this.visibleActions().forEach((a, i) => {
 			const focused = FIELDS.length + i === this.focus;
+			const desc = focused ? `  ${t.fg("dim", a.desc)}` : "";
 			const actRow = ` ${a.label}`;
-			lines.push(focused ? row(`\x1b[7m${actRow}\x1b[27m`) : row(t.fg("accent", actRow)));
+			lines.push(focused ? row(`\x1b[7m${actRow}\x1b[27m${desc}`) : row(t.fg("accent", actRow)));
 		});
 
 		// 状态行

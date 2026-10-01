@@ -111,7 +111,7 @@ function stripQuotes(etag: string): string {
 }
 
 /** 判断失败是否属「网络不可达」类（触发代理重试），与 web-tool.isWalledFailure 同逻辑 */
-function isNetworkFailure(e: unknown, status?: number): boolean {
+export function isNetworkFailure(e: unknown, status?: number): boolean {
 	if (status != null && (status === 429 || status >= 500)) return true;
 	if (e instanceof Error) {
 		const name = e.name;
@@ -134,6 +134,31 @@ function isNetworkFailure(e: unknown, status?: number): boolean {
 	return false;
 }
 
+
+/**
+ * 把同步/连通类异常翻译成「原因 + 建议动作」：常见 HTTP 状态与网络类失败给出可操作的下一步，
+ * 其余保留原始消息。命令 / 工具 / 面板三处共用，避免各写一套。
+ */
+export function describeSyncError(e: unknown): string {
+	const raw = e instanceof Error ? e.message : String(e);
+	if (e instanceof DavError) {
+		if (e.method === "SYNC_LOCKED") return raw; // 锁冲突的长指引已写得很完整
+		switch (e.status) {
+			case 401:
+				return `${raw}\n用户名或密码可能不对：运行 /kb-config 检查凭据，或先用「① 测试连通」验证。`;
+			case 403:
+				return `${raw}\n账号无此目录权限：检查 WebDAV 地址与目录授权（/kb-config 可改）。`;
+			case 404:
+				return `${raw}\n远端路径不存在：检查 WebDAV 地址是否指到了正确的库根目录。`;
+			default:
+				break;
+		}
+	}
+	if (isNetworkFailure(e, e instanceof DavError ? e.status : undefined)) {
+		return `${raw}\n网络不可达或超时：检查网络/代理设置（/kb-config 可设代理），稍后重试。`;
+	}
+	return raw;
+}
 
 /** 经代理发任意方法请求（CONNECT 隧道 + 完整 body 收发），返回统一响应 */
 function proxyRequest(

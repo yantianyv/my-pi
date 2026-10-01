@@ -11,8 +11,9 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { setStatusWithTTL } from "../shared/status";
 import { loadConfig, isConfigured, defaultMirrorDir, agentConfigDir } from "./store";
-import { syncAll, SYNC_LOCK_WAIT_MS } from "./sync";
+import { syncAll, formatSyncSummary, formatSyncNotes, SYNC_LOCK_WAIT_MS } from "./sync";
 import { isUnlocked } from "./crypto";
+import { describeSyncError } from "./client";
 import { KbConfigOverlay } from "./panel-config";
 
 // ---------------------------------------------------------------------------
@@ -78,18 +79,14 @@ export function registerKbCommands(pi: ExtensionAPI): void {
 					onProgress: (label) => push(`🔄 ${label}`, 30_000),
 					lockWaitMs: SYNC_LOCK_WAIT_MS,
 				});
-				const parts: string[] = [];
-				if (stats.downloaded) parts.push(`下载 ${stats.downloaded}`);
-				if (stats.uploaded) parts.push(`上传 ${stats.uploaded}`);
-				if (stats.deleted) parts.push(`删除 ${stats.deleted}`);
-				if (stats.conflicts) parts.push(`冲突 ${stats.conflicts}（已保留 .conflict 副本）`);
-				if (parts.length === 0) parts.push("已是最新");
-				if (stats.errors.length) parts.push(`失败 ${stats.errors.length}`);
-				push(`📚 ${parts.join("，")}`, 8_000);
-				ctx.ui.notify(`同步完成：${parts.join("，")}`, stats.errors.length ? "warning" : "info");
+				const summary = formatSyncSummary(stats);
+				const notes = formatSyncNotes(stats);
+				push(`📚 ${summary}`, 8_000);
+				ctx.ui.notify([`同步完成：${summary}`, ...notes].join("\n"), stats.errors.length ? "warning" : "info");
 			} catch (e) {
-				push(`⚠ 同步失败：${e instanceof Error ? e.message : String(e)}`, 10_000);
-				ctx.ui.notify(`同步失败：${e instanceof Error ? e.message : String(e)}`, "error");
+				const msg = describeSyncError(e);
+				push(`⚠ 同步失败：${msg}`, 10_000);
+				ctx.ui.notify(`同步失败：${msg}`, "error");
 			}
 		},
 	});

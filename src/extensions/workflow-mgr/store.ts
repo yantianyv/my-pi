@@ -14,8 +14,8 @@
  * default 槽 = .pi/workflow/ 根目录三 JSON（向后兼容旧布局），命名槽 =
  * .pi/workflow/slots/<名称>/ 下同样三 JSON（archive 亦按槽分目录）。
  * 每个会话经 .pi/workflow/bindings.json 绑定一个槽（sessionId → 槽名 /
- * null=明确不用工作流 / 无记录=未选择）；未选择时由 events 层按
- * 「槽位 ≥2 或有其他活跃会话已绑定」决定自动绑定还是注入选择指引。
+ * "auto"=暂不启用、是否使用交由 AI 判断 / null=明确不用工作流 / 无记录=未选择）；
+ * 未选择时由 events 层按「槽位 ≥2 或有其他活跃会话已绑定」决定自动绑定还是注入选择指引。
  * 旧路径：.pi/workflow/{workflow,state,config}.json（项目级、跨会话、可 git 审查）。
  */
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
@@ -48,8 +48,13 @@ export interface Derived {
 
 /** 默认槽位名：对应 .pi/workflow/ 根目录（向后兼容既有数据布局） */
 export const DEFAULT_SLOT = "default";
+/**
+ * 绑定值：暂不启用——用户的无责选择（不指定工作流、也不关掉），是否使用由 AI 视任务自行判断。
+ * 不占用槽位，与 null（明确不用）区分：auto 下 AI 可自行 bind 启用，null 下 AI 不得启用。
+ */
+export const BINDING_AUTO = "auto";
 /** 保留槽位名（与目录/命令字冲突） */
-const RESERVED_SLOTS = new Set([DEFAULT_SLOT, "none", "archive", "slots"]);
+const RESERVED_SLOTS = new Set([DEFAULT_SLOT, "none", "archive", "slots", BINDING_AUTO]);
 /** 绑定记录保鲜期：超过视为失效（防重启堆积的陈旧绑定复活） */
 const BINDING_TTL_MS = 7 * 24 * 3600_000;
 
@@ -78,7 +83,7 @@ function bindingsPath(cwd: string): string {
 	return join(cwd, CONFIG_DIR_NAME, "workflow", "bindings.json");
 }
 
-/** bindings.json：sessionId → 绑定（slot=槽名 / null=本会话明确不用工作流；无记录=未选择） */
+/** bindings.json：sessionId → 绑定（slot=槽名 / BINDING_AUTO=暂不启用、由 AI 判断 / null=明确不用；无记录=未选择） */
 interface BindingsFile {
 	schemaVersion: 1;
 	sessions: Record<string, { slot: string | null; at: number }>;
@@ -93,7 +98,7 @@ function readBindings(cwd: string): BindingsFile {
 	return loadJsonConfig(bindingsPath(cwd), { schemaVersion: 1, sessions: {} }, isBindingsFile);
 }
 
-/** 读会话绑定：string=槽位 / null=明确不用工作流 / undefined=未选择（过期按未选择） */
+/** 读会话绑定：槽位名 / BINDING_AUTO=暂不启用（AI 判断） / null=明确不用 / undefined=未选择（过期按未选择） */
 export function getBinding(cwd: string, sid: string): string | null | undefined {
 	const b = readBindings(cwd).sessions[sid];
 	if (!b || Date.now() - b.at > BINDING_TTL_MS) return undefined;
@@ -161,12 +166,12 @@ export function slotSummaries(cwd: string): SlotSummary[] {
 /**
  * 是否有其他「活着的」会话已绑定工作流（session_start 自动绑定判定用）：
  * 优先借 pair-guard 注册表心跳判活（零耦合可选读，缺席/无记录时按绑定时间 24h 内视为活跃）；
- * 绑定为 null（不用工作流）的会话不占槽，不参与判定。
+ * 绑定为 null（明确不用）或 BINDING_AUTO（暂不启用）的会话不占槽，不参与判定。
  */
 export function hasOtherLiveBinding(cwd: string, selfSid: string): boolean {
 	const now = Date.now();
 	for (const [sid, b] of Object.entries(readBindings(cwd).sessions)) {
-		if (sid === selfSid || b.slot === null || now - b.at > BINDING_TTL_MS) continue;
+		if (sid === selfSid || b.slot === null || b.slot === BINDING_AUTO || now - b.at > BINDING_TTL_MS) continue;
 		let live = now - b.at < 24 * 3600_000;
 		try {
 			const rec = JSON.parse(readFileSync(join(cwd, CONFIG_DIR_NAME, "sessions", `${sid}.json`), "utf8")) as {
@@ -376,11 +381,12 @@ export class WorkflowStore {
 	/** 本 store 对应的槽位（default = 根目录布局） */
 	readonly slot: string;
 	/**
-	 * 绑定阻塞态（getStore 赋值）：undecided=会话未绑定（多槽/并发待选择）
-	 * none=本会话明确不用工作流；非 null 时工具层应拒绝操作并引导 bind。
+	 * 绑定阻塞态（getStore 赋值）：undecided=会话未绑定（多槽/并发待选择）、
+	 * auto=用户暂不启用（是否使用由 AI 判断）、none=明确不用工作流；
+	 * 非 null 时工具层应拒绝操作并引导 bind。
 	 * 阻塞时 store 落在 default 槽（惰性、不主动写盘），仅作占位。
 	 */
-	blocked: "undecided" | "none" | null = null;
+	blocked: "undecided" | "auto" | "none" | null = null;
 	private wf: WorkflowDef | null = null;
 	private derived: Derived | null = null;
 	private state: WorkflowState | null = null;
@@ -534,7 +540,7 @@ let sessionStore: WorkflowStore | null = null;
 /** 本会话绑定缓存（rebind 后需 invalidateBindingCache 失效重建）；键含 cwd 防同 sid 跨目录串 */
 let sessionBinding: { sid: string; cwd: string; value: string | null | undefined } | null = null;
 
-/** 解析本会话绑定：string=槽位 / null=不用工作流 / undefined=未选择（会话内缓存） */
+/** 解析本会话绑定：槽位名 / BINDING_AUTO=暂不启用（AI 判断） / null=明确不用 / undefined=未选择（会话内缓存） */
 export function resolveBinding(ctx: ExtensionContext): string | null | undefined {
 	// sessionManager 在真实 pi 中恒存在；可选链兜底测试 mock 与极端场景
 	const sid = ctx.sessionManager?.getSessionId?.() ?? "unknown";
@@ -551,8 +557,10 @@ export function invalidateBindingCache(): void {
 
 export function getStore(ctx: ExtensionContext): WorkflowStore {
 	const binding = resolveBinding(ctx);
-	const slot = typeof binding === "string" ? binding : DEFAULT_SLOT;
-	const blocked = binding === undefined ? ("undecided" as const) : binding === null ? ("none" as const) : null;
+	const deferred = binding === BINDING_AUTO;
+	const slot = typeof binding === "string" && !deferred ? binding : DEFAULT_SLOT;
+	const blocked =
+		binding === undefined ? ("undecided" as const) : binding === null ? ("none" as const) : deferred ? ("auto" as const) : null;
 	if (!sessionStore || sessionStore.cwd !== ctx.cwd || sessionStore.slot !== slot || sessionStore.blocked !== blocked) {
 		sessionStore = new WorkflowStore(ctx, slot);
 		sessionStore.blocked = blocked;

@@ -68,6 +68,8 @@ const MB = (n: number) => `${(n / 1048576).toFixed(1)}MB`;
 
 let enabled = true;
 let lastStatus = "";
+/** 本次会话是否已就「历史图片被省略」提醒过（只提醒一次，不刷屏） */
+let omitNotified = false;
 /** 分支图片体积缓存：按分支长度失效，避免每次工具结果都全量扫分支 */
 let branchCache = { len: -1, bytes: 0 };
 
@@ -151,7 +153,7 @@ function branchImageBytes(ctx: ExtensionContext): number {
 }
 
 function setStatus(ctx: ExtensionContext, bytes: number, dropped: number): void {
-	const text = bytes >= WARN_AT_B64 ? `🖼 ${MB(bytes)}${dropped > 0 ? ` 裁${dropped}图` : ""}` : undefined;
+	const text = bytes >= WARN_AT_B64 ? `🖼 ${MB(bytes)}${dropped > 0 ? ` · 已省略${dropped}张旧图` : ""}` : undefined;
 	const key = text ?? "";
 	if (key === lastStatus) return;
 	lastStatus = key;
@@ -193,7 +195,9 @@ export default function (pi: ExtensionAPI): void {
 			if (slim !== block) changed = true;
 			out.push(slim);
 		}
-		if (changed) return { content: out };
+		if (!changed) return;
+		// structuredContent 必须随 content 一起返回：runner 见到 content 替换而未带 structuredContent 时会丢弃它
+		return { content: out, structuredContent: event.structuredContent };
 	});
 
 	// ---- 2. 用户粘贴/附带的图片 ----
@@ -234,6 +238,14 @@ export default function (pi: ExtensionAPI): void {
 		}
 		branchCache = { len: -1, bytes: 0 }; // 分支长度未变，手动失效
 		setStatus(ctx, total - freed, dropped);
+		// 省略的是「不给本轮模型看的历史图」，用户容易误以为图丢了：首次发生时解释一次
+		if (dropped > 0 && !omitNotified) {
+			omitNotified = true;
+			ctx.ui.notify(
+				`img-slim：历史图片超出本轮请求体预算，已省略最旧的 ${dropped} 张（原图仍在会话记录中，需要时可重新 read；/img-slim 查看详情）`,
+				"warning",
+			);
+		}
 	});
 
 	// ---- 命令：/img-slim [on|off] ----
@@ -244,7 +256,11 @@ export default function (pi: ExtensionAPI): void {
 			if (arg === "off" || arg === "on") {
 				enabled = arg === "on";
 				if (!enabled) setStatus(ctx, 0, 0);
-				ctx.ui.notify(`img-slim 已${enabled ? "开启" : "关闭"}（本次会话）`, "info");
+				omitNotified = false; // 重新开启后允许再提醒一次
+				ctx.ui.notify(
+					enabled ? "img-slim 已开启（本次会话）" : "img-slim 已关闭（本次会话；关闭期间不防上游请求体超限，慎用）",
+					"info",
+				);
 				return;
 			}
 			if (arg) {
@@ -264,11 +280,13 @@ export default function (pi: ExtensionAPI): void {
 			}
 			const lines = [
 				`状态：${enabled ? "开启" : "关闭"}`,
-				`分支内图片：${count} 张 / ${MB(bytes)} base64（请求体预算 ${MB(REQ_BUDGET_B64)}）`,
-				`单图预算：照片 ${Math.round(PHOTO_MAX_B64 / 1024)}KB / 图形 ${Math.round(GRAPHIC_MAX_B64 / 1024)}KB · 最长边 ${MAX_SIDE}px`,
-				bytes > REQ_BUDGET_B64
-					? `⚠️ 已超预算：下轮请求会从最旧的图片开始省略（可 /compact 彻底清掉）`
-					: `未超预算，图片按原样重发`,
+				`分支内图片：${count} 张 / 请求体体积约 ${MB(bytes)}（预算 ${MB(REQ_BUDGET_B64)}）`,
+				`单图上限：照片 ${(PHOTO_MAX_B64 / 1048576).toFixed(1)}MB / 图形 ${(GRAPHIC_MAX_B64 / 1048576).toFixed(1)}MB · 最长边 ${MAX_SIDE}px`,
+				!enabled
+					? `已关闭：图片不做任何预算处理`
+					: bytes > REQ_BUDGET_B64
+						? `⚠️ 已超预算：本轮请求已从最旧图片开始省略（省略的图对模型不可见，原图仍在会话记录；可 /compact 彻底清掉）`
+						: `未超预算，图片按原样发送`,
 			];
 			ctx.ui.notify(lines.join("\n"), bytes > WARN_AT_B64 ? "warning" : "info");
 		},

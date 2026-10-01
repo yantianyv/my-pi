@@ -296,12 +296,24 @@ export class QuestionnairePage {
 		return answers;
 	}
 
+	/** 勾了「其他（自由输入）」却没填内容：单选/多选都会静默变成未作答，需专门提示 */
+	private otherUnfilled(q: Question): boolean {
+		if (q.type !== "single" && q.type !== "multi") return false;
+		const st = this.stateOf(q);
+		const idx = this.otherIndex(q);
+		return idx >= 0 && st.sel.has(idx) && st.other.trim() === "";
+	}
+
 	/** 提交校验：必答完整性 + number 数值/范围；返回第一个未通过的题 */
 	private firstInvalid(): { q: Question; reason: string } | null {
 		const answers = this.collect();
 		for (const q of this.qn.questions) {
 			const v = answers[q.id];
-			if (q.required !== false && !isAnswered(q, v)) return { q, reason: "尚未作答" };
+			if (q.required !== false && !isAnswered(q, v))
+				return {
+					q,
+					reason: this.otherUnfilled(q) ? "选了「其他」但未填写内容" : "尚未作答",
+				};
 			if (q.type === "number" && typeof v === "string" && v.trim()) {
 				const n = Number(v);
 				if (!Number.isFinite(n)) return { q, reason: "不是有效数字" };
@@ -319,7 +331,8 @@ export class QuestionnairePage {
 			return;
 		}
 		const idx = answerableQuestions(this.qn).indexOf(bad.q);
-		this.hint = `第 ${idx + 1} 题${bad.reason}${bad.q.required !== false ? "（必答）" : ""}`;
+		const total = answerableQuestions(this.qn).length;
+		this.hint = `第 ${idx + 1}/${total} 题：${bad.reason}${bad.q.required !== false ? "（必答）" : "（已填内容需合法，清空可跳过）"}`;
 		this.flash = "";
 		const rows = this.buildRows();
 		const at = rows.findIndex((r) => r.qid === bad.q.id);
@@ -393,7 +406,11 @@ export class QuestionnairePage {
 			const v = answers[q.id];
 			const empty =
 				v === undefined || (typeof v === "string" && !v.trim()) || (Array.isArray(v) && v.length === 0);
-			out.push({ label: `${n}. ${q.question}`, value: empty ? "（跳过 / 未答）" : formatValue(q, v!), dim: empty });
+			out.push({
+				label: `${n}. ${q.question}`,
+				value: empty ? (q.required === false ? "（选填 · 已跳过）" : "（必答 · 未完成）") : formatValue(q, v!),
+				dim: empty,
+			});
 		}
 		return out;
 	}
@@ -458,7 +475,7 @@ export class QuestionnairePage {
 			}
 			this.deleteArmed = true;
 			this.hint = "";
-			this.flash = "再按一次确认删除这份问卷（不可恢复）";
+			this.flash = "再按一次确认删除（问卷作废、AI 不再等待，不可恢复；只想稍后答请按 Esc）";
 			this.tui.requestRender();
 			return;
 		}
@@ -556,8 +573,10 @@ export class QuestionnairePage {
 				if (n >= min && n <= max) {
 					st.rating = n;
 					this.hint = "";
-					this.tui.requestRender();
+				} else {
+					this.hint = `本评分范围是 ${min}-${max}`;
 				}
+				this.tui.requestRender();
 			} else if (matchesKey(data, Key.enter)) {
 				this.trySubmit();
 			}
@@ -746,7 +765,12 @@ export class QuestionnairePage {
 			const barW = Math.min(12, total);
 			const filled = Math.min(barW, Math.round((doneCount / total) * barW));
 			const bar = "▰".repeat(filled) + "▱".repeat(barW - filled);
-			progressText = `已答 ${doneCount}/${total} ${bar} `;
+			// 分母含选填题：必答已齐但选填未答时明说，避免与状态行「可以提交」打架
+			const pending = answerableQuestions(this.qn).filter(
+				(q) => q.required !== false && !isAnswered(q, answers[q.id]),
+			).length;
+			const tail = pending === 0 ? "（必答已齐，余为选填）" : "";
+			progressText = `已答 ${doneCount}/${total} ${bar}${tail} `;
 		}
 		// 标题 + 进度一行放不下时折行完整展示（不截断）
 		if (visibleWidth(titleText) + visibleWidth(progressText) + 1 <= W) {
@@ -801,9 +825,9 @@ export class QuestionnairePage {
 				[
 					["Ctrl+P", "答案一览（一览里按 C 复制答案到剪贴板）"],
 					["x", "展开 / 收起超长说明与上下文"],
-					["Ctrl+D / D", "删除这份问卷（按两次确认，不可恢复）"],
+					["Ctrl+D / D", "删除这份问卷（按两次确认；问卷作废、AI 不再等待，不可恢复）"],
 					["?", "本帮助"],
-					["Esc", "搁置（存草稿，随时 /answer 继续）"],
+					["Esc", "搁置：存草稿退出，随时 /answer 续答（AI 会收到「已搁置」）"],
 				],
 			],
 		];
@@ -844,6 +868,7 @@ export class QuestionnairePage {
 		}
 		const footer = [
 			this.flash ? th.fg("success", ` ${this.flash}`) : "",
+			th.fg("dim", " 此页不提交；必答未完成时 Enter 仍会跳到该题"),
 			th.fg("dim", " C 复制答案到剪贴板 · 滚轮滚动 · 任意键返回作答"),
 		].filter(Boolean);
 		const budget = Math.max(1, H - footer.length);
@@ -937,7 +962,7 @@ export class QuestionnairePage {
 					content.push({
 						text:
 							`${prefix} ${th.fg("dim", "‹")} ${dots} ${st.rating ?? "–"}/${max} ${th.fg("dim", "›")}` +
-							(focused ? th.fg("dim", "   ←→ 调整 · 数字直选") : ""),
+							(focused ? th.fg("dim", `   ←→ 调整 · 数字直选 ${min}-${max}`) : ""),
 						row: ri,
 					});
 				}
@@ -949,6 +974,8 @@ export class QuestionnairePage {
 				const parts: string[] = [`已选 ${st.sel.size} 项`];
 				if (q.min !== undefined) parts.push(`至少 ${q.min}`);
 				if (q.max !== undefined) parts.push(`最多 ${q.max}`);
+				parts.push(q.required === false ? "选填" : "必答");
+				if (this.otherUnfilled(q)) parts.push("「其他」选了但未填写内容");
 				pushWrapped("      ", th.fg("dim", `（${parts.join("，")}）`));
 			}
 		});
@@ -981,10 +1008,10 @@ export class QuestionnairePage {
 		const keysLine = th.fg(
 			"dim",
 			onMultiline
-				? " ↑↓ 行间移动 · Shift+Enter 换行 · Enter 提交 · Ctrl+P 预览 · ? 帮助 · Esc 搁置"
+				? " ↑↓ 行间移动 · Shift+Enter 换行 · Enter 提交 · Ctrl+P 一览 · ? 帮助 · Esc 存草稿"
 				: focusedRow?.kind === "input" || focusedRow?.kind === "other"
-					? " ←→/Ctrl+←→ 移动 · Ctrl+W 删词 · Enter 提交 · Ctrl+P 预览 · ? 帮助 · Esc 搁置"
-					: " ↑↓ 移动 · 空格 选择 · Enter 提交 · Ctrl+P 预览 · ? 帮助 · Esc 搁置",
+					? " ←→ 移动 · Ctrl+W 删词 · Enter 提交 · Ctrl+P 一览 · ? 帮助 · Esc 存草稿"
+					: " ↑↓ 移动 · 空格 选择 · Enter 提交 · Ctrl+P 一览 · ? 帮助 · Esc 存草稿 · D 删除",
 		);
 
 		// ---- 组装：头 + 滚动内容窗 + 底，恰好 H 行 ----
@@ -1108,14 +1135,14 @@ export class QuestionnairePicker {
 			const when = q.createdAt.length >= 16 ? q.createdAt.slice(11, 16) : "";
 			const meta = th.fg(
 				"dim",
-				`（${q.id} · ${q.questions.length} 题${total !== q.questions.length ? `（${total} 可答）` : ""}${answered > 0 ? ` · 已答 ${answered}` : ""}${q.status === "draft" ? " · 草稿" : ""}${when ? ` · ${when}` : ""}）`,
+				`（${q.id} · ${q.questions.length} 题${total !== q.questions.length ? ` · ${total} 可答` : ""}${answered > 0 ? ` · 已答 ${answered}` : ""}${q.status === "draft" ? " · 草稿" : ""}${when ? ` · ${when}` : ""}）`,
 			);
 			const prefix = i === this.idx ? th.fg("accent", " › ") : "   ";
 			const title = i === this.idx ? th.fg("accent", q.title) : q.title;
 			lines.push(row(`${prefix}📝 ${title} ${meta}`));
 		});
 		if (this.flash) lines.push(row(th.fg("warning", ` ${this.flash}`)));
-		lines.push(row(th.fg("dim", " ↑↓ 选择 · Enter 打开 · D 删除 · Esc 取消")));
+		lines.push(row(th.fg("dim", " ↑↓ 选择 · Enter 打开 · D 删除（按两次） · Esc 取消选择")));
 		lines.push(bottomBorder());
 		return lines;
 	}
