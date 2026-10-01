@@ -176,7 +176,7 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 
 ## 全链路状态感知（src/extensions/status-beacon.ts，前身 task-alert）
 
-**执行中标题进度**（2026-09 新增，全链路「进行中」段）：`agent_start` → `agent_settled` 全程在终端标题显示 spinner（200ms 转帧）+ 当前活动 + 目录名——工具执行时显示工具图标+名称（`tool_execution_start` 更新，如 `⠋ ⌨️ bash — my_pi`），生成间隙显示「思考中」；等待人工提醒期间让位、应答后自动恢复；Ctrl+C 打断（abort）时还给 pi 默认标题。切到其他窗口也能从任务栏/标签页看到 pi 在跑什么。
+**执行中标题进度**（2026-09 新增，全链路「进行中」段）：`agent_start` → `agent_settled` 全程在终端标题显示 spinner（200ms 转帧）+ 当前活动 + 目录名，**活动段与 Working 行、HUD 行 1 用同一套词**：工具执行 `⠋ ⌨️ bash — my_pi`、思考块流式 `⠋ 思考中 — my_pi`、正文生成 `⠋ 输出中 — my_pi`、块间隙只显目录 `⠋ my_pi`；等待人工提醒期间让位、应答后自动恢复；Ctrl+C 打断（abort）时还给 pi 默认标题。切到其他窗口也能从任务栏/标签页看到 pi 在跑什么。
 
 提示音与收尾提醒移植自 ClaudeCodeInit 的 hooks 提示音方案，五种状态五种音效（钢琴音色，音源 `ClaudeCodeInit/wav/piano/`，部署到 `~/.pi/agent/sounds/`）：
 

@@ -5,8 +5,9 @@
  * agent 工作全程都在终端标题上反映进展，用户切到其他窗口也能从任务栏/标签页看到：
  *
  *   执行中（agent_start → agent_settled）
- *     → 标题 spinner（200ms 转帧）+ 当前活动（工具执行时显示工具图标+名称，生成时显示「思考中」）+ 目录名
- *     → 如「⠋ ⌨️ bash — my_pi」；ui_prompt 阻塞时让位给等待人工提醒，应答后自动恢复
+ *     → 标题 spinner（200ms 转帧）+ 当前活动 + 目录名，活动段与 Working 行/HUD 用同一套词：
+ *       工具执行「⠋ ⌨️ bash — my_pi」、思考块流式「⠋ 思考中 — my_pi」、正文生成「⠋ 输出中 — my_pi」、
+ *       块间隙只显目录「⠋ my_pi」；ui_prompt 阻塞时让位给等待人工提醒，应答后自动恢复
  *     → 同时接管执行中 Working 行（pi setWorkingMessage，本扩展独占写入；行首那支 spinner 是 pi
  *       Working 指示器自带的，本扩展只写字），按「在等什么」分层：
  *       等人工（ui_prompt 阻塞：ask 问卷/perm-gate 复核，文本可由扩展经 __PI_STATUS_BEACON_API__ 登记）
@@ -404,9 +405,26 @@ export default function (pi: ExtensionAPI) {
 
 	// ---- 执行中标题 ---------------------------------------------------------
 
+	/**
+	 * 执行中标题的活动段：工具 > 思考中（思考块流式）> 输出中（正文生成）>（块间隙不写状态词）。
+	 * 与 Working 行、HUD 行 1 同一套词，三个显示面对同一时刻的说法保持一致。
+	 */
+	function workActivityLabel(): string | undefined {
+		if (currentTool) return currentTool;
+		if (thinking) return "思考中";
+		if (writing) return "输出中";
+		return undefined;
+	}
+
+	/** 执行中标题即时刷新（块边界 / 工具起止；平时由 200ms 定时器转帧） */
+	function refreshWorkTitle(ctx: ExtensionContext): void {
+		if (workTimer && ctx.hasUI) ctx.ui.setTitle(workTitleText());
+	}
+
 	function workTitleText(): string {
 		const spinner = WORK_SPINNER_FRAMES[workFrame % WORK_SPINNER_FRAMES.length];
-		return `${spinner} ${currentTool ?? "思考中"} — ${path.basename(process.cwd())}`;
+		const dir = path.basename(process.cwd());
+		return workActivityLabel() ? `${spinner} ${workActivityLabel()} — ${dir}` : `${spinner} ${dir}`;
 	}
 
 	/** 启动执行中标题（agent_running 且无提醒时）；重复调用幂等 */
@@ -574,7 +592,7 @@ export default function (pi: ExtensionAPI) {
 		currentTool = toolLabel(event.toolName);
 		thinking = false;
 		writing = false;
-		if (workTimer && currentCtx?.hasUI) currentCtx.ui.setTitle(workTitleText());
+		refreshWorkTitle(ctx);
 		applyWorking(ctx);
 	});
 
@@ -582,6 +600,7 @@ export default function (pi: ExtensionAPI) {
 	// 失败交给 turn 级 error 统一收尾。子代理工具名随实现而异（内置 explore / 第三方 subagent）
 	pi.on("tool_execution_end", async (event, ctx) => {
 		currentTool = null;
+		refreshWorkTitle(ctx);
 		applyWorking(ctx);
 		if (SUBAGENT_TOOLS.has(event.toolName) && !event.isError) playSoundGated(SOUNDS.subagent);
 	});
@@ -593,6 +612,7 @@ export default function (pi: ExtensionAPI) {
 		if (m.role !== "assistant") return;
 		thinking = false;
 		writing = false;
+		refreshWorkTitle(ctx);
 		applyRunStatus(ctx);
 		const text = m.content
 			.filter((b) => b.type === "text")
@@ -621,7 +641,10 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			return;
 		}
-		if (thinking !== wasThinking || writing !== wasWriting) applyWorking(ctx);
+		if (thinking !== wasThinking || writing !== wasWriting) {
+			refreshWorkTitle(ctx);
+			applyWorking(ctx);
+		}
 	});
 
 	// 新任务开始 → 撤掉上一提醒 + 启动执行中标题

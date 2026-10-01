@@ -115,12 +115,13 @@ async function bundle(entry, name) {
 	// -------------------------------------------------------------------------
 	console.log("场景 D：status-beacon 提示音门控");
 	const execCalls = [];
+	const titles = [];
 	const workingMessages = [];
 	const hiddenLabelCalls = [];
 	const statuses = new Map();
 	const ui = {
 		setStatus: (k, v) => (v === undefined ? statuses.delete(k) : statuses.set(k, v)),
-		setTitle() {},
+		setTitle: (t) => titles.push(t),
 		setWidget() {},
 		setWorkingMessage: (t) => workingMessages.push(t),
 		setHiddenThinkingLabel: (t) => hiddenLabelCalls.push(t),
@@ -205,14 +206,17 @@ async function bundle(entry, name) {
 
 		// 思考块边界：思考只覆盖 thinking_start → thinking_end 这段时间
 		await fire("message_update", { assistantMessageEvent: { type: "thinking_start" } });
+		check("E: 标题栏同步显「思考中」", String(titles[titles.length - 1]).includes("思考中"), JSON.stringify(titles[titles.length - 1]));
 		check("E: 思考块开始 → HUD 显「思考中」", statuses.get("task-alert-run") === "💭 思考中", JSON.stringify(statuses.get("task-alert-run")));
 		check("E: 思考块开始 → Working 行显「思考中」", String(workingMessages[workingMessages.length - 1]).startsWith("思考中"), JSON.stringify(workingMessages[workingMessages.length - 1]));
 		await fire("message_update", { assistantMessageEvent: { type: "thinking_delta" } });
 		check("E: 思考块内多帧 delta 不改变状态", statuses.get("task-alert-run") === "💭 思考中");
 		await fire("message_update", { assistantMessageEvent: { type: "thinking_end" } });
 		check("E: 思考块结束 → 不再显「思考中」", !(statuses.get("task-alert-run") ?? "").includes("思考"), JSON.stringify(statuses.get("task-alert-run")));
+		check("E: 标题栏不再显「思考中」", !String(titles[titles.length - 1]).includes("思考中"), JSON.stringify(titles[titles.length - 1]));
 		await fire("message_update", { assistantMessageEvent: { type: "text_start" } });
 		check("E: 正文流式 → HUD 显「输出中」", statuses.get("task-alert-run") === "✍️ 输出中", JSON.stringify(statuses.get("task-alert-run")));
+		check("E: 标题栏同步显「输出中」", String(titles[titles.length - 1]).includes("输出中"), JSON.stringify(titles[titles.length - 1]));
 		await fire("message_update", { assistantMessageEvent: { type: "toolcall_start" } });
 		check("E: 工具调用块 → 撤下输出状态", statuses.get("task-alert-run") === undefined, JSON.stringify(statuses.get("task-alert-run")));
 
