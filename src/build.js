@@ -81,6 +81,10 @@ async function buildExtension(entry) {
 		for (const e of err.errors ?? []) {
 			console.error(`  ${path.relative(ROOT, e.location?.file ?? entry.src)}:${e.location?.line ?? "?"}: ${e.text}`);
 		}
+		// 依赖缺失（npm install 不完整/未装）是最常见的构建失败原因，给出可直接照做的补救提示
+		if ((err.errors ?? []).some((e) => /Could not resolve/.test(e.text ?? ""))) {
+			console.error("  提示：Could not resolve 多为 npm 构建依赖缺失。在仓库根目录运行 node install.js（自动检测并补装依赖），或 cd src && npm install 后重试。");
+		}
 		return false;
 	}
 }

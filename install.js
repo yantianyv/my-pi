@@ -5,7 +5,7 @@
  * 新设备拿到本仓库后，一条命令即可完成「pi 本体 + 定制配置」的完整部署：
  *   1. 检测 node 版本（pi 要求 ≥22.19.0，过低仅警告不阻塞）
  *   2. 检测 pi 本体（@earendil-works/pi-coding-agent），缺失则自动 npm i -g
- *   3. 检测构建依赖 esbuild，缺失则自动 npm install（src/ 下）
+ *   3. 检测构建依赖（src/package.json 声明清单 vs src/node_modules 实况全量比对，不只查 esbuild），缺失则自动 npm install（src/ 下）
  *   4. 自动构建扩展产物（src/build.js → dist/extensions/）
  *   5. 安装配置到 ~/.pi/agent/（扩展/主题/提示音/skills/models.json/settings）
  *   6. 可选依赖 rtk 二进制（pi-rtk-optimizer 的命令改写引擎）：PATH 上缺失时询问并自动
@@ -159,11 +159,31 @@ async function ensurePi() {
 	}
 }
 
-/** 确保构建依赖已安装：src/node_modules/esbuild 缺失（克隆后首次）时交互确认后自动 npm install。 */
+/** 读取 src/package.json 声明的全部构建依赖（dependencies + devDependencies），
+ *  返回缺失于 src/node_modules 的包名列表（scoped 包 @scope/name 按目录层级检查）。
+ *  @types/* 虽只服务类型检查不参与构建，但统一纳入同一检测口径，缺了一起补。 */
+function missingBuildDeps() {
+	const pkgPath = path.join(SRC_DIR, "package.json");
+	try {
+		const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+		const names = [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})];
+		return names.filter((n) => !fs.existsSync(path.join(SRC_DIR, "node_modules", ...n.split("/"))));
+	} catch {
+		return [
+			/* 清单解析失败：退化为原有的 esbuild 单项检查（该包在则视为依赖无恙，避免误报） */
+			...(fs.existsSync(ESBUILD_DIR) ? [] : ["esbuild"]),
+		];
+	}
+}
+
+/** 确保构建依赖已安装：按 src/package.json 清单与 src/node_modules 实况全量比对
+ *  （不只查 esbuild 一个包），任一依赖缺失即交互确认后 npm install 补装——
+ *  覆盖克隆后首次、以及 node_modules 不完整（如 install 中途中断、包被手删）的情形。 */
 async function ensureDeps() {
-	if (fs.existsSync(ESBUILD_DIR)) return;
-	log("未找到 esbuild（构建依赖）");
-	if (!(await confirm("  是否自动执行 npm install 拉取构建依赖（esbuild）？（Y/n）"))) {
+	const missing = missingBuildDeps();
+	if (missing.length === 0) return;
+	log(`构建依赖缺失（${missing.length}）：${missing.join(", ")}`);
+	if (!(await confirm("  是否自动执行 npm install 拉取构建依赖？（Y/n）"))) {
 		console.error("已取消。请手动执行 cd src && npm install 后重新运行 install.js。");
 		process.exit(1);
 	}
@@ -173,6 +193,12 @@ async function ensureDeps() {
 		execSync("npm install", { cwd: SRC_DIR, stdio: "inherit" });
 	} catch {
 		console.error("\nnpm install 失败（需要网络）。请手动执行 cd src && npm install 后重新运行 install.js。");
+		process.exit(1);
+	}
+	// 补装后复查：仍缺说明 npm 源异常或 package.json 与锁文件不一致，明示给用户
+	const still = missingBuildDeps();
+	if (still.length > 0) {
+		console.error(`\n✗ 仍有依赖未安装成功：${still.join(", ")}。请检查网络重试；若刚改过 package.json，先 npm install 更新锁文件。`);
 		process.exit(1);
 	}
 }
@@ -628,7 +654,8 @@ async function main() {
 	console.log(`  node ${node.version} ${node.ok ? "✓" : `✗（pi 要求 ≥ ${NODE_MIN}，建议先升级 node 再启动 pi）`}`);
 	const piRootBefore = findPiGlobalRoot();
 	console.log(`  pi 本体 ${piRootBefore ? `✓ ${piRootBefore}` : `✗ 未安装（${PI_PACKAGE}）`}`);
-	console.log(`  构建依赖 esbuild ${fs.existsSync(ESBUILD_DIR) ? "✓" : "✗ 未安装"}`);
+	const buildDepsMissing = missingBuildDeps();
+	console.log(`  构建依赖 ${buildDepsMissing.length === 0 ? "✓" : `✗ 缺 ${buildDepsMissing.length} 个（${buildDepsMissing.join(", ")}）`}`);
 	console.log(`  rtk（可选，pi-rtk-optimizer 命令改写）${rtkOnPath() ? "✓" : "✗ 未安装（稍后可选自动安装）"}`);
 	console.log("");
 

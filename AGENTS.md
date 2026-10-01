@@ -8,7 +8,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 
 | 命令 | 作用 | 出处 |
 |---|---|---|
-| `node install.js` | 交互式环境安装向导：检测 node/pi 本体/esbuild/rtk → 逐步确认（pi 缺失自动 `npm i -g @earendil-works/pi-coding-agent`、esbuild 缺失自动 `npm install`、rtk 缺失可选自动下载跨平台二进制）→ 构建 → 安装到 `~/.pi/agent/`（含 theme=matrix）；**`-y` 非交互全自动**（非 TTY 环境自动等价）；`--skip-build` 跳过构建、`--dry-run` 只预览不询问不修改；脚本路径自适应（任意目录下 node <绝对路径>/install.js 均可） | install.js |
+| `node install.js` | 交互式环境安装向导：检测 node/pi 本体/构建依赖/rtk → 逐步确认（pi 缺失自动 `npm i -g @earendil-works/pi-coding-agent`、构建依赖按 `src/package.json` 清单全量比对 `src/node_modules`，任一缺失自动 `npm install`、rtk 缺失可选自动下载跨平台二进制）→ 构建 → 安装到 `~/.pi/agent/`（含 theme=matrix）；**`-y` 非交互全自动**（非 TTY 环境自动等价）；`--skip-build` 跳过构建、`--dry-run` 只预览不询问不修改；脚本路径自适应（任意目录下 node <绝对路径>/install.js 均可） | install.js |
 | `node install.js --dry-run`（或 `-n`） | 试运行，只打印不修改（不询问、不触发构建/安装） | install.js |
 | `node src/build.js` | 伪编译：esbuild 把 src/extensions/ 源码（含 shared/、hud/ 子模块）内联打包成 dist/extensions/ 下的零耦合单文件（hud/ → hud.ts）；静态资源不经本脚本；install.js 会自动调用，也可手动单独跑 | src/build.js |
 | `npm install` | 首次拉取构建依赖（在 src/ 下执行，esbuild 装入 src/node_modules） | src/package.json |
@@ -19,7 +19,7 @@ pi（@earendil-works/pi-coding-agent）的个人定制配置仓库：主题、�
 ## 目录结构
 
 ```
-install.js          # 安装脚本（根目录）：交互式向导——检测并自动安装 pi 本体（npm i -g，缺失时）+ 构建依赖 esbuild（npm install）+ 可选依赖 rtk 二进制（缺失时按平台下载 GitHub release，直连优先、gh-proxy 镜像回落，checksums.txt 校验）→ 执行 src/build.js 构建 → 从 dist/extensions/ 装扩展产物、从 static/ 装静态资源（themes/sounds/models.json/AGENTS.md，无需编译）→ 生成 src/config/tsconfig.json（探测 pi 全局目录）；-y 非交互全自动，--skip-build 跳过构建，--dry-run 只预览
+install.js          # 安装脚本（根目录）：交互式向导——检测并自动安装 pi 本体（npm i -g，缺失时）+ 构建依赖（按 src/package.json 清单全量比对 src/node_modules，任一缺失即 npm install）+ 可选依赖 rtk 二进制（缺失时按平台下载 GitHub release，直连优先、gh-proxy 镜像回落，checksums.txt 校验）→ 执行 src/build.js 构建 → 从 dist/extensions/ 装扩展产物、从 static/ 装静态资源（themes/sounds/models.json/AGENTS.md，无需编译）→ 生成 src/config/tsconfig.json（探测 pi 全局目录）；-y 非交互全自动，--skip-build 跳过构建，--dry-run 只预览
 .gitignore          # 忽略生成物 tsconfig.json / node_modules / dist（产物不入库）
 README.md           # 项目说明（含 HUD 图例、各扩展用法、卸载方法）
 src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（build.js 的唯一输入）
@@ -175,7 +175,7 @@ static/              #   静态部署物（无需编译，install.js 直接从�
                       #   README.md 含出处表与对齐更新流程；install.js 复制到 ~/.pi/agent/vendor/、有依赖的包补
                       #   npm install --omit=dev、本地路径注册进 settings.json 的 packages（并自动注销已移除的包）；
                       #   伴随物 rtk 二进制（Apache-2.0）不入库，由 install.js 按平台自动下载（跨平台资产映射见 install.js 顶部配置）
-dist/               # 扩展产物（build.js 生成，gitignore 不入库）：install.js 只认这里的 extensions/；每次 install 自动重建，克隆后 node install.js 即用（pi/esbuild 缺失自动装）
+dist/               # 扩展产物（build.js 生成，gitignore 不入库）：install.js 只认这里的 extensions/；每次 install 自动重建，克隆后 node install.js 即用（pi 缺失、构建依赖不全均自动装）
   extensions/       #   扩展产物：每扩展一个零耦合单文件 .ts（hud.ts 由 hud/ 合并而来）
     ask.ts          #     ask/ 合并为单文件（问卷）
     hud.ts          #     hud/ 五个子模块合并为单文件（解决 hud 拆分问题）
@@ -185,7 +185,7 @@ dist/               # 扩展产物（build.js 生成，gitignore 不入库）：
 
 ## 架构要点
 
-- **伪编译架构**：`src/`（源码：extensions/ 含 shared/ 共享模块与 hud/ 子目录）→ `src/build.js`（esbuild bundle 扩展，与 npm 生态同层、require esbuild 自然命中）→ `dist/extensions/`（扩展产物，**gitignore 不入库**）；静态资源（static/）无需编译，install.js 直接从 static/ 安装。`install.js` 每次运行先自动 build（缺失即报错提示）。克隆后直接 `node install.js` 即用（自动装 pi 本体/esbuild 并重建 dist，无需入库）；改了 src/ 后 `node install.js` 一步构建+安装。构建用 `src/config/tsconfig.build.json`（无 paths）——主 tsconfig 的 paths 会把包名解析成 pi 全局绝对路径，导致 external 白名单的包名匹配失效、意外内联 typebox。产物 external 白名单只留 `@earendil-works/*` 与 `typebox`，其余 npm 依赖（如 web-tool 的 turndown/domino/gfm）被 esbuild 内联进单文件——产物仍是零外部依赖单文件，运行时零安装。
+- **伪编译架构**：`src/`（源码：extensions/ 含 shared/ 共享模块与 hud/ 子目录）→ `src/build.js`（esbuild bundle 扩展，与 npm 生态同层、require esbuild 自然命中）→ `dist/extensions/`（扩展产物，**gitignore 不入库**）；静态资源（static/）无需编译，install.js 直接从 static/ 安装。`install.js` 每次运行先自动 build（缺失即报错提示）。克隆后直接 `node install.js` 即用（自动装 pi 本体、按 package.json 清单补全构建依赖并重建 dist，无需入库）；改了 src/ 后 `node install.js` 一步构建+安装。构建用 `src/config/tsconfig.build.json`（无 paths）——主 tsconfig 的 paths 会把包名解析成 pi 全局绝对路径，导致 external 白名单的包名匹配失效、意外内联 typebox。产物 external 白名单只留 `@earendil-works/*` 与 `typebox`，其余 npm 依赖（如 web-tool 的 turndown/domino/gfm）被 esbuild 内联进单文件——产物仍是零外部依赖单文件，运行时零安装。
 - **安装模型**：`install.js` 把 dist/extensions/ 产物与 static/ 静态资源（themes/sounds/models.json）复制到 `~/.pi/agent/` 对应位置；改扩展源码后跑 `node install.js`（自动 build）+ pi 内 `/reload`；改静态资源（主题色、提示音）只需 `node install.js --skip-build` 重装即可，无需重新编译。
 - **扩展间联动**：展示层统一走**官方 `ctx.ui.setStatus(key, text)` 状态通道**（行 1 只显示优先级最高的一个：一根轴分五层——输入态 100 > 结果提醒 90+ > 阻塞等人 86/84 > 具体活动 80~60 > 通用运行兜底 58 > 环境信息 56；文案约定 进行中`<emoji>动作中` / 成功`✓ 结果` / 失败`⚠ 对象失败`，数字与单位空格分隔；`test/status-keys.test.mjs` 双向校验推送 key 与 STATUS_STYLE 登记一致）（`status-beacon` 推 `task-alert`/`task-alert-error`/`task-alert-wait` 闪烁帧（key 沿用旧名）、`claude-it` 推 `init` 进度、`web-tool` 推 `web-search`/`web-fetch` 状态、`workflow-mgr` 推 `workflow-mgr` 进度摘要、`status-beacon` 另推 `task-alert-run`（思考中/当前工具）、hud 自身推 `balance-error`/`model-switch`/`hud-bash`）；`hud/hud-core.ts` 渲染行 1 动态区时按 `STATUS_STYLE` 样式表（hud/hud-core.ts）映射颜色与优先级（数字大者胜出），TTL/闪烁由各推送方自管。扩展间零耦合：setStatus 是 pi 原生接口，各插件推状态**不依赖 hud**（hud 缺席时状态自动回落原生 footer 第 3 行 `getExtensionStatuses()`，hud 兼容该通道仅做展示）。hud 置 `globalThis.__PI_HUD_ACTIVE__`（installFooter 时 true、dispose 时 false）供依赖 hud 特有功能的扩展校验，并暴露**通用底部行接口** `__PI_HUD_API__`（`registerExtraRows`/`notifyExtraRowsUpdate`，hud-core.ts）——**当前 workflow-mgr 已依赖**：hud 存在且开启时经该接口注册渲染函数，其常驻面板内容（任务/分工/里程碑 ≈4 行，内容与样式由 workflow 自决、与面板同款）由 hud 在 footer 底部渲染（屏幕最底），面板隐藏；showPanel 关闭或 hud 关闭（`hud:state-change` 事件）时注销底部行并恢复自绘面板（hud-core.ts extraRowProviders / workflow-mgr panel.ts renderHudRows）。
 - **hud 余额适配**：`BALANCE_ADAPTERS` 注册表（hud/hud-balance.ts）按 providerId 逐一适配；DeepSeek 消耗按 `DEEPSEEK_PRICES`（hud/hud-cost.ts）官方人民币定价直算（恒 ¥，永不依赖汇率），峰谷计价（高峰 ×2）已按官方时段生效；其余供应商成本按原始货币 USD 记录、显示时换算。汇率三态（hud/hud-cost.ts）：实时（frankfurter→open.er-api 多源，1h 节流）→ 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`）→ 无（断网且无缓存，显示原始货币 USD，不用固定近似值）。hud 子模块**可选加载**：任一缺失时对应功能降级（余额行显「模块未加载」/ 隐藏消耗统计 / git 显「⎇ git模块未加载」，与「⎇ -（非 git 仓库）」可区分），不拖垮整个 HUD。
