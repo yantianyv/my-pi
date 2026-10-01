@@ -117,8 +117,9 @@ async function bundle(entry, name) {
 	const execCalls = [];
 	const workingMessages = [];
 	const hiddenLabelCalls = [];
+	const statuses = new Map();
 	const ui = {
-		setStatus() {},
+		setStatus: (k, v) => (v === undefined ? statuses.delete(k) : statuses.set(k, v)),
 		setTitle() {},
 		setWidget() {},
 		setWorkingMessage: (t) => workingMessages.push(t),
@@ -197,8 +198,14 @@ async function bundle(entry, name) {
 		const last = workingMessages[workingMessages.length - 1];
 		check("E: Working 行保留「在等什么」信息", typeof last === "string" && last.includes("bash"), JSON.stringify(last));
 		check("E: Working 行不自带 spinner（行首交给 pi 的指示器）", typeof last === "string" && !/^[⠀-⣿]/.test(last), JSON.stringify(last));
+		check("E: 工具执行时 HUD 行 1 显示当前工具", (statuses.get("task-alert-run") ?? "").includes("bash"), JSON.stringify(statuses.get("task-alert-run")));
 		check("E: 不再改写折叠思考标签", hiddenLabelCalls.length === 0);
+		await fire("tool_execution_end", { toolName: "bash" });
+		const idle = workingMessages[workingMessages.length - 1];
+		check("E: 工具收尾回到「思考中」", typeof idle === "string" && idle.startsWith("思考中"), JSON.stringify(idle));
+		check("E: HUD 行 1 随即回到「思考中」", statuses.get("task-alert-run") === "💭 思考中", JSON.stringify(statuses.get("task-alert-run")));
 		await fire("agent_settled");
+		check("E: 收尾撤下执行中状态", !statuses.has("task-alert-run"));
 		check("E: 收尾后仍不碰折叠思考标签", hiddenLabelCalls.length === 0);
 	}
 

@@ -155,6 +155,7 @@ export default async function (pi: ExtensionAPI) {
 		"task-alert": { color: "success", priority: 90 }, // 任务完成（status-beacon 自管闪烁帧）
 		"task-alert-error": { color: "error", priority: 92 }, // 任务出错（status-beacon）
 		"task-alert-wait": { color: "warning", priority: 91 }, // 等待人工干预（status-beacon）
+		"task-alert-run": { color: "accent", priority: 58 }, // 执行中：思考中 / 当前工具（status-beacon；低于一切具体活动状态）
 		"init": { color: "warning", priority: 80 }, // claude-it /init 进度
 		"web-search": { color: "accent", priority: 75 }, // 联网搜索状态（web-tool）
 		"web-fetch": { color: "accent", priority: 74 }, // 网页抓取状态（web-tool）

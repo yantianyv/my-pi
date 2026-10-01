@@ -28,6 +28,8 @@
  *   打开问卷不算「等待人工」；按键不撤等待提醒（用户需要按键回答提示），由 ui_prompt_end 撤；
  * - 标题单通道所有权全在本扩展：执行中标题与提醒标题互斥（startAlert 停执行标题，
  *   stopAlert 在 agent 仍运行时恢复执行标题），避免两个动画互相覆盖；
+ * - 执行中自身也是一个状态：Working 行按「等人工 > 等工具 > 思考中」分层，同一状态同步推 HUD 行 1
+ *   （key=task-alert-run，「💭 思考中」/ 当前工具），收尾即撤；
  * - 联动走官方 setStatus 通道：三种提醒状态各用独立 key（沿用 task-alert / task-alert-wait /
  *   task-alert-error 旧 key 名，hud STATUS_STYLE 映射不变、零改动），hud 缺席自动回落原生 footer；
  * - 音频跨平台播放：Windows 用 PowerShell SoundPlayer，macOS 用 afplay，
@@ -103,6 +105,9 @@ const ALERT_STYLE: Record<AlertKind, { statusKey: string; titleFrames: string[];
 		statusFrames: ["⏳ 等待人工", "🔔 等待人工"],
 	},
 };
+
+/** 执行中状态（思考中 / 当前工具）在 HUD 行 1 的 setStatus key */
+const RUN_STATUS_KEY = "task-alert-run";
 
 /** 提醒的标题栏/状态栏闪烁间隔 */
 const TITLE_INTERVAL_MS = 500;
@@ -291,7 +296,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Working 行文案分层：等你 X > 等 X 完成 > 正在（廉价 AI 短语 > work > pi 默认）。
+	 * Working 行文案分层：等人工 > 等工具 > 思考中（模型生成阶段，带廉价 AI 短语说明在思考什么）。
 	 * 只给文案、不自带 spinner：pi 的 Working 指示器本身就在行首转（默认盲文帧 80ms），
 	 * 再拼一个帧就是两支并排转圈。
 	 */
@@ -301,14 +306,20 @@ export default function (pi: ExtensionAPI) {
 			return `等你：${detail}`;
 		}
 		if (currentTool) return `等 ${currentTool} 完成…`;
-		if (stepPhrase) return `正在${stepPhrase}…`;
-		const work = readWork(ctx);
-		return work ? `正在${work}…` : `工作中…`;
+		return stepPhrase ? `思考中：${stepPhrase}…` : "思考中…";
 	}
 
-	/** 把当前分层文案推到 Working 行（agent 未运行/无 UI 时不写） */
+	/** 执行中状态推 HUD 行 1 动态区（思考中 / 当前工具）；agent 未运行时清除 */
+	function applyRunStatus(ctx: ExtensionContext): void {
+		if (!ctx.hasUI) return;
+		ctx.ui.setStatus(RUN_STATUS_KEY, agentRunning ? (currentTool ?? "💭 思考中") : undefined);
+	}
+
+	/** 把当前分层文案推到 Working 行 + 执行中状态推 HUD（agent 未运行时只负责清状态） */
 	function applyWorking(ctx: ExtensionContext): void {
-		if (!agentRunning || !ctx.hasUI) return;
+		if (!ctx.hasUI) return;
+		applyRunStatus(ctx);
+		if (!agentRunning) return;
 		ctx.ui.setWorkingMessage(workingLineText(ctx));
 	}
 
@@ -512,6 +523,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		agentRunning = false;
+		applyRunStatus(ctx); // 撤下 HUD 的「思考中 / 当前工具」（提醒状态随后接管行 1）
 		const reason = lastEndStopReason;
 		lastEndStopReason = undefined;
 		if (reason === "aborted") {
@@ -612,8 +624,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("ui_prompt_end", async () => markUserInput());
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		agentRunning = false;
+		applyRunStatus(ctx);
 		clearTimers();
 		inputHookUnsubscribe?.();
 		inputHookUnsubscribe = undefined;
