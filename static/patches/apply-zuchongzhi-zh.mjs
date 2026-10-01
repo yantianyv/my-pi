@@ -9,7 +9,7 @@
  * 因此汉化只能直接替换全局安装 dist 编译产物里的硬编码字符串。
  *
  * 覆盖范围（首批高频可见文案，按文件定向替换）：
- *   - settings-selector.js   /settings 界面全部标题/描述/按钮（~77 条）
+ *   - settings-selector.js   /settings 界面全部标题/描述/按钮（~99 条）
  *   - session-selector.js    /resume 会话选择器
  *   - tree-selector.js       /tree 树选择器（标签提示 + 消息前缀）
  *   - model-selector.js      /model 模型选择器
@@ -63,6 +63,22 @@ const log = (...m) => console.log((dryRun ? "[DRY-RUN] " : "") + m.join(" "));
 const PATCHES = {
 	// ---- /settings 界面：全部为首字母大写的 label/标题/描述，value 是小写，不碰 ----
 	"components/settings-selector.js": [
+		["  automatic", "  自动"],
+		["Auto-compact", "自动压缩"],
+		["Auto-resize images", "自动缩放图片"],
+		["Cache warming", "缓存预热"],
+		["Fullscreen wheel scrolling", "全屏模式滚轮滚动"],
+		["Theme created from your terminal's colors", "根据终端配色生成的主题"],
+		["Select a theme, or choose automatic to follow terminal appearance.", "选择主题，或选「自动」跟随终端外观。"],
+		["Print the transcript or only a session resume hint when exiting fullscreen mode", "退出全屏模式时打印完整记录，或只打印会话恢复提示"],
+		["Scrollbar behavior in fullscreen mode; has no effect in regular mode", "全屏模式下的滚动条行为；常规模式下无效"],
+		["Resize large images to 2000x2000 max for better model compatibility", "将大图缩放至最长边 2000px 以提升模型兼容性"],
+		["Horizontal padding for user messages, assistant messages, and thinking", "用户消息、助手消息与思考块的水平内边距"],
+		["Show OSC 9;4 progress indicators in the terminal tab bar", "在终端标签栏显示 OSC 9;4 进度指示"],
+		["Automatically copy selected text in fullscreen mode; disable to copy selections with Ctrl+X", "全屏模式下选中即复制；禁用后需按 Ctrl+X 复制选中内容"],
+		["Enter while streaming queues steering messages. 'one-at-a-time': deliver one, wait for response. 'all': deliver all at once.", "流式输出期间按 Enter 会排队引导消息。「one-at-a-time」：逐条送达并等待响应；「all」：一次全部送达。"],
+		["Lines per mouse-wheel event in fullscreen mode; 'auto' speeds up fast wheel spins where the terminal does not", "全屏模式下每次滚轮事件滚动的行数；「auto」在终端不加速时对快速滚动自动加速"],
+		["off; streaming while the agent runs; idle also between runs while continuation stays profitable", "off：关闭；streaming：代理运行期间预热；idle：运行间隙有利时也预热"],
 		["Action when pressing Escape twice with empty editor", "在编辑器为空时按两次 Esc 的动作"],
 		["Automatically compact context when it gets too large", "上下文过大时自动压缩"],
 		["Choose themes for terminal light and dark appearance.", "为终端浅色和深色外观选择主题。"],
