@@ -21,6 +21,13 @@
  *   - session-share.js       /share 会话分享（gh gist 上传流程，0.85.1 从
  *                            interactive-mode.js 拆出的新文件）
  *
+ * 加载路径（1.0.0 起三分，补丁全覆盖）：
+ *   - dist/bundle/chunks/*.js    主 CLI 入口（package.json 的 bin 指向 dist/bundle/cli.js），
+ *                                主界面 UI 全在压缩 chunks 里——全表并集（仅引号条目）逐 chunk 替换；
+ *                                压缩产物把非 ASCII 转义成 \xNN 序列，这类条目放 BUNDLE_EXTRA 单独配表
+ *   - dist/modes/interactive/*   未打包构建，只服务扩展经包导入（exports "." → dist/index.js）
+ *   - pi-tui/dist/components/*   扩展经 @earendil-works/pi-tui 导入渲染的组件（PATCHES_TUI）
+ *
  * 安全策略（逐个核对过 dist 源码上下文，见上方替换表注释）：
  *   1. 只替换首字母大写的 UI 展示文案（label/标题/描述/提示）；
  *      绝不碰小写 value（"apply"/"save and go back"/"all"/"dark" 等是配置值或
@@ -381,6 +388,21 @@ const PATCHES = {
 	],
 };
 
+// ---- pi-tui 未打包组件（扩展经 @earendil-works/pi-tui 包导入渲染的列表；主 CLI 用的是 bundle 内副本，由下方并集覆盖）----
+const PATCHES_TUI = {
+	"components/settings-list.js": [
+		["  Type to search · Enter/Space to change · Esc to cancel", "  输入以搜索 · Enter/空格 修改 · Esc 取消"],
+		["  Enter/Space to change · Esc to cancel", "  Enter/空格 修改 · Esc 取消"],
+	],
+};
+
+// ---- 仅 bundle 并集使用的条目：压缩产物把非 ASCII 字符转义成了 \xNN 字面序列，
+//      与未打包文件里的原始字符不是同一串，需单独配表（打进 chunk 后译文写原始字符即可）----
+const BUNDLE_EXTRA = [
+	["  Type to search \\xB7 Enter/Space to change \\xB7 Esc to cancel", "  输入以搜索 · Enter/空格 修改 · Esc 取消"],
+	["  Enter/Space to change \\xB7 Esc to cancel", "  Enter/空格 修改 · Esc 取消"],
+];
+
 /** 探测 pi 安装根目录（含 dist/modes/interactive/ 的包根）。 */
 function findPiRoot() {
 	if (process.env.PI_HAN_ROOT) return process.env.PI_HAN_ROOT;
@@ -437,10 +459,16 @@ function main() {
 			process.exit(1);
 		}
 		let restored = 0;
+		const bundleDir = path.join(root, "dist", "bundle");
+		const tuiDir = path.join(root, "node_modules", "@earendil-works", "pi-tui", "dist");
 		for (const rel of fs.readdirSync(backupDir, { recursive: true })) {
 			const from = path.join(backupDir, rel);
 			if (!fs.statSync(from).isFile()) continue;
-			const to = path.join(interactiveDir, rel);
+			const to = rel.startsWith("bundle" + path.sep)
+				? path.join(bundleDir, rel.slice("bundle".length + 1))
+				: rel.startsWith("pi-tui" + path.sep)
+					? path.join(tuiDir, rel.slice("pi-tui".length + 1))
+					: path.join(interactiveDir, rel);
 			fs.mkdirSync(path.dirname(to), { recursive: true });
 			fs.copyFileSync(from, to);
 			restored++;
@@ -478,25 +506,28 @@ function main() {
 	const missingReports = [];
 	let syntaxError = null;
 
-	for (const [rel, entries] of Object.entries(PATCHES)) {
-		const absPath = path.join(interactiveDir, rel);
+	/**
+	 * 对单个文件应用替换表：状态跳过 / 按原文长度降序替换 / 缺失记录 / 语法校验 / 备份写盘。
+	 * reportMissing=false 时不记缺失（bundle chunk 共享并集表，单 chunk 缺条目属正常）；
+	 * hitMap 传入时记录每条命中数（供并集零命中统计）。返回 false 表示语法错误中止。
+	 */
+	function applyToFile(absPath, entries, backupRel, label, { reportMissing = true, hitMap = null } = {}) {
 		if (!fs.existsSync(absPath)) {
-			console.warn(`⚠ 文件不存在（pi 版本可能已变动）: ${rel}`);
-			continue;
+			console.warn(`⚠ 文件不存在（pi 版本可能已变动）: ${label}`);
+			return true;
 		}
 		const src = fs.readFileSync(absPath, "utf8");
 		const srcSha = sha256(src);
 
 		if (!dryRun && state[absPath] === srcSha) {
-			console.log(`已汉化，跳过: ${rel}`);
+			console.log(`已汉化，跳过: ${label}`);
 			totalSkipped++;
-			continue;
+			return true;
 		}
 
-		// 按原文长度降序替换，保证 "Theme" ⊂ "Dark Theme" 这类子串先长后短
-		// 按原文长度降序替换（双保险）；默认只匹配双引号字符串字面量（"<原文>"），
-		// 绝不碰 JS 标识符/属性名（如 onTerminalInput: 含 Input 子串）；
-		// 显式传 false 的条目做无引号匹配（仅限模板字符串内、确认无歧义的文案）。
+		// 默认只匹配双引号字符串字面量（"<原文>"），绝不碰 JS 标识符/属性名
+		// （如 onTerminalInput: 含 Input 子串）；显式传 false 的条目做无引号匹配
+		// （仅限模板字符串内、确认无歧义的文案）。
 		let out = src;
 		let replaced = 0;
 		const missing = [];
@@ -510,38 +541,95 @@ function main() {
 			});
 			if (count === 0) {
 				// 未命中：若原文（对应形式）本身也不含该串，记缺失
-				if (!src.includes(needle)) missing.push(from);
+				if (reportMissing && !src.includes(needle)) missing.push(from);
 			} else {
 				replaced += count;
+				if (hitMap) hitMap.set(from, (hitMap.get(from) ?? 0) + count);
 			}
 		}
 
 		if (missing.length > 0) {
 			totalMissing += missing.length;
-			missingReports.push(`  ${rel}: 缺失 ${missing.length} 条目标串（pi 升级后文案变动？）`);
+			missingReports.push(`  ${label}: 缺失 ${missing.length} 条目标串（pi 升级后文案变动？）`);
 			for (const m of missing) missingReports.push(`    - ${JSON.stringify(m)}`);
 		}
 		totalReplaced += replaced;
 
 		if (dryRun) {
-			console.log(`将替换 ${replaced} 处: ${rel}`);
-			continue;
+			console.log(`将替换 ${replaced} 处: ${label}`);
+			return true;
 		}
 
 		const err = syntaxCheck(out);
 		if (err) {
-			syntaxError = `${rel}: ${err}`;
-			break;
+			syntaxError = `${label}: ${err}`;
+			return false;
 		}
 		// 备份原文件（首次）
-		const backupPath = path.join(backupDir, rel);
+		const backupPath = path.join(backupDir, backupRel);
 		if (!fs.existsSync(backupPath)) {
 			fs.mkdirSync(path.dirname(backupPath), { recursive: true });
 			fs.copyFileSync(absPath, backupPath);
 		}
 		fs.writeFileSync(absPath, out, "utf8");
 		state[absPath] = sha256(out);
-		console.log(`已替换 ${replaced} 处: ${rel}`);
+		console.log(`已替换 ${replaced} 处: ${label}`);
+		return true;
+	}
+
+	for (const [rel, entries] of Object.entries(PATCHES)) {
+		if (!applyToFile(path.join(interactiveDir, rel), entries, rel, rel)) break;
+	}
+
+	// pi-tui 未打包组件（扩展经包导入渲染的列表/选择器）
+	if (!syntaxError) {
+		const tuiDir = path.join(root, "node_modules", "@earendil-works", "pi-tui", "dist");
+		for (const [rel, entries] of Object.entries(PATCHES_TUI)) {
+			if (!applyToFile(path.join(tuiDir, rel), entries, path.join("pi-tui", rel), `pi-tui/${rel}`)) break;
+		}
+	}
+
+	// 1.0.0 起 CLI 入口是 dist/bundle/cli.js（package.json 的 bin 指向它），主界面 UI 代码
+	// 在压缩 chunks 里；dist/modes 与 pi-tui/dist 只服务扩展导入。字符串字面量在压缩后
+	// 原样保留，故把全表并集（仅引号条目）打到每个 chunk。
+	if (!syntaxError) {
+		const chunksDir = path.join(root, "dist", "bundle", "chunks");
+		if (fs.existsSync(chunksDir)) {
+			const union = new Map();
+			for (const table of [PATCHES, PATCHES_TUI]) {
+				for (const entries of Object.values(table)) {
+					for (const [from, to, quoted = true] of entries) {
+						if (!quoted) continue; // 无引号条目针对特定模板上下文，不扩散到压缩产物
+						const prev = union.get(from);
+						if (prev !== undefined && prev !== to) {
+							syntaxError = `并集冲突: ${JSON.stringify(from)} 存在两个译文`;
+							break;
+						}
+						union.set(from, to);
+					}
+				}
+			}
+			for (const [from, to] of BUNDLE_EXTRA) union.set(from, to);
+			if (!syntaxError) {
+				const hitMap = new Map();
+				let processed = 0;
+				for (const file of fs.readdirSync(chunksDir)) {
+					if (!file.endsWith(".js")) continue;
+					const rel = path.join("chunks", file);
+					const before = totalSkipped;
+					if (!applyToFile(path.join(chunksDir, file), [...union.entries()], path.join("bundle", rel), `bundle/${rel.replaceAll(path.sep, "/")}`, { reportMissing: false, hitMap })) break;
+					if (totalSkipped === before) processed++;
+				}
+				if (!syntaxError && processed > 0) {
+					const zeroHit = [...union.keys()].filter((k) => !hitMap.has(k));
+					if (zeroHit.length > 0) {
+						console.log(`ℹ 并集 ${union.size} 条中 ${zeroHit.length} 条在 bundle 未命中（可能只在 dist/modes 或文案已变）:`);
+						for (const k of zeroHit.slice(0, 20)) console.log(`    - ${JSON.stringify(k)}`);
+						if (zeroHit.length > 20) console.log(`    … 等 ${zeroHit.length} 条`);
+					}
+				}
+			}
+		}
 	}
 
 	if (syntaxError) {
