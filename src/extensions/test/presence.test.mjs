@@ -186,6 +186,22 @@ async function bundle(entry, name) {
 	await settleNormal();
 	check("D: 无系统读数时，跨实例近期输入同样抑制出声", execCalls.length === 0, JSON.stringify(execCalls));
 
+	// ---- 场景 E：思考折叠标签动画（原 btf-think 并入 status-beacon） ----
+	console.log("场景 E：思考标签动画");
+	{
+		const labels = [];
+		ui.setHiddenThinkingLabel = (t) => labels.push(t);
+		await fire("message_start", { message: { role: "assistant", content: [] } });
+		check("E: assistant 流式开始写入动画标签", typeof labels[0] === "string" && labels[0].startsWith("Thinking"));
+		await fire("message_end", { message: { role: "assistant", content: [] } });
+		check("E: 流式结束恢复默认标签", labels[labels.length - 1] === undefined);
+		const before = labels.length;
+		await fire("message_start", { message: { role: "user", content: [] } });
+		check("E: 用户消息不触发动画", labels.length === before);
+		await fire("agent_settled"); // 兜底停止也要恢复默认标签
+		check("E: agent_settled 兜底恢复默认标签", labels[labels.length - 1] === undefined);
+	}
+
 	await fire("session_shutdown"); // 走扩展清理路径（停探测进程 / 删在场文件）
 	P.disposeIdleProbe();
 }

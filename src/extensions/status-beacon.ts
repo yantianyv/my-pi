@@ -104,6 +104,9 @@ const ALERT_STYLE: Record<AlertKind, { statusKey: string; titleFrames: string[];
 	},
 };
 
+/** 折叠思考标签动画：帧间隔与点数量（原 btf-think 的 400ms/4 帧） */
+const THINKING_FRAME_INTERVAL_MS = 400;
+const THINKING_FRAMES = 4;
 /** 提醒的标题栏/状态栏闪烁间隔 */
 const TITLE_INTERVAL_MS = 500;
 /** 视为「子代理」的工具名（内置 explore 与第三方 subagent 插件），完成后补一声提示音 */
@@ -255,6 +258,8 @@ export default function (pi: ExtensionAPI) {
 	let statusTimer: ReturnType<typeof setTimeout> | undefined; // HUD 动态区闪烁
 	let idleTimer: ReturnType<typeof setTimeout> | undefined; // 完成后 60s 无操作补空闲提醒
 	let workTimer: ReturnType<typeof setTimeout> | undefined; // 执行中标题转帧
+	let thinkingTimer: ReturnType<typeof setInterval> | undefined; // 折叠「Thinking」标签动画
+	let thinkingDots = 0;
 	let statusFrame = 0;
 	let frame = 0;
 	let workFrame = 0;
@@ -364,6 +369,30 @@ export default function (pi: ExtensionAPI) {
 				stepInFlight = false;
 			}
 		})();
+	}
+
+	/**
+	 * 折叠思考标签动画（原 btf-think 并入本扩展）：assistant 消息流式期间
+	 * 把「Thinking」标签变成 Thinking. → Thinking.... 逐帧动画（消息级绑定，工具执行期间不空转）。
+	 * 多层兜底停止：message_end / turn_end / agent_settled 任一触发即恢复默认标签。
+	 */
+	function startThinkingAnim(ctx: ExtensionContext) {
+		if (!ctx.hasUI || typeof ctx.ui.setHiddenThinkingLabel !== "function") return;
+		stopThinkingAnim();
+		const tick = () => {
+			thinkingDots = (thinkingDots % THINKING_FRAMES) + 1;
+			ctx.ui.setHiddenThinkingLabel(`Thinking${".".repeat(thinkingDots)}`);
+		};
+		tick();
+		thinkingTimer = setInterval(tick, THINKING_FRAME_INTERVAL_MS);
+	}
+
+	function stopThinkingAnim(ctx?: ExtensionContext) {
+		if (thinkingTimer) {
+			clearInterval(thinkingTimer);
+			thinkingTimer = undefined;
+		}
+		if (ctx?.hasUI && typeof ctx.ui.setHiddenThinkingLabel === "function") ctx.ui.setHiddenThinkingLabel(); // 恢复默认标签
 	}
 
 	function clearTimers() {
@@ -506,8 +535,16 @@ export default function (pi: ExtensionAPI) {
 		lastEndStopReason = lastStopReason(event.messages);
 	});
 
+	// 思考折叠标签动画（原 btf-think 并入）：仅在 assistant 消息流式期间显示
+	pi.on("message_start", async (event, ctx) => {
+		if (event.message.role === "assistant") startThinkingAnim(ctx);
+	});
+	pi.on("message_end", async (_event, ctx) => stopThinkingAnim(ctx));
+	pi.on("turn_end", async (_event, ctx) => stopThinkingAnim(ctx));
+
 	pi.on("agent_settled", async (_event, ctx) => {
 		agentRunning = false;
+		stopThinkingAnim(ctx); // 最终兜底：turn_end 偶发不触发时不残留动画
 		const reason = lastEndStopReason;
 		lastEndStopReason = undefined;
 		if (reason === "aborted") {
@@ -611,6 +648,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		agentRunning = false;
 		clearTimers();
+		stopThinkingAnim();
 		inputHookUnsubscribe?.();
 		inputHookUnsubscribe = undefined;
 		disposeIdleProbe();
