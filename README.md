@@ -20,12 +20,12 @@ node install.js --dry-run # 先预览要做什么，不修改
 |------|------|----------|
 | `themes/` | `matrix.json` — 黑客帝国风格荧光绿主题 | `~/.pi/agent/themes/` |
 | `extensions/` | `hud/`（源码多文件：`index.ts` + `hud-core.ts` + `hud-balance.ts` + `hud-cost.ts` + `hud-git.ts`；build.js 合并为单文件 `hud.ts` 产物）— 3 行 HUD 状态栏，见下 | `~/.pi/agent/extensions/` |
-| `extensions/` | `btf-think.ts` — 思考折叠标签动画（Thinking. → Thinking.. → Thinking... → Thinking....，独立 UI 反馈插件） | `~/.pi/agent/extensions/` |
 | `extensions/` | `btw/` — `/btw` 旁支问答：侧栏浮层多轮追问、`m` 转正附带、`/btw-config` 模型 auto 最便宜故障转移（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`） | `~/.pi/agent/extensions/` |
 | `extensions/` | `status-beacon.ts` — 全链路状态感知：执行中标题进度（spinner+工具活动）+ 五状态五音效 + 状态栏闪烁 + 提醒标题动画（见下；前身 task-alert） | `~/.pi/agent/extensions/` |
 | `extensions/` | `perm-gate.ts` — bash 命令权限门：硬拒绝 / 关注项 / 已记住的操作（意图缓存）+ AI 审核与人工确认面板（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `explore-agent.ts` — `explore` 只读探索子代理：并行派子代理、成果渐进落盘（`.pi/explore/report.md`）、断点续跑与上下文压缩（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `qr.ts` — 二维码：`qr_encode` 编码（显示到 UI + PNG 落盘）+ `qr_decode` 解码 + `/qr` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `img-slim.ts` — 图片请求体预算：新图按类型瘦身（照片→JPEG、图形→优先 PNG、动图 WebP 转静态）+ 每轮请求前按总量预算省略最旧历史图片（防 DeepSeek 等上游 48MiB 请求体 413）（见下） | `~/.pi/agent/extensions/` |
@@ -196,6 +196,8 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 - **全局去重**：出声前抢一次跨进程名额（独占创建 + 超龄回收），多实例同时收尾**只有第一个出声**，视觉提醒仍各窗口各闪；
 - 查看与调参：`/beacon status` 报告当前判定与读数；阈值可在 `~/.pi/agent/status-beacon.json` 覆盖（`presenceGate:false` 关闭门控、`activeIdleMs` / `awayIdleMs` / `dedupeMs`）。
 
+**思考折叠标签动画**（原 btf-think 并入）：assistant 消息流式期间把折叠的「Thinking」标签逐帧显示为 `Thinking.` → `Thinking....`（400ms/帧，消息级绑定——工具执行期间不空转），`message_end` / `turn_end` / `agent_settled` 多层兜底恢复默认标签。
+
 **Ctrl+C 打断（abort）不算完成，不触发提醒**：打断后 agent-loop 的最后一条 assistant 消息 `stopReason="aborted"`，status-beacon 据此跳过。「等待人工」有 `ctx.isIdle()` 守卫：用户空闲时主动开的提示（如 `/answer` 续答问卷）不打扰。
 
 - **状态栏闪烁**：三种需要视觉的状态各用独立 key 走官方 `ctx.ui.setStatus(key, …)` 通道（`task-alert` / `task-alert-error` / `task-alert-wait` 三个 key 沿用旧名，HUD STATUS_STYLE 零改动；500ms 交替帧，本扩展自管帧切换与清除），HUD 按 `STATUS_STYLE` 映射不同颜色后在行 1 动态区闪烁。两扩展零耦合——status-beacon 不知道 hud 的存在；HUD 被禁用时状态自动回落原生 footer 第 3 行，提示退化为标题栏动画；
@@ -215,6 +217,18 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 - **sudo 授权通道（密码即授权，仅当次有效）**：AI 在 bash 里直接写 `sudo` 会被拦截打回并引导改用 `sudo_exec` 工具（`command` 不带 sudo 前缀，整条以 root 执行）；调用时弹整屏授权面板——命令全文折行展示（PgUp/PgDn 滚动）+ 掩码密码框（提示写明「密码仅用于本次执行，每次提权都需重新输入」），Enter 授权 / Esc 拒绝，密码错误原地重试共 3 次；扩展内 `sudo -kS` 从 stdin 喂密执行，`-k` 使凭据不被缓存（收尾再补 `sudo -k` 双保险），**每次调用必重新弹窗授权**；密码只经扩展内存，不进会话历史/工具结果/磁盘；NOPASSWD 免密账户退化为确认弹窗（仍逐次授权）；`requiretty` 或未装 sudo 时明确报错请用户手动执行；`/perm-gate sudo on|off` 开关（配置项 `sudoExec`，默认开）；
 - **配置**：`~/.pi/agent/perm-gate.json`（首次运行自动写默认配置；手动编辑，无管理面板）——`enabled` 总开关、`deny` 硬拒绝正则列表、`watch` 关注项正则列表、`remembered` 已记住的操作（`{pattern, intent, addedAt, lastHit, hits}`）、`aiReview`（false = 未命中名单一律转人工确认）、`aiTimeoutMs`、`sudoExec`、`model`；无效正则跳过并在 `/perm-gate` 状态里提示（附配置路径）；
 - **命令**：`/perm-gate` 查看状态（开关/审核模型/sudo 通道/已记住条数含过期提示/关注项与硬拒绝条数/无效正则/配置路径）、`/perm-gate on|off` 开关（持久化）、`/perm-gate sudo on|off` sudo 通道开关（持久化）、`/perm-gate reload` 重读配置、`/perm-gate model` 选审核模型（`<provider>/<id>|auto` 直接设置）、`/perm-gate prune` 清理过期记忆。
+
+## 探索子代理（src/extensions/explore-agent.ts）
+
+`explore` 工具：一个任务 = 一个只读子代理（read/ls/grep/find），并行探索代码库并交回结构化报告，主上下文不加载原始文件内容。
+
+**成果渐进落盘**（不白烧 token）：子代理每轮的正文与检索轨迹实时写进项目内 `.pi/explore/tasks/<任务哈希>.partial.md`，报告文件 `.pi/explore/report.md` 同步重写——跑的过程中就能打开看着它长，不必等最后一次性总结。
+
+**断点续跑**：同一任务文本第二次调用会直接复用已完成成果（`tasks/<哈希>.md`，零 token）；上次被中断的任务会带着半成品作为起点继续跑（提示词里明确「不要重复已验证的检索」）。要强制重跑传 `fresh=true`。
+
+**上下文与轮数兜底**：上下文超限（各家措辞都识别）→ 把过程记录压缩成要点后继续跑（每任务最多 2 次）；轮数用尽或没有正文产出 → 用过程记录整理出报告。超时/网络中断/进程被杀时，返回结果里会带上「中断前已确认的部分」，半成品留在磁盘上等下次续跑。
+
+`/explore-config` 选择子模型（默认 auto = 最便宜可用模型，可指定 provider/modelId）。
 
 ## 联网工具（src/extensions/web-tool/）
 
@@ -342,7 +356,6 @@ node static/patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
 ```bash
 rm ~/.pi/agent/themes/matrix.json
 rm ~/.pi/agent/extensions/hud.ts
-rm ~/.pi/agent/extensions/btf-think.ts
 rm ~/.pi/agent/extensions/claude-it.ts
 rm ~/.pi/agent/extensions/status-beacon.ts
 rm ~/.pi/agent/extensions/web-tool.ts

@@ -20,3 +20,6 @@ src/extensions/test/.tmp-*
 .pi/pair-*.log
 # 工作流会话绑定表（workflow-mgr：sessionId→槽，本机会话级运行时数据）
 .pi/workflow/bindings.json
+
+# explore 子代理的运行产物（渐进报告 + 单任务成果缓存）：与具体仓库内容无关，不入库
+.pi/explore/

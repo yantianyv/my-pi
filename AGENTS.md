@@ -58,13 +58,20 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
       hud-git.ts    #       hud-git：git 状态解析
       test/         #       hud-git 路径引号解码回归测试（node src/extensions/hud/test/unquote.test.mjs）
     ask/          #     问卷（多文件扩展源码，build.js 把 index.ts 打包成单文件 ask.ts）：types.ts 数据模型/容错规范化（含 note 只读说明题与问卷级 context）+ store.ts 问卷文件读写（.pi/questionnaires/）+ page.ts 整屏问卷页（进度条/跳题/答案一览/帮助屏/删除/说明题与上下文折叠）+ 选择器 + tool.ts ask 工具（create 创建 / cancel 作废，context/includeLastMessage 附上下文）+ commands.ts /answer 命令 + state.ts 状态推送/排队链；校验口径：必答未完成提示带「第 i/n 题」分母，勾「其他」未填内容单独提示，评分数字越界给范围反馈，头部进度条在必答已齐时明标「余为选填」；test/ask.test.mjs 回归测试（A~T + 渲染不变量）
-    btf-think.ts  #   思考折叠标签动画（Thinking... 逐帧动画，独立 UI 反馈插件）
     btw/          #   旁支问答（多文件扩展源码，build.js 把 index.ts 打包成单文件 btw.ts）：
                     #     config.ts 常量/系统提示词/模型设置（auto 最便宜故障转移）+ messages.ts 消息清洗 +
                     #     render.ts（转发 shared/markdown：markdown 渲染已上提共用）+ overlay.ts 浮层组件 +
                     #     run.ts 后台流式问答 + index.ts 入口；
                     #     /btw 多轮追问 + m 转正附带 + /btw-config 模型选择；只读工具；曾用官方 pi-btw 替代，
                     #     2026-09-07 因 bug 回退（出处与借鉴评估见 src/vendor/README.md 回退记录）
+    explore-agent.ts #  只读探索子代理（explore 工具，一个任务 = 一个子代理，read/ls/grep/find 只读工具）：
+                    #   成果渐进落盘（抗打断，不白烧 token）——.pi/explore/report.md 边跑边重写，
+                    #   单任务 .pi/explore/tasks/<任务哈希>.{partial.md,md,json}：每轮正文 + 检索轨迹实时写入
+                    #   partial，完成写 md、中断留 partial（进程被杀也留证据）；
+                    #   断点续跑：同一任务文本再次调用直接复用已完成成果（不花 token），
+                    #   中断任务带 partial 作起点续跑；fresh=true 强制重跑；
+                    #   上下文兜底：超限 → 过程记录压缩后继续（≤2 次），轮数用尽/无正文 → 用记录整理成报告，
+                    #   任何路径都尽量交回成果；自适应并发 + 可重试错误指数退避；/explore-config 选子模型
     clipboard.ts #   剪贴板读写：clipboard_get 读取（可截断）+ clipboard_set 写入（空串清空）+ /clipboard 命令；
                     #   跨平台（Windows PowerShell Get/Set-Clipboard、macOS pbpaste/pbcopy、Linux xclip 退 xsel，
                     #   零依赖，统一临时文件中转规避 PS5.1 管道 UTF-16LE 编码乱码与 shell 转义；读时 CRLF→LF 归一化），
@@ -119,7 +126,7 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   执行中 Working 行由 status-beacon 负责，本扩展不写；
                     #   状态行推「👥 N 并发会话」+ peer 出现/消失 notify + /pair 命令
     claude-it.ts      #   Claude Code 风格：/init 在后台独立上下文生成/更新 AGENTS.md（只产出 AGENTS.md，不生成 CLAUDE.md）、/exit 别名、Ctrl+C 取消 turn、双击 Ctrl+C 预填 /rewind 回退
-    status-beacon.ts  #   全链路状态感知（前身 task-alert）：执行中标题进度（agent_start→settled 全程 spinner+当前工具活动+目录名，提醒期间让位、应答后恢复）+ 接管执行中 Working 行（独占 setWorkingMessage 写入，按「在等什么」分层：等人工（ui_prompt 阻塞，ask/perm-gate 经 __PI_STATUS_BEACON_API__.wait 登记具体文本，如「等你：回答问卷「方案确认」」）> 等工具/子代理完成 > 生成中显廉价 AI 概括的当前动作短语（message_end 触发异步概括，pickAuxModel 选最便宜已认证模型，仿 perm-gate completeSimple 路线，/beacon model 经 shared/model-selector 官方面板或 provider/id 直选，覆写 status-beacon.json，缺省自动；无则退注册表 work，再退 pi 默认「Working」）；run 开局重置防残留）+ 五状态五音效（完成/出错/等待人工 ui_prompt/空闲 60s/子代理完成，音源 ClaudeCodeInit wav/piano；提示音经 shared/presence 在场门控：系统空闲 <20s 或任一实例 20s 内有输入 → 只闪不出声，全局去重只响第一声，第二声空闲提醒仅在「已离开」>5min 时补）+ 提醒标题动画 + setStatus 状态推送（三状态独立 key，沿用 task-alert* 旧名）；/beacon status 报告门控判定，阈值可在 status-beacon.json 覆盖
+    status-beacon.ts  #   全链路状态感知（前身 task-alert）：执行中标题进度（agent_start→settled 全程 spinner+当前工具活动+目录名，提醒期间让位、应答后恢复）+ 接管执行中 Working 行（独占 setWorkingMessage 写入，按「在等什么」分层：等人工（ui_prompt 阻塞，ask/perm-gate 经 __PI_STATUS_BEACON_API__.wait 登记具体文本，如「等你：回答问卷「方案确认」」）> 等工具/子代理完成 > 生成中显廉价 AI 概括的当前动作短语（message_end 触发异步概括，pickAuxModel 选最便宜已认证模型，仿 perm-gate completeSimple 路线，/beacon model 经 shared/model-selector 官方面板或 provider/id 直选，覆写 status-beacon.json，缺省自动；无则退注册表 work，再退 pi 默认「Working」）；run 开局重置防残留）+ 五状态五音效（完成/出错/等待人工 ui_prompt/空闲 60s/子代理完成，音源 ClaudeCodeInit wav/piano；提示音经 shared/presence 在场门控：系统空闲 <20s 或任一实例 20s 内有输入 → 只闪不出声，全局去重只响第一声，第二声空闲提醒仅在「已离开」>5min 时补）+ 思考折叠标签动画（原 btf-think 并入：assistant 消息流式期间 Thinking. → Thinking.... 逐帧，message_end/turn_end/agent_settled 多层兜底停）+ 提醒标题动画 + setStatus 状态推送（三状态独立 key，沿用 task-alert* 旧名）；/beacon status 报告门控判定，阈值可在 status-beacon.json 覆盖
     workflow-mgr/     #   人机协作任务面板（多文件扩展源码：build.js 把 index.ts 入口打包成单文件 workflow-mgr.ts）
       index.ts        #     插件主体（组装薄壳）：tools.ts（7 个工具 wf_workflow/status/switch/block/rollback/note/milestone，含 import 一次性导入）+ commands.ts（/workflow-config 只留无参）+ events.ts（session 钩子 + hud 联动 + 条件注入）+ 事件钩子
       tools.ts       #     工具注册：wf_switch（完成+推进一步到位，complete=false 搁置；推进后附 status 记录复核提醒）/ wf_note（AI 记录，对用户透明：kind=fact/status 时效分类 + key 主题键顶替防决策打架，status 记录切换任务时提醒复核）/ wf_milestone（增删改）等 7 工具；wf_workflow import 初始化一次性导入（草稿 json，id 自动生成 + 全图环检测带链路，非空拒绝）；wf_workflow bind 会话绑定（slot 缺省列出可选+当前绑定，新名称建空槽，"auto" 暂不启用、由 AI 判断是否使用，"none" 明确不用）；未绑定/暂不启用/明确不用时其余 6 工具被 guardBound 守卫拒绝（暂不启用的拒绝文案告知 AI 可自行 bind 启用）
