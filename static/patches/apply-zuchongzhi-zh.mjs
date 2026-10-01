@@ -302,7 +302,6 @@ const PATCHES = {
 		["Context", "上下文"],
 		["Tokens", "令牌"],
 		["Extensions", "扩展"],
-		["Themes", "主题"],
 		["Prompts", "提示模板"],
 		["Skills", "技能"],
 		["No summary", "无摘要"],

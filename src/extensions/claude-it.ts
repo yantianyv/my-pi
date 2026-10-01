@@ -210,7 +210,7 @@ async function runInitAgent(
 		model,
 		maxTokens: INIT_MAX_TOKENS,
 		convertToLlm,
-		shouldStopAfterTurn: () => ++turns >= INIT_MAX_TURNS,
+		finishTurn: () => (++turns >= INIT_MAX_TURNS ? { action: "end" as const } : undefined),
 	};
 
 	try {
@@ -243,7 +243,7 @@ async function runInitAgent(
 				const more = await runAgentLoop(
 					[nudge],
 					{ messages: [systemMessage(buildInitSystemPrompt(ctx.cwd)), ...newMessages], tools: [] },
-					{ model, maxTokens: INIT_MAX_TOKENS, convertToLlm, shouldStopAfterTurn: () => true },
+					{ model, maxTokens: INIT_MAX_TOKENS, convertToLlm, finishTurn: () => ({ action: "end" as const }) },
 					() => {},
 					signal,
 					streamFn,
@@ -371,7 +371,7 @@ export default function (pi: ExtensionAPI) {
 
 	// 1) /exit 斜杠命令别名
 	pi.registerCommand("exit", {
-		description: "退出 pi（/quit 的别名）",
+		description: "退出 pi（立即结束当前会话；等同于直接输入 exit 或 /quit）",
 		handler: async (_args, ctx) => {
 			ctx.shutdown();
 		},
@@ -416,12 +416,9 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("已把上一条消息放回输入框", "info");
 				return;
 			}
-			const result = (await ctx.navigateTree(targetId)) as { cancelled: boolean; editorText?: string };
+			const result = await ctx.navigateTree(targetId);
 			if (result.cancelled) return;
-			// interactive-mode 已在输入框为空时自动回填 editorText；此处仅兜底（RPC 模式等）
-			if (result.editorText && !ctx.ui.getEditorText().trim()) {
-				ctx.ui.setEditorText(result.editorText);
-			}
+			// interactive-mode 会在输入框为空时自动把被导航消息文本回填进输入框
 			ctx.ui.notify("已回退到上一条消息，内容已在输入框", "info");
 		},
 	});

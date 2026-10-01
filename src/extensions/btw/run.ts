@@ -59,7 +59,7 @@ export async function runBtwTurn(
 		model,
 		maxTokens: BTW_MAX_TOKENS,
 		convertToLlm,
-		shouldStopAfterTurn: () => ++turns >= BTW_MAX_TURNS,
+		finishTurn: () => (++turns >= BTW_MAX_TURNS ? { action: "end" as const } : undefined),
 	};
 
 	try {

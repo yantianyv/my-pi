@@ -503,9 +503,14 @@ function deepseekModelKey(modelId: string): string {
 
 // ---------------------------------------------------------------------------
 // MiMo 按量付费人民币定价（元 / 百万 tokens）
-// 来源：https://mimo.mi.com/
+// 来源：https://mimo.mi.com/（各 model 页「模型价格」）
+//   V2.6 系列（2026-09-22 发布，Flash/Pro 与 V2.5 持平）：
+//   mimo-v2.6-pro ：缓存命中 ¥0.025，缓存未命中 ¥3，输出 ¥6
+//   mimo-v2.6-flash ：缓存命中 ¥0.02，缓存未命中 ¥1，输出 ¥2
+//   mimo-v2.6-pro-ultraspeed ：缓存命中 ¥0.25，缓存未命中 ¥30，输出 ¥60（Pro 的 10 倍）
+//   V2.5 系列：
 //   mimo-v2.5-pro ：缓存命中 ¥0.025，缓存未命中 ¥3，输出 ¥6
-//   mimo-v2.5-pro-ultraspeed ：缓存命中 ¥0.075，缓存未命中 ¥9，输出 ¥18
+//   mimo-v2.5-pro-ultraspeed ：缓存命中 ¥0.075，缓存未命中 ¥9，输出 ¥18（Pro 的 3 倍）
 //   mimo-v2.5 ：缓存命中 ¥0.02，缓存未命中 ¥1，输出 ¥2
 // ---------------------------------------------------------------------------
 
@@ -516,6 +521,9 @@ interface MimoPrice {
 }
 
 const MIMO_PRICES: Record<string, MimoPrice> = {
+	"mimo-v2.6-pro": { cacheHit: 0.025, cacheMiss: 3, output: 6 },
+	"mimo-v2.6-flash": { cacheHit: 0.02, cacheMiss: 1, output: 2 },
+	"mimo-v2.6-pro-ultraspeed": { cacheHit: 0.25, cacheMiss: 30, output: 60 },
 	"mimo-v2.5-pro": { cacheHit: 0.025, cacheMiss: 3, output: 6 },
 	"mimo-v2.5-pro-ultraspeed": { cacheHit: 0.075, cacheMiss: 9, output: 18 },
 	"mimo-v2.5": { cacheHit: 0.02, cacheMiss: 1, output: 2 },
@@ -523,17 +531,20 @@ const MIMO_PRICES: Record<string, MimoPrice> = {
 
 function mimoModelKey(modelId: string): string {
 	const id = modelId.toLowerCase();
-	if (id.includes("ultraspeed")) return "mimo-v2.5-pro-ultraspeed";
-	if (id.includes("pro")) return "mimo-v2.5-pro";
-	return "mimo-v2.5";
+	// V2.6 与 V2.5 的 Flash/Pro 同价，但 UltraSpeed 档倍率不同（V2.6 = 10×Pro，V2.5 = 3×Pro），须分开
+	const v26 = id.includes("2.6") || id.includes("2-6");
+	if (id.includes("ultraspeed")) return v26 ? "mimo-v2.6-pro-ultraspeed" : "mimo-v2.5-pro-ultraspeed";
+	if (id.includes("pro")) return v26 ? "mimo-v2.6-pro" : "mimo-v2.5-pro";
+	return v26 ? "mimo-v2.6-flash" : "mimo-v2.5";
 }
 
 // ---------------------------------------------------------------------------
 // Kimi 官方人民币定价（元 / 百万 tokens）
-// 来源：https://www.kimi.com/membership/pricing?tab=api
-//   kimi-k3          ：缓存命中 ¥2.00，缓存未命中 ¥20.00，输出 ¥100.00
+// 来源：https://platform.kimi.com/docs/pricing/chat
+//   kimi-k3          ：缓存命中 ¥2.00，缓存未命中 ¥20.00，输出 ¥100.00；
+//                      另有缓存写入费（按 TTL 档）：5min ¥20.00、1h ¥40.00（不指定 TTL 默认 5min 档）
 //   kimi-k2.7-code   ：缓存命中 ¥1.30，缓存未命中 ¥6.50， 输出 ¥27.00
-//   kimi-k2.7-code-high（高速版）：缓存命中 ¥3.90，缓存未命中 ¥19.50，输出 ¥81.00
+//   kimi-k2.7-code-highspeed（高速版，官方模型 ID 同名）：缓存命中 ¥2.60，缓存未命中 ¥13.00，输出 ¥54.00（普通版 2 倍）
 //   kimi-k2.6        ：缓存命中 ¥1.10，缓存未命中 ¥6.50， 输出 ¥27.00
 // 说明：Kimi For Coding 订阅制也按 K2.7 Code API 价估算等效消费。
 // ---------------------------------------------------------------------------
@@ -542,12 +553,13 @@ interface KimiPrice {
 	cacheHit: number; // 缓存命中输入（元/百万 tokens）
 	cacheMiss: number; // 缓存未命中输入
 	output: number; // 输出
+	cacheWrite?: number; // 缓存写入（元/百万 tokens，仅 K3 系列计费；按 5min TTL 档，1h 档为其 2 倍）
 }
 
 const KIMI_PRICES: Record<string, KimiPrice> = {
-	"kimi-k3": { cacheHit: 2.0, cacheMiss: 20.0, output: 100.0 },
+	"kimi-k3": { cacheHit: 2.0, cacheMiss: 20.0, output: 100.0, cacheWrite: 20.0 },
 	"kimi-k2.7-code": { cacheHit: 1.3, cacheMiss: 6.5, output: 27.0 },
-	"kimi-k2.7-code-high": { cacheHit: 3.9, cacheMiss: 19.5, output: 81.0 },
+	"kimi-k2.7-code-highspeed": { cacheHit: 2.6, cacheMiss: 13.0, output: 54.0 },
 	"kimi-k2.6": { cacheHit: 1.1, cacheMiss: 6.5, output: 27.0 },
 };
 
@@ -555,7 +567,7 @@ function kimiModelKey(modelId: string): string {
 	const id = modelId.toLowerCase();
 	if (id.includes("k3")) return "kimi-k3";
 	if (id.includes("k2.7") || id.includes("k2-7")) {
-		if (id.includes("high") || id.includes("ultra") || id.includes("fast")) return "kimi-k2.7-code-high";
+		if (id.includes("high") || id.includes("ultra") || id.includes("fast")) return "kimi-k2.7-code-highspeed";
 		return "kimi-k2.7-code";
 	}
 	if (id.includes("k2.6") || id.includes("k2-6")) return "kimi-k2.6";
@@ -568,7 +580,14 @@ function kimiModelKey(modelId: string): string {
  */
 function kimiCostCny(u: AssistantMessage["usage"], modelId: string): number {
 	const p = KIMI_PRICES[kimiModelKey(modelId)] ?? KIMI_PRICES["kimi-k2.7-code"];
-	return (p.cacheMiss * u.input + p.cacheHit * u.cacheRead + p.output * u.output) / 1_000_000;
+	// K3 系列的缓存写入按 TTL 档单独计费（此处按默认 5min 档）；上游未上报 cacheWrite 时该项为 0
+	return (
+		(p.cacheMiss * u.input +
+			p.cacheHit * u.cacheRead +
+			p.output * u.output +
+			(p.cacheWrite ?? 0) * u.cacheWrite) /
+		1_000_000
+	);
 }
 
 /**
@@ -605,28 +624,46 @@ interface GoPrice {
 	cacheMiss: number; // 缓存未命中输入（USD/百万 tokens）
 	cacheHit: number; // 缓存读取
 	output: number; // 输出
+	cacheWrite?: number; // 缓存写入（官方表中标 "-" 的模型不计）
 	highTier?: {
 		// 超过上下文阈值后的高价档（可选）
 		threshold: number;
 		cacheMiss: number;
 		cacheHit: number;
 		output: number;
+		cacheWrite?: number;
 	};
 }
 
 const GO_PRICES: Record<string, GoPrice> = {
+	"grok-4.7": {
+		cacheMiss: 2.0,
+		cacheHit: 0.5,
+		output: 6.0,
+		highTier: { threshold: 200_000, cacheMiss: 4.0, cacheHit: 1.0, output: 12.0 },
+	},
 	"grok-4.6": {
 		cacheMiss: 2.0,
 		cacheHit: 0.5,
 		output: 6.0,
 		highTier: { threshold: 200_000, cacheMiss: 4.0, cacheHit: 1.0, output: 12.0 },
 	},
+	"gpt-6-luna": {
+		cacheMiss: 0.1,
+		cacheHit: 0.01,
+		output: 0.5,
+		cacheWrite: 0.125,
+		highTier: { threshold: 272_000, cacheMiss: 0.2, cacheHit: 0.02, output: 0.75, cacheWrite: 0.25 },
+	},
 	"gpt-5.6-luna": {
 		cacheMiss: 0.2,
 		cacheHit: 0.02,
 		output: 1.2,
-		highTier: { threshold: 272_000, cacheMiss: 0.4, cacheHit: 0.04, output: 1.8 },
+		cacheWrite: 0.25,
+		highTier: { threshold: 272_000, cacheMiss: 0.4, cacheHit: 0.04, output: 1.8, cacheWrite: 0.5 },
 	},
+	// GLM-5.3-FlashX：OpenCode Go 尚未上架，按官方 2.5× GLM-5.3-Flash 折算预留（上架后以官网价为准）
+	"glm-5.3-flashx": { cacheMiss: 0.375, cacheHit: 0.075, output: 1.25 },
 	"glm-5.3-flash": { cacheMiss: 0.15, cacheHit: 0.03, output: 0.5 },
 	"glm-5.3": { cacheMiss: 1.4, cacheHit: 0.26, output: 4.4 },
 	"glm-5.2": { cacheMiss: 1.4, cacheHit: 0.26, output: 4.4 },
@@ -635,39 +672,50 @@ const GO_PRICES: Record<string, GoPrice> = {
 	"kimi-k2.7-code": { cacheMiss: 0.95, cacheHit: 0.19, output: 4.0 },
 	"kimi-k2.6": { cacheMiss: 0.95, cacheHit: 0.16, output: 4.0 },
 	"longcat-2.0": { cacheMiss: 0.3, cacheHit: 0.006, output: 1.2 },
+	"mimo-v2.6-flash": { cacheMiss: 0.14, cacheHit: 0.0028, output: 0.28 },
+	"mimo-v2.6-pro": { cacheMiss: 0.435, cacheHit: 0.003625, output: 0.87 },
 	"mimo-v2.5": { cacheMiss: 0.14, cacheHit: 0.0028, output: 0.28 },
 	"mimo-v2.5-pro": { cacheMiss: 0.435, cacheHit: 0.003625, output: 0.87 },
 	"minimax-m3": { cacheMiss: 0.3, cacheHit: 0.06, output: 1.2 },
-	"minimax-m2.7": { cacheMiss: 0.3, cacheHit: 0.06, output: 1.2 },
+	"minimax-m2.7": { cacheMiss: 0.3, cacheHit: 0.06, output: 1.2, cacheWrite: 0.375 },
+	"minimax-m2.5": { cacheMiss: 0.3, cacheHit: 0.06, output: 1.2, cacheWrite: 0.375 },
+	"muse-spark-1.3-contributor": { cacheMiss: 0.1, cacheHit: 0.002, output: 0.2 },
 	"muse-spark-1.2-contributor": { cacheMiss: 0.1, cacheHit: 0.002, output: 0.2 },
-	"qwen3.8-max": { cacheMiss: 2.0, cacheHit: 0.25, output: 6.0 },
-	"qwen3.8-flash": { cacheMiss: 0.15, cacheHit: 0.016, output: 0.47 },
-	"qwen3.7-max": { cacheMiss: 2.5, cacheHit: 0.5, output: 7.5 },
+	"qwen3.8-max": { cacheMiss: 2.0, cacheHit: 0.25, output: 6.0, cacheWrite: 2.5 },
+	"qwen3.8-flash": { cacheMiss: 0.15, cacheHit: 0.016, output: 0.47, cacheWrite: 0.2 },
+	"qwen3.7-max": { cacheMiss: 2.5, cacheHit: 0.5, output: 7.5, cacheWrite: 3.125 },
 	"qwen3.7-plus": {
 		cacheMiss: 0.4,
 		cacheHit: 0.04,
 		output: 1.6,
-		highTier: { threshold: 256_000, cacheMiss: 1.2, cacheHit: 0.12, output: 4.8 },
+		cacheWrite: 0.5,
+		highTier: { threshold: 256_000, cacheMiss: 1.2, cacheHit: 0.12, output: 4.8, cacheWrite: 1.5 },
 	},
 	"qwen3.6-plus": {
 		cacheMiss: 0.5,
 		cacheHit: 0.05,
 		output: 3.0,
-		highTier: { threshold: 256_000, cacheMiss: 2.0, cacheHit: 0.2, output: 6.0 },
+		cacheWrite: 0.625,
+		highTier: { threshold: 256_000, cacheMiss: 2.0, cacheHit: 0.2, output: 6.0, cacheWrite: 2.5 },
 	},
 	"deepseek-v4-pro": { cacheMiss: 0.66, cacheHit: 0.022, output: 1.98 },
-	// 2026-09 随上游降价：V4 Flash 系列（含新上线的 V4.1 Flash，经 goModelKey 兑底命中本档）
-	// 空闲 $0.15/$0.60/$0.003（原 $0.22/$0.66/$0.007），高峰 ×2；V4 Flash 月额度升至 $30
+	// 2026-09 随上游降价：V4 Flash 系列（含新上线的 V4.1 Flash，同价；月额度 $60）
+	// 空闲 $0.15/$0.60/$0.003（原 $0.22/$0.66/$0.007），高峰 ×2；旧 V4 Flash 月额度 $30
+	"deepseek-v4.1-flash": { cacheMiss: 0.15, cacheHit: 0.003, output: 0.6 },
 	"deepseek-v4-flash": { cacheMiss: 0.15, cacheHit: 0.003, output: 0.6 },
 	"deepseek-v4-flash-vision-exp": { cacheMiss: 0.15, cacheHit: 0.003, output: 0.6 },
+	"space-bunny-free": { cacheMiss: 0, cacheHit: 0, output: 0 }, // 限时免费
 	"hy4-preview": { cacheMiss: 0.834, cacheHit: 0.042, output: 2.501 },
 	"hy3": { cacheMiss: 0.14, cacheHit: 0.035, output: 0.58 },
 };
 
 function goModelKey(modelId: string): string {
 	const id = modelId.toLowerCase();
+	if (id.includes("grok-4.7") || id.includes("grok-4-7")) return "grok-4.7";
 	if (id.includes("grok")) return "grok-4.6";
+	if (id.includes("gpt-6") || id.includes("6-luna")) return "gpt-6-luna";
 	if (id.includes("gpt-5.6") || id.includes("luna")) return "gpt-5.6-luna";
+	if (id.includes("glm-5.3-flashx") || id.includes("glm-5.3-flash-x")) return "glm-5.3-flashx";
 	if (id.includes("glm-5.3-flash")) return "glm-5.3-flash";
 	if (id.includes("glm-5.3")) return "glm-5.3";
 	if (id.includes("glm-5.2")) return "glm-5.2";
@@ -678,12 +726,19 @@ function goModelKey(modelId: string): string {
 	if (id.includes("longcat")) return "longcat-2.0";
 	if (id.includes("deepseek") && id.includes("vision")) return "deepseek-v4-flash-vision-exp";
 	if (id.includes("deepseek") && id.includes("pro")) return "deepseek-v4-pro";
+	if (id.includes("deepseek") && (id.includes("4.1") || id.includes("4-1"))) return "deepseek-v4.1-flash";
 	if (id.includes("deepseek")) return "deepseek-v4-flash";
-	if (id.includes("mimo") && id.includes("pro")) return "mimo-v2.5-pro";
-	if (id.includes("mimo")) return "mimo-v2.5";
+	if (id.includes("mimo")) {
+		const v26 = id.includes("2.6") || id.includes("2-6");
+		if (id.includes("pro")) return v26 ? "mimo-v2.6-pro" : "mimo-v2.5-pro";
+		return v26 ? "mimo-v2.6-flash" : "mimo-v2.5";
+	}
 	if (id.includes("minimax-m3")) return "minimax-m3";
-	if (id.includes("minimax")) return "minimax-m2.7"; // M2.7 / M2.5 同价
+	if (id.includes("minimax-m2.5") || id.includes("minimax-m2-5")) return "minimax-m2.5";
+	if (id.includes("minimax")) return "minimax-m2.7"; // M2.7 同价
+	if (id.includes("muse") && id.includes("1.3")) return "muse-spark-1.3-contributor";
 	if (id.includes("muse")) return "muse-spark-1.2-contributor";
+	if (id.includes("bunny")) return "space-bunny-free"; // 限时免费
 	if (id.includes("qwen3.8-max")) return "qwen3.8-max";
 	if (id.includes("qwen3.8-flash")) return "qwen3.8-flash";
 	if (id.includes("qwen3.7-max")) return "qwen3.7-max";
@@ -720,8 +775,9 @@ function goCostUsd(u: AssistantMessage["usage"], modelId: string, ts: number): n
 	const miss = hi?.cacheMiss ?? p.cacheMiss;
 	const hit = hi?.cacheHit ?? p.cacheHit;
 	const out = hi?.output ?? p.output;
+	const write = hi?.cacheWrite ?? p.cacheWrite ?? 0;
 	const peak = key.startsWith("deepseek") && isGoPeakHour(ts) ? 2 : 1;
-	return ((miss * u.input + hit * u.cacheRead + out * u.output) * peak) / 1_000_000;
+	return ((miss * u.input + hit * u.cacheRead + out * u.output + write * u.cacheWrite) * peak) / 1_000_000;
 }
 
 /**

@@ -21,6 +21,9 @@
  *   cmd/sh 用共享追加不受锁影响；ps1 保留 30 天，自动清理旧文件；abort 类死亡的原生栈会落在这里）
  * - pi.ps1 额外记录 [START]/[EXIT] 行（区分正常/异常退出）
  *
+ * 旗标注入方式：pi.cmd 的 SETLOCAL 环境在 node 调用同行的 endLocal 时被回收，
+ * SET NODE_OPTIONS 走不通，故 cmd 把 node 旗标内联在调用行；ps1/sh 用进程环境变量。
+ *
  * 幂等（检测到 v2 标记跳过；自动清理 v1 注入行）。pi 升级（npm i -g）会重写垫片，
  * 届时需重跑本补丁（与其他 patches 同惯例）。
  *
@@ -36,9 +39,14 @@ const DIR = join(homedir(), ".pi", "agent");
 const REPORT_DIR = join(DIR, "reports");
 const ERRLOG = join(DIR, "pi-stderr.log");
 const NODE_OPTS = "--max-old-space-size=8192 --report-on-fatalerror";
+/** cmd 调用行内联旗标段（含前导空格），stripOld 依赖此常量做定点摘除 */
+const CMD_FLAGS = ` ${NODE_OPTS} "--report-directory=${REPORT_DIR}"`;
 
-/** 清理 v1/v2 历史注入行（按标记与特征行过滤） */
+/** 清理历史注入（先摘调用行上的内联部分——整行过滤会误删 node 调用本身，再按行过滤独立注入行） */
 function stripOld(s) {
+	s = s.replaceAll(CMD_FLAGS, ""); // cmd 调用行内联旗标
+	s = s.replace(/ 2>>"[^"]*pi-stderr\.log"/g, ""); // cmd/sh 行尾 stderr 重定向
+	s = s.replace(/ 2>> \$piStderr/g, ""); // ps1 行尾 stderr 重定向
 	return s
 		.split(/\r?\n/)
 		.filter(
@@ -47,7 +55,8 @@ function stripOld(s) {
 				!l.includes("PI-CRASH-FORENSICS") &&
 				!l.includes("--report-on-fatalerror") &&
 				!l.includes("--report-directory") &&
-				!l.includes("pi-stderr.log") &&
+				!l.includes("pi-stderr") &&
+				!l.includes("$piStderr") &&
 				!l.includes(".pi/agent/reports") &&
 				!l.includes(".pi\\\\agent\\\\reports") &&
 				!l.includes("agent\\reports"),
@@ -79,11 +88,12 @@ try {
 			"SETLOCAL",
 			`REM ${MARKER} v2: 崩溃取证（大堆+诊断报告+stderr落盘），pi 升级后重跑 static/patches/apply-pi-launch-report.mjs`,
 			`IF NOT EXIST "${REPORT_DIR}" MD "${REPORT_DIR}"`,
-			`SET "NODE_OPTIONS=${NODE_OPTS} --report-directory=${REPORT_DIR}"`,
 		].join("\r\n");
 		s = s.replace("SETLOCAL", inject);
-		// node 调用行尾部挂 stderr 追加重定向 + 统一回 CRLF（批处理 LF-only 有 GOTO 标签风险）
-		s = s.replace(/("%_prog%"[^&\r\n]*%*)(\r?\n)$/, '$1 2>>"' + ERRLOG + '"\r\n');
+		// node 旗标内联进调用行（SETLOCAL 的环境变量在同行 endLocal 时被回收，SET NODE_OPTIONS 走不通）
+		// + 行尾挂 stderr 追加重定向 + 统一回 CRLF（批处理 LF-only 有 GOTO 标签风险）
+		s = s.replace(/("%_prog%")([^&\r\n]*%*)(\r?\n)$/, `$1${CMD_FLAGS}$2 2>>"${ERRLOG}"$3`);
+		if (!s.includes(CMD_FLAGS)) console.error(`[警告] ${cmdPath} 调用行注入失败，请人工核对`);
 		if (!s.includes("\r\n")) s = s.replace(/\n/g, "\r\n");
 		writeFileSync(cmdPath, s);
 		patched++;
@@ -143,6 +153,7 @@ try {
 		].join("\n");
 		s = s.replace("case `uname` in", inject + "\ncase `uname` in");
 		s = s.replaceAll(/(exec "?\$basedir\/node"?|exec node)(\s+"\$basedir\/node_modules\/.*?cli\.js" "\$@")/g, "$1$2 2>>\"" + ERRLOG + '"');
+		if (!s.includes("pi-stderr.log")) console.error(`[警告] ${shPath} 调用行注入失败，请人工核对`);
 		writeFileSync(shPath, s);
 		patched++;
 		console.log(`[完成] ${shPath}`);

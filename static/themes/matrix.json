@@ -1,6 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
   "name": "matrix",
+  "appearance": "dark",
   "vars": {
     "bg0": "#000502",
     "bg1": "#021008",
@@ -34,6 +35,10 @@
     "thinkingText": "muted",
 
     "selectedBg": "bg3",
+    "scrollbarTrack": "bg1",
+    "scrollbarThumb": "neonDeep",
+    "searchMatchBg": "bg3",
+    "searchMatchText": "lime",
     "userMessageBg": "bg1",
     "userMessageText": "neon",
     "customMessageBg": "#05180b",
