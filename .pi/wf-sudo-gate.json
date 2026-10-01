@@ -1,0 +1,44 @@
+{
+	"mode": "human-ai",
+	"stages": [
+		{
+			"id": "impl",
+			"name": "实现",
+			"goal": "perm-gate 集成 sudo 密码授权（密码即授权、仅当次有效）",
+			"tasks": [
+				{
+					"title": "实现 sudo_exec 工具与密码浮层",
+					"desc": "perm-gate.ts 内新增：SudoPanel 掩码密码浮层（复用 shared/ui.ts editInput + createBoxRenderer，Enter 提交 / Esc 驳回，重试时显示第 N/3 次）+ sudo_exec 自定义工具（spawn sudo -kS 喂密码执行，认证失败原地重试共 3 次，授权仅当次；NOPASSWD 走 confirm；无 UI 报错）",
+					"aiTasks": ["编写 SudoPanel 组件", "编写 runSudoCommand spawn 封装", "注册 sudo_exec 工具"],
+					"deliverable": "src/extensions/perm-gate.ts 新增代码",
+					"doneSignal": "npx tsc 类型检查通过"
+				},
+				{
+					"title": "bash sudo 拦截重定向 + 配置项",
+					"desc": "tool_call 链最前加 sudo 检测（shell-split 拆段，段首 token 判定），命中即 block 并引导 AI 改用 sudo_exec；配置加 sudoExec 开关（默认 true），/perm-gate 状态行展示",
+					"aiTasks": ["编写 containsSudo 检测", "接入 tool_call 链与配置"],
+					"deliverable": "拦截逻辑 + perm-gate.json 新键",
+					"doneSignal": "类型检查通过；默认黑名单示例里的 \\bsudo\\b 注释更新",
+					"deps": ["0.1"]
+				},
+				{
+					"title": "构建安装",
+					"desc": "node src/build.js + node install.js 安装到全局",
+					"aiTasks": ["跑构建与安装", "更新 AGENTS.md perm-gate 条目"],
+					"deliverable": "dist/extensions/perm-gate.ts 产物 + 安装完成",
+					"doneSignal": "install.js 输出成功",
+					"deps": ["1.2"]
+				},
+				{
+					"title": "Linux 设备实测",
+					"desc": "在目标 Linux 设备（纯 SSH）安装后实测：AI 发起 sudo 命令 → 弹密码框 → 正确/错误密码各试一次 → 确认 sudo -k 后再次调用需重新输密",
+					"humanTasks": ["同步代码到 Linux 设备并安装", "实测授权流与仅当次有效"],
+					"aiTasks": ["根据实测反馈修复"],
+					"deliverable": "实测通过",
+					"doneSignal": "用户确认 sudo 授权流工作正常",
+					"deps": ["1.3"]
+				}
+			]
+		}
+	]
+}

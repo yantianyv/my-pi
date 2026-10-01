@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-10-01T13:09:04.932Z",
+  "currentTaskId": null,
+  "tasks": {
+    "0.1": {
+      "status": "done",
+      "doneAt": "2026-10-01T12:41:49.041Z"
+    },
+    "0.2": {
+      "status": "done",
+      "doneAt": "2026-10-01T12:43:04.844Z"
+    },
+    "0.3": {
+      "status": "done",
+      "doneAt": "2026-10-01T13:00:41.810Z"
+    },
+    "1.1": {
+      "status": "done",
+      "doneAt": "2026-10-01T13:04:19.252Z"
+    },
+    "1.2": {
+      "status": "done",
+      "doneAt": "2026-10-01T13:06:39.340Z"
+    },
+    "1.3": {
+      "status": "done",
+      "doneAt": "2026-10-01T13:08:59.008Z"
+    }
+  },
+  "milestones": {},
+  "notes": [
+    {
+      "id": "n1",
+      "ts": "2026-10-01T12:41:46.426Z",
+      "content": "补丁命中审计（0.99.2）：① usage-guard 两处目标串原样仍在（pi-ai dist 未变，上游未修，bug 仍在）需重打；② zuchongzhi 246 处命中、仅 interactive-mode.js 的 \"Themes\" 条目失效（0.99.0 移除了启动横幅 [Themes] 节），需从替换表删除该条后重打；③ launch-report 垫片被升级重写，锚点（SETLOCAL/Split-Path/case uname/exec cli.js/$ret=$LASTEXITCODE）全部仍匹配，cli.js 路径变为 dist/bundle/cli.js 但不影响锚点，需重打；ps1 有两处调用行和两处 $ret 行，补丁 map/flatMap 逻辑天然覆盖。",
+      "key": "patch-audit-0992"
+    },
+    {
+      "id": "n2",
+      "ts": "2026-10-01T13:00:38.395Z",
+      "content": "运行时审计结论（0.99.2）：全部事件/ctx API/内部依赖（ModelSelectorComponent、ModelRegistry.runtime、pi-ai/compat、setFooter、navigateTree、setWorkingMessage）经逐点核对仍在且签名兼容，tsc 0 报错。需修：① img-slim 和 pair-guard 的 tool_result 返回 {content} 未透传 structuredContent（0.99.0 起会丢结构化内容）；② zuchongzhi 删 \"Themes\" 失效条目；③ matrix.json 补 appearance:\"dark\"。观察项：crash-log 与 0.86 原生 crashes.json 功能重叠（原生带扩展归因、上限 5 条 7 天）；claude-it 的 navigateTree editorText 兜底分支在 0.99.2 是死代码（官方实现内部消化 editorText 不返回）。无状态 messages 直接赋值（0.87.0 breaking 不涉及）。",
+      "key": "runtime-audit-0992"
+    }
+  ],
+  "log": [
+    {
+      "ts": "2026-10-01T12:41:46.426Z",
+      "event": "note_add",
+      "taskId": "n1",
+      "msg": "补丁命中审计（0.99.2）：① usage-guard 两处目标串原样仍在（pi-ai dist 未变，上游未修，bug 仍在）需重打；② zuchongzhi 246 处命中、仅 interactive-mode.js 的 \"Themes\" 条目失效（0.99.0 移除了启动横幅 [Themes] 节），需从替换表删除该条后重打；③ launch-report 垫片被升级重写，锚点（SETLOCAL/Split-Path/case uname/exec cli.js/$ret=$LASTEXITCODE）全部仍匹配，cli.js 路径变为 dist/bundle/cli.js 但不影响锚点，需重打；ps1 有两处调用行和两处 $ret 行，补丁 map/flatMap 逻辑天然覆盖。"
+    },
+    {
+      "ts": "2026-10-01T12:41:49.041Z",
+      "event": "task_done",
+      "taskId": "0.1",
+      "msg": "补丁命中情况实测"
+    },
+    {
+      "ts": "2026-10-01T12:41:49.041Z",
+      "event": "task_start",
+      "taskId": "0.2",
+      "msg": "扩展类型检查"
+    },
+    {
+      "ts": "2026-10-01T12:43:04.844Z",
+      "event": "task_done",
+      "taskId": "0.2",
+      "msg": "扩展类型检查"
+    },
+    {
+      "ts": "2026-10-01T12:43:04.844Z",
+      "event": "task_start",
+      "taskId": "0.3",
+      "msg": "扩展运行时依赖审计"
+    },
+    {
+      "ts": "2026-10-01T13:00:38.395Z",
+      "event": "note_add",
+      "taskId": "n2",
+      "msg": "运行时审计结论（0.99.2）：全部事件/ctx API/内部依赖（ModelSelectorComponent、ModelRegistry.runtime、pi-ai/compat、setFooter、navigateTree、setWorkingMessage）经逐点核对仍在且签名兼容，tsc 0 报错。需修：① img-slim 和 pair-guard 的 tool_result 返回 {content} 未透传 structuredContent（0.99.0 起会丢结构化内容）；② zuchongzhi 删 \"Themes\" 失效条目；③ matrix.json 补 appearance:\"dark\"。观察项：crash-log 与 0.86 原生 crashes.json 功能重叠（原生带扩展归因、上限 5 条 7 天）；claude-it 的 navigateTree editorText 兜底分支在 0.99.2 是死代码（官方实现内部消化 editorText 不返回）。无状态 messages 直接赋值（0.87.0 breaking 不涉及）。"
+    },
+    {
+      "ts": "2026-10-01T13:00:41.810Z",
+      "event": "task_done",
+      "taskId": "0.3",
+      "msg": "扩展运行时依赖审计"
+    },
+    {
+      "ts": "2026-10-01T13:00:41.811Z",
+      "event": "task_start",
+      "taskId": "1.1",
+      "msg": "重打三个补丁"
+    },
+    {
+      "ts": "2026-10-01T13:04:19.252Z",
+      "event": "task_done",
+      "taskId": "1.1",
+      "msg": "重打三个补丁"
+    },
+    {
+      "ts": "2026-10-01T13:04:19.252Z",
+      "event": "task_start",
+      "taskId": "1.2",
+      "msg": "修复扩展兼容问题"
+    },
+    {
+      "ts": "2026-10-01T13:06:39.340Z",
+      "event": "task_done",
+      "taskId": "1.2",
+      "msg": "修复扩展兼容问题"
+    },
+    {
+      "ts": "2026-10-01T13:06:39.340Z",
+      "event": "task_start",
+      "taskId": "1.3",
+      "msg": "构建安装与文档更新"
+    },
+    {
+      "ts": "2026-10-01T13:08:59.008Z",
+      "event": "task_done",
+      "taskId": "1.3",
+      "msg": "构建安装与文档更新"
+    }
+  ],
+  "archiveStatus": "全部完成：0.99.2 适配审计 + 修复 + 补丁重打 + 安装"
+}
