@@ -81,7 +81,7 @@ export function summaryLine(state: WorkflowState, derived: Derived, slot?: strin
 	const done = derived.all.filter((t) => state.tasks[t.id]?.status === "done").length;
 	const cur = currentTask(state, derived);
 	const tag = slot && slot !== "default" ? `「${slot}」` : "";
-	return `${tag}进度 ${done}/${derived.all.length}｜当前：${cur ? cur.id + " " + cur.title : "全部完成"}`;
+	return `📋 ${tag}进度 ${done}/${derived.all.length} · 当前：${cur ? cur.id + " " + cur.title : "全部完成"}`;
 }
 
 /** 轻量状态视图：工具 results 的 details（不带完整 log） */

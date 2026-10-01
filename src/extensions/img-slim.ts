@@ -153,7 +153,7 @@ function branchImageBytes(ctx: ExtensionContext): number {
 }
 
 function setStatus(ctx: ExtensionContext, bytes: number, dropped: number): void {
-	const text = bytes >= WARN_AT_B64 ? `🖼 ${MB(bytes)}${dropped > 0 ? ` · 已省略${dropped}张旧图` : ""}` : undefined;
+	const text = bytes >= WARN_AT_B64 ? `🖼 ${MB(bytes)}${dropped > 0 ? ` · 已省略 ${dropped} 张旧图` : ""}` : undefined;
 	const key = text ?? "";
 	if (key === lastStatus) return;
 	lastStatus = key;

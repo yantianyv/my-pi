@@ -99,14 +99,14 @@ export default function (pi: ExtensionAPI) {
 						results = r.results;
 						src = r.source;
 					}
-				push(`🔍 ${results.length} 条`, 6_000);
+				push(`✓ 搜索 ${results.length} 条`, 6_000);
 				return {
 					content: [{ type: "text", text: formatSearchResults(results, src) }],
 					details: { results: results.length, source: src },
 				};
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
-				push("🔍 失败", 6_000);
+				push("⚠ 搜索失败", 6_000);
 				return {
 					content: [{ type: "text", text: `搜索失败：${msg}` }],
 					details: { error: msg },
@@ -142,7 +142,7 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const maxChars = Math.min(params.maxChars ?? DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT);
 				const { markdown, title, finalUrl, bytes, truncated } = await fetchAsMarkdown(params.url, maxChars, signal);
-				push("🌐 完成", 6_000);
+				push("✓ 抓取完成", 6_000);
 				const header: string[] = [];
 				if (title) header.push(`标题: ${title}`);
 				header.push(`源: ${finalUrl}`);
@@ -153,7 +153,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
-				push("🌐 失败", 6_000);
+				push("⚠ 抓取失败", 6_000);
 				return {
 					content: [
 						{

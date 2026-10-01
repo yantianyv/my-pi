@@ -334,7 +334,7 @@ async function aiReview(
 		(watched ? "\n\n【关注项】：该命令命中了用户标记为需要留意的类别，请从严判断——宁可 review，不要 allow。" : "");
 	const messages: Message[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
 
-	ctx.ui.setStatus("perm-gate", `🛡 AI 正在审核命令…（最长 ${Math.round(timeoutMs / 1000)} 秒，超时转人工确认）`);
+	ctx.ui.setStatus("perm-gate", `🛡 正在审核命令…（≤${Math.round(timeoutMs / 1000)} 秒）`);
 	try {
 		const result = await completeSimple(
 			model,

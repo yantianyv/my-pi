@@ -184,7 +184,7 @@ function normalizeNewlines(s: string): string {
 			onUpdate?.({ content: [{ type: "text", text: "正在读取剪贴板…" }], details: { progress: 10 } });
 			try {
 				const text = await readClipboard(signal);
-				push("📋 已读取", 6_000);
+				push("✓ 已读取", 6_000);
 				if (text.length === 0) {
 					return {
 						content: [
@@ -207,7 +207,7 @@ function normalizeNewlines(s: string): string {
 				};
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
-				push("📋 读取失败", 6_000);
+				push("⚠ 读取失败", 6_000);
 				return { content: [{ type: "text", text: `读取剪贴板失败：${msg}` }], details: { error: msg } };
 			}
 		},
@@ -249,7 +249,7 @@ function normalizeNewlines(s: string): string {
 					/* 旧内容读取失败：保留默认文案继续写入 */
 				}
 				await writeClipboard(params.content, signal);
-				push("📝 已写入", 6_000);
+				push("✓ 已写入", 6_000);
 				const len = params.content.length;
 				return {
 					content: [
@@ -262,7 +262,7 @@ function normalizeNewlines(s: string): string {
 				};
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
-				push("📝 写入失败", 6_000);
+				push("⚠ 写入失败", 6_000);
 				return { content: [{ type: "text", text: `写入剪贴板失败：${msg}` }], details: { error: msg } };
 			}
 		},

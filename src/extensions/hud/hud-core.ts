@@ -150,23 +150,35 @@ export default async function (pi: ExtensionAPI) {
 	// （颜色 + 优先级，数字大者胜出）；TTL/闪烁由各推送方自管（setStatus 触发全局重绘，零延迟可见）。
 	// 未登记 key 默认灰字、priority 0（基本不显示）。
 	const STATUS_STYLE: Record<string, { color: string; priority: number }> = {
+		// 一根轴：谁更该被一眼看到，谁的数字大。分五层——输入态 > 结果提醒 > 阻塞等人 >
+		// 进行中·具体活动 > 进行中·通用兜底 > 环境信息；未登记的 key 缺省灰字 priority 0。
+		// 输入态
 		"hud-bash": { color: "warning", priority: 100 }, // 指令模式提示（输入以 ! 开头）
+		// 结果提醒（status-beacon 自管闪烁帧）
+		"task-alert-error": { color: "error", priority: 92 }, // 任务出错
+		"task-alert-wait": { color: "warning", priority: 91 }, // 等待人工干预
+		"task-alert": { color: "success", priority: 90 }, // 任务完成
+		// 阻塞等人（要你立刻响应）
+		"perm-gate": { color: "warning", priority: 86 }, // 命令审核中（perm-gate）
+		"ask": { color: "accent", priority: 84 }, // 待答问卷数（ask；常年挂着，不能被活动盖掉）
+		// 进行中·具体活动（各自说清楚在干什么，短时）
+		"init": { color: "warning", priority: 80 }, // /init 进度（claude-it）
 		"balance-error": { color: "error", priority: 78 }, // 余额查询失败（后台周期探测、自行恢复，不压任务提醒）
-		"task-alert": { color: "success", priority: 90 }, // 任务完成（status-beacon 自管闪烁帧）
-		"task-alert-error": { color: "error", priority: 92 }, // 任务出错（status-beacon）
-		"task-alert-wait": { color: "warning", priority: 91 }, // 等待人工干预（status-beacon）
-		"task-alert-run": { color: "accent", priority: 58 }, // 执行中：思考中 / 当前工具（status-beacon；低于一切具体活动状态）
-		"init": { color: "warning", priority: 80 }, // claude-it /init 进度
+		"img-slim": { color: "warning", priority: 76 }, // 图片预算：本轮已省略 N 张旧图（img-slim）
 		"web-search": { color: "accent", priority: 75 }, // 联网搜索状态（web-tool）
 		"web-fetch": { color: "accent", priority: 74 }, // 网页抓取状态（web-tool）
-		"qr": { color: "accent", priority: 64 }, // 二维码生成/解码状态（qr）
-		"workflow-mgr": { color: "accent", priority: 72 }, // 人机协作任务面板摘要（workflow-mgr）
-		"model-switch": { color: "accent", priority: 70 }, // 模型切换
 		"kb-sync": { color: "accent", priority: 73 }, // 知识库同步进度（webdav-kb；后台自动同步，低于前台 web 活动）
-		"kb-test": { color: "accent", priority: 65 }, // 知识库连通测试（webdav-kb）
+		"workflow-mgr": { color: "accent", priority: 72 }, // 人机协作任务摘要 / 完成信号审计（workflow-mgr）
+		"model-switch": { color: "accent", priority: 70 }, // 模型切换
+		"explore": { color: "accent", priority: 68 }, // 探索子代理进度（explore-agent；高于通用运行态）
+		"qr": { color: "accent", priority: 64 }, // 二维码生成/解码状态（qr）
 		"kb-vault": { color: "muted", priority: 62 }, // vault 解锁/锁定状态（webdav-kb）
+		"clipboard": { color: "accent", priority: 61 }, // 剪贴板读写状态（clipboard）
 		"btw-transfer": { color: "muted", priority: 60 }, // btw 问答已附带提示（btw）
-		"img-slim": { color: "warning", priority: 76 }, // 图片预算：本轮已省略 N 张旧图（img-slim）
+		// 进行中·通用兜底（说不出具体在干什么时的活动态）
+		"task-alert-run": { color: "accent", priority: 58 }, // 思考中 / 输出中 / 当前工具（status-beacon）
+		// 环境信息（常态存在，不需要抢格子）
+		"pair-guard": { color: "muted", priority: 56 }, // 并发会话数（pair-guard）
 	};
 	/** 检测 ctx 是否仍有效：session 替换 / reload 后旧 ctx 的所有 getter 都会抛 stale 错误。 */
 	function ctxAlive(ctx: ExtensionContext): boolean {

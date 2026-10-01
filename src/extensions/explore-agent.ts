@@ -899,7 +899,7 @@ async function executeExplore(
 			],
 			details: { model: modelName, total: tasks.length, succeeded: 0, tasks: [] },
 		});
-		ctx.ui.setStatus("explore", `🔎 ${doneCount()}/${tasks.length} · ⚙${limiter.limit}`);
+		ctx.ui.setStatus("explore", `🔎 探索 ${doneCount()}/${tasks.length} · 并发 ${limiter.limit}`);
 	};
 	report();
 
@@ -989,7 +989,7 @@ async function executeExplore(
 	const succeeded = results.filter((r) => r.ok).length;
 	const cachedCount = results.filter((r) => r.cached).length;
 	const failed = results.filter((r) => !r.ok);
-	setStatusWithTTL(ctx, "explore", `🔎 ✓ ${succeeded}/${results.length}`, 6_000);
+	setStatusWithTTL(ctx, "explore", `✓ 探索 ${succeeded}/${results.length}`, 6_000);
 	flushReport();
 	await reporter.drained(); // 返回前确保报告落盘（用户可能立刻打开读）
 

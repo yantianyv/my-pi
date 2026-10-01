@@ -294,13 +294,13 @@ export default function (pi: ExtensionAPI) {
 		let toolCalls = 0;
 		const modelName = `${model.provider}/${model.id}`;
 		// 进度经官方 setStatus 通道推给 hud 行 1 动态区（与任务完成提醒同一通道，hud 按 key 映射样式）
-		ctx.ui.setStatus("init", `⚙ init · ${toolCalls}`);
+		ctx.ui.setStatus("init", `⚙ 初始化 · ${toolCalls} 步`);
 
 		void (async () => {
 			try {
 				const result = await runInitAgent(ctx, model, prompt, controller.signal, () => {
 					toolCalls++;
-					ctx.ui.setStatus("init", `⚙ init · ${toolCalls}`);
+					ctx.ui.setStatus("init", `⚙ 初始化 · ${toolCalls} 步`);
 				});
 				ctx.ui.notify(
 					result.ok

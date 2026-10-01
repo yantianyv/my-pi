@@ -686,7 +686,7 @@ export function registerTools(pi: ExtensionAPI) {
 			// 完成推进前派全新上下文的只读+bash 子代理核验完成信号，不通过则打回（任务保持 doing）。
 			// 审计自身故障（超时/异常）放行——增强不是门禁，基础设施故障不卡死工作流。
 			if (complete && cur && curSt && curSt.status !== "done" && cur.doneSignal && s.getPanelConfig().auditOnComplete) {
-				if (ctx.hasUI) ctx.ui.setStatus("workflow-mgr", `🔍 正在独立审计完成信号（最长 90 秒）…`);
+				if (ctx.hasUI) ctx.ui.setStatus("workflow-mgr", `🔍 正在审计完成信号…（≤90 秒）`);
 				const verdict = await auditCompletion(ctx, cur);
 				updateWidget(ctx, s); // 恢复常规进度摘要（审计期间占用的是同一条状态）
 				if (!verdict.pass) {

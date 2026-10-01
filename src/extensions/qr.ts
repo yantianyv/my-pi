@@ -340,7 +340,7 @@ export default function (pi: ExtensionAPI) {
 					pngPath = path.join(os.tmpdir(), `pi-qr-${Date.now()}.png`);
 					fs.writeFileSync(pngPath, built.png);
 				}
-				push("🔳 已显示", 6_000);
+				push("✓ 二维码已显示", 6_000);
 				const details: QrEncodeDetails = {
 					text: params.text,
 					version: built.version,
@@ -355,7 +355,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: textParts.join("\n") }], details };
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
-				push("🔳 生成失败", 6_000);
+				push("⚠ 生成失败", 6_000);
 				return {
 					content: [{ type: "text", text: `生成二维码失败：${msg}${/too long|big/i.test(msg) ? "（文本过长超出二维码容量，可换 ecc=L 或精简文本）" : ""}` }],
 					details: { error: msg },
@@ -421,7 +421,7 @@ export default function (pi: ExtensionAPI) {
 					throw new Error("仅支持 PNG / JPEG 图片（请提供 .png/.jpg/.jpeg 文件或对应 URL）");
 				}
 				const decoded = decodeQrRgba(rgba);
-				push("🔳 已解码", 6_000);
+				push("✓ 已解码", 6_000);
 				const details: QrDecodeDetails = {
 					source: params.image,
 					text: decoded.text,
@@ -439,7 +439,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
-				push("🔳 解码失败", 6_000);
+				push("⚠ 解码失败", 6_000);
 				return {
 					content: [
 						{

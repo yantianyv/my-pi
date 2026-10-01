@@ -812,7 +812,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				});
 				const summary = formatSyncSummary(stats);
 				const notes = formatSyncNotes(stats);
-				status(ctx, "kb-sync", `📚 ${summary}`, 8_000);
+				status(ctx, "kb-sync", `✓ ${summary}`, 8_000);
 				return text(`✓ 同步完成：${summary}${notes.length ? `\n${notes.join("\n")}` : ""}`, {
 					downloaded: stats.downloaded,
 					uploaded: stats.uploaded,

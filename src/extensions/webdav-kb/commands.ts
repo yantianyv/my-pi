@@ -81,7 +81,7 @@ export function registerKbCommands(pi: ExtensionAPI): void {
 				});
 				const summary = formatSyncSummary(stats);
 				const notes = formatSyncNotes(stats);
-				push(`📚 ${summary}`, 8_000);
+				push(`✓ ${summary}`, 8_000);
 				ctx.ui.notify([`同步完成：${summary}`, ...notes].join("\n"), stats.errors.length ? "warning" : "info");
 			} catch (e) {
 				const msg = describeSyncError(e);
