@@ -1,9 +1,10 @@
 /**
  * hud-core：3 行 HUD 状态栏核心（hud 多文件扩展）
  *
- * 行 1  git：分支 / 暂存(+N) / 工作区(~N) / 未跟踪(?N) / 领先落后 / 项目名
- * 行 2  模型：供应商 / 模型 / 思考级别 + 用量：token / 成本 / 上下文进度条
- * 行 3  账户：余额 / plan 余量 + 消耗速率（固定此行）
+ * 三行三列（竖线分中列与右列）：
+ * 行 1  左 git 状态 │ 中 动态区（扩展状态；空闲时是会话时长） │ 右 目录名
+ * 行 2  左 模型·思考级别 │ 中 速率曲线 + 当前速率 │ 右 上下文进度条
+ * 行 3  左 余额 / plan 余量 │ 中 消耗（token 进出 + 计价与花费） │ 右 余额刷新时刻
  *
  * 目录结构（hud 多文件扩展，pi 只加载 index.ts 作为入口；本文件为真正的核心实现，
  * index.ts 仅做 re-export）：
@@ -37,10 +38,12 @@
  */
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getCapabilities, hyperlink, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import path from "node:path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { clearStatusTimers, setStatusWithTTL } from "../shared/status";
+import { RATE_REF_DECAY, SPARK_WIDTH, sparklineBars, sparklineCells } from "./hud-spark";
 
 const execFileAsync = promisify(execFile);
 
@@ -64,9 +67,7 @@ const RATE_REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 实时汇率刷新间隔（�
 let lastRateRefresh = 0;
 const GIT_REFRESH_INTERVAL_MS = 5_000; // git 状态刷新间隔
 const LEFT_LABEL_W = 15; // 左侧标签栏固定宽度（⎇ master / [DeepSeek] / 余额 ¥x.xx）
-const RIGHT_SEG1 = 22; // 右侧分栏：第一个分隔符前的固定宽度
-const RIGHT_SEG2 = 16; // 右侧分栏：第二个分隔符前的固定宽度
-const RIGHT_TOTAL = 41; // 右侧区域总宽度（三行分隔符垂直对齐）
+const CTX_SEG = 16; // 上下文段（进度条 + 百分比 + 窗口大小）恒宽，不随内容抖动
 const THINKING_LABEL: Record<string, string> = {
 	off: "off",
 	minimal: "min",
@@ -174,7 +175,7 @@ export default async function (pi: ExtensionAPI) {
 		"qr": { color: "accent", priority: 64 }, // 二维码生成/解码状态（qr）
 		"kb-vault": { color: "muted", priority: 62 }, // vault 解锁/锁定状态（webdav-kb）
 		"clipboard": { color: "accent", priority: 61 }, // 剪贴板读写状态（clipboard）
-		"kb-op": { color: "accent", priority: 61 }, // kb 工具回执（webdav-kb；一个键承载写读删移等动作）
+		"kb-op": { color: "accent", priority: 61 }, // kb 工具回执（webdav-kb；一个键承载读/写/删/移等动作）
 		"btw-transfer": { color: "muted", priority: 60 }, // btw 问答已附带提示（btw）
 		// 进行中·通用兜底（说不出具体在干什么时的活动态）
 		"task-alert-run": { color: "accent", priority: 58 }, // 思考中 / 输出中 / 当前工具（status-beacon）
@@ -309,6 +310,24 @@ export default async function (pi: ExtensionAPI) {
 		return "余额：-";
 	}
 
+	// 速率采样环：**每轮记一次**（turn_end，此时本轮原始速率与 EMA 都已更新），一格 = 一轮。
+	// 曲线画本轮原始速率（起伏真实），均值作为基准线（颜色分档 + 📊 数字）。
+	// rateRef 是曲线的满格参考值 = 会话峰值随时间缓慢衰减（不因峰值滚出窗口而突然重缩放）。
+	const RATE_TURNS = 24; // 曲线窗口：最近 24 轮
+	const rateHistory: number[] = [];
+	let rateRef = 0;
+	const sampleRate = (): void => {
+		if (!costMod) return;
+		try {
+			const v = Math.max(0, costMod.getTurnRate() ?? costMod.getTokenRate(Date.now()) ?? 0);
+			rateHistory.push(v);
+			if (rateHistory.length > RATE_TURNS) rateHistory.splice(0, rateHistory.length - RATE_TURNS);
+			rateRef = Math.max(v, rateRef * RATE_REF_DECAY);
+		} catch {
+			/* 采样失败不影响 HUD */
+		}
+	};
+
 	function installFooter(ctx: ExtensionContext) {
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			// 存在且开启标记 + 通知依赖 hud 的扩展（workflow-mgr 等）立即接管/切换展示
@@ -348,7 +367,8 @@ export default async function (pi: ExtensionAPI) {
 				}
 			});
 
-			// 首次安装立即拉取，之后定时刷新（余额 5min / git 5s）
+
+	// 首次安装立即拉取，之后定时刷新（余额 5min / git 5s）
 			void refreshBalance(ctx);
 			if (refreshTimer) clearInterval(refreshTimer);
 			refreshTimer = setInterval(() => void refreshBalance(ctx), REFRESH_INTERVAL_MS);
@@ -356,15 +376,6 @@ export default async function (pi: ExtensionAPI) {
 			if (gitTimer) clearInterval(gitTimer);
 			gitTimer = setInterval(() => void refreshGitStats(ctx), GIT_REFRESH_INTERVAL_MS);
 
-			// 行布局辅助：左侧固定左对齐，右侧固定右对齐，中间用空格撑开。
-			// 左侧超长时先截左段（不是整行截断）——否则右侧消耗/刷新时间会被整段吃掉且无任何提示
-			const layout = (left: string, right: string, width: number): string => {
-				const rightW = visibleWidth(right);
-				const budget = Math.max(1, width - rightW - 1);
-				const l = visibleWidth(left) > budget ? truncateToWidth(left, budget) : left;
-				const pad = " ".repeat(Math.max(1, width - visibleWidth(l) - rightW));
-				return l + pad + right;
-			};
 			const padTo = (str: string, w: number): string => str + " ".repeat(Math.max(0, w - visibleWidth(str)));
 			// 右对齐：内容紧贴分隔线
 			const padLeft = (str: string, w: number): string => " ".repeat(Math.max(0, w - visibleWidth(str))) + str;
@@ -463,7 +474,8 @@ export default async function (pi: ExtensionAPI) {
 			};
 
 			// 动态区（信息屏B）：读官方 setStatus 通道的状态，按样式表取优先级最高者；
-			// 固定宽度，空闲时显示会话时长占位。TTL 由各推送方自管，无需本处清理。
+			// 空闲时退回会话时长占位。只出内容不裁剪——状态占行 1 中段，宽度由行布局按
+			// 终端宽度给（超长由调用方裁 `…`）。TTL 由各推送方自管，无需本处清理。
 			const renderStatuses = (): string => {
 				let best: { text: string; color?: string; priority: number } | null = null;
 				for (const [key, text] of footerData.getExtensionStatuses()) {
@@ -472,13 +484,8 @@ export default async function (pi: ExtensionAPI) {
 					const priority = style?.priority ?? 0;
 					if (!best || priority > best.priority) best = { text, color: style?.color, priority };
 				}
-				if (!best) {
-					const tip = truncateToWidth(`会话 ${fmtDuration(Date.now() - (costMod?.getStartupTime() ?? Date.now()))}`, RIGHT_SEG2, "");
-					return theme.fg("muted", tip) + " ".repeat(RIGHT_SEG2 - visibleWidth(tip));
-				}
-				const truncated = truncateToWidth(best.text, RIGHT_SEG2, "");
-				const content = best.color ? theme.fg(best.color as never, truncated) : truncated;
-				return content + " ".repeat(RIGHT_SEG2 - visibleWidth(truncated));
+				if (!best) return theme.fg("muted", `会话 ${fmtDuration(Date.now() - (costMod?.getStartupTime() ?? Date.now()))}`);
+				return best.color ? theme.fg(best.color as never, best.text) : best.text;
 			};
 
 			return {
@@ -509,10 +516,11 @@ export default async function (pi: ExtensionAPI) {
 					if (!ctxAlive(ctx)) return [];
 					const model = ctx.model;
 
-					// ---- 行 1：git 状态 + 项目名 + 动态区 ----
+					// ---- 行 1：左列 git 状态 · 中列 动态区（状态）· 右列 目录名 ----
 					const left1 = renderGitLine();
-					const project = ctx.cwd.split(/[\\/]/).filter(Boolean).pop() || ctx.cwd;
-					const right1 = `${padLeft(project ? theme.fg("dim", `📁 ${project}`) : "", RIGHT_SEG1)}${theme.fg("dim", " │ ")}${renderStatuses()}`;
+					// 用 path.basename 取目录名（Windows 上同时认 `\` 和 `/`，且能吃掉结尾分隔符；
+					// 手写 split 正则曾因转义丢字符类，把完整路径显示到了这一格）
+					const project = path.basename(ctx.cwd);
 
 					// ---- 行 2：模型 + 用量 + 上下文 ----
 					const providerDisplay = model
@@ -537,17 +545,15 @@ export default async function (pi: ExtensionAPI) {
 							output += m.usage.output;
 						}
 					}
+					// 速率双口径：🔥 本轮（未平滑，看清"这一轮多快"）+ 📊 均值（EMA，看清"平时多快"），
+					// 一律取整（小值区间两位小数太长；曲线已有形状精度）
+					const fmtRate = (r: number): string =>
+						r >= 1000 ? `${costMod?.fmtNum(r) ?? ""}/s` : `${Math.round(r)}/s`;
+					const emaRate = costMod ? (costMod.getTokenRate(Date.now()) ?? 0) : 0;
+					const turnRateNow = costMod ? (costMod.getTurnRate() ?? emaRate) : 0;
+					const rateStr = fmtRate(emaRate);
 					const tokensSeg = costMod
-						? (() => {
-								const tokenRate = costMod.getTokenRate(Date.now()) ?? 0;
-								const rateStr =
-									tokenRate >= 1000
-										? `${costMod.fmtNum(tokenRate)}/s`
-										: tokenRate >= 100
-											? `${tokenRate.toFixed(1)}/s`
-											: `${tokenRate.toFixed(2)}/s`;
-								return `${theme.fg("muted", `↑${costMod.fmtNum(input)}`)} ${theme.fg("muted", `↓${costMod.fmtNum(output)}`)} ${theme.fg("muted", rateStr)}`;
-							})()
+						? `${theme.fg("muted", `↑${costMod.fmtNum(input)}`)} ${theme.fg("muted", `↓${costMod.fmtNum(output)}`)}`
 						: "";
 
 					const usage = ctx.getContextUsage();
@@ -565,16 +571,16 @@ export default async function (pi: ExtensionAPI) {
 								// 无上下文窗口大小时退化为原逻辑：尾部显示百分比或 0
 								if (windowText == null) {
 									const numText = pctRaw != null ? pctText : "0";
-									const barWidth = Math.max(3, RIGHT_SEG2 - 3 - visibleWidth(numText));
+									const barWidth = Math.max(3, CTX_SEG - 3 - visibleWidth(numText));
 									return `[${progressBar(pct, barWidth)}] ${numText}`;
 								}
 								// 未返回百分比：空条 + 上下文大小（原样）
 								if (pctRaw == null) {
-									const barWidth = Math.max(3, RIGHT_SEG2 - 3 - visibleWidth(windowText));
+									const barWidth = Math.max(3, CTX_SEG - 3 - visibleWidth(windowText));
 									return `[${progressBar(0, barWidth)}] ${windowText}`;
 								}
 
-								const barWidth = Math.max(3, RIGHT_SEG2 - 3 - visibleWidth(windowText));
+								const barWidth = Math.max(3, CTX_SEG - 3 - visibleWidth(windowText));
 								// 已占用格数（满格 + 半格），与 progressBar 内部计算一致
 								const total = barWidth * 8;
 								const filledCells = Math.round((pct / 100) * total);
@@ -589,14 +595,12 @@ export default async function (pi: ExtensionAPI) {
 									return `[${core}${theme.fg("dim", ` ${pctText}`)}${rest}] ${windowText}`;
 								}
 								// 方案 B：进度条占满可用宽度，百分比替换尾部上下文大小
-								const barWidthB = Math.max(3, RIGHT_SEG2 - 3 - pctWidth);
+								const barWidthB = Math.max(3, CTX_SEG - 3 - pctWidth);
 								return `[${progressBar(pct, barWidthB)}] ${pctText}`;
 							})()
 						: "";
-					// hud-cost 子模块缺失：行 2 右侧统一提示，而非空白
-					const right2 = costMod
-						? `${padLeft(tokensSeg, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(ctxSeg, RIGHT_SEG2)}`
-						: `${padLeft(theme.fg("warning", "用量 模块缺失"), RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo("", RIGHT_SEG2)}`;
+					// 行 2 右列：上下文条（成本模块缺失时给降级提示，不留空白）
+					const ctxCell = costMod ? ctxSeg : theme.fg("warning", "用量 模块缺失");
 
 					// ---- 行 3：账户（余额 / plan）+ 消耗统计 ----
 					// 计费徽章（挂余额行末尾）：
@@ -631,15 +635,57 @@ export default async function (pi: ExtensionAPI) {
 								.join(" ")
 						: "";
 					const timeText = balance.fetchedAt ? theme.fg("dim", `↻ ${fmtTime(balance.fetchedAt)}`) : "";
-					const right3 =
-						timeText || rateText
-							? `${padLeft(rateText, RIGHT_SEG1)}${theme.fg("dim", " │ ")}${padTo(timeText, RIGHT_TOTAL - RIGHT_SEG1 - 3)}`
-							: "";
+					// 行 3 中列：消耗（本会话 token 进出 + 计价与花费）
+					const costCell = costMod ? `${tokensSeg}${rateText ? ` ${rateText}` : ""}` : "";
 
-					const line1 = layout(left1, right1, width);
-					const line2 = layout(left2, right2, width);
-					const line3 = layout(left3, right3, width);
-					const base = [line1, line2, line3].map((l) => truncateToWidth(l, width));
+					// ---- 三行三列：左列 git/模型/余额 · 中列 状态/速率柱+速率/消耗 · 右列 目录/上下文/刷新时刻 ----
+					// 三行共用同一组栏宽（列起止对齐）：左列左对齐、中列右对齐贴住竖线、右列左对齐紧跟竖线。
+					// 行 1 中列特殊：先放速率图借来的上半行（可能为空），再右对齐状态。
+					const GAP = 2;
+					const statusText = renderStatuses();
+					const colLeftW = Math.min(
+						Math.max(visibleWidth(left1), visibleWidth(left2), visibleWidth(left3)),
+						Math.max(10, Math.floor(width * 0.34)),
+					);
+					const colRightW = Math.min(
+						Math.max(visibleWidth(project ? "📁 " + project : ""), visibleWidth(ctxCell), visibleWidth(timeText)),
+						Math.max(10, Math.floor(width * 0.34)),
+					);
+					const midW = Math.max(6, width - colLeftW - GAP - 3 - colRightW);
+
+					// 行 2 中列：速率柱状图（一格 = 一轮）×+ 双口径数字 🔥本轮 / 📊均值。
+					// **自适应两行**：行 1 的状态右对齐、柱子贴中列左端，状态不长时柱子正上方是空的，
+					// 就把那块借来画上半行（16 档）；状态长到压过来时把位置还回去，退回单行（8 档）。
+					const rateChart = ((): { bottom: string; top: string | null } => {
+						if (!costMod) return { bottom: "", top: null };
+						const nums = `${theme.fg("muted", `🔥${fmtRate(turnRateNow)}`)} ${theme.fg("dim", `📊${rateStr}`)}`;
+						const paint = (cells: { char: string; aboveBaseline: boolean }[]): string =>
+							cells.map((c) => (c.aboveBaseline ? theme.fg("accent", c.char) : theme.fg("muted", c.char))).join("");
+						const bars = sparklineBars(rateHistory, SPARK_WIDTH, { ref: rateRef, baseline: emaRate });
+						const bottom2 = `${paint(bars.lower)} ${nums}`;
+						// 柱子上方是否放得下上半行：状态左端（中列内偏移）要在柱子右侧留出 1 格
+						const chartCol = midW - visibleWidth(bottom2);
+						if (chartCol >= 0 && midW - visibleWidth(statusText) >= chartCol + SPARK_WIDTH + 1) {
+							return { bottom: bottom2, top: " ".repeat(chartCol) + paint(bars.upper) };
+						}
+						// 还位置：单行 8 档
+						const single = paint(sparklineCells(rateHistory, SPARK_WIDTH, { ref: rateRef, baseline: emaRate }));
+						return { bottom: `${single} ${nums}`, top: null };
+					})();
+					// 有上半行就把它放在柱子正上方，状态仍右对齐；没有就退回纯状态右对齐
+					const statusCell = rateChart.top
+						? rateChart.top + " ".repeat(Math.max(0, midW - visibleWidth(rateChart.top) - visibleWidth(statusText))) + statusText
+						: padLeft(statusText, midW);
+					const base = [
+						{ left: left1, middle: statusCell, right: project ? theme.fg("dim", `📁 ${project}`) : "" },
+						{ left: left2, middle: rateChart.bottom, right: ctxCell },
+						{ left: left3, middle: costCell, right: timeText },
+					].map((c) => {
+						const l = padTo(truncateToWidth(c.left, colLeftW, "…"), colLeftW);
+						const m = padLeft(truncateToWidth(c.middle, midW, "…"), midW);
+						const rt = padTo(truncateToWidth(c.right, colRightW, "…"), colRightW);
+						return truncateToWidth(l + " ".repeat(GAP) + m + theme.fg("dim", " │ ") + rt, width);
+					});
 					// 额外底部行：遍历注册方（workflow-mgr 等），把各自渲染的行追加到最底
 					const extra: string[] = [];
 					for (const p of extraRowProviders) {
@@ -665,10 +711,16 @@ export default async function (pi: ExtensionAPI) {
 		if (costMod) costMod.startTurn();
 	});
 
+	// assistant 消息流式结束 = 本轮模型生成段终点（速率分母只算这一段，不含工具执行）
+	pi.on("message_end", async (event) => {
+		if (costMod && event.message.role === "assistant") costMod.markModelPhaseEnd();
+	});
+
 	pi.on("turn_end", async (_event, ctx) => {
 		// 记录本 turn 消耗（成本增量入 10 分钟窗口 + 输出 token 速率 EMA 平滑）
 		if (costMod) {
 			costMod.recordTurnCosts(ctx);
+			sampleRate(); // 本轮速率入曲线（一格 = 一轮）
 			// Z.AI Coding CN：积分轨只能远端采样（消息 usage 不含积分），
 			// turn_end 拉一次 quota 接口做差分（fire-and-forget，内部 30s 节流）
 			if (ctx.model?.provider === "zai-coding-cn") void costMod.recordZaiCreditUsage(ctx);

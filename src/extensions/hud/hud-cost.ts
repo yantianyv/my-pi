@@ -185,7 +185,9 @@ let startupTime = Date.now();
 
 let lastRecordedOutputTotal = 0;
 let turnStartTime: number | null = null;
+let modelPhaseEnd: number | null = null; // 本轮 assistant 消息流式结束时刻（模型生成段的终点）
 let smoothedTokenRate: number | null = null;
+let lastTurnRate: number | null = null; // 最近一轮的原始速率（未平滑），供 HUD 与平滑值并显
 
 /** 会话启动时刻（供 HUD 行 1 动态区占位“会话时长”显示）。 */
 export function getStartupTime(): number {
@@ -328,7 +330,7 @@ export async function recordZaiCreditUsage(ctx: ExtensionContext): Promise<void>
 	}
 }
 
-const TOKEN_RATE_SMOOTH_FACTOR = 0.2; // 新 turn 速率权重，历史速率权重 = 1 - 0.2
+const TOKEN_RATE_SMOOTH_FACTOR = 0.1; // 新 turn 速率权重（越小越平滑），历史权重 = 1 - 该值
 
 export const fmtNum = (n: number) => {
 	if (n >= 1_000_000) {
@@ -385,13 +387,34 @@ export function resetCostTracking(ctx: ExtensionContext): void {
 	lastRecordedOutputTotal = sumOutputTokens(ctx);
 	costEvents = [];
 	turnStartTime = null;
+	modelPhaseEnd = null;
 	smoothedTokenRate = null;
+	lastTurnRate = null;
 	resetZaiCreditTracking(); // Z.AI 积分轨同步清零（换会话/换供应商后旧采样无意义）
 }
 
 /** turn_start 时记录起始时刻（供输出 token 速率计算）。 */
 export function startTurn(): void {
 	turnStartTime = Date.now();
+	modelPhaseEnd = null;
+}
+
+/**
+ * assistant 消息流式结束（message_end）即本轮「模型生成段」的终点。
+ * 速率只认这一段：pi 的一个 turn = 一次模型响应 + 该响应触发的所有工具调用，
+ * 到 turn_end 时工具早跑完了——用 turn 全长当分母会把工具耗时算进模型速率。
+ */
+export function markModelPhaseEnd(): void {
+	modelPhaseEnd = Date.now();
+}
+
+/**
+ * 本轮模型生成段速率（tok/s）：分母 = turn_start → assistant message_end。
+ * 含请求发送、网络延迟、首字延迟与思考（都是模型侧时间），不含工具执行。
+ */
+export function computeModelPhaseRate(outputDelta: number, startMs: number, endMs: number): number {
+	const durationMs = Math.max(100, endMs - startMs);
+	return outputDelta / (durationMs / 1000);
 }
 
 /**
@@ -414,14 +437,16 @@ export function recordTurnCosts(ctx: ExtensionContext): void {
 	const outputDelta = outputTotal - lastRecordedOutputTotal;
 	lastRecordedOutputTotal = outputTotal;
 	if (outputDelta > 0 && turnStartTime != null) {
-		const durationMs = Math.max(100, Date.now() - turnStartTime);
-		const turnRate = outputDelta / (durationMs / 1000);
+		// 分母优先用模型生成段终点（message_end）；没有 assistant 消息的异常轮退化为 turn 全长
+		const turnRate = computeModelPhaseRate(outputDelta, turnStartTime, modelPhaseEnd ?? Date.now());
+		lastTurnRate = turnRate;
 		smoothedTokenRate =
 			smoothedTokenRate == null
 				? turnRate
 				: smoothedTokenRate * (1 - TOKEN_RATE_SMOOTH_FACTOR) + turnRate * TOKEN_RATE_SMOOTH_FACTOR;
 	}
 	turnStartTime = null;
+	modelPhaseEnd = null;
 }
 
 /** 当前会话累计成本（双轨），供速率事件与 /hud 展示使用。 */
@@ -438,9 +463,14 @@ function sumCosts(ctx: ExtensionContext): { cny: number; usd: number } {
 	return { cny, usd };
 }
 
-/** 输出 token 速率（/s），用于行 2 渲染。 */
+/** 输出 token 速率（/s，80/10 EMA 平滑值），用于 HUD 显示。 */
 export function getTokenRate(now: number): number | null {
 	return computeTokenRate(now);
+}
+
+/** 最近一轮的原始输出速率（/s，未平滑）——与平滑值并显，看清"这一轮有多快 / 平时多快"。 */
+export function getTurnRate(): number | null {
+	return lastTurnRate;
 }
 
 // ---------------------------------------------------------------------------

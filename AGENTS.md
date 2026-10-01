@@ -52,9 +52,21 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                       #       test/shell-split.test.mjs 回归测试（20 场景）
     hud/            #     3 行 HUD（多文件扩展源码：build.js 把 index.ts 入口打包成单文件 hud.ts）
       index.ts      #       入口薄壳：re-export hud-core（pi 加载约定）
-      hud-core.ts   #       核心：渲染 + 生命周期 + 命令；开启时置 globalThis.__PI_HUD_ACTIVE__（dispose 时清），workflow-mgr 据此接管底部行；子模块动态加载，缺失时降级显示
+      hud-core.ts   #       核心：三行三列渲染（左列 git/模型/余额 · 中列 状态/速率柱状（自适应两行 16 档；状态长时退回单行 8 档）+双口径速率/消耗 · 右列 目录/上下文/刷新时刻，中右之间 dim 竖线、三行共用栏宽、中列超长才裁 `…`）+ 速率采样环（36 × 5s，挂在 git 定时器上）+ 生命周期 + 命令；开启时置 globalThis.__PI_HUD_ACTIVE__（dispose 时清），workflow-mgr 据此接管底部行；子模块动态加载，缺失时降级显示
+      hud-spark.ts  #       速率柱状纯函数（sparklineBars/sparkline/sparklineCells/brailleLine/SPARK_WIDTH/
+                    #       RATE_REF_DECAY）：sparklineBars 供两行 16 档（k<8 只有下行、k≥8 下行满格 + 上行从 ▁ 起）；
+                    #       8 档块字符、floor 取档（非零最低值落在 ▁）、格数恒等；每格带 aboveBaseline
+                    #       标记（HUD 据此按「高于均值亮色 / 低于暗色」着色，曲线内即体现 EMA 位置）；
+                    #       满格参考值缺省用窗口峰值、可传会话峰值；零采样不画格（空段）；
+                    #       0 档与冷启动占位都是最低档 ▁（块字符只有 8 个标准档位）；
+                    #       brailleLine 备选：盲文 2×4 点阵折线（横向密度×2、纵向 4 档）；
+                    #       test/sparkline.test.mjs 回归
       hud-balance.ts#       hud-balance：供应商余额适配器（BALANCE_ADAPTERS 注册表）
-      hud-cost.ts   #       hud-cost：消耗统计 / DeepSeek 定价 / 按量付费文本 / 实时汇率
+      hud-cost.ts   #       hud-cost：消耗统计 / DeepSeek 定价 / 按量付费文本 / 实时汇率；
+                    #       输出速率口径：分子 = assistant usage.output 增量（供应商上报，已含
+                    #       reasoning/thinking token），分母 = 模型生成段（turn_start → assistant
+                    #       message_end，含网络与首字延迟、不含工具执行；markModelPhaseEnd 由
+                    #       hud-core 在 message_end 调用）；computeModelPhaseRate + token-rate 测试
       hud-git.ts    #       hud-git：git 状态解析
       test/         #       hud-git 路径引号解码回归测试（node src/extensions/hud/test/unquote.test.mjs）
     ask/          #     问卷（多文件扩展源码，build.js 把 index.ts 打包成单文件 ask.ts）：types.ts 数据模型/容错规范化（含 note 只读说明题与问卷级 context）+ store.ts 问卷文件读写（.pi/questionnaires/）+ page.ts 整屏问卷页（进度条/跳题/答案一览/帮助屏/删除/说明题与上下文折叠）+ 选择器 + tool.ts ask 工具（create 创建 / cancel 作废，context/includeLastMessage 附上下文）+ commands.ts /answer 命令 + state.ts 状态推送/排队链；校验口径：必答未完成提示带「第 i/n 题」分母，勾「其他」未填内容单独提示，评分数字越界给范围反馈，头部进度条在必答已齐时明标「余为选填」；test/ask.test.mjs 回归测试（A~T + 渲染不变量）
