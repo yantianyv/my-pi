@@ -115,11 +115,14 @@ async function bundle(entry, name) {
 	// -------------------------------------------------------------------------
 	console.log("场景 D：status-beacon 提示音门控");
 	const execCalls = [];
+	const workingMessages = [];
+	const hiddenLabelCalls = [];
 	const ui = {
 		setStatus() {},
 		setTitle() {},
 		setWidget() {},
-		setWorkingMessage() {},
+		setWorkingMessage: (t) => workingMessages.push(t),
+		setHiddenThinkingLabel: (t) => hiddenLabelCalls.push(t),
 		onTerminalInput: () => () => {},
 		notify() {},
 	};
@@ -186,20 +189,18 @@ async function bundle(entry, name) {
 	await settleNormal();
 	check("D: 无系统读数时，跨实例近期输入同样抑制出声", execCalls.length === 0, JSON.stringify(execCalls));
 
-	// ---- 场景 E：思考折叠标签动画（原 btf-think 并入 status-beacon） ----
-	console.log("场景 E：思考标签动画");
+	// ---- 场景 E：执行中动画在 Working 行，折叠思考标签交回 pi 默认 ----
+	console.log("场景 E：Working 行动画 / 思考标签不干预");
 	{
-		const labels = [];
-		ui.setHiddenThinkingLabel = (t) => labels.push(t);
-		await fire("message_start", { message: { role: "assistant", content: [] } });
-		check("E: assistant 流式开始写入动画标签", typeof labels[0] === "string" && labels[0].startsWith("Thinking"));
-		await fire("message_end", { message: { role: "assistant", content: [] } });
-		check("E: 流式结束恢复默认标签", labels[labels.length - 1] === undefined);
-		const before = labels.length;
-		await fire("message_start", { message: { role: "user", content: [] } });
-		check("E: 用户消息不触发动画", labels.length === before);
-		await fire("agent_settled"); // 兜底停止也要恢复默认标签
-		check("E: agent_settled 兜底恢复默认标签", labels[labels.length - 1] === undefined);
+		await fire("agent_start");
+		await fire("tool_execution_start", { toolName: "bash", args: {} });
+		const last = workingMessages[workingMessages.length - 1];
+		const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+		check("E: Working 行带执行中动画帧", typeof last === "string" && frames.includes(last[0]), JSON.stringify(last));
+		check("E: Working 行保留「在等什么」信息", typeof last === "string" && last.includes("bash"));
+		check("E: 不再改写折叠思考标签", hiddenLabelCalls.length === 0);
+		await fire("agent_settled");
+		check("E: 收尾后仍不碰折叠思考标签", hiddenLabelCalls.length === 0);
 	}
 
 	await fire("session_shutdown"); // 走扩展清理路径（停探测进程 / 删在场文件）

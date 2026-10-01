@@ -104,9 +104,6 @@ const ALERT_STYLE: Record<AlertKind, { statusKey: string; titleFrames: string[];
 	},
 };
 
-/** 折叠思考标签动画：帧间隔与点数量（原 btf-think 的 400ms/4 帧） */
-const THINKING_FRAME_INTERVAL_MS = 400;
-const THINKING_FRAMES = 4;
 /** 提醒的标题栏/状态栏闪烁间隔 */
 const TITLE_INTERVAL_MS = 500;
 /** 视为「子代理」的工具名（内置 explore 与第三方 subagent 插件），完成后补一声提示音 */
@@ -258,8 +255,6 @@ export default function (pi: ExtensionAPI) {
 	let statusTimer: ReturnType<typeof setTimeout> | undefined; // HUD 动态区闪烁
 	let idleTimer: ReturnType<typeof setTimeout> | undefined; // 完成后 60s 无操作补空闲提醒
 	let workTimer: ReturnType<typeof setTimeout> | undefined; // 执行中标题转帧
-	let thinkingTimer: ReturnType<typeof setInterval> | undefined; // 折叠「Thinking」标签动画
-	let thinkingDots = 0;
 	let statusFrame = 0;
 	let frame = 0;
 	let workFrame = 0;
@@ -295,16 +290,21 @@ export default function (pi: ExtensionAPI) {
 		return pickAuxModel(ctx, []);
 	}
 
-	/** Working 行文案分层：等你 X > 等 X 完成 > 正在（廉价 AI 短语 > work > pi 默认） */
+	/**
+	 * Working 行文案分层：等你 X > 等 X 完成 > 正在（廉价 AI 短语 > work > pi 默认）。
+	 * 行首带执行中动画帧（与终端标题同一个 spinner 与 200ms 节拍）——动画显示在本扩展的
+	 * 显示位上，而不是去改 pi 的折叠思考标签（那个交回默认静态「Thinking...」）。
+	 */
 	function workingLineText(ctx: ExtensionContext): string | undefined {
+		const spinner = WORK_SPINNER_FRAMES[workFrame % WORK_SPINNER_FRAMES.length];
 		if (promptKind) {
 			const detail = promptWaitText ?? promptTitle ?? promptKindLabel(promptKind);
-			return `等你：${detail}`;
+			return `${spinner} 等你：${detail}`;
 		}
-		if (currentTool) return `等 ${currentTool} 完成…`;
-		if (stepPhrase) return `正在${stepPhrase}…`;
+		if (currentTool) return `${spinner} 等 ${currentTool} 完成…`;
+		if (stepPhrase) return `${spinner} 正在${stepPhrase}…`;
 		const work = readWork(ctx);
-		return work ? `正在${work}…` : undefined;
+		return work ? `${spinner} 正在${work}…` : `${spinner} 工作中…`;
 	}
 
 	/** 把当前分层文案推到 Working 行（agent 未运行/无 UI 时不写） */
@@ -371,30 +371,6 @@ export default function (pi: ExtensionAPI) {
 		})();
 	}
 
-	/**
-	 * 折叠思考标签动画（原 btf-think 并入本扩展）：assistant 消息流式期间
-	 * 把「Thinking」标签变成 Thinking. → Thinking.... 逐帧动画（消息级绑定，工具执行期间不空转）。
-	 * 多层兜底停止：message_end / turn_end / agent_settled 任一触发即恢复默认标签。
-	 */
-	function startThinkingAnim(ctx: ExtensionContext) {
-		if (!ctx.hasUI || typeof ctx.ui.setHiddenThinkingLabel !== "function") return;
-		stopThinkingAnim();
-		const tick = () => {
-			thinkingDots = (thinkingDots % THINKING_FRAMES) + 1;
-			ctx.ui.setHiddenThinkingLabel(`Thinking${".".repeat(thinkingDots)}`);
-		};
-		tick();
-		thinkingTimer = setInterval(tick, THINKING_FRAME_INTERVAL_MS);
-	}
-
-	function stopThinkingAnim(ctx?: ExtensionContext) {
-		if (thinkingTimer) {
-			clearInterval(thinkingTimer);
-			thinkingTimer = undefined;
-		}
-		if (ctx?.hasUI && typeof ctx.ui.setHiddenThinkingLabel === "function") ctx.ui.setHiddenThinkingLabel(); // 恢复默认标签
-	}
-
 	function clearTimers() {
 		if (titleTimer) clearInterval(titleTimer);
 		if (dismissTimer) clearTimeout(dismissTimer);
@@ -423,6 +399,7 @@ export default function (pi: ExtensionAPI) {
 		workTimer = setInterval(() => {
 			workFrame++;
 			ctx.ui.setTitle(workTitleText());
+			applyWorking(ctx); // Working 行同步转帧（同一时钟，不额外起定时器）
 		}, WORK_TITLE_INTERVAL_MS);
 	}
 
@@ -535,16 +512,8 @@ export default function (pi: ExtensionAPI) {
 		lastEndStopReason = lastStopReason(event.messages);
 	});
 
-	// 思考折叠标签动画（原 btf-think 并入）：仅在 assistant 消息流式期间显示
-	pi.on("message_start", async (event, ctx) => {
-		if (event.message.role === "assistant") startThinkingAnim(ctx);
-	});
-	pi.on("message_end", async (_event, ctx) => stopThinkingAnim(ctx));
-	pi.on("turn_end", async (_event, ctx) => stopThinkingAnim(ctx));
-
 	pi.on("agent_settled", async (_event, ctx) => {
 		agentRunning = false;
-		stopThinkingAnim(ctx); // 最终兜底：turn_end 偶发不触发时不残留动画
 		const reason = lastEndStopReason;
 		lastEndStopReason = undefined;
 		if (reason === "aborted") {
@@ -648,7 +617,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		agentRunning = false;
 		clearTimers();
-		stopThinkingAnim();
 		inputHookUnsubscribe?.();
 		inputHookUnsubscribe = undefined;
 		disposeIdleProbe();
