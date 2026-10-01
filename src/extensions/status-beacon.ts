@@ -40,6 +40,17 @@ import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Message } from "@earendil-works/pi-ai";
 import { pickAuxModel, type AnyModel } from "./shared/model-pick";
 import { pickModelViaSelector } from "./shared/model-selector";
+import {
+	claimSoundSlot,
+	computeActive,
+	computeAway,
+	disposeIdleProbe,
+	disposePresence,
+	getOsIdleMs,
+	initPresence,
+	markUserInput,
+	recentPiInputMs,
+} from "./shared/presence";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -95,10 +106,24 @@ const ALERT_STYLE: Record<AlertKind, { statusKey: string; titleFrames: string[];
 
 /** 提醒的标题栏/状态栏闪烁间隔 */
 const TITLE_INTERVAL_MS = 500;
+/** 视为「子代理」的工具名（内置 explore 与第三方 subagent 插件），完成后补一声提示音 */
+const SUBAGENT_TOOLS = new Set(["subagent", "explore", "Task"]);
 /** 完成提醒后无操作多久补一声空闲提醒（对齐 Claude idle_prompt 语义） */
 const IDLE_REMIND_MS = 60_000;
 /** 超时自动撤销提醒（用户长时间没回来就不闪了） */
 const AUTO_DISMISS_MS = 600_000;
+
+/**
+ * 提示音的「在场门控」（跨实例协调，详见 shared/presence）：
+ * - ACTIVE_IDLE_MS：手还在键盘/鼠标上（系统级空闲小于此值）→ 只闪标题不出声，不打断当前操作；
+ * - AWAY_IDLE_MS：判定「人不在」的阀值（所有 pi 实例都超过这么久无输入），
+ *   补第二声空闲提醒只在人真的不在时才响；
+ * - SOUND_DEDUPE_MS：全局去重窗口——多实例同时收尾时只有第一个出声，不再「交响乐」。
+ * 都可在 status-beacon.json 里覆盖（见 loadPresenceConfig）。
+ */
+const ACTIVE_IDLE_MS = 20_000;
+const AWAY_IDLE_MS = 5 * 60_000;
+const SOUND_DEDUPE_MS = 2_500;
 
 // ---------------------------------------------------------------------------
 // 执行中标题（全链路「进行中」段）
@@ -124,6 +149,36 @@ function loadBeaconModel(): string | undefined {
 		return typeof j.model === "string" && j.model.trim() ? j.model : undefined;
 	} catch {
 		return undefined;
+	}
+}
+
+/** 在场门控配置（status-beacon.json 可覆盖；presenceGate:false 则完全按单实例行为发声） */
+interface PresenceConfig {
+	enabled: boolean;
+	/** status-beacon.json 里用 presenceGate:false 关闭门控 */
+	presenceGate?: boolean;
+	activeIdleMs: number;
+	awayIdleMs: number;
+	dedupeMs: number;
+}
+
+function loadPresenceConfig(): PresenceConfig {
+	const fallback: PresenceConfig = {
+		enabled: true,
+		activeIdleMs: ACTIVE_IDLE_MS,
+		awayIdleMs: AWAY_IDLE_MS,
+		dedupeMs: SOUND_DEDUPE_MS,
+	};
+	try {
+		const j = JSON.parse(fs.readFileSync(BEACON_CONFIG_FILE, "utf8")) as Partial<PresenceConfig> & { presenceGate?: boolean };
+		return {
+			enabled: j.presenceGate !== false,
+			activeIdleMs: typeof j.activeIdleMs === "number" && j.activeIdleMs >= 0 ? j.activeIdleMs : ACTIVE_IDLE_MS,
+			awayIdleMs: typeof j.awayIdleMs === "number" && j.awayIdleMs >= 0 ? j.awayIdleMs : AWAY_IDLE_MS,
+			dedupeMs: typeof j.dedupeMs === "number" && j.dedupeMs >= 0 ? j.dedupeMs : SOUND_DEDUPE_MS,
+		};
+	} catch {
+		return fallback;
 	}
 }
 
@@ -223,6 +278,7 @@ export default function (pi: ExtensionAPI) {
 	let stepInFlight = false;
 	let stepLastAt = 0;
 	let beaconModel = loadBeaconModel(); // 概括模型覆盖项（provider/id）；undefined = 自动最便宜
+	let presenceCfg = loadPresenceConfig(); // 提示音在场门控（session_start 重读，便于手改配置后重启会话生效）
 
 	/** 概括用模型：手动覆盖优先（不可用时静默退自动），自动 = 最便宜已认证模型 */
 	function resolveStepModel(ctx: ExtensionContext): AnyModel | undefined {
@@ -383,13 +439,32 @@ export default function (pi: ExtensionAPI) {
 		tryNext(0);
 	}
 
+	/**
+	 * 带在场门控的提示音：手在键盘上（或本实例刚有输入）→ 只闪不出声；
+	 * 抢不到全局名额（别的实例刚响过）→ 也不出声。visual 提醒不受影响。
+	 * requireAway=true 用于「补第二声」：只有人真的不在时才响。
+	 */
+	function playSoundGated(file: string, opts: { requireAway?: boolean } = {}) {
+		if (presenceCfg.enabled) {
+			const osIdle = getOsIdleMs();
+			const piIdle = recentPiInputMs();
+			if (opts.requireAway) {
+				if (!computeAway(osIdle, piIdle, presenceCfg.awayIdleMs)) return;
+			} else if (computeActive(osIdle, piIdle, presenceCfg.activeIdleMs)) {
+				return; // 人正在操作：默认不打扰
+			}
+			if (!claimSoundSlot(presenceCfg.dedupeMs)) return; // 多实例同时收尾：只响第一声
+		}
+		playSound(file);
+	}
+
 	/** 启动（或替换）一个提醒：声音 + HUD 状态闪烁 + 标题动画 + 超时自动撤 */
 	function startAlert(kind: AlertKind, ctx: ExtensionContext, statusSuffix?: string) {
 		stopAlert(ctx);
 		stopWorkTitle(ctx, false); // 标题单通道：提醒期间执行中标题让位
 		alertKind = kind;
 		const style = ALERT_STYLE[kind];
-		playSound(SOUNDS[kind]);
+		playSoundGated(SOUNDS[kind]);
 
 		const statusText = (i: number) => style.statusFrames[i % style.statusFrames.length] + (statusSuffix ?? "");
 
@@ -411,10 +486,11 @@ export default function (pi: ExtensionAPI) {
 			}, TITLE_INTERVAL_MS);
 		}
 
-		// 完成提醒 60s 无操作 → 补一声空闲提醒（仅声音一次，不动视觉）
+		// 完成提醒 60s 后仍无人应答 → 补一声空闲提醒（仅声音一次，不动视觉；
+		// 只有人真的不在时才响，免得在场用户被打扰两次）
 		if (kind === "complete") {
 			idleTimer = setTimeout(() => {
-				if (alertKind === "complete") playSound(SOUNDS.idle);
+				if (alertKind === "complete") playSoundGated(SOUNDS.idle, { requireAway: true });
 			}, IDLE_REMIND_MS);
 		}
 
@@ -475,11 +551,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// 工具执行结束 → 回到「思考中」；子代理完成补一声提示音（中间事件，不动标题/状态），
-	// 失败交给 turn 级 error 统一收尾
+	// 失败交给 turn 级 error 统一收尾。子代理工具名随实现而异（内置 explore / 第三方 subagent）
 	pi.on("tool_execution_end", async (event, ctx) => {
 		currentTool = null;
 		applyWorking(ctx);
-		if (event.toolName === "subagent" && !event.isError) playSound(SOUNDS.subagent);
+		if (SUBAGENT_TOOLS.has(event.toolName) && !event.isError) playSoundGated(SOUNDS.subagent);
 	});
 
 	// assistant 消息完结 → 触发廉价 AI 异步概括「正在干什么」（节流，静默失败）
@@ -509,6 +585,7 @@ export default function (pi: ExtensionAPI) {
 		applyWorking(ctx);
 	});
 	pi.on("input", async (_event, ctx) => {
+		markUserInput(); // 用户提交消息：本实例在场信号
 		stopAlert(ctx);
 		return { action: "continue" };
 	});
@@ -517,26 +594,57 @@ export default function (pi: ExtensionAPI) {
 	// 例外：等待人工提醒不按键盘撤——用户需要按键回答提示本身，由 ui_prompt_end 撤。
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
+		presenceCfg = loadPresenceConfig();
+		const sid = ctx.sessionManager?.getSessionId?.() ?? `pid-${process.pid}`;
+		const project = ctx.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "";
+		initPresence(sid, project);
 		if (ctx.mode !== "tui" || inputHookUnsubscribe) return;
 		inputHookUnsubscribe = ctx.ui.onTerminalInput(() => {
+			markUserInput(); // 任何按键都算「人在」（写盘内部节流 5s）
 			if (alertKind && alertKind !== "waiting" && currentCtx) stopAlert(currentCtx);
 			return { consume: false }; // 只观察，不拦截按键
 		});
 	});
+
+	pi.on("ui_prompt_end", async () => markUserInput());
 
 	pi.on("session_shutdown", async () => {
 		agentRunning = false;
 		clearTimers();
 		inputHookUnsubscribe?.();
 		inputHookUnsubscribe = undefined;
+		disposeIdleProbe();
+		disposePresence();
 		delete (globalThis as Record<string, unknown>).__PI_STATUS_BEACON_API__;
 	});
 
-	// /beacon 命令：概括模型选择（无参官方面板 / auto / provider/id），配置持久化 status-beacon.json
+	// /beacon 命令：概括模型选择（无参官方面板 / auto / provider/id）+ status 查看在场门控
 	pi.registerCommand("beacon", {
-		description: "status-beacon：Working 行「正在干什么」概括模型（选面板 / auto / provider/id）",
+		description: "status-beacon：Working 行概括模型（无参选面板 / auto / provider/id）；/beacon status 查看提示音在场门控状态",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
+			if (arg === "status" || arg === "presence") {
+				const osIdle = getOsIdleMs();
+				const piIdle = recentPiInputMs();
+				const fmt = (ms: number) => (Number.isFinite(ms) ? `${Math.round(ms / 1000)}s` : "无");
+				const verdict = !presenceCfg.enabled
+					? "已关闭（全部提示音照常播放）"
+					: computeActive(osIdle, piIdle, presenceCfg.activeIdleMs)
+						? `人在操作（系统空闲 < ${Math.round(presenceCfg.activeIdleMs / 1000)}s）→ 只闪不出声`
+						: computeAway(osIdle, piIdle, presenceCfg.awayIdleMs)
+							? `已离开（> ${Math.round(presenceCfg.awayIdleMs / 60_000)} 分钟无输入）→ 出声提醒（含第二声）`
+							: "普通状态 → 出声提醒（第二声仅在「已离开」时补）";
+				ctx.ui.notify(
+					[
+						`在场门控：${presenceCfg.enabled ? "开" : "关"}｜当前判定：${verdict}`,
+						`系统级空闲：${osIdle == null ? "不可用（退用 pi 实例信号）" : fmt(osIdle)}｜跨实例最近输入：${fmt(piIdle)}`,
+						`提示音全局去重窗口：${presenceCfg.dedupeMs}ms（多实例同时完成只响第一声）`,
+						`阈值可在 ${BEACON_CONFIG_FILE} 改：activeIdleMs / awayIdleMs / dedupeMs / presenceGate`,
+					].join("\n"),
+					"info",
+				);
+				return;
+			}
 			if (arg === "auto") {
 				beaconModel = undefined;
 			} else if (arg) {
@@ -549,7 +657,7 @@ export default function (pi: ExtensionAPI) {
 				beaconModel = `${m.provider}/${m.id}`;
 			} else {
 				if (!ctx.hasUI) {
-					ctx.ui.notify("用法：/beacon model <provider>/<modelId> ｜ /beacon model auto", "info");
+					ctx.ui.notify("用法：/beacon（面板选模型）｜ /beacon auto ｜ /beacon <provider>/<modelId> ｜ /beacon status", "info");
 					return;
 				}
 				const picked = await pickModelViaSelector(ctx);
@@ -561,7 +669,7 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				/* 持久化失败不阻断 */
 			}
-			ctx.ui.notify(`status-beacon 概括模型：${beaconModel ?? "自动（最便宜已认证兑底）"}（已持久化）`, "info");
+			ctx.ui.notify(`status-beacon 概括模型：${beaconModel ?? "自动（最便宜已认证兜底）"}（已持久化）`, "info");
 		},
 	});
 
