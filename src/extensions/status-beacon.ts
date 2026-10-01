@@ -7,11 +7,13 @@
  *   执行中（agent_start → agent_settled）
  *     → 标题 spinner（200ms 转帧）+ 当前活动（工具执行时显示工具图标+名称，生成时显示「思考中」）+ 目录名
  *     → 如「⠋ ⌨️ bash — my_pi」；ui_prompt 阻塞时让位给等待人工提醒，应答后自动恢复
- *     → 同时接管执行中 Working 行（pi setWorkingMessage，本扩展独占写入），按「在等什么」分层：
+ *     → 同时接管执行中 Working 行（pi setWorkingMessage，本扩展独占写入；行首那支 spinner 是 pi
+ *       Working 指示器自带的，本扩展只写字），按「在等什么」分层：
  *       等人工（ui_prompt 阻塞：ask 问卷/perm-gate 复核，文本可由扩展经 __PI_STATUS_BEACON_API__ 登记）
- *       > 等工具/子代理完成 > 生成中显廉价 AI 概括的当前动作短语（message_end 触发后台异步概括，
- *       仿 perm-gate 审核的 pickAuxModel 路线；无则退注册表 work，再退 pi 默认「Working」）；
- *       run 开局重置，防上一 run 文案残留
+ *       > 等工具/子代理完成 > 思考中（**只覆盖思考块流出的那段时间**：thinking_start → thinking_end，
+ *       带廉价 AI 概括的当前动作短语 `思考中：重构 HUD…`，message_end 触发后台异步概括、
+ *       仿 perm-gate 审核的 pickAuxModel 路线；拿不到短语只显「思考中…」）
+ *       > 正在{短语}… / 正在输出…（思考已结束的内容生成与块间隙）；run 开局重置，防上一 run 文案残留
  *   任务完成（agent_settled 正常结束）→ task_complete.wav + ✅ 标题/状态栏闪烁
  *   出错终止（末条 assistant stopReason="error"）→ error.wav + ❌ 闪烁
  *   等待人工（ui_prompt_start；perm-gate 人工复核 / ask 问卷等阻塞提示）→ attention.wav + ⏳ 闪烁，
@@ -28,8 +30,9 @@
  *   打开问卷不算「等待人工」；按键不撤等待提醒（用户需要按键回答提示），由 ui_prompt_end 撤；
  * - 标题单通道所有权全在本扩展：执行中标题与提醒标题互斥（startAlert 停执行标题，
  *   stopAlert 在 agent 仍运行时恢复执行标题），避免两个动画互相覆盖；
- * - 执行中自身也是一个状态：Working 行按「等人工 > 等工具 > 思考中」分层，同一状态同步推 HUD 行 1
- *   （key=task-alert-run，「💭 思考中」/ 当前工具），收尾即撤；
+ * - 执行中自身也是一个状态：Working 行按「等人工 > 等工具 > 思考中 > 正在做什么」分层，同一状态同步推
+ *   HUD 行 1（key=task-alert-run：「💭 思考中」只在思考块流式期间，「✍️ 输出中」在正文生成期间，
+ *   工具执行时显工具名），收尾即撤；
  * - 联动走官方 setStatus 通道：三种提醒状态各用独立 key（沿用 task-alert / task-alert-wait /
  *   task-alert-error 旧 key 名，hud STATUS_STYLE 映射不变、零改动），hud 缺席自动回落原生 footer；
  * - 音频跨平台播放：Windows 用 PowerShell SoundPlayer，macOS 用 afplay，
@@ -280,6 +283,8 @@ export default function (pi: ExtensionAPI) {
 	let promptTitle: string | undefined; // ui_prompt 事件的 title（custom 类通常缺失）
 	let promptWaitText: string | undefined; // 阻塞 UI 的扩展登记的具体等待文本（ask/perm-gate）
 	let stepPhrase: string | undefined; // 廉价 AI 概括的「正在干什么」短语（生成中显示）
+	let thinking = false; // 思考块流式中——「思考」严格等于这段时间（thinking_start → thinking_end）
+	let writing = false; // 正文块流式中（思考之外的内容块生成）
 	let stepInFlight = false;
 	let stepLastAt = 0;
 	let beaconModel = loadBeaconModel(); // 概括模型覆盖项（provider/id）；undefined = 自动最便宜
@@ -296,7 +301,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Working 行文案分层：等人工 > 等工具 > 思考中（模型生成阶段，带廉价 AI 短语说明在思考什么）。
+	 * Working 行文案分层：等人工 > 等工具 > 思考中（思考块流式中）> 正在做什么（正文生成/块间隙）。
 	 * 只给文案、不自带 spinner：pi 的 Working 指示器本身就在行首转（默认盲文帧 80ms），
 	 * 再拼一个帧就是两支并排转圈。
 	 */
@@ -306,13 +311,16 @@ export default function (pi: ExtensionAPI) {
 			return `等你：${detail}`;
 		}
 		if (currentTool) return `等 ${currentTool} 完成…`;
-		return stepPhrase ? `思考中：${stepPhrase}…` : "思考中…";
+		if (thinking) return stepPhrase ? `思考中：${stepPhrase}…` : "思考中…";
+		if (stepPhrase) return `正在${stepPhrase}…`;
+		return writing ? "正在输出…" : "工作中…";
 	}
 
-	/** 执行中状态推 HUD 行 1 动态区（思考中 / 当前工具）；agent 未运行时清除 */
+	/** 执行中状态推 HUD 行 1 动态区（思考中 / 输出中 / 当前工具）；思考块之外的时间不冒充「思考中」 */
 	function applyRunStatus(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
-		ctx.ui.setStatus(RUN_STATUS_KEY, agentRunning ? (currentTool ?? "💭 思考中") : undefined);
+		const state = currentTool ?? (thinking ? "💭 思考中" : writing ? "✍️ 输出中" : undefined);
+		ctx.ui.setStatus(RUN_STATUS_KEY, agentRunning ? state : undefined);
 	}
 
 	/** 把当前分层文案推到 Working 行 + 执行中状态推 HUD（agent 未运行时只负责清状态） */
@@ -523,7 +531,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		agentRunning = false;
-		applyRunStatus(ctx); // 撤下 HUD 的「思考中 / 当前工具」（提醒状态随后接管行 1）
+		thinking = false;
+		writing = false;
+		applyRunStatus(ctx); // 撤下 HUD 的「思考中 / 输出中 / 当前工具」（提醒状态随后接管行 1）
 		const reason = lastEndStopReason;
 		lastEndStopReason = undefined;
 		if (reason === "aborted") {
@@ -562,6 +572,8 @@ export default function (pi: ExtensionAPI) {
 	// Working 行切换到「等 X 完成…」层级
 	pi.on("tool_execution_start", async (event, ctx) => {
 		currentTool = toolLabel(event.toolName);
+		thinking = false;
+		writing = false;
 		if (workTimer && currentCtx?.hasUI) currentCtx.ui.setTitle(workTitleText());
 		applyWorking(ctx);
 	});
@@ -579,12 +591,37 @@ export default function (pi: ExtensionAPI) {
 		if (!agentRunning) return;
 		const m = event.message;
 		if (m.role !== "assistant") return;
+		thinking = false;
+		writing = false;
+		applyRunStatus(ctx);
 		const text = m.content
 			.filter((b) => b.type === "text")
 			.map((b) => (b as { type: "text"; text: string }).text)
 			.join("\n")
 			.trim();
 		if (text) summarizeStep(ctx, text);
+	});
+
+	// 内容块边界 → 思考/输出状态切换。pi 把块级事件放在 message_update（thinking_start/end、
+	// text_start…），只在「块开始/结束」时改写状态，逐 token 的 delta 不触发重绘。
+	pi.on("message_update", async (event, ctx) => {
+		if (!agentRunning) return;
+		const t = event.assistantMessageEvent?.type;
+		const wasThinking = thinking;
+		const wasWriting = writing;
+		if (t === "thinking_start" || t === "thinking_delta") {
+			thinking = true;
+			writing = false;
+		} else if (t === "thinking_end" || t === "toolcall_start" || t === "toolcall_delta" || t === "done" || t === "error") {
+			thinking = false;
+			writing = false;
+		} else if (t === "text_start" || t === "text_delta") {
+			thinking = false;
+			writing = true;
+		} else {
+			return;
+		}
+		if (thinking !== wasThinking || writing !== wasWriting) applyWorking(ctx);
 	});
 
 	// 新任务开始 → 撤掉上一提醒 + 启动执行中标题
@@ -595,9 +632,11 @@ export default function (pi: ExtensionAPI) {
 		agentRunning = true;
 		currentCtx = ctx;
 		startWorkTitle(ctx);
-		// Working 行 run 开局重置：清上一 run 的工具/短语残留，先显 work 兑底
+		// Working 行 run 开局重置：清上一 run 的工具/短语残留，先退回「思考中…」
 		currentTool = null;
 		stepPhrase = undefined;
+		thinking = false;
+		writing = false;
 		applyWorking(ctx);
 	});
 	pi.on("input", async (_event, ctx) => {

@@ -198,19 +198,24 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 
 **执行中动画的位置**：终端标题的 spinner（200ms 转帧）由本扩展驱动；**Working 行行首那支转圈是 pi 指示器自带的**（默认盲文帧 80ms），本扩展只提供文案——文案里不再拼第二支 spinner。pi 的折叠思考标签不再被改写，交回默认静态 `Thinking...`。
 
-**Working 行分层**（`等人工 > 等工具 > 思考中`，模型生成阶段是一个显式状态）：
+**Working 行分层**（`等人工 > 等工具 > 思考中 > 正在做什么`）：
 | 阶段 | 文案 |
 |---|---|
 | 等你回答（问卷 / 权限复核） | `等你：回答问卷「方案确认」` |
-| 工具执行中 | `等 bash 完成…` |
-| 模型生成中（有概括短语） | `思考中：重构 HUD 余额模块…` |
-| 模型生成中（无短语） | `思考中…` |
+| 工具执行中 | `等 ⌨️ bash 完成…`（工具名带图标） |
+| 思考块流式中（有概括短语） | `思考中：重构 HUD 余额模块…` |
+| 思考块流式中（无短语） | `思考中…` |
+| 正文生成中（有概括短语） | `正在重构 HUD 余额模块…` |
+| 正文生成中（无短语） | `正在输出…` |
+| 内容块间隙 / 收尾 | `工作中…` |
 
-同一状态同步推 HUD 行 1 动态区（key `task-alert-run`：`💭 思考中` / 当前工具名），收尾即撤；优先级 58，低于通知、同步、抓取等具体活动状态。
+**「思考」的边界**：严格等于思考块流出的那段时间（`message_update` 的 `thinking_start` → `thinking_end`）。思考块结束后的正文生成算「输出」、工具执行算「等 X 完成」——思考块之外的时间不会显示「思考中」。
+
+同一状态同步推 HUD 行 1 动态区（key `task-alert-run`）：`💭 思考中`（思考块流式）/ `✍️ 输出中`（正文生成）/ 工具名（执行中），块间隙与收尾不显状态；优先级 58，低于通知、同步、抓取等具体活动状态——有具体事在发生时优先显具体事。
 
 **Ctrl+C 打断（abort）不算完成，不触发提醒**：打断后 agent-loop 的最后一条 assistant 消息 `stopReason="aborted"`，status-beacon 据此跳过。「等待人工」有 `ctx.isIdle()` 守卫：用户空闲时主动开的提示（如 `/answer` 续答问卷）不打扰。
 
-- **状态栏闪烁**：三种需要视觉的状态各用独立 key 走官方 `ctx.ui.setStatus(key, …)` 通道（`task-alert` / `task-alert-error` / `task-alert-wait` 三个 key 沿用旧名，HUD STATUS_STYLE 零改动；500ms 交替帧，本扩展自管帧切换与清除），HUD 按 `STATUS_STYLE` 映射不同颜色后在行 1 动态区闪烁。两扩展零耦合——status-beacon 不知道 hud 的存在；HUD 被禁用时状态自动回落原生 footer 第 3 行，提示退化为标题栏动画；
+- **状态栏闪烁**：三种需要视觉的状态各用独立 key 走官方 `ctx.ui.setStatus(key, …)` 通道（`task-alert` / `task-alert-error` / `task-alert-wait` 三个 key 沿用旧名（另有执行中状态 `task-alert-run`，不闪烁、agent 收尾即撤），HUD STATUS_STYLE 零改动；500ms 交替帧，本扩展自管帧切换与清除），HUD 按 `STATUS_STYLE` 映射不同颜色后在行 1 动态区闪烁。两扩展零耦合——status-beacon 不知道 hud 的存在；HUD 被禁用时状态自动回落原生 footer 第 3 行，提示退化为标题栏动画；
 - **标题单通道所有权**：执行中标题与提醒标题互斥（startAlert 停执行标题，stopAlert 在 agent 仍运行时恢复执行标题），两动画不互相覆盖；
 - **音频播放**：跨平台——Windows 用 PowerShell `Media.SoundPlayer`，macOS 用 `afplay`，Linux 依次尝试 `paplay`/`aplay`，全部不可用时退到终端响铃；任何失败都静默；
 - **标题栏动画**：终端标题同步闪烁，切到其他窗口也能看到。

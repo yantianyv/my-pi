@@ -201,9 +201,21 @@ async function bundle(entry, name) {
 		check("E: 工具执行时 HUD 行 1 显示当前工具", (statuses.get("task-alert-run") ?? "").includes("bash"), JSON.stringify(statuses.get("task-alert-run")));
 		check("E: 不再改写折叠思考标签", hiddenLabelCalls.length === 0);
 		await fire("tool_execution_end", { toolName: "bash" });
-		const idle = workingMessages[workingMessages.length - 1];
-		check("E: 工具收尾回到「思考中」", typeof idle === "string" && idle.startsWith("思考中"), JSON.stringify(idle));
-		check("E: HUD 行 1 随即回到「思考中」", statuses.get("task-alert-run") === "💭 思考中", JSON.stringify(statuses.get("task-alert-run")));
+		check("E: 工具收尾后不再冒充思考（思考块之外的间隙）", !(statuses.get("task-alert-run") ?? "").includes("思考"), JSON.stringify(statuses.get("task-alert-run")));
+
+		// 思考块边界：思考只覆盖 thinking_start → thinking_end 这段时间
+		await fire("message_update", { assistantMessageEvent: { type: "thinking_start" } });
+		check("E: 思考块开始 → HUD 显「思考中」", statuses.get("task-alert-run") === "💭 思考中", JSON.stringify(statuses.get("task-alert-run")));
+		check("E: 思考块开始 → Working 行显「思考中」", String(workingMessages[workingMessages.length - 1]).startsWith("思考中"), JSON.stringify(workingMessages[workingMessages.length - 1]));
+		await fire("message_update", { assistantMessageEvent: { type: "thinking_delta" } });
+		check("E: 思考块内多帧 delta 不改变状态", statuses.get("task-alert-run") === "💭 思考中");
+		await fire("message_update", { assistantMessageEvent: { type: "thinking_end" } });
+		check("E: 思考块结束 → 不再显「思考中」", !(statuses.get("task-alert-run") ?? "").includes("思考"), JSON.stringify(statuses.get("task-alert-run")));
+		await fire("message_update", { assistantMessageEvent: { type: "text_start" } });
+		check("E: 正文流式 → HUD 显「输出中」", statuses.get("task-alert-run") === "✍️ 输出中", JSON.stringify(statuses.get("task-alert-run")));
+		await fire("message_update", { assistantMessageEvent: { type: "toolcall_start" } });
+		check("E: 工具调用块 → 撤下输出状态", statuses.get("task-alert-run") === undefined, JSON.stringify(statuses.get("task-alert-run")));
+
 		await fire("agent_settled");
 		check("E: 收尾撤下执行中状态", !statuses.has("task-alert-run"));
 		check("E: 收尾后仍不碰折叠思考标签", hiddenLabelCalls.length === 0);
