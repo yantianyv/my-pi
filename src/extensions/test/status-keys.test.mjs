@@ -53,8 +53,18 @@ for (const file of sources(EXT_ROOT)) {
 		const key = m[1] ?? m[2];
 		if (key) pushed.set(key, rel);
 	}
-	for (const m of src.matchAll(/(?:statusKey:|STATUS_KEY\s*=\s*)\s*"([a-z][a-z0-9-]*)"/g)) {
+	// 包装函数式调用（历史盲区：webdav-kb 的 status(ctx, "kb-read", …) 不走 setStatus，
+	// 曾让 10 个键逃过检查）——凡是 `xxxStatus(ctx, "小写键"` 形态都当键处理
+	for (const m of src.matchAll(/[Ss]tatus\(\s*ctx,\s*"([a-z][a-z0-9-]*)"\s*,/g)) {
 		if (!pushed.has(m[1])) pushed.set(m[1], rel);
+	}
+	for (const m of src.matchAll(/statusKey:\s*"([a-z][a-z0-9-]*)"/g)) {
+		if (!pushed.has(m[1])) pushed.set(m[1], rel);
+	}
+	// 常量式键：RUN_STATUS_KEY / STATUS_KEY / KB_OP_KEY…（*_WIDGET_KEY 是组件键，不是状态键）
+	for (const m of src.matchAll(/([A-Z_]*KEY)\s*=\s*"([a-z][a-z0-9-]*)"/g)) {
+		if (/WIDGET/.test(m[1])) continue;
+		if (!pushed.has(m[2])) pushed.set(m[2], rel);
 	}
 }
 

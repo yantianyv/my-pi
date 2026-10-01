@@ -104,7 +104,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				const matched = sections.filter((s) => s.includes(topic));
 				if (matched.length > 0) content = matched.join("\n\n") + "\n\n（完整守则可用 kb_help 查看）";
 			}
-			status(ctx, "kb-help", "📖", 6_000);
+			status(ctx, "📖 已读使用守则", 6_000);
 			return text(content, {});
 		},
 	});
@@ -137,7 +137,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			const limit = Math.min(params.limit ?? SEARCH_LIMIT, SEARCH_LIMIT_MAX);
 			try {
 				const results = idx.search(params.query, { limit, namespace: params.namespace });
-				status(ctx, "kb-search", `🔍 ${results.length} 条`, 6_000);
+				status(ctx, `✓ 搜索 ${results.length} 条`, 6_000);
 				if (results.length === 0) {
 					return text(
 						`知识库未找到与「${params.query}」相关的内容。\n`
@@ -192,7 +192,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 						{},
 					);
 				}
-				status(ctx, "kb-read", "📖", 4_000);
+				status(ctx, "✓ 已读取笔记", 4_000);
 				const offset = Math.max(0, params.offset ?? 0);
 				if (offset >= content.length) {
 					return text(`（${params.path} 共 ${content.length} 字符，offset ${offset} 已越界，没有更多内容）`, {});
@@ -264,7 +264,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			const cfg = loadConfig(agentConfigDir());
 			try {
 				const etag = await vaultPutNote(cfg, mirror, params.path, params.content, { signal });
-				status(ctx, "kb-write", "✍️", 4_000);
+				status(ctx, "✓ 已写入笔记", 4_000);
 				return text(
 					`✓ 已写入 ${params.path}${etag ? "" : "（离线：仅本地，稍后自动同步）"}\n`
 						+ (exists ? "（覆盖已有笔记）" : "（新建）"),
@@ -307,7 +307,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			const cfg = loadConfig(agentConfigDir());
 			try {
 				await vaultPutNote(cfg, mirror, params.path, merged, { signal });
-				status(ctx, "kb-append", "➕", 4_000);
+				status(ctx, "✓ 已追加笔记", 4_000);
 				return text(`✓ 已追加 ${params.path}（共 ${merged.length} 字符）`, {});
 			} catch (e) {
 				return text(`追加失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
@@ -420,7 +420,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				await ensureRemoteDirs(client, p);
 				const { etag } = await client.put(p, data, { signal });
 				touchLfsCache(mirror, { path: p, size: data.length });
-				status(ctx, "kb-lfs", "📤", 4_000);
+				status(ctx, "✓ 已上传 LFS 文件", 4_000);
 				return text(
 					`✓ 已上传到 LFS：${p}（${formatSize(data.length)}${etag ? "" : "（etag 缺失）"}）\n`
 						+ `md 笔记里引用方式：附件路径 ${p}\n`
@@ -465,7 +465,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				}
 				fs.mkdirSync(path.dirname(dest), { recursive: true });
 				fs.writeFileSync(dest, data);
-				status(ctx, "kb-lfs", "📥", 4_000);
+				status(ctx, "✓ 已下载 LFS 文件", 4_000);
 				return text(`✓ 已下载：${dest}（${formatSize(data.length)}）`, { path: dest, size: data.length });
 			} catch (e) {
 				if (e instanceof DavError && e.status === 404) {
@@ -617,7 +617,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			const lines = [`✓ 导入完成：${stats.imported} 成功 / ${stats.skipped} 跳过 / ${stats.failed} 失败`];
 			if (skippedList.length > 0) lines.push(`跳过（${skippedList.length}）：\n  - ${skippedList.join("\n  - ")}`);
 			if (failedList.length > 0) lines.push(`失败（${failedList.length}）：\n  - ${failedList.join("\n  - ")}`);
-			status(ctx, "kb-import", "📥", 5_000);
+			status(ctx, `✓ 导入完成 ${stats.imported} 成功`, 5_000);
 			return text(lines.join("\n"), { ...stats });
 		},
 	});
@@ -667,7 +667,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				if (fs.existsSync(abs)) fs.unlinkSync(abs);
 				// 审计日志
 				appendDeleteLog(mirror, params.path);
-				status(ctx, "kb-delete", "🗑️", 4_000);
+				status(ctx, "✓ 已删除笔记", 4_000);
 				return text(`✓ 已删除：${params.path}（远端 + 本地镜像 + 账本）`, {});
 			} catch (e) {
 				return text(`删除失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
@@ -728,7 +728,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				const abs = mirrorPath(mirror, rel);
 				if (fs.existsSync(abs)) fs.unlinkSync(abs);
 				appendDeleteLog(mirror, `${params.path} → ${params.destPath}`);
-				status(ctx, "kb-move", "➡️", 4_000);
+				status(ctx, "✓ 已移动笔记", 4_000);
 				return text(`✓ 已移动：${params.path} → ${params.destPath}`, {});
 			} catch (e) {
 				return text(`移动失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
@@ -784,7 +784,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				`待上传积压：${pending > 0 ? `${pending}（离线写入未上传，下次同步补传）` : "无"}`,
 				`LFS 文件：${lfsCache.files.length}（元数据缓存，${isLfsCacheFresh(lfsCache) ? "新鲜" : "已过期，kb_lslfs force 刷新"}）`,
 			];
-			status(ctx, "kb-status", "📊", 4_000);
+			status(ctx, "✓ 已输出同步状态", 4_000);
 			return text(lines.join("\n"), { conflicts, pending });
 		},
 	});
@@ -803,16 +803,16 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
 			const cfg = loadConfig(agentConfigDir());
 			const mirror = mirrorOf();
-			status(ctx, "kb-sync", "🔄 同步中", 30_000);
+			setStatusWithTTL(ctx, "kb-sync", "🔄 同步中", 30_000);
 			try {
 				const stats = await syncAll(cfg, mirror, {
 					signal,
 					lockWaitMs: SYNC_LOCK_WAIT_MS,
-					onProgress: (label) => status(ctx, "kb-sync", `🔄 ${label}`, 30_000),
+					onProgress: (label) => setStatusWithTTL(ctx, "kb-sync", `🔄 ${label}`, 30_000),
 				});
 				const summary = formatSyncSummary(stats);
 				const notes = formatSyncNotes(stats);
-				status(ctx, "kb-sync", `✓ ${summary}`, 8_000);
+				setStatusWithTTL(ctx, "kb-sync", `✓ ${summary}`, 8_000);
 				return text(`✓ 同步完成：${summary}${notes.length ? `\n${notes.join("\n")}` : ""}`, {
 					downloaded: stats.downloaded,
 					uploaded: stats.uploaded,
@@ -910,8 +910,15 @@ function hasFrontmatter(content: string): boolean {
 	return /title\s*:/.test(m[1]) || /tags\s*:/.test(m[1]);
 }
 
-function status(ctx: ExtensionContext, key: string, icon: string, ttlMs: number): void {
-	setStatusWithTTL(ctx, key, icon, ttlMs);
+/**
+ * kb 工具回执：统一走一个状态键（kb-op），文案写清「做了什么 + 对象」——
+ * 单 emoji 的提示看不出动作（旧版 10 个键各自一个图标，且都没登记进 hud 样式表，
+ * 优先级 0 等于从不显示）。TTL 短，不抢长期状态。
+ */
+const KB_OP_KEY = "kb-op";
+
+function status(ctx: ExtensionContext, text: string, ttlMs: number): void {
+	setStatusWithTTL(ctx, KB_OP_KEY, text, ttlMs);
 }
 
 /** 删除审计：追加到镜像根 .kb-delete-log（时间/路径），失败静默 */

@@ -95,7 +95,11 @@ async function runBackgroundSync(ctx: ExtensionContext, cfg: ReturnType<typeof l
 		const summary = formatSyncSummary(stats);
 		const notes = formatSyncNotes(stats, 1);
 		push(`✓ ${summary}`, 8_000);
-		if (notes.length > 0) push(`⚠ ${notes[0].replace(/^⚠\s*/, "")}`, 12_000);
+		// 状态行只放短摘要：完整说明（冲突副本处理办法等长句）留在工具回执里
+		if (notes.length > 0) {
+			const short = notes[0].replace(/^⚠\s*/, "").split(/[：:（(]/)[0].slice(0, 24);
+			push(`⚠ ${short}`, 12_000);
+		}
 	} catch (e) {
 		if (e instanceof DavError && e.method === "SYNC_LOCKED") {
 			// 锁被占 ≠ 同步失败：另一实例正在同步，镜像读写照常可用，明示后跳过、不自动重试

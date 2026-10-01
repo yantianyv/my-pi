@@ -174,6 +174,7 @@ export default async function (pi: ExtensionAPI) {
 		"qr": { color: "accent", priority: 64 }, // 二维码生成/解码状态（qr）
 		"kb-vault": { color: "muted", priority: 62 }, // vault 解锁/锁定状态（webdav-kb）
 		"clipboard": { color: "accent", priority: 61 }, // 剪贴板读写状态（clipboard）
+		"kb-op": { color: "accent", priority: 61 }, // kb 工具回执（webdav-kb；一个键承载写读删移等动作）
 		"btw-transfer": { color: "muted", priority: 60 }, // btw 问答已附带提示（btw）
 		// 进行中·通用兜底（说不出具体在干什么时的活动态）
 		"task-alert-run": { color: "accent", priority: 58 }, // 思考中 / 输出中 / 当前工具（status-beacon）
