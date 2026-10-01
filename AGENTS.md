@@ -164,8 +164,10 @@ static/              #   静态部署物（无需编译，install.js 直接从�
   patches/            #     pi 补丁脚本
     apply-pi-ai-usage-guard.mjs     #       pi-ai usage 缺失防护补丁：模型偶发返回无 usage 的 assistant 消息导致后续调用瞬时失败；pi 升级后需重跑
     apply-zuchongzhi-zh.mjs        #       祖冲之汉化补丁：pi 无官方 i18n，直接替换 dist 编译产物硬编码英文为中文（约 730 处：dist/modes 10 文件 + pi-tui 组件 + bundle 全部 chunks）；备份带 pi 版本戳，升级后旧版备份自动废弃（防 --restore 把旧文件盖回新版 dist）；pi 升级后需重跑
-    apply-pi-launch-report.mjs     #       启动垫片取证补丁 v2：给 npm 的 pi.cmd/pi.ps1/pi 注入崩溃取证（8GB 堆 + --report-on-fatalerror；
-                                   #       ps1/sh 走 NODE_OPTIONS 环境变量，cmd 因 SETLOCAL 同行 endLocal 回收环境变量改为调用行内联 node 旗标）
+    apply-pi-launch-report.mjs     #       启动垫片取证补丁 v2：给 npm 的 pi 启动垫片注入崩溃取证（8GB 堆 + --report-on-fatalerror；
+                                   #       Windows pi.cmd/pi.ps1；POSIX 旧式 sh 垫片走 NODE_OPTIONS，cmd 因 SETLOCAL 同行 endLocal 回收环境变量改为调用行内联 node 旗标；
+                                   #       npm 11 起 POSIX 全局 bin 是符号链接（pi → 包内 dist/bundle/cli.js ESM 垫片），垫片自身改不了启动旗标，
+                                   #       补丁把它改写为 spawn wrapper：node 旗标拉起 cli-runtime.js + 信号/退出码转发 + NODE_COMPILE_CACHE 保留编译缓存）
                                    #       + stderr 追加落盘 ~/.pi/agent/pi-stderr.log + ps1 记录 [START]/[EXIT] 退出码；背景是 pi 反复无声崩溃，
                                    #       崩溃取证史（含当时的机器与退出码细节）见补丁文件头注释，不写入本文档（与环境解耦）
                                    #       ；幂等、自动清理 v1 注入；pi 升级后需重跑

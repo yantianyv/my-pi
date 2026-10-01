@@ -14,7 +14,8 @@
  *   （未入库）；换 x64 机器后该问题未复现，A/B 启动器随之废弃
  * - 若在其他机器复现同类崩溃，按本补丁的 stderr 落盘通道取证，机器细节记在各自现场，不回填仓库文档
  *
- * 本补丁给 npm 生成的 pi 三个启动垫片（pi.cmd / pi.ps1 / pi）注入：
+ * 本补丁给 npm 生成的 pi 启动垫片（Windows 的 pi.cmd / pi.ps1；POSIX 的 pi sh 垫片，或
+ * npm 11 起的符号链接目标 dist/bundle/cli.js）注入：
  * - --max-old-space-size=8192：排除 V8 堆上限 OOM
  * - --report-on-fatalerror：V8 致命错误诊断报告 → ~/.pi/agent/reports/
  * - stderr 追加落盘 → ~/.pi/agent/pi-stderr-<时间戳>.log（每次启动独立文件，避免多实例写锁；
@@ -24,12 +25,18 @@
  * 旗标注入方式：pi.cmd 的 SETLOCAL 环境在 node 调用同行的 endLocal 时被回收，
  * SET NODE_OPTIONS 走不通，故 cmd 把 node 旗标内联在调用行；ps1/sh 用进程环境变量。
  *
+ * POSIX 两种形态：
+ * - 旧式 npm sh 垫片（npm ≤10）：脚本内 export NODE_OPTIONS + 调用行尾 2>> 重定向
+ * - npm 11 起全局 bin 是符号链接（pi → 包内 dist/bundle/cli.js 的 ESM 垫片）：垫片
+ *   自身无法改启动旗标，补丁把它改写为 spawn wrapper——用 node 旗标拉起 cli-runtime.js，
+ *   子进程 stderr 落 pi-stderr.log，信号与退出码转发，NODE_COMPILE_CACHE 保留编译缓存
+ *
  * 幂等（检测到 v2 标记跳过；自动清理 v1 注入行）。pi 升级（npm i -g）会重写垫片，
  * 届时需重跑本补丁（与其他 patches 同惯例）。
  *
  * 用法：node static/patches/apply-pi-launch-report.mjs
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -100,7 +107,8 @@ try {
 		console.log(`[完成] ${cmdPath}`);
 	}
 } catch (e) {
-	console.error(`[失败] ${cmdPath}: ${e.message}`);
+	if (e.code === "ENOENT") console.log(`[跳过] ${cmdPath} 不存在（非 Windows 环境）`);
+	else console.error(`[失败] ${cmdPath}: ${e.message}`);
 }
 
 // --- pi.ps1 ---
@@ -136,16 +144,19 @@ try {
 		console.log(`[完成] ${ps1Path}`);
 	}
 } catch (e) {
-	console.error(`[失败] ${ps1Path}: ${e.message}`);
+	if (e.code === "ENOENT") console.log(`[跳过] ${ps1Path} 不存在（非 Windows 环境）`);
+	else console.error(`[失败] ${ps1Path}: ${e.message}`);
 }
 
-// --- pi (sh) ---
+// --- pi (sh：旧式垫片 / npm 11 符号链接) ---
 const shPath = join(BIN, "pi");
 try {
-	let s = stripOld(readFileSync(shPath, "utf8"));
-	if (s.includes(MARKER)) {
+	const raw = readFileSync(shPath, "utf8");
+	if (raw.includes(MARKER)) {
 		console.log(`[跳过] ${shPath} 已是 v2`);
-	} else {
+	} else if (raw.includes("case `uname` in")) {
+		// 旧式 npm sh 垫片（npm ≤10 POSIX）：在脚本内注入环境变量与 stderr 重定向
+		let s = stripOld(raw);
 		const inject = [
 			`# ${MARKER} v2: 崩溃取证（大堆+诊断报告+stderr落盘），pi 升级后重跑 static/patches/apply-pi-launch-report.mjs`,
 			`mkdir -p "${REPORT_DIR}" 2>/dev/null`,
@@ -157,9 +168,59 @@ try {
 		writeFileSync(shPath, s);
 		patched++;
 		console.log(`[完成] ${shPath}`);
+	} else {
+		// npm 11 起 POSIX 全局 bin 是符号链接（pi → 包内 dist/bundle/cli.js 的 ESM 垫片）。
+		// 垫片自身无法改启动旗标，故改写为 spawn wrapper：用 node 旗标拉起 cli-runtime.js，
+		// 并把子进程 stderr 落到 pi-stderr.log（abort 类原生栈会写在这里）。
+		const target = realpathSync(shPath);
+		const tRaw = readFileSync(target, "utf8");
+		if (tRaw.includes(MARKER)) {
+			console.log(`[跳过] ${target} 已是 v2`);
+		} else if (tRaw.includes("cli-runtime.js")) {
+			const wrapper = [
+				"#!/usr/bin/env node",
+				`// ${MARKER} v2: 崩溃取证（大堆+诊断报告+stderr落盘），pi 升级后重跑 static/patches/apply-pi-launch-report.mjs`,
+				"// 本文件是 pi 包内 bin 垫片（npm 11 POSIX 符号链接的目标），已由补丁改写为取证 wrapper。",
+				'import { spawn } from "node:child_process";',
+				'import { openSync, mkdirSync } from "node:fs";',
+				'import { homedir, tmpdir } from "node:os";',
+				'import { join } from "node:path";',
+				'import { fileURLToPath } from "node:url";',
+				"",
+				'const __pfRoot = join(homedir(), ".pi", "agent");',
+				'mkdirSync(join(__pfRoot, "reports"), { recursive: true });',
+				'const __pfErr = openSync(join(__pfRoot, "pi-stderr.log"), "a");',
+				"const __pfChild = spawn(",
+				"\tprocess.execPath,",
+				"\t[",
+				'\t\t"--max-old-space-size=8192",',
+				'\t\t"--report-on-fatalerror",',
+				'\t\t"--report-directory=" + join(__pfRoot, "reports"),',
+				'\t\tfileURLToPath(new URL("./cli-runtime.js", import.meta.url)),',
+				"\t\t...process.argv.slice(2),",
+				"\t],",
+				"\t{",
+				'\t\tstdio: ["inherit", "inherit", __pfErr],',
+				'\t\tenv: { ...process.env, NODE_COMPILE_CACHE: process.env.NODE_COMPILE_CACHE ?? join(tmpdir(), "node-compile-cache") },',
+				"\t},",
+				");",
+				'for (const __pfSig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(__pfSig, () => __pfChild.kill(__pfSig));',
+				'__pfChild.on("exit", (code, signal) => {',
+				"\tif (signal) process.kill(process.pid, signal);",
+				"\telse process.exit(code ?? 0);",
+				"});",
+				"",
+			].join("\n");
+			writeFileSync(target, wrapper);
+			patched++;
+			console.log(`[完成] ${target}（经符号链接 ${shPath}）`);
+		} else {
+			console.error(`[警告] ${shPath} 无法识别（既非旧式 sh 垫片也非 npm 11 符号链接），请人工核对`);
+		}
 	}
 } catch (e) {
-	console.error(`[失败] ${shPath}: ${e.message}`);
+	if (e.code === "ENOENT") console.log(`[跳过] ${shPath} 不存在`);
+	else console.error(`[失败] ${shPath}: ${e.message}`);
 }
 
 console.log(`\n共补丁 ${patched} 个垫片。诊断报告：${REPORT_DIR}；stderr 日志：${ERRLOG}`);
