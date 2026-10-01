@@ -362,7 +362,7 @@ const PATCHES = {
 		["Fullscreen layout is not initialized", "全屏布局尚未初始化"],
 		["Already at this point", "已在此位置"],
 		["Unknown error", "未知错误"],
-		["Thinking...", "思考中..."],
+		["Thinking...", "[思考]"],
 		["Working", "处理中"],		["Cache Re-billed:", "缓存重新计费："],
 		["Cache miss", "缓存未命中"],
 		["Changelog: ", "更新日志："],
