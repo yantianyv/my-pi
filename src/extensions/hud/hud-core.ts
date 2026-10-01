@@ -43,7 +43,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { clearStatusTimers, setStatusWithTTL } from "../shared/status";
-import { RATE_REF_DECAY, SPARK_WIDTH, sparklineBars, sparklineCells } from "./hud-spark";
+import { RATE_REF_DECAY, SPARK_WIDTH, sparkline, sparklineBars } from "./hud-spark";
 
 const execFileAsync = promisify(execFile);
 
@@ -67,7 +67,6 @@ const RATE_REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 实时汇率刷新间隔（�
 let lastRateRefresh = 0;
 const GIT_REFRESH_INTERVAL_MS = 5_000; // git 状态刷新间隔
 const LEFT_LABEL_W = 15; // 左侧标签栏固定宽度（⎇ master / [DeepSeek] / 余额 ¥x.xx）
-const CTX_SEG = 16; // 上下文段（进度条 + 百分比 + 窗口大小）恒宽，不随内容抖动
 const THINKING_LABEL: Record<string, string> = {
 	off: "off",
 	minimal: "min",
@@ -313,7 +312,7 @@ export default async function (pi: ExtensionAPI) {
 	// 速率采样环：**每轮记一次**（turn_end，此时本轮原始速率与 EMA 都已更新），一格 = 一轮。
 	// 曲线画本轮原始速率（起伏真实），均值作为基准线（颜色分档 + 📊 数字）。
 	// rateRef 是曲线的满格参考值 = 会话峰值随时间缓慢衰减（不因峰值滚出窗口而突然重缩放）。
-	const RATE_TURNS = 24; // 曲线窗口：最近 24 轮
+	const RATE_TURNS = 40; // 采样窗口（远大于图表格数，保证曲线宽度变化时都有数据）
 	const rateHistory: number[] = [];
 	let rateRef = 0;
 	const sampleRate = (): void => {
@@ -377,6 +376,13 @@ export default async function (pi: ExtensionAPI) {
 			gitTimer = setInterval(() => void refreshGitStats(ctx), GIT_REFRESH_INTERVAL_MS);
 
 			const padTo = (str: string, w: number): string => str + " ".repeat(Math.max(0, w - visibleWidth(str)));
+			// 居中：右列里的刷新时刻按列宽居中（两端留白尽量均等，余数给右侧）
+			const padCenter = (str: string, w: number): string => {
+				const len = visibleWidth(str);
+				if (len >= w) return str;
+				const left = Math.floor((w - len) / 2);
+				return " ".repeat(left) + str + " ".repeat(w - len - left);
+			};
 			// 右对齐：内容紧贴分隔线
 			const padLeft = (str: string, w: number): string => " ".repeat(Math.max(0, w - visibleWidth(str))) + str;
 
@@ -558,54 +564,46 @@ export default async function (pi: ExtensionAPI) {
 
 					const usage = ctx.getContextUsage();
 					// ctx 段固定总宽：`[bar] tail` 恒为 16 格，分割线不偏移。
-					// 百分比自适应位置：进度条空白够时嵌入空白最左侧（`[██ 20%    ] 1m`），
-					// 空白不足（进度快满）时替换尾部上下文大小（`[█████████▏] 90%`）。
-					const ctxSeg = costMod
-						? (() => {
-								const pctRaw = usage?.percent;
-								const pct = pctRaw != null ? Math.round(pctRaw) : 0;
-								const pctText = `${pct}%`;
-								const pctWidth = visibleWidth(pctText);
-								const windowText = usage?.contextWindow != null ? costMod.fmtNum(usage.contextWindow) : null;
+					// 上下文段：宽度 segW 由调用方给（= 右列宽度，跟着目录名/刷新时刻自动缩放，视觉更整齐）。
+					// 百分比自适应位置：空白够时嵌在进度条空白最左侧（`[██ 20%    ] 1m`），不够时替换尾部大小。
+					const buildCtxCell = (segW: number): string => {
+						if (!costMod) return theme.fg("warning", "用量 模块缺失");
+						const pctRaw = usage?.percent;
+						const pct = pctRaw != null ? Math.round(pctRaw) : 0;
+						const pctText = `${pct}%`;
+						const pctWidth = visibleWidth(pctText);
+						const windowText = usage?.contextWindow != null ? costMod.fmtNum(usage.contextWindow) : null;
 
-								// 无上下文窗口大小时退化为原逻辑：尾部显示百分比或 0
-								if (windowText == null) {
-									const numText = pctRaw != null ? pctText : "0";
-									const barWidth = Math.max(3, CTX_SEG - 3 - visibleWidth(numText));
-									return `[${progressBar(pct, barWidth)}] ${numText}`;
-								}
-								// 未返回百分比：空条 + 上下文大小（原样）
-								if (pctRaw == null) {
-									const barWidth = Math.max(3, CTX_SEG - 3 - visibleWidth(windowText));
-									return `[${progressBar(0, barWidth)}] ${windowText}`;
-								}
+						// 无上下文窗口大小时退化为原逻辑：尾部显示百分比或 0
+						if (windowText == null) {
+							const numText = pctRaw != null ? pctText : "0";
+							const barWidth = Math.max(3, segW - 3 - visibleWidth(numText));
+							return `[${progressBar(pct, barWidth)}] ${numText}`;
+						}
+						// 未返回百分比：空条 + 上下文大小（原样）
+						if (pctRaw == null) {
+							const barWidth = Math.max(3, segW - 3 - visibleWidth(windowText));
+							return `[${progressBar(0, barWidth)}] ${windowText}`;
+						}
 
-								const barWidth = Math.max(3, CTX_SEG - 3 - visibleWidth(windowText));
-								// 已占用格数（满格 + 半格），与 progressBar 内部计算一致
-								const total = barWidth * 8;
-								const filledCells = Math.round((pct / 100) * total);
-								const used = Math.floor(filledCells / 8) + (filledCells % 8 ? 1 : 0);
-								const empty = Math.max(0, barWidth - used);
+						const barWidth = Math.max(3, segW - 3 - visibleWidth(windowText));
+						// 已占用格数（满格 + 半格），与 progressBar 内部计算一致
+						const total = barWidth * 8;
+						const filledCells = Math.round((pct / 100) * total);
+						const used = Math.floor(filledCells / 8) + (filledCells % 8 ? 1 : 0);
+						const empty = Math.max(0, barWidth - used);
 
-								if (empty >= pctWidth + 1) {
-									// 方案 A：百分比嵌入进度条空白最左侧，尾部保留上下文大小
-									const bar = progressBar(pct, barWidth);
-									const core = bar.slice(0, bar.length - empty); // 去掉尾部空白（实体部分）
-									const rest = " ".repeat(empty - (pctWidth + 1));
-									return `[${core}${theme.fg("dim", ` ${pctText}`)}${rest}] ${windowText}`;
-								}
-								// 方案 B：进度条占满可用宽度，百分比替换尾部上下文大小
-								const barWidthB = Math.max(3, CTX_SEG - 3 - pctWidth);
-								return `[${progressBar(pct, barWidthB)}] ${pctText}`;
-							})()
-						: "";
-					// 行 2 右列：上下文条（成本模块缺失时给降级提示，不留空白）
-					const ctxCell = costMod ? ctxSeg : theme.fg("warning", "用量 模块缺失");
-
-					// ---- 行 3：账户（余额 / plan）+ 消耗统计 ----
-					// 计费徽章（挂余额行末尾）：
-					// - DeepSeek：高峰/低峰时段标签（北京时间周一至周五 9:00-12:00 / 14:00-18:00，周末全天低峰；高峰 = warning 橙黄、低峰 = success 绿）
-					// - MiMo Token Plan：夜间优惠时段（北京时间 0:00-8:00），低峰 = success 绿（0.8x 消耗）、高峰 = 正常
+						if (empty >= pctWidth + 1) {
+							// 方案 A：百分比嵌入进度条空白最左侧，尾部保留上下文大小
+							const bar = progressBar(pct, barWidth);
+							const core = bar.slice(0, bar.length - empty); // 去掉尾部空白（实体部分）
+							const rest = " ".repeat(empty - (pctWidth + 1));
+							return `[${core}${theme.fg("dim", ` ${pctText}`)}${rest}] ${windowText}`;
+						}
+						// 方案 B：进度条占满可用宽度，百分比替换尾部上下文大小
+						const barWidthB = Math.max(3, segW - 3 - pctWidth);
+						return `[${progressBar(pct, barWidthB)}] ${pctText}`;
+					};
 					const peakTag = (() => {
 						if (model?.provider === "deepseek" && costMod) {
 							const isPeak = costMod.isDeepSeekPeakHour(Date.now());
@@ -643,43 +641,56 @@ export default async function (pi: ExtensionAPI) {
 					// 行 1 中列特殊：先放速率图借来的上半行（可能为空），再右对齐状态。
 					const GAP = 2;
 					const statusText = renderStatuses();
+					// 左列宽度按内容取最大值，上限 45%（给长余额行留够——OpenCode Go 那种「月/周/5h」
+					// 三段额度能到 40+ 格；上限太紧会把余额截成 `5h 1…`）。
 					const colLeftW = Math.min(
 						Math.max(visibleWidth(left1), visibleWidth(left2), visibleWidth(left3)),
-						Math.max(10, Math.floor(width * 0.34)),
+						Math.max(24, Math.floor(width * 0.45)),
 					);
+					// 右列宽度按目录名 / 刷新时刻自动缩放（上限 40，避免长目录名吃掉中列）；
+					// 上下文条**跟着这个宽度**生成——三者同宽时右列看起来是一条整齐的竖带。
 					const colRightW = Math.min(
-						Math.max(visibleWidth(project ? "📁 " + project : ""), visibleWidth(ctxCell), visibleWidth(timeText)),
+						Math.max(12, visibleWidth(project ? `📁 ${project}` : ""), visibleWidth(timeText)),
 						Math.max(10, Math.floor(width * 0.34)),
+						40,
 					);
 					const midW = Math.max(6, width - colLeftW - GAP - 3 - colRightW);
+					const ctxCell = buildCtxCell(colRightW);
 
-					// 行 2 中列：速率柱状图（一格 = 一轮）×+ 双口径数字 🔥本轮 / 📊均值。
+					// 行 2 中列：速率柱状图（一格 = 一轮，单色）+ 🔥本轮速率。
+					// 宽度与下面那一行（消耗）等宽——两行的左边缘因此对齐（整块右对齐到竖线）。
 					// **自适应两行**：行 1 的状态右对齐、柱子贴中列左端，状态不长时柱子正上方是空的，
 					// 就把那块借来画上半行（16 档）；状态长到压过来时把位置还回去，退回单行（8 档）。
 					const rateChart = ((): { bottom: string; top: string | null } => {
 						if (!costMod) return { bottom: "", top: null };
-						const nums = `${theme.fg("muted", `🔥${fmtRate(turnRateNow)}`)} ${theme.fg("dim", `📊${rateStr}`)}`;
-						const paint = (cells: { char: string; aboveBaseline: boolean }[]): string =>
-							cells.map((c) => (c.aboveBaseline ? theme.fg("accent", c.char) : theme.fg("muted", c.char))).join("");
-						const bars = sparklineBars(rateHistory, SPARK_WIDTH, { ref: rateRef, baseline: emaRate });
-						const bottom2 = `${paint(bars.lower)} ${nums}`;
+						// 双口径数字：🔥 本轮（未平滑）+ 📊 均值（EMA）；图表本身单色，不再按均值分亮暗
+						const nums = `${theme.fg("muted", `🔥${fmtRate(turnRateNow)}`)} ${theme.fg("dim", `📊${fmtRate(emaRate)}`)}`;
+						const costW = visibleWidth(costCell);
+						const chartW = Math.max(8, Math.min(40, costW - visibleWidth(nums) - 1));
+						const paint = (bars: { lower: string; upper: string }): { bottom: string; top: string } => ({
+							bottom: theme.fg("accent", bars.lower),
+							top: theme.fg("accent", bars.upper),
+						});
+						const two = paint(sparklineBars(rateHistory, chartW, { ref: rateRef }));
+						const bottom2 = `${two.bottom} ${nums}`;
 						// 柱子上方是否放得下上半行：状态左端（中列内偏移）要在柱子右侧留出 1 格
 						const chartCol = midW - visibleWidth(bottom2);
-						if (chartCol >= 0 && midW - visibleWidth(statusText) >= chartCol + SPARK_WIDTH + 1) {
-							return { bottom: bottom2, top: " ".repeat(chartCol) + paint(bars.upper) };
+						if (chartCol >= 0 && midW - visibleWidth(statusText) >= chartCol + chartW + 1) {
+							return { bottom: bottom2, top: " ".repeat(chartCol) + two.top };
 						}
-						// 还位置：单行 8 档
-						const single = paint(sparklineCells(rateHistory, SPARK_WIDTH, { ref: rateRef, baseline: emaRate }));
+						// 还位置：单行 8 档（按同一参考值重新归一）
+						const single = theme.fg("accent", sparkline(rateHistory, chartW, { ref: rateRef }));
 						return { bottom: `${single} ${nums}`, top: null };
 					})();
 					// 有上半行就把它放在柱子正上方，状态仍右对齐；没有就退回纯状态右对齐
 					const statusCell = rateChart.top
 						? rateChart.top + " ".repeat(Math.max(0, midW - visibleWidth(rateChart.top) - visibleWidth(statusText))) + statusText
 						: padLeft(statusText, midW);
+					const projectCell = project ? padTo(theme.fg("dim", `📁 ${project}`), colRightW) : "";
 					const base = [
-						{ left: left1, middle: statusCell, right: project ? theme.fg("dim", `📁 ${project}`) : "" },
+						{ left: left1, middle: statusCell, right: projectCell },
 						{ left: left2, middle: rateChart.bottom, right: ctxCell },
-						{ left: left3, middle: costCell, right: timeText },
+						{ left: left3, middle: costCell, right: padCenter(timeText, colRightW) },
 					].map((c) => {
 						const l = padTo(truncateToWidth(c.left, colLeftW, "…"), colLeftW);
 						const m = padLeft(truncateToWidth(c.middle, midW, "…"), midW);
