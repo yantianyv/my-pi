@@ -17,9 +17,13 @@
  *     未经本会话解析的 userId 放行但附软警告
  *   · 本会话相同（目标+内容）重复发送 → 拒执，提示改用只读查询验证（防「为验证重发」事故）
  *   · 查询类结果自动附当前系统时间（时间窗一律相对此刻，防沿用对话旧日期锚点）
+ *   · 正文里的字面「反斜杠-n」自动归一为真换行（模型常把换行写成两个字符，dws 会
+ *     吃成空格导致分行静默粘连）；文件/媒体消息发出后明确回报「本条不含正文」
+ *     （--title 不显示给收件人，说明文字必须另发一条）
+ * - dws_skill（逃生舱）：消息收发之外的复杂管理操作（表格/文档/日历/审批/组织/听记等）
+ *   按需拉取官方技能正文（无参给技能索引）——技能文件不动，只是不再常驻系统提示词
  * - dws_resolve_user：包 aisearch person，单候选自动记入本会话已验证集，多候选列出并要求
- *   pick 参数确认，零候选给换维度/手机号反查的指引
- *
+ *   pick 参数确认，零候选给换维度/手机号反查的指引 *
  * 配置 ~/.pi/agent/dingtalk-bridge.json：requireAiTag（默认 true）/ blockedSkillPrefixes /
  * dwsPath / execTimeoutMs / maxOutputChars。/dws-bridge 查看状态。
  */
@@ -41,6 +45,8 @@ const LEDGER_FILE = path.join(os.homedir(), ".pi", "agent", "dingtalk-bridge-sen
 const PENDING_TTL_MS = 10 * 60_000;
 /** dws schema 摘要单层输出预算（超出提示继续下钻） */
 const SCHEMA_MAX_CHARS = 12_000;
+/** dws_skill 单次返回的技能正文上限 */
+const SKILL_MAX_CHARS = 12_000;
 
 interface BridgeConfig {
 	/** 发送内容缺【AI发送】标签时拒执（formal=true 豁免） */
@@ -54,6 +60,8 @@ interface BridgeConfig {
 	maxOutputChars: number;
 	/** 已发送台账保留时长（分钟）：期间内同内容发送被视为重复（跨会话生效） */
 	dedupMinutes: number;
+	/** 技能目录（缺省 ~/.agents/skills，dws 官方技能的规范位置） */
+	skillsDir?: string;
 }
 const DEFAULT_CONFIG: BridgeConfig = {
 	requireAiTag: true,
@@ -89,6 +97,11 @@ const QUERY_PREFIXES: string[][] = [
 ];
 /** 发送目标取值 flag（含中文姓名即拒执） */
 const TARGET_FLAGS = new Set(["--to", "--user", "--users"]);
+/** 正文类 flag（做字面 \n 归一） */
+const CONTENT_FLAGS = new Set(["--content", "--text", "--markdown"]);
+/** 文件/媒体类 flag：命中则本条消息无正文（协议层与正文互斥） */
+const MEDIA_FLAGS = new Set(["--file", "--file-path", "--media-id"]);
+const MEDIA_TYPES = new Set(["file", "image", "audio", "video"]);
 /** 签名计算时剔除的易变 flag（不影响「同一条消息」判定） */
 const VOLATILE_FLAGS = new Set(["--format", "-f", "--yes", "-y", "--timeout", "--jq", "--fields"]);
 
@@ -107,6 +120,41 @@ function flagValues(args: string[], flags: Set<string>): string[] {
 		else if (i + 1 < args.length && !args[i + 1]!.startsWith("-")) out.push(args[++i]!);
 	}
 	return out;
+}
+
+/**
+ * 字面 \n 归一：模型常把换行写成两个字符（反斜杠+n），dws/钉钉会把它吃成空格，
+ * 导致本应分行的消息静默粘成一行。意图无歧义，直接换成真换行并回报改动。
+ */
+export function normalizeContent(args: string[]): { args: string[]; fixed: number } {
+	let fixed = 0;
+	const out = args.map((a, i) => {
+		const eq = a.indexOf("=");
+		const inlineKey = eq > 0 ? a.slice(0, eq) : undefined;
+		const isInline = inlineKey !== undefined && CONTENT_FLAGS.has(inlineKey);
+		// 值形式：\"--flag 值\" 中的值是前一项为正文 flag 且自身不以 - 开头的参数
+		const isValue = !a.startsWith("-") && i > 0 && CONTENT_FLAGS.has(args[i - 1]!);
+		if (!isInline && !isValue) return a;
+		const replaced = a.replace(/(?<!\\)\\n/g, "\n");
+		if (replaced === a) return a;
+		fixed += (a.match(/(?<!\\)\\n/g) ?? []).length;
+		return replaced;
+	});
+	return { args: out, fixed };
+}
+
+/** 本条消息是否携带文件/媒体（与正文互斥：说明文字必须另发一条） */
+export function mediaKind(args: string[]): string | undefined {
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i]!;
+		const key = a.includes("=") ? a.slice(0, a.indexOf("=")) : a;
+		if (MEDIA_FLAGS.has(key)) return "file";
+		if (key === "--msg-type") {
+			const v = a.includes("=") ? a.slice(a.indexOf("=") + 1) : args[i + 1];
+			if (v && MEDIA_TYPES.has(v)) return v;
+		}
+	}
+	return undefined;
 }
 
 const hasCJK = (s: string): boolean => /[㐀-鿿豈-﫿]/.test(s);
@@ -231,9 +279,11 @@ export function decideExec(
 	// 首次发送：登记待确认草稿，回执交模型在对话里请用户审核
 	const token = createHash("sha1").update(`${sig}:${now}`).digest("hex").slice(0, 10);
 	state.pending.set(token, { sig, args: [...args], expiresAt: now + PENDING_TTL_MS });
+	const media = mediaKind(args);
 	const preview = [
 		`命令：dws ${args.join(" ")}`,
 		targets.length ? `目标：${targets.join("、")}` : null,
+		media ? `本条为${media === "file" ? "文件" : "图片/音视频"}消息：不含正文——解释文字必须另发一条文本消息（--text/--markdown/--content）` : null,
 	].filter(Boolean).join("\n");
 	return { action: "pending", token, preview };
 }
@@ -311,13 +361,39 @@ export function formatSchemaOutput(raw: string, maxChars: number): string {
 	return truncate(raw, "已到叶子或结构未识别");
 }
 
-/** 自动附加 --format json 与 -y（调用方未显式给出时） */
+/** 自动附加 --format json 与 -y（调用方未显式给出时；--dry-run 与 --yes 互斥，预览时不加 -y） */
 export function buildArgv(args: string[]): string[] {
 	const has = (...flags: string[]) => args.some((a) => flags.includes(a) || flags.some((f) => a.startsWith(`${f}=`)));
 	const out = [...args];
 	if (!has("--format", "-f")) out.push("--format", "json");
-	if (!has("--yes", "-y")) out.push("--yes");
+	if (!has("--yes", "-y") && !has("--dry-run")) out.push("--yes");
 	return out;
+}
+
+/* ============================== 技能逃生舱（复杂管理操作走原生技能） ============================== */
+
+/** 从 SKILL.md frontmatter 取 description（缺失时回落到首个非空正文行） */
+export function parseSkillDescription(md: string): string {
+	const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(md);
+	if (m) {
+		const d = /^description:\s*(.+)$/m.exec(m[1]!);
+		if (d) return d[1]!.trim().replace(/^["']|["']$/g, "");
+	}
+	for (const line of md.split(/\r?\n/)) {
+		const t = line.trim();
+		if (t && !t.startsWith("#") && !t.startsWith("---")) return t;
+	}
+	return "";
+}
+
+/** 技能索引文本（一行一个）；逃生舱的无参形态，替代被过滤的系统提示词技能清单 */
+export function formatSkillIndex(entries: { name: string; description: string }[], maxPerDesc = 160): string {
+	if (!entries.length) return "（未发现可用技能）";
+	const lines = entries.map((e) => {
+		const d = e.description.length > maxPerDesc ? `${e.description.slice(0, maxPerDesc)}…` : e.description;
+		return `- ${e.name}：${d || "（无描述）"}`;
+	});
+	return `可用技能 ${entries.length} 个（完整正文按需加载：dws_skill topic=\"<短名>\"）：\n${lines.join("\n")}`;
 }
 
 /* ============================== dws 进程执行 ============================== */
@@ -405,7 +481,11 @@ export default function (pi: ExtensionAPI) {
 			"钉钉操作（消息/日历/文档/待办/审批/表格等）已由 dingtalk-bridge 接管：dws_schema 查命令用法（无参看产品概览、逐层下钻）、dws_exec 执行（args 数组直传免转义）、dws_resolve_user 按姓名解析 userId；无需加载 dingtalk-* 技能。";
 		const g2 =
 			"dws_exec 的发送类命令（+dm/+messages-send/ding）强制两阶段：首次调用只返回草稿回执不发送，须把草稿展示给用户、经明确同意后带 confirm 重调才真发；缺【AI发送】标签或目标是中文姓名都会被拦截。";
-		if (!guidelines.includes(g1)) guidelines.push(g1, g2);
+		const g3 =
+			"消息收发之外的复杂钉钉操作（表格/文档/日历/审批/组织/听记等）先 dws_skill 拉取对应官方技能正文再照做——技能已移出系统提示词，需要时按需加载。";
+		const g4 =
+			"发钉钉消息：多行正文用真换行（写在字符串里就是换行，勿写两个字面反斜杠-n）；文件/图片消息不含正文（--title 不显示给收件人），说明文字必须另发一条文本——文件与说明分开发。";
+		if (!guidelines.includes(g1)) guidelines.push(g1, g2, g3, g4);
 	});
 
 	pi.on("session_start", () => {
@@ -452,15 +532,18 @@ export default function (pi: ExtensionAPI) {
 			formal: Type.Optional(Type.Boolean({ description: "用户明确要求的正式通知时传 true，豁免【AI发送】标签检查" })),
 		}),
 		async execute(_id, params) {
-			const args = params.args;
+			// 字面 反斜杠-n 先归一：模型常把换行写成两个字符，dws 会吃成空格导致静默粘连
+			const norm = normalizeContent(params.args);
+			const args = norm.args;
 			const decision = decideExec(args, { confirm: params.confirm, formal: params.formal }, state, cfg, Date.now());
 			if (decision.action === "block") {
 				stats.blocked++;
 				return text(`🚫 ${decision.reason}`, { kind: "blocked" });
 			}
 			if (decision.action === "pending") {
+				const fixedNote = norm.fixed ? `\n\n（正文里的 ${norm.fixed} 处字面反斜杠-n 已自动转为真换行）` : "";
 				return text(
-					`📋 草稿待确认（尚未发送）。请把以下草稿展示给用户，经明确同意后用 confirm=\"${decision.token}\" 重新调用：\n\n${decision.preview}`,
+					`📋 草稿待确认（尚未发送）。请把以下草稿展示给用户，经明确同意后用 confirm=\"${decision.token}\" 重新调用：\n\n${decision.preview}${fixedNote}`,
 					{ kind: "pending", token: decision.token },
 				);
 			}
@@ -475,9 +558,16 @@ export default function (pi: ExtensionAPI) {
 				state.sent.set(sendSignature(args), { at: Date.now(), snippet: args.join(" ").slice(0, 80) });
 				saveLedger(cfg, state);
 				stats.sent++;
+				if (norm.fixed) out += `\n\n（正文里的 ${norm.fixed} 处字面反斜杠-n 已自动转为真换行）`;
 				const unverified = flagValues(args, TARGET_FLAGS).filter((t) => !state.resolved.has(t) && !hasCJK(t));
 				if (unverified.length) {
 					out += `\n\n⚠️ 提醒：目标 ${unverified.join("、")} 未在本会话经 dws_resolve_user 验证——若 ID 来自记忆而非实时查询，请用 +search-msg 核对收件人。`;
+				}
+				const media = mediaKind(args);
+				if (media) {
+					out +=
+						`\n\n⚠️ 本条是${media === "file" ? "文件" : "媒体"}消息，已发出但**不含任何说明正文**（--title 只作文件卡标题，不在消息里显示）。` +
+						`如用户需要说明文字，请现在另发一条文本消息（--text/--markdown 或 +dm --content）；不要以为说明已随本条发出。`;
 				}
 			}
 			out = annotateQuery(args, out, new Date());
@@ -527,6 +617,57 @@ export default function (pi: ExtensionAPI) {
 			state.resolved.add(p.userId);
 			stats.resolved++;
 			return text(`✓ ${p.name || params.name}（userId: ${p.userId}）${p.extra ? `｜${p.extra}` : ""}`, { kind: "ok", userId: p.userId });
+		},
+	});
+
+	// 逃生舱：消息收发之外的复杂操作（表格/文档/日历/审批/组织等）按需拉官方技能正文
+	pi.registerTool({
+		name: "dws_skill",
+		label: "钉钉技能文档",
+		description:
+			"按需读取钉钉官方技能文档（dws postinstall 安装的 dingtalk-* 技能；插件默认把它们移出系统提示词以省上下文，这里是按需拿回的正道）。" +
+			"无 topic 时列出全部技能及一句话说明；传 topic（短名如 chat/sheet/todo，或全名 dingtalk-chat）返回该技能完整正文。" +
+			"复杂钉钉操作（表格/文档/日历/审批/组织/听记等）先拉取对应技能再照做——里面有完整命令路由与踩坑。",
+		promptSnippet: "钉钉技能文档：dws_skill([topic]) → 技能索引 / 技能正文",
+		parameters: Type.Object({
+			topic: Type.Optional(Type.String({ description: "技能短名（如 chat、sheet、todo）或全名（dingtalk-chat）；缺省列出全部技能" })),
+		}),
+		async execute(_id, params) {
+			const dir = cfg.skillsDir ?? path.join(os.homedir(), ".agents", "skills");
+			let names: string[];
+			try {
+				names = fs
+					.readdirSync(dir, { withFileTypes: true })
+					.filter((e) => e.isDirectory() || e.isSymbolicLink())
+					.map((e) => e.name)
+					.filter((n) => n.startsWith("dingtalk-"))
+					.sort();
+			} catch {
+				return text(`技能目录不可读：${dir}（可在 ~/.pi/agent/dingtalk-bridge.json 配置 skillsDir）`, { kind: "error" });
+			}
+			if (!params.topic) {
+				const entries = names.map((n) => {
+					try {
+						return { name: n, description: parseSkillDescription(fs.readFileSync(path.join(dir, n, "SKILL.md"), "utf8")) };
+					} catch {
+						return { name: n, description: "" };
+					}
+				});
+				return text(formatSkillIndex(entries));
+			}
+			const want = params.topic.trim();
+			const full = want.startsWith("dingtalk-") ? want : `dingtalk-${want}`;
+			if (!names.includes(full)) {
+				return text(`没有技能「${params.topic}」。可用：${names.map((n) => n.replace("dingtalk-", "")).join("、") || "（无）"}`, { kind: "error" });
+			}
+			const skillDir = path.join(dir, full);
+			try {
+				const md = fs.readFileSync(path.join(skillDir, "SKILL.md"), "utf8");
+				const body = md.length > SKILL_MAX_CHARS ? `${md.slice(0, SKILL_MAX_CHARS)}\n\n……（正文过长已截断）` : md;
+				return text(`${body}\n\n（技能目录：${skillDir}；references/ 下的细化文档可用 read 工具按需读取）`, { kind: "ok" });
+			} catch (e) {
+				return text(`读取技能失败：${(e as Error).message}`, { kind: "error" });
+			}
 		},
 	});
 

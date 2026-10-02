@@ -23,3 +23,6 @@ src/extensions/test/.tmp-*
 
 # explore 子代理的运行产物（渐进报告 + 单任务成果缓存）：与具体仓库内容无关，不入库
 .pi/explore/
+
+# 临时工作目录（冒烟/联调脚本产物）
+.tmp/

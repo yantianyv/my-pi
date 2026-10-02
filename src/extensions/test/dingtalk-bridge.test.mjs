@@ -42,7 +42,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, parseSkillDescription, formatSkillIndex, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -53,6 +53,8 @@ console.log("A、buildArgv 自动附加");
 	check("补 --format json 与 --yes", a.join(" ").includes("--format json") && a.includes("--yes"));
 	const b = buildArgv(["todo", "task", "list", "-f", "ndjson"]);
 	check("已有 -f 不重复附加", b.filter((x) => x === "--format").length === 0 && b.includes("ndjson"));
+	const c = buildArgv(["chat", "+messages-send", "--file", "a.pdf", "--dry-run"]);
+	check("--dry-run 时不附加 --yes（dws 要求二选一）", !c.includes("--yes") && !c.includes("-y"));
 }
 
 console.log("B、发送缺标签拦截");
@@ -166,6 +168,36 @@ console.log("M、跨会话台账防重发");
 	st.sent.set(__test__.sendSignature(SEND), { at: now, snippet: "" });
 	const d = decideExec(SEND, {}, st, CFG, now);
 	check("新会话同内容 → block", d.action === "block" && d.reason.includes("台账"));
+}
+
+console.log("N、字面反斜杠-n 归一");
+{
+	const BS = String.fromCharCode(92);
+	const r = normalizeContent(["chat", "+messages-send", "--markdown", `第一行${BS}n第二行${BS}n第三行`]);
+	check("字面 \\n 转为真换行", r.fixed === 2 && r.args[3].includes("\n") && !r.args[3].includes(`${BS}n`));
+	check("--markdown=x 内联形式也归一", normalizeContent([`chat`, `+dm`, `--content=a${BS}nb`]).fixed === 1);
+	const keep = normalizeContent(["chat", "+dm", "--content", "已经是真\n换行"]);
+	check("真换行不动", keep.fixed === 0);
+	const esc = normalizeContent(["chat", "+dm", "--content", `写代码里的${BS}${BS}n`]);
+	check("转义反斜杠（\\\\n）不动", esc.fixed === 0);
+}
+
+console.log("O、文件/媒体消息识别");
+{
+	check("--file → file", mediaKind(["chat", "+messages-send", "--file", "a.pdf"]) === "file");
+	check("--msg-type image → image", mediaKind(["chat", "+messages-send", "--msg-type", "image", "--media-id", "x"]) === "image");
+	check("纯文本 → undefined", mediaKind(["chat", "+dm", "--content", "hi"]) === undefined);
+	const d = decideExec(["chat", "+messages-send", "--as", "user", "--user", "u1", "--msg-type", "file", "--file", "a.pdf", "--content", "【AI发送】说明"], {}, newExecState(), CFG, NOW);
+	check("文件发送的草稿预览注明「不含正文」", d.action === "pending" && d.preview.includes("不含正文"));
+}
+
+console.log("P、技能逃生舱（纯函数）");
+{
+	const md = `---\nname: dingtalk-chat\ndescription: 钉钉群聊与消息。Use when 发消息。\nmetadata:\n  category: product\n---\n\n# 正文\n`;
+	check("frontmatter description 提取", parseSkillDescription(md).startsWith("钉钉群聊与消息"));
+	check("无 frontmatter 回落首个正文行", parseSkillDescription("# 标题\n这是一行说明\n") === "这是一行说明");
+	const idx = formatSkillIndex([{ name: "dingtalk-chat", description: "x".repeat(300) }, { name: "dingtalk-todo", description: "待办" }]);
+	check("索引列出技能并截断超长描述", idx.includes("dingtalk-chat") && idx.includes("dingtalk-todo") && idx.includes("…"));
 }
 
 const failed = results.filter((r) => !r.ok);

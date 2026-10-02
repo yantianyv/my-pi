@@ -62,7 +62,20 @@ await show("只读执行 todo task list", await call("dws_exec", { args: ["todo"
 
 // L2：人员解析
 const name = process.argv[2] ?? "严天宇";
-await show(`人员解析 ${name}`, await call("dws_resolve_user", { name }));
+const resolved = await call("dws_resolve_user", { name });
+await show(`人员解析 ${name}`, resolved);
+const uid = resolved.details?.userId ?? "u001";
+
+// 逃生舱：技能索引 + 按需正文
+await show("逃生舱：技能索引", await call("dws_skill", {}), 700);
+await show("逃生舱：取 dingtalk-todo 正文", await call("dws_skill", { topic: "todo" }), 400);
+
+// 字面反斜杠-n 归一：dry-run 发送（不真发）看载荷里的换行
+const BS = String.fromCharCode(92);
+const literalArgs = ["chat", "+messages-send", "--as", "user", "--user", uid, "--markdown", `【AI发送】归一化验证${BS}n第二行${BS}n第三行`, "--dry-run"];
+const normDraft = await call("dws_exec", { args: literalArgs });
+await show("字面反斜杠-n 自动归一（草稿回执）", normDraft, 500);
+if (normDraft.details?.token) await show("confirm 执行（--dry-run，不真发）", await call("dws_exec", { args: literalArgs, confirm: normDraft.details.token }), 700);
 
 // L2：发送拦截链（不真发）
 await show("发送缺【AI发送】标签", await call("dws_exec", { args: ["chat", "+dm", "--to", "u001", "--content", "明天下午三点教研会"] }));

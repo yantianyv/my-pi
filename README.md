@@ -375,9 +375,12 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
   - **中文姓名目标拒执**：强制先 `dws_resolve_user` 实时解析，严禁凭记忆硬编码 userId
   - **防重发**：相同目标+内容第二次发送直接拒——会话内存 + 跨会话台账（`~/.pi/agent/dingtalk-bridge-sent.json`，保留 `dedupMinutes` 分钟），重开会话重跑也拦得住
 - **`dws_resolve_user(name[, pick])`**：包 `aisearch person`，单候选自动确认，多候选列出后带 `pick=<userId>` 确认。
+- **`dws_skill([topic])`（逃生舱）**：消息收发之外的复杂操作（表格/文档/日历/审批/组织/听记等）按需拉取官方技能正文——无参给技能索引（14 个 + 一句话），传 topic 取完整 SKILL.md。技能文件不动，只是不再常驻系统提示词。
+- **消息发送的两处硬处理**：正文里的字面 `
+`（模型常把换行写成两个字符）自动归一为真换行——dws 会把它吃成空格导致分行静默粘连；文件/媒体消息（`--file`/`--media-id`）与正文协议层互斥，发出后工具结果明确回报「本条不含正文」（`--title` 只作文件卡标题、不显示给收件人），说明文字必须另发一条。
 - 查询类命令结果自动附**当前系统时间**（时间窗一律相对此刻推算）。
 
-配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars` / `dedupMinutes`）；`/dws-bridge` 查看状态。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 12 场景，不真实起 dws 进程）。
+配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars` / `dedupMinutes` / `skillsDir`）；`/dws-bridge` 查看状态。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 12 场景，不真实起 dws 进程）。
 
 ## pi-ai usage 缺失防护补丁（patches/apply-pi-ai-usage-guard.mjs）
 
