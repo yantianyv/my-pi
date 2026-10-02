@@ -31,6 +31,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `img-slim.ts` — 图片请求体预算：新图按类型瘦身（照片→JPEG、图形→优先 PNG、动图 WebP 转静态）+ 每轮请求前按总量预算省略最旧历史图片（防 DeepSeek 等上游 48MiB 请求体 413）（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `crash-log.ts` — 崩溃黑匣子：崩溃堆栈同步落盘 `~/.pi/agent/pi-crash.log`，`/crash-log` 报告最近一条崩溃与取证路径（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `mimo-omni.ts` — 媒体兼容层（过渡件）：`mimo_transcribe` 解析音频/视频（逐字稿或按需求解析）+ `mimo_speak` 文字合成语音，`/mimo-config` 面板配置（见下） | `~/.pi/agent/extensions/` |
 | `patches/` | 两个 pi 补丁：ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装） | `~/.pi/agent/skills/` |
@@ -337,6 +338,29 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 - **`/.history` 历史副本区**：所有文件的改动（覆盖/追加）与删除自动留档——副本存 `/.history/`、目录结构与根一致、文件名加 `_yymmddhhmmss` 后缀；同秒重名叠加 `_hash`（sha1 前 8 位），`_hash` 也重名说明是同一份内容直接跳过；**自身不递归**（`/.history` 与 `/lfs/` 下文件不备份）；`.history` 不参与 `kb_list`/`kb_search`（内容浏览不透明），恢复用 WebDAV 客户端取回副本（vault 历史为密文 `.enc`，拷回 `/vault/` 对应路径后经 kb 工具解密）；备份先落本地、账本登记、**下次同步补传远端**（延迟一轮）；`kb_move` 不备份（内容未变、只是路径变化，目标被删时仍会留档）；
 - **工具清单**：`kb_help`（守则，topic 按节筛选）/ `kb_search`（全文检索，namespace 限定）/ `kb_read`（读全文）/ `kb_write`（写/覆盖，需 overwrite:true，文本上限 50MB）/ `kb_append`（追加）/ `kb_list`（目录树，路径可不带前导 `/`）/ `kb_upload` `kb_download` `kb_lslfs`（LFS）/ `kb_move`（移动/重命名，镜像+远端+账本三方一致、vault 透明搬移）/ `kb_delete`（删除，需 confirm:true，先留 `.history` 副本再删）/ `kb_status`（同步状态）/ `kb_sync`（手动同步）/ `kb_import`（本地目录批量导入，导入后按守则重新归位）；
 - **测试**：`node src/extensions/webdav-kb/test/sync.test.mjs`（esbuild bundle + mock DAV：增量同步全场景 + `.history` 留档/命名/去重/不递归 + 空目录清理 + PROTOCOL 过滤）、`tools.test.mjs`/`search.test.mjs`/`client.test.mjs`/`crypto.test.mjs`/`panel-config.test.mjs`/`commands.test.mjs`/`lfs.test.mjs`/`panel.test.mjs`；`live-*` 为真实网盘联调脚本（不自动跑）。
+
+## 媒体兼容层（src/extensions/mimo-omni.ts）
+
+给 AI 补上「听音频 / 看视频 / 说话」三种能力，走小米 MiMo 开放平台。
+
+**为什么需要它**：pi 的消息内容类型只有 text / image，全模态模型的原生音频、视频输入暂时进不了上下文。所以这里用工具把媒体转成文字——**文字在编码场景里反而更好用**：可搜索、可引用、可编辑、可回看。这是过渡件，等 pi 支持音频内容类型后应整体撤掉。
+
+**两个工具**：
+
+- **`mimo_transcribe(path, prompt?, fps?, resolution?)`**：解析本地音频/视频（也可传公网 URL），返回逐字稿或按 `prompt` 指定的要求解析（如「提取行动项与负责人」「按时间轴分段总结」）。
+  - 音频 `wav/mp3/m4a/flac/ogg/aac/opus`；视频 `mp4/mov/avi/wmv`；视频可调 `fps`（0.1~10，默认 2）与 `media_resolution`（default/max）
+  - 本地文件走 base64，超过 45MB 提前拦截并提示改走 URL（官方上限：base64 50MB、URL 音频 100MB / 视频 300MB）
+  - 计费参考：音频约 6.25 token/秒，视频按抽帧计（fps 与分辨率越高越贵）
+- **`mimo_speak(text, voice?, out?, play?)`**：文字 → 语音 wav，默认立即播放（系统自带播放器：Windows PowerShell SoundPlayer / macOS afplay / Linux paplay，零额外依赖）。
+  - 音色：`mimo_default`、`冰糖`、`茉莉`、`苏打`、`白桦`、`Mia`、`Chloe`、`Milo`、`Dean`
+
+**配置**（`/mimo-config`）：TUI 面板逐项设置解析模型与合成音色（Esc 退出）；也可 `/mimo-config model mimo-v2.6-pro`、`/mimo-config voice 冰糖` 直接设置。配置存 `~/.pi/agent/mimo-omni.json`。
+
+**解析链的可靠性设计**：默认用最便宜的 `mimo-v2.6-flash`，实测它约有一半概率**只回思考不回正文**（返回空内容）；因此链路上做了「同一模型空正文重试一次 → 仍空则降级到 `mimo-v2.6-pro` → 再降级 `mimo-v2.5`」，并把每次尝试记录在工具结果的 details 里。追求稳定可直接 `/mimo model mimo-v2.6-pro`。
+
+**API Key**：优先取 pi 注册表的 `xiaomi` provider（`/login xiaomi` 后可用），回落 `~/.pi/agent/auth.json`，再回落环境变量 `MIMO_API_KEY`。
+
+**回归测试**：`node src/extensions/test/mimo-omni.test.mjs [音频] [视频]`（离线 18 项：类型判定、内容块构造、fps/分辨率透传、超大与格式错误拦截）；加 `MIMO_LIVE=1` 则额外用真实文件打一次 API 验证音频与视频两条路径。
 
 ## pi-ai usage 缺失防护补丁（patches/apply-pi-ai-usage-guard.mjs）
 

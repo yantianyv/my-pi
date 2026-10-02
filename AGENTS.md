@@ -100,6 +100,15 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   （只改本次请求、非破坏性，>40MB 时新图半预算温和降级）+ /img-slim 报告与开关；
                     #   背景：pi 历史图片每轮原样重发、token 估算每图仅记 1200 tokens（1M 窗口要 820 张才
                     #   触发压缩），请求体上限永远先到（实测会话 76 张/75.6MB 起连续 413、涨到 186 张/186.5MB）
+    mimo-omni.ts  #  媒体兼容层（过渡件）：.pi 消息类型只有 text/image，全模态模型的原生音频/视频输入
+                    #   还进不了上下文，故用两个工具把能力补上——mimo_transcribe（给音频/视频，返回逐字稿
+                    #   或按 prompt 要求的解析：要点/行动项/时间轴）与 mimo_speak（给文字，合成 wav，默认播放）；
+                    #   音频 wav/mp3/m4a/flac/ogg/aac/opus，视频 mp4/mov/avi/wmv（fps 0.1~10、media_resolution
+                    #   default/max）；本地文件走 base64（>45MB 提前拦截，官方上限 50MB）、公网 URL 直传；
+                    #   解析链带模型降级 + 空正文重试（便宜档 flash 实测约半数只回思考不回正文，会自动降级到
+                    #    pro/v2.5）；播放走系统自带播放器（Win PowerShell SoundPlayer / afplay / paplay），零依赖；
+                    #   /mimo-config TUI 面板设置模型与音色；等 pi 支持音频内容类型后这一层即可整体撤掉；
+                    #   test/mimo-omni.test.mjs 回归（离线 18 项 + MIMO_LIVE=1 联测真实音频/视频）
     crash-log.ts  #   崩溃黑匣子：prependListener 抢在 pi 的 uncaughtException 处理器（同步 exit）之前把堆栈
                     #   同步落盘 ~/.pi/agent/pi-crash.log（含 unhandledRejection 与 exit 码），崩溃条目与会话文件按时间配对；
                     #   用户入口：/crash-log 报告最近一条崩溃与取证路径（clear 清空），上次会话有崩溃时 session_start 提醒一次

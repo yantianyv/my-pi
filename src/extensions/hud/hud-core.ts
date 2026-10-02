@@ -162,6 +162,7 @@ export default async function (pi: ExtensionAPI) {
 		"perm-gate": { color: "warning", priority: 86 }, // 命令审核中（perm-gate）
 		"ask": { color: "accent", priority: 84 }, // 待答问卷数（ask；常年挂着，不能被活动盖掉）
 		// 进行中·具体活动（各自说清楚在干什么，短时）
+		"mimo-omni": { color: "accent", priority: 70 }, // 媒体解析/语音合成状态（mimo-omni）
 		"init": { color: "warning", priority: 80 }, // /init 进度（claude-it）
 		"balance-error": { color: "error", priority: 78 }, // 余额查询失败（后台周期探测、自行恢复，不压任务提醒）
 		"img-slim": { color: "warning", priority: 76 }, // 图片预算：本轮已省略 N 张旧图（img-slim）
