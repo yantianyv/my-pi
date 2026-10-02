@@ -42,7 +42,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, parseSkillDescription, formatSkillIndex, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, parseSkillDescription, formatSkillIndex, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -198,6 +198,21 @@ console.log("P、技能逃生舱（纯函数）");
 	check("无 frontmatter 回落首个正文行", parseSkillDescription("# 标题\n这是一行说明\n") === "这是一行说明");
 	const idx = formatSkillIndex([{ name: "dingtalk-chat", description: "x".repeat(300) }, { name: "dingtalk-todo", description: "待办" }]);
 	check("索引列出技能并截断超长描述", idx.includes("dingtalk-chat") && idx.includes("dingtalk-todo") && idx.includes("…"));
+}
+
+console.log("Q、markdown 硬换行（钉钉单换行会拼成一行）");
+{
+	const BS = String.fromCharCode(92), NL = String.fromCharCode(10);
+	const md = (c) => ["chat", "+messages-send", "--as", "user", "--user", "u1", "--markdown", c];
+	const r = normalizeContent(md("一" + BS + "n二" + BS + "n三"));
+	check("单换行补行尾双空格", r.hardBreaks === 2 && r.args[7] === "一  " + NL + "二  " + NL + "三", JSON.stringify(r.args[7]));
+	check("字面反斜杠-n 也先归一", r.fixed === 2);
+	check("空行分段不动（不叠加硬换行）", normalizeContent(md("一" + BS + "n" + BS + "n二")).hardBreaks === 0);
+	check("已有行尾双空格不重复补", normalizeContent(md("一  " + BS + "n二")).hardBreaks === 0);
+	check("+dm 的 --content 同样按 markdown 处理", normalizeContent(["chat", "+dm", "--to", "u1", "--content", "一" + BS + "n二"]).hardBreaks === 1);
+	const txt = normalizeContent(["chat", "+messages-send", "--as", "user", "--user", "u1", "--text", "一" + BS + "n二"]);
+	check("--text 不做硬换行（但会提示）", txt.hardBreaks === 0 && hasMultilineText(txt.args));
+	check("--text 单行不提示", !hasMultilineText(["chat", "+messages-send", "--text", "一行"]));
 }
 
 const failed = results.filter((r) => !r.ok);

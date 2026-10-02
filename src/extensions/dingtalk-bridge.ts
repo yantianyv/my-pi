@@ -123,24 +123,66 @@ function flagValues(args: string[], flags: Set<string>): string[] {
 }
 
 /**
- * 字面 \n 归一：模型常把换行写成两个字符（反斜杠+n），dws/钉钉会把它吃成空格，
- * 导致本应分行的消息静默粘成一行。意图无歧义，直接换成真换行并回报改动。
+ * 字面 \n 归一 + markdown 硬换行：
+ * · 模型常把换行写成两个字符（反斜杠+n），dws/钉钉会把它吃成空格；
+ * · 钉钉客户端 markdown 单换行被当段落内空格拼成一行（--text 同样拼行），需行尾双空格硬换行
+ *   （实测：markdown+行尾双空格分行且紧凑；空行分段也可但行距偏松）。
+ * 两者意图都无歧义，直接改并回报处数。
  */
-export function normalizeContent(args: string[]): { args: string[]; fixed: number } {
+export function normalizeContent(args: string[]): { args: string[]; fixed: number; hardBreaks: number } {
 	let fixed = 0;
+	let hardBreaks = 0;
+	const markdownBody = isMarkdownBody(args);
 	const out = args.map((a, i) => {
 		const eq = a.indexOf("=");
 		const inlineKey = eq > 0 ? a.slice(0, eq) : undefined;
 		const isInline = inlineKey !== undefined && CONTENT_FLAGS.has(inlineKey);
-		// 值形式：\"--flag 值\" 中的值是前一项为正文 flag 且自身不以 - 开头的参数
+		// 值形式："--flag 值" 中的值是前一项为正文 flag 且自身不以 - 开头的参数
 		const isValue = !a.startsWith("-") && i > 0 && CONTENT_FLAGS.has(args[i - 1]!);
 		if (!isInline && !isValue) return a;
-		const replaced = a.replace(/(?<!\\)\\n/g, "\n");
-		if (replaced === a) return a;
-		fixed += (a.match(/(?<!\\)\\n/g) ?? []).length;
-		return replaced;
+		const flag = isInline ? inlineKey! : args[i - 1]!;
+		const head = isInline ? a.slice(0, eq + 1) : "";
+		let value = isInline ? a.slice(eq + 1) : a;
+		const replaced = value.replace(/(?<!\\)\\n/g, "\n");
+		if (replaced !== value) {
+			fixed += (value.match(/(?<!\\)\\n/g) ?? []).length;
+			value = replaced;
+		}
+		// 硬换行只对 markdown 类正文（--markdown；+dm 的 --content）生效
+		if (markdownBody && (flag === "--markdown" || flag === "--content") && value.includes("\n")) {
+			const lines = value.split("\n");
+			value = lines
+				.map((line, k) => {
+					if (k === lines.length - 1) return line;
+					if (line === "" || lines[k + 1] === "") return line; // 已是段落分隔
+					if (/\s\s$/.test(line)) return line; // 已有硬换行
+					hardBreaks++;
+					return `${line}  `;
+				})
+				.join("\n");
+		}
+		return head + value;
 	});
-	return { args: out, fixed };
+	return { args: out, fixed, hardBreaks };
+}
+
+/** 本次发送是否 markdown 正文（--markdown 任意命令；+dm 的 --content 也支持 Markdown） */
+export function isMarkdownBody(args: string[]): boolean {
+	const hasFlag = (f: string) => args.some((a) => a === f || a.startsWith(`${f}=`));
+	if (hasFlag("--markdown")) return true;
+	return args[0] === "chat" && args[1] === "+dm" && hasFlag("--content");
+}
+
+/** 纯文本 --text 多行会在钉钉客户端拼成一行（需改用 --markdown） */
+export function hasMultilineText(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i]!;
+		const inline = a.startsWith("--text=");
+		if (!inline && a !== "--text") continue;
+		const v = inline ? a.slice(7) : (args[i + 1] ?? "");
+		if (v.includes("\n")) return true;
+	}
+	return false;
 }
 
 /** 本条消息是否携带文件/媒体（与正文互斥：说明文字必须另发一条） */
@@ -541,7 +583,14 @@ export default function (pi: ExtensionAPI) {
 				return text(`🚫 ${decision.reason}`, { kind: "blocked" });
 			}
 			if (decision.action === "pending") {
-				const fixedNote = norm.fixed ? `\n\n（正文里的 ${norm.fixed} 处字面反斜杠-n 已自动转为真换行）` : "";
+				const notes = [
+					norm.fixed ? `正文里的 ${norm.fixed} 处字面反斜杠-n 已转为真换行` : "",
+					norm.hardBreaks ? `${norm.hardBreaks} 处换行已补 markdown 行尾双空格（钉钉单换行会拼成一行）` : "",
+					hasMultilineText(args) ? "纯文本 --text 的多行在钉钉会拼成一行，建议改用 --markdown" : "",
+				].filter(Boolean);
+				const fixedNote = notes.length ? `
+
+（${notes.join("；")}）` : "";
 				return text(
 					`📋 草稿待确认（尚未发送）。请把以下草稿展示给用户，经明确同意后用 confirm=\"${decision.token}\" 重新调用：\n\n${decision.preview}${fixedNote}`,
 					{ kind: "pending", token: decision.token },
@@ -558,7 +607,14 @@ export default function (pi: ExtensionAPI) {
 				state.sent.set(sendSignature(args), { at: Date.now(), snippet: args.join(" ").slice(0, 80) });
 				saveLedger(cfg, state);
 				stats.sent++;
-				if (norm.fixed) out += `\n\n（正文里的 ${norm.fixed} 处字面反斜杠-n 已自动转为真换行）`;
+				const sentNotes = [
+					norm.fixed ? `正文里的 ${norm.fixed} 处字面反斜杠-n 已转为真换行` : "",
+					norm.hardBreaks ? `${norm.hardBreaks} 处换行已补 markdown 行尾双空格（钉钉单换行会拼成一行）` : "",
+					hasMultilineText(args) ? "纯文本 --text 的多行在钉钉会拼成一行——本次可能已粘连，需要多行请改用 --markdown" : "",
+				].filter(Boolean);
+				if (sentNotes.length) out += `
+
+（${sentNotes.join("；")}）`;
 				const unverified = flagValues(args, TARGET_FLAGS).filter((t) => !state.resolved.has(t) && !hasCJK(t));
 				if (unverified.length) {
 					out += `\n\n⚠️ 提醒：目标 ${unverified.join("、")} 未在本会话经 dws_resolve_user 验证——若 ID 来自记忆而非实时查询，请用 +search-msg 核对收件人。`;
