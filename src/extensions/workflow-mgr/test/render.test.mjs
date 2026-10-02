@@ -48,6 +48,7 @@ function makePi() {
 		tools: [],
 		commands: {},
 		events: {},
+		sent: [],
 		registerTool(t) {
 			this.tools.push(t);
 		},
@@ -56,6 +57,9 @@ function makePi() {
 		},
 		on(ev, cb) {
 			this.events[ev] = cb;
+		},
+		sendUserMessage(content, options) {
+			this.sent.push({ content, options });
 		},
 	};
 }
@@ -79,6 +83,12 @@ function makeCtx(cwd, captures = {}) {
 			},
 			custom: async (fn) => {
 				captures.custom = fn;
+				// 未指定按键驱动时直接 resolve undefined（保持旧行为，兼容场景 F 的手动构造）
+				if (!captures.customKeys) return undefined;
+				return await new Promise((resolve) => {
+					const comp = fn(null, themeMock, {}, resolve);
+					for (const k of captures.customKeys) comp.handleInput(k);
+				});
 			},
 			select: async (title, options) => {
 				captures.select = { title, options };
@@ -991,8 +1001,16 @@ async function scenarioR() {
 	const r7 = await st.execute("8", {}, undefined, undefined, ctxB);
 	check("有其他活跃绑定会话时新会话不自动绑定", r7.details?.kind === "error" && r7.content[0].text.includes("尚未选择工作流"));
 
-	// 8. TUI 弹窗路径：多槽时 session_start 弹选择框——选「新建」+ 输入名称 → 绑定新槽
-	const dir3 = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
+	// 8. TUI 弹窗路径：多槽时 session_start 弹选择浮窗——数字直选「新建」+ 输入名称 → 绑定新槽
+	const dir3 = makeFixture(DEFAULT_WORKFLOW_FIXTURE, {
+		schemaVersion: 1,
+		updatedAt: new Date().toISOString(),
+		currentTaskId: "0.1",
+		tasks: { "0.1": { status: "todo" }, "0.2": { status: "todo" }, "1.1": { status: "todo" }, "1.2": { status: "todo" } },
+		milestones: {},
+		notes: [],
+		log: [],
+	});
 	const beta3 = join(dir3, ".pi", "workflow", "slots", "beta");
 	mkdirSync(beta3, { recursive: true });
 	writeFileSync(
@@ -1002,12 +1020,23 @@ async function scenarioR() {
 	);
 	const caps8 = {};
 	const ctx8 = makeCtx(dir3, caps8);
-	caps8.selectAnswer = "＋ 新建工作流…";
+	caps8.customKeys = ["5"]; // 数字直选第 5 项 = ＋ 新建工作流…（1 暂不启用 2 resume 3 default 4 beta 5 新建）
 	caps8.inputAnswer = "gamma";
 	await fireEvent(pi, ctx8, "session_start");
-	check("多槽 TUI：session_start 弹出选择框（首位默认=暂不启用，后跟各槽+新建）",
-		caps8.select?.options[0].startsWith("暂不启用") && caps8.select.options.some((o) => o.startsWith("default")) && caps8.select.options.includes("＋ 新建工作流…"));
-	check("新建名称经 input 收集", caps8.input !== undefined);
+	check("多槽 TUI：session_start 弹出自绘选择浮窗", typeof caps8.custom === "function");
+	// 渲染断言：通用/工作流分组 + 边框 + 默认高亮 + 行宽
+	const comp8 = caps8.custom(null, themeMock, {}, () => {});
+	const lines8 = comp8.render(70);
+	check("选择浮窗圆角边框", lines8[0].includes("╭") && lines8[lines8.length - 1].includes("╰"));
+	check("通用操作与实际工作流分区呈现", lines8.some((l) => l.includes("通用")) && lines8.some((l) => l.includes("工作流（2）")));
+	check("分区之间含分隔线", lines8.some((l) => l.includes("───")));
+	check("暂不启用默认高亮（▶）", lines8.some((l) => l.includes("▶") && l.includes("暂不启用")));
+	check("槽位行带进度摘要", lines8.some((l) => l.includes("default")) && lines8.some((l) => l.includes("进度")));
+	check(
+		"浮窗行宽 ≤ 70",
+		lines8.map((l) => visibleWidth(l)).every((w) => w <= 70),
+	);
+	check("新建名称经 input 收集", caps8.input !== undefined && caps8.inputAnswer === "gamma");
 	const bound8 = JSON.parse(readFile(join(dir3, ".pi", "workflow", "bindings.json")));
 	check("选择「新建 gamma」后绑定落盘", bound8.sessions["test-sid"]?.slot === "gamma");
 	check("新建空槽 notify 引导规划", caps8.notify?.text.includes("gamma"));
@@ -1025,9 +1054,10 @@ async function scenarioR() {
 	);
 	const caps9 = {};
 	const ctx9 = makeCtx(dir4, caps9);
+	caps9.customKeys = ["\x1b"]; // Esc = 暂不启用（与旧选择框语义一致）
 	await fireEvent(pi, ctx9, "session_start");
 	const bound9 = JSON.parse(readFile(join(dir4, ".pi", "workflow", "bindings.json")));
-	check("弹窗 Esc 视同暂不启用", caps9.select !== undefined && caps9.notify?.text.includes("暂不启用"));
+	check("浮窗 Esc 视同暂不启用", typeof caps9.custom === "function" && caps9.notify?.text.includes("暂不启用"));
 	check("暂不启用绑定值为 auto（不占槽位）", bound9.sessions["test-sid"]?.slot === "auto");
 	const r9 = await st.execute("10", {}, undefined, undefined, ctx9);
 	check("auto 态工具拒绝并说明由 AI 判断是否使用",
@@ -1041,6 +1071,48 @@ async function scenarioR() {
 	const inject9b = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx9);
 	check("自行 bind 后恢复注入", inject9b.systemPrompt?.includes("【工作流】"));
 
+	// 9b. 选择「从 resume 中加载」→ 不写本会话绑定、派发 /wf-resume 命令（内部入口）
+	const dirR = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
+	const betaR = join(dirR, ".pi", "workflow", "slots", "beta");
+	mkdirSync(betaR, { recursive: true });
+	writeFileSync(
+		join(betaR, "workflow.json"),
+		JSON.stringify({ schemaVersion: 1, stages: [{ id: "s0", name: "贝塔", goal: "", tasks: [{ id: "0.1", title: "贝塔任务", desc: "", humanTasks: [], aiTasks: [], deliverable: "", doneSignal: "", deps: [] }] }] }),
+		"utf8",
+	);
+	const capsR = {};
+	const ctxR = makeCtx(dirR, capsR);
+	capsR.customKeys = ["2"]; // 数字直选第 2 项 = 从 resume 中加载会话
+	await fireEvent(pi, ctxR, "session_start");
+	check("选择 resume 后派发 /wf-resume 命令（expandPromptTemplates）",
+		pi.sent.some((m) => m.content === "/wf-resume" && m.options?.expandPromptTemplates === true));
+	const boundR = existsSync(join(dirR, ".pi", "workflow", "bindings.json"))
+		? JSON.parse(readFile(join(dirR, ".pi", "workflow", "bindings.json")))
+		: { sessions: {} };
+	check("选择 resume 不写本会话绑定（留给恢复流程决定）", !boundR.sessions["test-sid"]);
+
+	// 9c. resume 恢复绑定：被恢复会话绑定过 beta → session_start 直接命中（不弹选择框、面板用 beta）
+	writeFileSync(
+		join(dirR, ".pi", "workflow", "bindings.json"),
+		JSON.stringify({ schemaVersion: 1, sessions: { "sid-resumed": { slot: "beta", at: Date.now() } } }),
+		"utf8",
+	);
+	const capsR2 = {};
+	const ctxR2 = makeCtx(dirR, capsR2);
+	ctxR2.sessionManager = { getSessionId: () => "sid-resumed" };
+	await fireEvent(pi, ctxR2, "session_start");
+	check("resume：被恢复会话命中自己的绑定（不弹选择浮窗）", capsR2.custom === undefined && capsR2.select === undefined);
+	const rR = await st.execute("8r", {}, undefined, undefined, ctxR2);
+	check("resume：工作流作用于绑定槽（贝塔任务）", rR.details?.kind !== "error" && rR.content[0].text.includes("贝塔任务"));
+
+	// 9d. /wf-resume 命令注册 + 非 TUI 回落
+	check("注册了 /wf-resume 命令", !!pi.commands["wf-resume"]);
+	const capsNR = {};
+	const ctxNR = makeCtx(dirR, capsNR);
+	ctxNR.mode = "print";
+	await pi.commands["wf-resume"].handler("", ctxNR);
+	check("/wf-resume 非 TUI 回落提示", capsNR.notify?.text.includes("交互界面"));
+
 	// 10. bind auto（非 TUI 路径：AI 用 ask 问卷问到「暂不启用」后落盘）
 	await wf.execute("11", { action: "bind", slot: "auto" }, undefined, undefined, ctx9);
 	const bound10 = JSON.parse(readFile(join(dir4, ".pi", "workflow", "bindings.json")));
@@ -1052,6 +1124,7 @@ async function scenarioR() {
 	rmSync(dir2, { recursive: true, force: true });
 	rmSync(dir3, { recursive: true, force: true });
 	rmSync(dir4, { recursive: true, force: true });
+	rmSync(dirR, { recursive: true, force: true });
 }
 
 /* ============================== 主流程 ============================== */
