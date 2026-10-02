@@ -42,7 +42,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, parseSkillDescription, formatSkillIndex, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, parseSkillDescription, formatSkillIndex, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -213,6 +213,34 @@ console.log("Q、markdown 硬换行（钉钉单换行会拼成一行）");
 	const txt = normalizeContent(["chat", "+messages-send", "--as", "user", "--user", "u1", "--text", "一" + BS + "n二"]);
 	check("--text 不做硬换行（但会提示）", txt.hardBreaks === 0 && hasMultilineText(txt.args));
 	check("--text 单行不提示", !hasMultilineText(["chat", "+messages-send", "--text", "一行"]));
+}
+
+console.log("R、发送入口覆盖与群名拦截");
+{
+	const st = newExecState();
+	const g1 = decideExec(["chat","+send-to-group","--group","教研组长群","--markdown","【AI发送】通知"], {}, st, CFG, NOW);
+	check("+send-to-group 纳入两阶段（群名先拦）", g1.action === "block" && g1.reason.includes("+chat-search"));
+	const g2 = decideExec(["chat","+send-to-group","--group","cid123","--markdown","通知没标签"], {}, st, CFG, NOW);
+	check("群发同样受【AI发送】标签约束", g2.action === "block" && g2.reason.includes("【AI发送】"));
+	const g3 = decideExec(["chat","+send-to-group","--group","cid123","--markdown","【AI发送】通知"], {}, st, CFG, NOW);
+	check("cid + 标签 → 草稿待确认", g3.action === "pending");
+	const b1 = decideExec(["chat","+messages-send-by-bot","--robot-code","rc","--groups","cidA","--text","没标签"], {}, st, CFG, NOW);
+	check("机器人发群受标签约束", b1.action === "block");
+	const d1 = decideExec(["ding","+send-personal","--to","u1","--content","没标签"], {}, st, CFG, NOW);
+	check("ding +send-personal 纳入拦截", d1.action === "block");
+	const w1 = decideExec(["chat","+messages-send-card","--as","user","--group","cidX","--markdown","【AI发送】卡片"], {}, st, CFG, NOW);
+	check("卡片消息纳入拦截", w1.action === "pending");
+}
+
+console.log("S、DING 提醒方式警示");
+{
+	const st = newExecState();
+	check("默认 app", dingChannel(["ding","+send-personal","--to","u1"]) === "app");
+	check("识别短信", dingChannel(["ding","+send-personal","--type","sms"]) === "sms");
+	check("识别电话（内联写法）", dingChannel(["ding","message","send-personal","--type=call"]) === "call");
+	check("非 DING 命令不误判", dingChannel(["chat","+dm","--type","sms"]) === undefined);
+	const d = decideExec(["ding","+send-personal","--to","u1","--type","sms","--content","【AI发送】催办"], {}, st, CFG, NOW);
+	check("草稿预览含费用警示", d.action === "pending" && d.preview.includes("实际费用"));
 }
 
 const failed = results.filter((r) => !r.ok);

@@ -83,10 +83,15 @@ function loadConfig(): BridgeConfig {
 
 /** 发送类命令前缀（argv 前几项匹配即命中）：命中即走两阶段 + 标签 + 防重发全套校验 */
 const SEND_PREFIXES: string[][] = [
-	["chat", "+dm"],
-	["chat", "+messages-send"],
-	["ding", "message", "send-by-message"],
-	["ding", "message", "send-personal"],
+	["chat", "+dm"], // 按姓名/ID 发单聊
+	["chat", "+send-to-group"], // 按群名/ID 发群消息
+	["chat", "+messages-send"], // 统一发送入口（user/bot/webhook，含多群）
+	["chat", "+messages-send-by-bot"], // 机器人发群
+	["chat", "+messages-send-by-webhook"], // Webhook 机器人发群
+	["chat", "+messages-send-card"], // 卡片消息
+	["ding", "+send-personal"], // 本人身份发 DING
+	["ding", "message", "send-by-message"], // 转原消息为 DING
+	["ding", "message", "send-personal"], // 新写内容发 DING
 ];
 /** 查询类命令前缀：结果前自动附当前系统时间 */
 const QUERY_PREFIXES: string[][] = [
@@ -97,6 +102,8 @@ const QUERY_PREFIXES: string[][] = [
 ];
 /** 发送目标取值 flag（含中文姓名即拒执） */
 const TARGET_FLAGS = new Set(["--to", "--user", "--users"]);
+/** 群目标 flag：值可能是中文群名（同名群/改群名都会发错）——同样要求解析成 openConversationId */
+const GROUP_FLAGS = new Set(["--group", "--chat-id"]);
 /** 正文类 flag（做字面 \n 归一） */
 const CONTENT_FLAGS = new Set(["--content", "--text", "--markdown"]);
 /** 文件/媒体类 flag：命中则本条消息无正文（协议层与正文互斥） */
@@ -120,6 +127,17 @@ function flagValues(args: string[], flags: Set<string>): string[] {
 		else if (i + 1 < args.length && !args[i + 1]!.startsWith("-")) out.push(args[++i]!);
 	}
 	return out;
+}
+
+/** DING 提醒方式（app 免费应用内 / sms 短信 / call 电话——后者产生真实费用与打扰） */
+export function dingChannel(args: string[]): string | undefined {
+	if (!(args[0] === "ding" && (args[1] === "+send-personal" || (args[1] === "message" && args[2] === "send-personal")))) return undefined;
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i]!;
+		if (a.startsWith("--type=")) return a.slice(7);
+		if (a === "--type") return args[i + 1];
+	}
+	return "app";
 }
 
 /**
@@ -173,8 +191,7 @@ export function isMarkdownBody(args: string[]): boolean {
 	return args[0] === "chat" && args[1] === "+dm" && hasFlag("--content");
 }
 
-/** 纯文本 --text 多行会在钉钉客户端拼成一行（需改用 --markdown） */
-export function hasMultilineText(args: string[]): boolean {
+/** 纯文本 --text 多行会在钉钉客户端拼成一行（需改用 --markdown） */export function hasMultilineText(args: string[]): boolean {
 	for (let i = 0; i < args.length; i++) {
 		const a = args[i]!;
 		const inline = a.startsWith("--text=");
@@ -199,7 +216,21 @@ export function mediaKind(args: string[]): string | undefined {
 	return undefined;
 }
 
-const hasCJK = (s: string): boolean => /[㐀-鿿豈-﫿]/.test(s);
+const hasCJK = (s: string): boolean => /[㐀-鿿豈-﫿]/.test(s);
+
+/** 取 flag→值 配对（报错文案需区分是姓名还是群名） */
+function flagPairs(args: string[], flags: Set<string>): { flag: string; value: string }[] {
+	const out: { flag: string; value: string }[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i]!;
+		const eq = a.indexOf("=");
+		const key = eq > 0 ? a.slice(0, eq) : a;
+		if (!flags.has(key)) continue;
+		if (eq > 0) out.push({ flag: key, value: a.slice(eq + 1) });
+		else if (i + 1 < args.length && !args[i + 1]!.startsWith("-")) out.push({ flag: key, value: args[++i]! });
+	}
+	return out;
+}
 
 export interface ExecState {
 	/** 本会话经 dws_resolve_user 验证过的 userId */
@@ -295,6 +326,15 @@ export function decideExec(
 				"请先用 dws_resolve_user 实时解析，多候选时与用户确认后再发。",
 		};
 	}
+	const cjkGroup = flagPairs(args, GROUP_FLAGS).find((p) => hasCJK(p.value));
+	if (cjkGroup) {
+		return {
+			action: "block",
+			reason:
+				`发送目标群「${cjkGroup.value}」是群名而非 openConversationId，已拦截（同名群、改群名都会发错）。` +
+				"请先解析成稳定 ID：dws_exec [\"chat\", \"+chat-search\", \"--query\", \"<群名>\"]，再用 --group <openConversationId> 发送。",
+		};
+	}
 
 	const sig = sendSignature(args);
 	if (state.sent.has(sig)) {
@@ -322,9 +362,11 @@ export function decideExec(
 	const token = createHash("sha1").update(`${sig}:${now}`).digest("hex").slice(0, 10);
 	state.pending.set(token, { sig, args: [...args], expiresAt: now + PENDING_TTL_MS });
 	const media = mediaKind(args);
+	const channel = dingChannel(args);
 	const preview = [
 		`命令：dws ${args.join(" ")}`,
 		targets.length ? `目标：${targets.join("、")}` : null,
+		channel && channel !== "app" ? `⚠️ 本条为${channel === "sms" ? "短信" : "电话"} DING：会产生实际费用与强打扰（默认 app 应用内 DING 免费）——确认前先与用户核对是否必要` : null,
 		media ? `本条为${media === "file" ? "文件" : "图片/音视频"}消息：不含正文——解释文字必须另发一条文本消息（--text/--markdown/--content）` : null,
 	].filter(Boolean).join("\n");
 	return { action: "pending", token, preview };
