@@ -1,0 +1,224 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-10-02T13:39:47.749Z",
+  "currentTaskId": null,
+  "tasks": {
+    "0.1": {
+      "status": "done",
+      "doneAt": "2026-10-02T10:31:32.209Z"
+    },
+    "0.2": {
+      "status": "done",
+      "doneAt": "2026-10-02T10:30:39.833Z"
+    },
+    "1.1": {
+      "status": "done",
+      "doneAt": "2026-10-02T10:31:39.589Z"
+    },
+    "1.2": {
+      "status": "done",
+      "doneAt": "2026-10-02T10:34:14.970Z"
+    },
+    "2.1": {
+      "status": "doing",
+      "startedAt": "2026-10-02T10:34:14.970Z"
+    },
+    "2.2": {
+      "status": "todo"
+    },
+    "3.1": {
+      "status": "todo"
+    },
+    "3.2": {
+      "status": "todo"
+    }
+  },
+  "milestones": {},
+  "notes": [
+    {
+      "id": "n1",
+      "ts": "2026-10-02T10:11:50.837Z",
+      "content": "MiMo API 关键事实：base_url=https://api.xiaomimimo.com/v1（OpenAI 兼容，MIMO_API_KEY）。ASR=mimo-v2.5-asr（chat.completions + input_audio，wav/mp3 base64 ≤10MB，asr_options.language=zh/auto/en，¥0.5/h）。TTS=mimo-v2.5-tts（stream=True + audio={format:pcm16,voice:...}，delta.audio.data base64 流式返回，24kHz PCM16LE mono；限时免费 0 Credit；预置音色：冰糖/茉莉（女）、苏打/白桦（男）、Mia/Chloe/Milo/Dean（英文）；目标文本放 assistant 消息，风格指令放 user 消息）。不走 mimo-v2-omni（绕开 pi agent 能力）",
+      "key": "mimo-api"
+    },
+    {
+      "id": "n2",
+      "ts": "2026-10-02T10:29:17.790Z",
+      "content": "语音测试约定：凡是需要用户出声/收听的测试，必须先播放 TTS 语音提示（如「测试开始，请说话」）再开始采集——用户在 pi TUI 里看不到测试何时开始（上次测试时用户正在用别的语音输入法，测试白跑）。daemon 的 --test-asr/--test-vad 已内置提示音",
+      "key": "voice-test-protocol"
+    },
+    {
+      "id": "n3",
+      "ts": "2026-10-02T10:34:14.971Z",
+      "content": "语音体验调优反馈（实测）：① 判停 640ms 偏短，用户一句话中的犹豫/停顿被切成多段（「好像成功了…呃…测不到」被切 3 段）→ 考虑 SILENCE_FRAMES_END 提到 ~28（900ms）或做自适应；② 说完后没有即时反馈，用户不确定「它听到我说完了没有」→ 进入 transcribing 时可播放轻提示音或状态提示；③ VAD 必须用 silero v5.1.2 模型（v6 图在 onnxruntime ARM64 上 LSTM 维度崩溃，v5 逐帧概率干净 max=0.99）",
+      "key": "voice-tuning"
+    },
+    {
+      "id": "n4",
+      "ts": "2026-10-02T11:14:20.931Z",
+      "content": "voice-call 架构 v2（用户拍板）：语音层独立成旁支对话（同构 btw：runAgentLoop + createPiStreamFn + pickAuxModel 廉价模型，独立小上下文 24 条上限），识别结果/语音问答全程不进主会话；主会话回复不再播报；/voice handoff 把语音对话经小模型润色后发给主会话。崩溃修复：PortAudio 流单线程独占（跨线程 abort 在骁龙 ARM 上 0xC0000005 崩溃，实测），打断只置标志位由播放线程自己收尾",
+      "key": "voice-arch",
+      "supersededBy": "n5"
+    },
+    {
+      "id": "n5",
+      "ts": "2026-10-02T12:15:20.000Z",
+      "content": "语音层架构 v4（定稿）：ASR 整层删除——daemon 直接上报音频段（pcm16 base64），小米全模态模型直接听音频（识别错误不下传、语气可用）；DeepSeek 与 pi 模型通道全部移除，语音层/转写/转正判断/润色全走 MiMo（api.xiaomimimo.com，OpenAI 兼容，key 取注册表 xiaomi provider → auth.json）。关键参数：thinking:{type:\"disabled\"}（实测首字 1.1s vs 开启 8.7s）；转写与转正判断挪到回答后的后台元信息调用（META_SYSTEM_PROMPT，输出「转录：…」+「转正：需要/不需要」），不占用户等待。价格（每百万 token 输入/输出）：flash $0.14/$0.28，pro $0.435/$0.87，pro-ultraspeed $4.35/$8.70（10×，用户明确禁止做默认）。实测首字（发布期拥堵）：flash 30~120s（排队）、pro 11s、ultraspeed 1.1s。默认模型 flash，/voice model 弹官方选择面板可换",
+      "key": "voice-arch"
+    },
+    {
+      "id": "n6",
+      "ts": "2026-10-02T12:32:10.601Z",
+      "content": "语音层待办需求（从语音记录捞回，待用户确认细节）：① 状态认知——语音层需知道主会话的对话摘要/结构/每句话开头（即主会话在干什么、聊到哪），对应「项目简报 + 结果回流」方案；② 接入 Beacon——status-beacon 有提示音且记录「用户离开/提醒状态」，用户后半句「当…做的时候也应该认为用户…」被截断，需补完；③ HUD 去重——用户 20:21:02 提「重复的文本不需要插入到 HUD 里面」，具体指哪处重复待确认（该条转正已发出但未在会话中看到）",
+      "key": "voice-pending-reqs",
+      "supersededBy": "n7"
+    },
+    {
+      "id": "n7",
+      "ts": "2026-10-02T12:38:41.670Z",
+      "content": "语音层待办需求：① 状态认知（语音层要知道主会话摘要/结构/每句话开头）——待做；② Beacon 接入——用户后半句「当…做的时候也应该认为用户…」被截断，仍待用户补完；③ HUD 去重——已澄清=识别文本不在 HUD 显示（已完成，仅内部用于转正载荷）；另：已修「主会话忙时转正消息被静默丢弃」bug（改用 deliverAs followUp）",
+      "key": "voice-pending-reqs"
+    }
+  ],
+  "log": [
+    {
+      "ts": "2026-10-02T10:11:50.837Z",
+      "event": "note_add",
+      "taskId": "n1",
+      "msg": "MiMo API 关键事实：base_url=https://api.xiaomimimo.com/v1（OpenAI 兼容，MIMO_API_KEY）。ASR=mimo-v2.5-asr（chat.completions + input_audio，wav/mp3 base64 ≤10MB，asr_options.language=zh/auto/en，¥0.5/h）。TTS=mimo-v2.5-tts（stream=True + audio={format:pcm16,voice:...}，delta.audio.data base64 流式返回，24kHz PCM16LE mono；限时免费 0 Credit；预置音色：冰糖/茉莉（女）、苏打/白桦（男）、Mia/Chloe/Milo/Dean（英文）；目标文本放 assistant 消息，风格指令放 user 消息）。不走 mimo-v2-omni（绕开 pi agent 能力）"
+    },
+    {
+      "ts": "2026-10-02T10:11:56.331Z",
+      "event": "task_blocked",
+      "taskId": "0.1",
+      "msg": "0.1: 等待用户注册 MiMo 开放平台并提供 API Key"
+    },
+    {
+      "ts": "2026-10-02T10:12:01.378Z",
+      "event": "task_done",
+      "taskId": "0.1",
+      "msg": "注册 MiMo 开放平台获取 API Key"
+    },
+    {
+      "ts": "2026-10-02T10:12:01.378Z",
+      "event": "task_start",
+      "taskId": "0.2",
+      "msg": "搭建 Python 语音环境并验证音频链路"
+    },
+    {
+      "ts": "2026-10-02T10:12:16.120Z",
+      "event": "task_rollback",
+      "taskId": "0.1",
+      "msg": "0.1 → todo"
+    },
+    {
+      "ts": "2026-10-02T10:12:21.977Z",
+      "event": "task_blocked",
+      "taskId": "0.1",
+      "msg": "0.1: 等待用户注册 MiMo 开放平台并提供 API Key"
+    },
+    {
+      "ts": "2026-10-02T10:14:30.442Z",
+      "event": "task_done",
+      "taskId": "0.2",
+      "msg": "搭建 Python 语音环境并验证音频链路"
+    },
+    {
+      "ts": "2026-10-02T10:14:30.442Z",
+      "event": "task_start",
+      "taskId": "0.1",
+      "msg": "注册 MiMo 开放平台获取 API Key"
+    },
+    {
+      "ts": "2026-10-02T10:14:48.732Z",
+      "event": "task_rollback",
+      "taskId": "0.2",
+      "msg": "0.2 → doing"
+    },
+    {
+      "ts": "2026-10-02T10:29:17.790Z",
+      "event": "note_add",
+      "taskId": "n2",
+      "msg": "语音测试约定：凡是需要用户出声/收听的测试，必须先播放 TTS 语音提示（如「测试开始，请说话」）再开始采集——用户在 pi TUI 里看不到测试何时开始（上次测试时用户正在用别的语音输入法，测试白跑）。daemon 的 --test-asr/--test-vad 已内置提示音"
+    },
+    {
+      "ts": "2026-10-02T10:30:39.833Z",
+      "event": "task_done",
+      "taskId": "0.2",
+      "msg": "搭建 Python 语音环境并验证音频链路"
+    },
+    {
+      "ts": "2026-10-02T10:31:12.444Z",
+      "event": "task_start",
+      "taskId": "0.1",
+      "msg": "注册 MiMo 开放平台获取 API Key"
+    },
+    {
+      "ts": "2026-10-02T10:31:32.209Z",
+      "event": "task_done",
+      "taskId": "0.1",
+      "msg": "注册 MiMo 开放平台获取 API Key"
+    },
+    {
+      "ts": "2026-10-02T10:31:32.209Z",
+      "event": "task_start",
+      "taskId": "1.1",
+      "msg": "voice_daemon.py：采集 + VAD + ASR"
+    },
+    {
+      "ts": "2026-10-02T10:31:39.589Z",
+      "event": "task_done",
+      "taskId": "1.1",
+      "msg": "voice_daemon.py：采集 + VAD + ASR"
+    },
+    {
+      "ts": "2026-10-02T10:31:39.589Z",
+      "event": "task_start",
+      "taskId": "1.2",
+      "msg": "voice_daemon.py：流式 TTS + 播放 + 打断"
+    },
+    {
+      "ts": "2026-10-02T10:34:14.970Z",
+      "event": "task_done",
+      "taskId": "1.2",
+      "msg": "voice_daemon.py：流式 TTS + 播放 + 打断"
+    },
+    {
+      "ts": "2026-10-02T10:34:14.970Z",
+      "event": "task_start",
+      "taskId": "2.1",
+      "msg": "voice-call.ts 扩展主体"
+    },
+    {
+      "ts": "2026-10-02T10:34:14.971Z",
+      "event": "note_add",
+      "taskId": "n3",
+      "msg": "语音体验调优反馈（实测）：① 判停 640ms 偏短，用户一句话中的犹豫/停顿被切成多段（「好像成功了…呃…测不到」被切 3 段）→ 考虑 SILENCE_FRAMES_END 提到 ~28（900ms）或做自适应；② 说完后没有即时反馈，用户不确定「它听到我说完了没有」→ 进入 transcribing 时可播放轻提示音或状态提示；③ VAD 必须用 silero v5.1.2 模型（v6 图在 onnxruntime ARM64 上 LSTM 维度崩溃，v5 逐帧概率干净 max=0.99）"
+    },
+    {
+      "ts": "2026-10-02T11:14:20.931Z",
+      "event": "note_add",
+      "taskId": "n4",
+      "msg": "voice-call 架构 v2（用户拍板）：语音层独立成旁支对话（同构 btw：runAgentLoop + createPiStreamFn + pickAuxModel 廉价模型，独立小上下文 24 条上限），识别结果/语音问答全程不进主会话；主会话回复不再播报；/voice handoff 把语音对话经小模型润色后发给主会话。崩溃修复：PortAudio 流单线程独占（跨线程 abort 在骁龙 ARM 上 0xC0000005 崩溃，实测），打断只置标志位由播放线程自己收尾"
+    },
+    {
+      "ts": "2026-10-02T12:15:20.000Z",
+      "event": "note_add",
+      "taskId": "n5",
+      "msg": "语音层架构 v4（定稿）：ASR 整层删除——daemon 直接上报音频段（pcm16 base64），小米全模态模型直接听音频（识别错误不下传、语气可用）；DeepSeek 与 pi 模型通道全部移除，语音层/转写/转正判断/润色全走 MiMo（api.xiaomimimo.com，OpenAI 兼容，key 取注册表 xiaomi provider → auth.json）。关键参数：thinking:{type:\"disabled\"}（实测首字 1.1s vs 开启 8.7s）；转写与转正判断挪到回答后的后台元信息调用（META_SYSTEM_PROMPT，输出「转录：…」+「转正：需要/不需要」），不占用户等待。价格（每百万 token 输入/输出）：flash $0.14/$0.28，pro $0.435/$0.87，pro-ultraspeed $4.35/$8.70（10×，用户明确禁止做默认）。实测首字（发布期拥堵）：flash 30~120s（排队）、pro 11s、ultraspeed 1.1s。默认模型 flash，/voice model 弹官方选择面板可换"
+    },
+    {
+      "ts": "2026-10-02T12:32:10.601Z",
+      "event": "note_add",
+      "taskId": "n6",
+      "msg": "语音层待办需求（从语音记录捞回，待用户确认细节）：① 状态认知——语音层需知道主会话的对话摘要/结构/每句话开头（即主会话在干什么、聊到哪），对应「项目简报 + 结果回流」方案；② 接入 Beacon——status-beacon 有提示音且记录「用户离开/提醒状态」，用户后半句「当…做的时候也应该认为用户…」被截断，需补完；③ HUD 去重——用户 20:21:02 提「重复的文本不需要插入到 HUD 里面」，具体指哪处重复待确认（该条转正已发出但未在会话中看到）"
+    },
+    {
+      "ts": "2026-10-02T12:38:41.670Z",
+      "event": "note_add",
+      "taskId": "n7",
+      "msg": "语音层待办需求：① 状态认知（语音层要知道主会话摘要/结构/每句话开头）——待做；② Beacon 接入——用户后半句「当…做的时候也应该认为用户…」被截断，仍待用户补完；③ HUD 去重——已澄清=识别文本不在 HUD 显示（已完成，仅内部用于转正载荷）；另：已修「主会话忙时转正消息被静默丢弃」bug（改用 deliverAs followUp）"
+    }
+  ],
+  "archiveStatus": "放弃：实时语音交互方向被证伪（级联架构天花板 + 语音与编码工作精度/节奏错配），外壳已全部砍掉，仅保留 MiMo 媒体调用内核并重做为 mimo-media 工具层（media_transcribe / media_speak）"
+}

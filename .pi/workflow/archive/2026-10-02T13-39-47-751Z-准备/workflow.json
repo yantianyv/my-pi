@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "mode": "human-ai",
+  "stages": [
+    {
+      "id": "prep",
+      "name": "准备",
+      "goal": "拿到 MiMo API 凭证，备齐 Python 语音依赖与麦克风环境",
+      "tasks": [
+        {
+          "id": "0.1",
+          "title": "注册 MiMo 开放平台获取 API Key",
+          "desc": "用小米账号登录 platform.xiaomimimo.com，创建 API Key，交给 AI 配置（环境变量 MIMO_API_KEY 或本地配置文件，不入库）",
+          "humanTasks": [
+            "登录 https://platform.xiaomimimo.com/ 创建 API Key",
+            "把 Key 发给 AI 或自行写入约定位置"
+          ],
+          "aiTasks": [
+            "告知 Key 的存放约定与验证方法"
+          ],
+          "deliverable": "可用的 MIMO_API_KEY",
+          "doneSignal": "用 Key 调用 MiMo TTS 简单请求返回 200",
+          "deps": []
+        },
+        {
+          "id": "0.2",
+          "title": "搭建 Python 语音环境并验证音频链路",
+          "desc": "安装 sounddevice/numpy/openai 等依赖，验证麦克风采集与扬声器播放可用",
+          "humanTasks": [],
+          "aiTasks": [
+            "pip install sounddevice numpy openai（VAD 选型 silero-vad/onnxruntime 按安装可行性定）",
+            "写脚本验证录音 5 秒并回放"
+          ],
+          "deliverable": "音频采集与播放验证通过",
+          "doneSignal": "脚本录音回放成功，无驱动报错",
+          "deps": []
+        }
+      ]
+    },
+    {
+      "id": "daemon",
+      "name": "语音守护进程",
+      "goal": "独立 Python 进程负责音频链路：采集→VAD→ASR→事件；TTS 文本→流式合成→播放→可打断",
+      "tasks": [
+        {
+          "id": "1.1",
+          "title": "voice_daemon.py：采集 + VAD + ASR",
+          "desc": "sounddevice 采集 16kHz 单声道；VAD 本地判停切段；整段 wav 上传 MiMo ASR；识别文本以 JSON 行输出到 stdout",
+          "humanTasks": [],
+          "aiTasks": [
+            "采集+VAD 状态机（说话中/判停/打断检测）",
+            "对接 MiMo ASR",
+            "stdout JSON 事件协议：utterance/interrupt/state"
+          ],
+          "deliverable": "可独立运行的 voice_daemon.py",
+          "doneSignal": "命令行下对麦克风说话，stdout 输出正确识别文本",
+          "deps": [
+            "0.1",
+            "0.2"
+          ]
+        },
+        {
+          "id": "1.2",
+          "title": "voice_daemon.py：流式 TTS + 播放 + 打断",
+          "desc": "stdin 接收文本（按句）；MiMo TTS 流式 pcm16 边收边播；收到 interrupt 或检测到用户开口立即停播并清空队列",
+          "humanTasks": [],
+          "aiTasks": [
+            "TTS 流式请求与 pcm16 拼接播放",
+            "播放期 VAD 监听用户开口触发 barge-in",
+            "命令协议：speak/flush/stop"
+          ],
+          "deliverable": "TTS 播报可被用户开口打断",
+          "doneSignal": "播报长文本时对麦克风说话，播放 1 秒内停止并上报 interrupt 事件",
+          "deps": [
+            "1.1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "extension",
+      "name": "pi 扩展调度层",
+      "goal": "voice-call 扩展：/voice 开关、文本注入对话、回复流式喂 TTS、打断联动、状态展示",
+      "tasks": [
+        {
+          "id": "2.1",
+          "title": "voice-call.ts 扩展主体",
+          "desc": "/voice 启停；spawn daemon 并 IPC；utterance 经 sendUserMessage 注入；assistant 输出按句切分喂 daemon；turn 结束 flush；daemon 经 install.js 部署",
+          "humanTasks": [],
+          "aiTasks": [
+            "扩展骨架与 daemon 生命周期管理",
+            "utterance → sendUserMessage 注入",
+            "按句流式喂 TTS（代码块/路径降级策略）",
+            "install.js 部署 daemon 到 ~/.pi/agent/voice-call/"
+          ],
+          "deliverable": "pi 内 /voice 开启后可全程语音对话",
+          "doneSignal": "在 pi 里说一句问题，听到语音回答，聊天记录同步出现文字",
+          "deps": [
+            "1.2"
+          ]
+        },
+        {
+          "id": "2.2",
+          "title": "打断联动与状态展示",
+          "desc": "interrupt 时中止当前 turn；语音各状态推 HUD 行；/voice 配置项：音色、语速、风格",
+          "humanTasks": [],
+          "aiTasks": [
+            "interrupt → 中止生成 + 停播",
+            "setStatus 推送语音状态（STATUS_STYLE 登记）",
+            "/voice 配置项"
+          ],
+          "deliverable": "对话可随时语音打断，状态可见",
+          "doneSignal": "播报中开口，生成中止、播放停止、HUD 显示已打断",
+          "deps": [
+            "2.1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "polish",
+      "name": "联调与收尾",
+      "goal": "端到端延迟测量与体验调优，沉淀文档",
+      "tasks": [
+        {
+          "id": "3.1",
+          "title": "端到端实测与调优",
+          "desc": "测量「说完→开声」全链路延迟并压到 ≤3s；连续对话 10 轮稳定性",
+          "humanTasks": [
+            "实际佩戴耳机/使用麦克风体验并反馈问题"
+          ],
+          "aiTasks": [
+            "延迟埋点与统计",
+            "VAD 判停时长/灵敏度调参",
+            "常见问题修复"
+          ],
+          "deliverable": "延迟数据 + 可日常使用的语音模式",
+          "doneSignal": "全链路延迟 ≤3s，连续 10 轮对话无卡死",
+          "deps": [
+            "2.2"
+          ]
+        },
+        {
+          "id": "3.2",
+          "title": "文档与提交",
+          "desc": "README 增补 voice-call 用法与依赖说明，AGENTS.md 目录结构同步，中文 conventional commit",
+          "humanTasks": [],
+          "aiTasks": [
+            "更新 README.md / AGENTS.md",
+            "git commit"
+          ],
+          "deliverable": "文档与提交完成",
+          "doneSignal": "commit 入库，文档与实际行为一致",
+          "deps": [
+            "3.1"
+          ]
+        }
+      ]
+    }
+  ]
+}
