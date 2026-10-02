@@ -118,6 +118,8 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   查询结果附当前时间锚点；字面 \n 归一 + 多行自动补 markdown 行尾双空格硬换行
                     #   （钉钉单换行会拼成一行）、文件/媒体消息回报「本条不含正文」
                     #   （--title 不显示给收件人））/ dws_resolve_user（aisearch 人员解析，多候选 pick 确认）/
+                    #   dws_resolve_group（chat +chat-search 群解析，同名群强制用 cid）/ 撤回命令同样两阶段
+                    #   + 防重复撤回 / 发送后给 openTaskId 与只读核验命令 / --file 存在性预检 /
                     #   dws_skill（逃生舱：复杂管理操作按需拉取官方技能正文，无参给索引）；
                     #   配置 ~/.pi/agent/dingtalk-bridge.json；test/dingtalk-bridge.test.mjs 回归（纯函数 12 场景）
     crash-log.ts  #   崩溃黑匣子：prependListener 抢在 pi 的 uncaughtException 处理器（同步 exit）之前把堆栈

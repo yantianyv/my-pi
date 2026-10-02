@@ -93,6 +93,15 @@ const SEND_PREFIXES: string[][] = [
 	["ding", "message", "send-by-message"], // 转原消息为 DING
 	["ding", "message", "send-personal"], // 新写内容发 DING
 ];
+/** 撤回类命令：破坏性但可再发；同样要过两阶段确认 + 防重复撤回 */
+const RECALL_PREFIXES: string[][] = [
+	["chat", "+messages-recall"],
+	["chat", "+messages-recall-by-bot"],
+	["chat", "+messages-batch-recall-by-bot"],
+	["ding", "+recall-personal"],
+];
+/** 撤回目标 flag */
+const RECALL_ID_FLAGS = new Set(["--msg-id", "--message-id", "--msg-ids", "--message-ids"]);
 /** 查询类命令前缀：结果前自动附当前系统时间 */
 const QUERY_PREFIXES: string[][] = [
 	["chat", "+search-msg"],
@@ -235,12 +244,14 @@ function flagPairs(args: string[], flags: Set<string>): { flag: string; value: s
 export interface ExecState {
 	/** 本会话经 dws_resolve_user 验证过的 userId */
 	resolved: Set<string>;
+	/** 本会话经 dws_resolve_group 解析过的 openConversationId */
+	resolvedGroups: Set<string>;
 	/** 待确认草稿：token → 签名/参数/过期时刻 */
 	pending: Map<string, { sig: string; args: string[]; expiresAt: number }>;
 	/** 已发送签名 → 首次发送时刻与摘要 */
 	sent: Map<string, { at: number; snippet: string }>;
 }
-export const newExecState = (): ExecState => ({ resolved: new Set(), pending: new Map(), sent: new Map() });
+export const newExecState = (): ExecState => ({ resolved: new Set(), resolvedGroups: new Set(), pending: new Map(), sent: new Map() });
 
 /** 已发送台账条目（跨会话防重发） */
 export interface LedgerEntry {
@@ -303,6 +314,29 @@ export function decideExec(
 	cfg: Pick<BridgeConfig, "requireAiTag">,
 	now: number,
 ): ExecDecision {
+	// 撤回：同样两阶段 + 防重复撤回（msgId 决定撤回哪条，错一个字符就撤错消息）
+	const recallIds = flagValues(args, RECALL_ID_FLAGS);
+	if (matchPrefix(args, RECALL_PREFIXES) && recallIds.length) {
+		const sig = `recall:${recallIds.join(",")}`;
+		if (state.sent.has(sig)) {
+			return { action: "block", reason: `消息 ${recallIds.join("、")} 已在本会话或近期撤回，未重复执行。` };
+		}
+		if (opts.confirm) {
+			const p = state.pending.get(opts.confirm);
+			if (p && p.sig === sig && p.expiresAt > now) {
+				state.pending.delete(opts.confirm);
+				return { action: "run" };
+			}
+			return { action: "block", reason: "确认标记无效或已过期（草稿 10 分钟有效）。请重新发起并让用户再次确认。" };
+		}
+		const token = createHash("sha1").update(`${sig}:${now}`).digest("hex").slice(0, 10);
+		state.pending.set(token, { sig, args: [...args], expiresAt: now + PENDING_TTL_MS });
+		const preview = [
+			`命令：dws ${args.join(" ")}`,
+			`将撤回消息：${recallIds.join("、")}（撤回后双方均不可见，不可恢复）`,
+		].join("\n");
+		return { action: "pending", token, preview };
+	}
 	if (!matchPrefix(args, SEND_PREFIXES)) return { action: "run" };
 
 	const labelOk =
@@ -404,6 +438,51 @@ export function parsePeople(text: string): { userId: string; name: string; extra
 	};
 	walk(data);
 	return [...found.values()];
+}
+
+/** 从 contact +me 输出取本人身份（发后核验命令需要「自己姓名」作 --sender） */
+export function parseSelf(text: string): { name: string; userId: string } | null {
+	try {
+		const found = parsePeopleLike(JSON.parse(text), (o) => typeof o.userId === "string" && typeof o.name === "string");
+		return found.length ? { name: String(found[0]!.name), userId: String(found[0]!.userId) } : null;
+	} catch {
+		return null;
+	}
+}
+
+/** 从 chat +chat-search 输出提取群候选（openConversationId 为稳定 ID） */
+export function parseGroups(text: string): { cid: string; name: string; extra: string }[] {
+	try {
+		const out = parsePeopleLike(JSON.parse(text), (o) => typeof o.openConversationId === "string");
+		return out.map((o) => ({
+			cid: String(o.openConversationId),
+			name: typeof o.name === "string" ? o.name : typeof o.title === "string" ? o.title : "",
+			extra: [o.memberCount !== undefined ? `${o.memberCount} 人` : "", typeof o.groupType === "string" ? o.groupType : ""].filter(Boolean).join("/"),
+		}));
+	} catch {
+		return [];
+	}
+}
+
+/** 递归收集满足谓词的对象（仅取 userId/name 等稳定字段，不猜层级） */
+function parsePeopleLike(v: unknown, pred: (o: Record<string, unknown>) => boolean): Record<string, unknown>[] {
+	const out: Record<string, unknown>[] = [];
+	const walk = (x: unknown): void => {
+		if (Array.isArray(x)) return x.forEach(walk);
+		if (typeof x !== "object" || x === null) return;
+		const o = x as Record<string, unknown>;
+		if (pred(o)) out.push(o);
+		Object.values(o).forEach(walk);
+	};
+	walk(v);
+	// 按 openConversationId/userId 去重
+	const seen = new Set<string>();
+	return out.filter((o) => {
+		const k = String(o.openConversationId ?? o.userId ?? "");
+		if (seen.has(k)) return false;
+		seen.add(k);
+		return true;
+	});
 }
 
 /** dws schema --compact 输出整层摘要：产品层列产品一句话，产品详情层列工具一行一个，叶子层原样 */
@@ -531,6 +610,20 @@ function runDws(cfg: BridgeConfig, args: string[]): Promise<RunResult> {
 	});
 }
 
+let cachedSelf: { name: string; userId: string } | null | undefined;
+
+/** 本人身份（惰性获取并缓存）：发后核验命令需要自己的姓名作 --sender */
+async function whoAmI(cfg: BridgeConfig): Promise<{ name: string; userId: string } | null> {
+	if (cachedSelf !== undefined) return cachedSelf;
+	try {
+		const r = await runDws(cfg, ["contact", "+me", "--format", "json"]);
+		cachedSelf = r.code === 0 ? parseSelf(r.stdout) : null;
+	} catch {
+		cachedSelf = null;
+	}
+	return cachedSelf;
+}
+
 const text = (t: string, details: Record<string, unknown> = {}) => ({
 	content: [{ type: "text" as const, text: t }],
 	details,
@@ -615,10 +708,18 @@ export default function (pi: ExtensionAPI) {
 			confirm: Type.Optional(Type.String({ description: "两阶段确认的草稿 token（首次发送调用的回执里给出）；仅在用户于对话中明确同意草稿后携带" })),
 			formal: Type.Optional(Type.Boolean({ description: "用户明确要求的正式通知时传 true，豁免【AI发送】标签检查" })),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, _signal, _onUpdate, ctx) {
 			// 字面 反斜杠-n 先归一：模型常把换行写成两个字符，dws 会吃成空格导致静默粘连
 			const norm = normalizeContent(params.args);
 			const args = norm.args;
+			// 文件存在性预检：路径笔误不必真去捅 dws（--file 限工作目录内相对路径）
+			const baseDir = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+			for (const f of flagValues(args, new Set(["--file", "--file-path"]))) {
+				const abs = path.isAbsolute(f) ? f : path.join(baseDir, f);
+				if (!fs.existsSync(abs)) {
+					return text(`🚫 待发文件不存在：${f}（--file 需为工作目录内相对路径；当前目录 ${baseDir}）`, { kind: "blocked" });
+				}
+			}
 			const decision = decideExec(args, { confirm: params.confirm, formal: params.formal }, state, cfg, Date.now());
 			if (decision.action === "block") {
 				stats.blocked++;
@@ -645,7 +746,13 @@ export default function (pi: ExtensionAPI) {
 			if (r.code !== 0) {
 				return text(`dws 失败（exit ${r.code}）：${errTail || out}`, { kind: "error" });
 			}
-			if (matchPrefix(args, SEND_PREFIXES)) {
+			if (matchPrefix(args, RECALL_PREFIXES)) {
+				const ids = flagValues(args, RECALL_ID_FLAGS);
+				state.sent.set(`recall:${ids.join(",")}`, { at: Date.now(), snippet: args.join(" ").slice(0, 80) });
+				saveLedger(cfg, state);
+				stats.sent++;
+				out += `\n\n（已记录撤回：${ids.join("、")}——同一消息不会重复撤回）`;
+			} else if (matchPrefix(args, SEND_PREFIXES)) {
 				state.sent.set(sendSignature(args), { at: Date.now(), snippet: args.join(" ").slice(0, 80) });
 				saveLedger(cfg, state);
 				stats.sent++;
@@ -666,6 +773,19 @@ export default function (pi: ExtensionAPI) {
 					out +=
 						`\n\n⚠️ 本条是${media === "file" ? "文件" : "媒体"}消息，已发出但**不含任何说明正文**（--title 只作文件卡标题，不在消息里显示）。` +
 						`如用户需要说明文字，请现在另发一条文本消息（--text/--markdown 或 +dm --content）；不要以为说明已随本条发出。`;
+				}
+				const unverifiedGroup = flagPairs(args, GROUP_FLAGS).filter((p) => !state.resolvedGroups.has(p.value));
+				if (unverifiedGroup.length) {
+					out += `\n\n⚠️ 提醒：目标群 ${unverifiedGroup.map((p) => p.value).join("、")} 未经 dws_resolve_group 解析——若 cid 来自记忆，请先解析核对。`;
+				}
+				const taskId = /"openTaskId"\s*:\s*"([^"]+)"/.exec(out)?.[1];
+				if (taskId) {
+					out += `\n\nopenTaskId：${taskId}（查发送状态：dws_exec [\"chat\", \"+messages-query-send-status\", \"--task-id\", \"${taskId}\"]；转 DING 也用它）`;
+				}
+				// 只读核验入口：给出可复制命令，叉住「输出看不清就重跑发送」的冲动
+				const self = await whoAmI(cfg);
+				if (self && (args[1] === "+dm" || (args.includes("--as") && args[args.indexOf("--as") + 1] === "user"))) {
+					out += `\n\n核验（只读，可反复执行）：dws_exec [\"chat\", \"+search-msg\", \"--sender\", \"${self.name}\", \"--limit\", \"3\", \"--order\", \"desc\"]`;
 				}
 			}
 			out = annotateQuery(args, out, new Date());
@@ -715,6 +835,42 @@ export default function (pi: ExtensionAPI) {
 			state.resolved.add(p.userId);
 			stats.resolved++;
 			return text(`✓ ${p.name || params.name}（userId: ${p.userId}）${p.extra ? `｜${p.extra}` : ""}`, { kind: "ok", userId: p.userId });
+		},
+	});
+
+	// 群解析（发群前的推荐步骤；与 dws_resolve_user 对称：同名群/改群名都会发错）
+	pi.registerTool({
+		name: "dws_resolve_group",
+		label: "钉钉群解析",
+		description:
+			"按群名解析 openConversationId（发群消息前的推荐步骤；同名群、改群名都会发错）。单候选自动确认；" +
+			"多候选返回列表，与用户确认后用 pick=<openConversationId> 再调一次；零候选可换关键词重试。",
+		promptSnippet: "解析钉钉群：dws_resolve_group(群名[, pick=openConversationId]) → openConversationId",
+		parameters: Type.Object({
+			name: Type.String({ description: "群名或关键词（按原文保真，不截断不改写）" }),
+			pick: Type.Optional(Type.String({ description: "多候选时选定的 openConversationId（须出现在候选列表中）" })),
+		}),
+		async execute(_id, params) {
+			const r = await runDws(cfg, ["chat", "+chat-search", "--query", params.name, "--limit", "10", "--format", "json"]);
+			if (r.timedOut) return text("群搜索超时", { kind: "error" });
+			if (r.code !== 0) return text(`群搜索失败：${r.stderr.trim() || r.stdout.trim()}`, { kind: "error" });
+			const groups = parseGroups(r.stdout);
+			if (params.pick) {
+				const hit = groups.find((g) => g.cid === params.pick);
+				if (!hit) return text(`pick 的 openConversationId「${params.pick}」不在「${params.name}」的候选列表中，未确认。`, { kind: "error" });
+				state.resolvedGroups.add(hit.cid);
+				return text(`✓ 已确认：${hit.name || "（无名）"}（openConversationId: ${hit.cid}）`, { kind: "ok", cid: hit.cid });
+			}
+			if (groups.length === 0) {
+				return text(`未找到群「${params.name}」——可换更短的关键词重试（如只取群名中段）。`, { kind: "error" });
+			}
+			if (groups.length > 1) {
+				const list = groups.map((g) => `- ${g.name || "（无名）"}${g.extra ? `（${g.extra}）` : ""}：${g.cid}`).join("\n");
+				return text(`「${params.name}」有 ${groups.length} 个候选，与用户确认后用 pick=<openConversationId> 重新调用：\n${list}`, { kind: "ambiguous", candidates: groups });
+			}
+			const g = groups[0]!;
+			state.resolvedGroups.add(g.cid);
+			return text(`✓ ${g.name || params.name}（openConversationId: ${g.cid}）${g.extra ? `｜${g.extra}` : ""}`, { kind: "ok", cid: g.cid });
 		},
 	});
 

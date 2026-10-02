@@ -42,7 +42,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, parseSkillDescription, formatSkillIndex, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, parseSelf, parseGroups, parseSkillDescription, formatSkillIndex, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -241,6 +241,29 @@ console.log("S、DING 提醒方式警示");
 	check("非 DING 命令不误判", dingChannel(["chat","+dm","--type","sms"]) === undefined);
 	const d = decideExec(["ding","+send-personal","--to","u1","--type","sms","--content","【AI发送】催办"], {}, st, CFG, NOW);
 	check("草稿预览含费用警示", d.action === "pending" && d.preview.includes("实际费用"));
+}
+
+console.log("T、撤回两阶段与防重复");
+{
+	const st = newExecState();
+	const rec = ["chat", "+messages-recall", "--msg-id", "msgABC"];
+	const d1 = decideExec(rec, {}, st, CFG, NOW);
+	check("首次撤回 → 草稿待确认", d1.action === "pending" && d1.preview.includes("msgABC"));
+	check("预览含不可恢复提示", d1.action === "pending" && d1.preview.includes("不可恢复"));
+	const d2 = decideExec(rec, { confirm: d1.token }, st, CFG, NOW);
+	check("正确 token → run", d2.action === "run");
+	st.sent.set("recall:msgABC", { at: NOW, snippet: "" });
+	check("重复撤回 → block", decideExec(rec, {}, st, CFG, NOW).action === "block");
+	check("撤回不受【AI发送】标签约束", decideExec(["ding","+recall-personal","--msg-id","m2"], {}, newExecState(), CFG, NOW).action === "pending");
+}
+
+console.log("U、群与本人解析");
+{
+	const g = parseGroups(JSON.stringify({ chats: [{ name: "教研室", openConversationId: "cidA", memberCount: 7 }, { title: "教研组", openConversationId: "cidB" }] }));
+	check("群候选提取", g.length === 2 && g[0].cid === "cidA" && g[0].extra.includes("7"));
+	const me = parseSelf(JSON.stringify({ ok: true, data: { name: "严天宇", userId: "u1", dept: "教研室" } }));
+	check("本人身份提取", me && me.name === "严天宇" && me.userId === "u1");
+	check("坏输入不抛", parseSelf("nope") === null && parseGroups("nope").length === 0);
 }
 
 const failed = results.filter((r) => !r.ok);
