@@ -42,7 +42,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -81,7 +81,7 @@ console.log("D、防重发");
 	// 执行层成功后记录签名（此处模拟）
 	st.sent.set(__test__.sendSignature(SEND), { at: NOW, snippet: "" });
 	const d = decideExec(SEND, {}, st, CFG, NOW);
-	check("同目标同内容 → block", d.action === "block" && d.reason.includes("重复发送"));
+	check("同目标同内容 → block", d.action === "block" && d.reason.includes("台账防重发"));
 	const other = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】改到四点"];
 	check("不同内容放行", decideExec(other, {}, st, CFG, NOW).action === "pending");
 }
@@ -149,6 +149,23 @@ console.log("L、签名剔除易变 flag");
 	const b = __test__.sendSignature([...SEND, "--format", "json", "--yes"]);
 	const c = __test__.sendSignature(["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会", "--timeout", "30"]);
 	check("--format/--yes/--timeout 不改变签名", a === b && a === c);
+}
+
+console.log("M、跨会话台账防重发");
+{
+	const now = NOW;
+	const entries = [
+		{ sig: "aaa", at: now - 10 * 60_000, snippet: "10 分钟前" },
+		{ sig: "bbb", at: now - 90 * 60_000, snippet: "90 分钟前" },
+	];
+	const kept = pruneLedger(entries, 60 * 60_000, now);
+	check("保留期内条目留下、过期剔除", kept.length === 1 && kept[0].sig === "aaa");
+	// 模拟新进程：台账汇入 state.sent 后，同内容发送应被拦（不依赖内存历史）
+	const st = newExecState();
+	for (const e of kept) st.sent.set(e.sig, { at: e.at, snippet: e.snippet });
+	st.sent.set(__test__.sendSignature(SEND), { at: now, snippet: "" });
+	const d = decideExec(SEND, {}, st, CFG, now);
+	check("新会话同内容 → block", d.action === "block" && d.reason.includes("台账"));
 }
 
 const failed = results.filter((r) => !r.ok);

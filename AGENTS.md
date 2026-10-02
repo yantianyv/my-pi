@@ -113,7 +113,8 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   故不碰文件——before_agent_start 把 dingtalk-* 从注入清单过滤（配置化前缀，/skill: 手动
                     #   加载仍可用）；dws_schema（dws schema --compact 活内省分层下钻）/ dws_exec（argv 数组直调
                     #   不过 shell；发送类强制两阶段——首次回草稿不发送、对话确认后带 confirm 重调才发 +
-                    #   【AI发送】标签检查（formal 豁免）+ 中文姓名目标拦截（强制 resolve）+ 防重发签名 +
+                    #   【AI发送】标签检查（formal 豁免）+ 中文姓名目标拦截（强制 resolve）+ 防重发签名
+                    #   （会话内存 + 跨会话台账 ~/.pi/agent/dingtalk-bridge-sent.json，dedupMinutes 默认 60）+
                     #   查询结果附当前时间锚点）/ dws_resolve_user（aisearch 人员解析，多候选 pick 确认）；
                     #   配置 ~/.pi/agent/dingtalk-bridge.json；test/dingtalk-bridge.test.mjs 回归（纯函数 12 场景）
     crash-log.ts  #   崩溃黑匣子：prependListener 抢在 pi 的 uncaughtException 处理器（同步 exit）之前把堆栈

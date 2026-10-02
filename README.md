@@ -373,11 +373,11 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
   - **两阶段确认**：首次调用只回草稿回执不发送，对话里经用户明确同意后带 `confirm` 重调才真发（草稿 10 分钟有效）
   - **【AI发送】标签强制**：缺失即拒（用户明确要求的正式通知传 `formal=true` 豁免；可在配置关闭）
   - **中文姓名目标拒执**：强制先 `dws_resolve_user` 实时解析，严禁凭记忆硬编码 userId
-  - **防重发**：本会话相同目标+内容第二次发送直接拒，提示改用只读查询验证
+  - **防重发**：相同目标+内容第二次发送直接拒——会话内存 + 跨会话台账（`~/.pi/agent/dingtalk-bridge-sent.json`，保留 `dedupMinutes` 分钟），重开会话重跑也拦得住
 - **`dws_resolve_user(name[, pick])`**：包 `aisearch person`，单候选自动确认，多候选列出后带 `pick=<userId>` 确认。
 - 查询类命令结果自动附**当前系统时间**（时间窗一律相对此刻推算）。
 
-配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars`）；`/dws-bridge` 查看状态。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 12 场景，不真实起 dws 进程）。
+配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars` / `dedupMinutes`）；`/dws-bridge` 查看状态。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 12 场景，不真实起 dws 进程）。
 
 ## pi-ai usage 缺失防护补丁（patches/apply-pi-ai-usage-guard.mjs）
 

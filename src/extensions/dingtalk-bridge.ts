@@ -30,11 +30,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { loadJsonConfig } from "./shared/config";
+import { loadJsonConfig, saveJsonConfig } from "./shared/config";
 
 /* ============================== 可调配置 ============================== */
 
 const CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "dingtalk-bridge.json");
+/** 已发送台账：跨会话防重发（新进程/重开会话时内存状态清零，靠它拦住「重跑一遍」） */
+const LEDGER_FILE = path.join(os.homedir(), ".pi", "agent", "dingtalk-bridge-sent.json");
 /** 待确认草稿有效期：超时需重新走确认（防拿昨天的回执发今天的消息） */
 const PENDING_TTL_MS = 10 * 60_000;
 /** dws schema 摘要单层输出预算（超出提示继续下钻） */
@@ -50,12 +52,15 @@ interface BridgeConfig {
 	execTimeoutMs: number;
 	/** dws_exec 单次输出截断 */
 	maxOutputChars: number;
+	/** 已发送台账保留时长（分钟）：期间内同内容发送被视为重复（跨会话生效） */
+	dedupMinutes: number;
 }
 const DEFAULT_CONFIG: BridgeConfig = {
 	requireAiTag: true,
 	blockedSkillPrefixes: ["dingtalk-"],
 	execTimeoutMs: 60_000,
 	maxOutputChars: 30_000,
+	dedupMinutes: 60,
 };
 const isConfig = (v: unknown): v is BridgeConfig =>
 	typeof v === "object" && v !== null &&
@@ -115,6 +120,36 @@ export interface ExecState {
 	sent: Map<string, { at: number; snippet: string }>;
 }
 export const newExecState = (): ExecState => ({ resolved: new Set(), pending: new Map(), sent: new Map() });
+
+/** 已发送台账条目（跨会话防重发） */
+export interface LedgerEntry {
+	sig: string;
+	at: number;
+	snippet: string;
+}
+
+/** 剔除超出保留期的台账条目（纯函数，便于测试） */
+export function pruneLedger(entries: LedgerEntry[], dedupMs: number, now: number): LedgerEntry[] {
+	return entries.filter((e) => typeof e?.sig === "string" && now - e.at < dedupMs);
+}
+
+/** 载入台账并汇入本会话已发送集（新进程/重开会话由此恢复防重发记忆） */
+function loadLedger(cfg: BridgeConfig, state: ExecState, now = Date.now()): void {
+	const raw = loadJsonConfig<LedgerEntry[]>(LEDGER_FILE, [], (v): v is LedgerEntry[] => Array.isArray(v));
+	for (const e of pruneLedger(raw, cfg.dedupMinutes * 60_000, now)) {
+		state.sent.set(e.sig, { at: e.at, snippet: e.snippet });
+	}
+}
+
+/** 落盘台账（先剔除过期条目，避免长期膨胀） */
+function saveLedger(cfg: BridgeConfig, state: ExecState, now = Date.now()): void {
+	const entries: LedgerEntry[] = [...state.sent.entries()]
+		.map(([sig, v]) => ({ sig, at: v.at, snippet: v.snippet }))
+		.filter((e) => now - e.at < cfg.dedupMinutes * 60_000)
+		.sort((a, b) => b.at - a.at)
+		.slice(0, 200);
+	saveJsonConfig(LEDGER_FILE, entries);
+}
 
 /** 消息签名：命令前缀 + 目标 + 内容相关 flag 值（剔除易变 flag），判定「同一条消息」 */
 function sendSignature(args: string[]): string {
@@ -176,8 +211,8 @@ export function decideExec(
 		return {
 			action: "block",
 			reason:
-				"本会话已发送过相同目标与内容的消息，已拦截重复发送。发送命令绝不为验证而重发——" +
-				"请改用只读查询确认：dws_exec [\"chat\", \"+search-msg\", \"--senders\", \"<自己姓名>\", ...]。",
+				"本会话或近期已发送过相同目标与内容的消息（台账防重发），已拦截。发送命令绝不为验证而重发——" +
+				"请改用只读查询确认：dws_exec [\"chat\", \"+search-msg\", \"--sender\", \"<自己姓名>\", ...]。",
 		};
 	}
 
@@ -351,6 +386,8 @@ export default function (pi: ExtensionAPI) {
 	const cfg = loadConfig();
 	const state = newExecState();
 	const stats = { sent: 0, blocked: 0, resolved: 0 };
+	// 启动即恢复台账（新进程/重开会话靠它拦住「重跑一遍发送」）
+	loadLedger(cfg, state);
 
 	// L0：从系统提示词注入清单过滤 dingtalk-* 技能（文件不动，/skill:dingtalk-* 仍可手动加载）
 	pi.on("before_agent_start", (event) => {
@@ -375,6 +412,7 @@ export default function (pi: ExtensionAPI) {
 		state.resolved.clear();
 		state.pending.clear();
 		state.sent.clear();
+		loadLedger(cfg, state);
 	});
 
 	// L1：schema 活内省（分层下钻）
@@ -435,6 +473,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (matchPrefix(args, SEND_PREFIXES)) {
 				state.sent.set(sendSignature(args), { at: Date.now(), snippet: args.join(" ").slice(0, 80) });
+				saveLedger(cfg, state);
 				stats.sent++;
 				const unverified = flagValues(args, TARGET_FLAGS).filter((t) => !state.resolved.has(t) && !hasCJK(t));
 				if (unverified.length) {
