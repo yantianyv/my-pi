@@ -216,8 +216,8 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		description:
 			"写入/覆盖一篇笔记（相对路径，必须位于 /notes /references /scratch /vault 之一，"
 			+ ".md/.markdown/.txt/.csv/.tsv/.json/.jsonl/.yaml/.yml/.toml/.html/.xml 后缀；vault 下自动加密）。"
-			+ "已存在文件需显式 overwrite:true；补充内容用 kb_append。"
-			+ "md/markdown 内容须以 frontmatter（title/tags）开头，否则会被拒绝；表格/数据格式无需 frontmatter（文件名即标题）。",
+			+ "md/markdown 内容须以 frontmatter（title/tags）开头，否则会被拒绝；表格/数据格式无需 frontmatter（文件名即标题）。"
+			+ "补充内容用 kb_append。",
 		promptSnippet: "写笔记：kb_write(路径, 内容[, overwrite]) → 已写入",
 		parameters: Type.Object({
 			path: Type.String({ description: "笔记相对路径，如 /notes/webdav-踩坑.md" }),
@@ -517,11 +517,9 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		name: "kb_import",
 		label: "批量导入本地目录",
 		description:
-			"把本地目录批量导入知识库（迁移场景）：递归扫描 sourceDir（相对工作目录）下的文本文件"
-			+ "（.md/.markdown/.txt/.csv/.tsv/.json/.jsonl/.yaml/.yml/.toml/.html/.xml），"
-			+ `目标 = ${"namespace"} + 原目录结构（md 自动生成 frontmatter：title=文件名、tags 空；已有 frontmatter 保留；表格/数据格式原样导入不加工）。`
-			+ "同名已存在默认跳过，mode=\"overwrite\" 则覆盖。非文本文件与超限文件跳过并在结果中列出（大文件用 kb_upload）。"
-			+ "vault 目标自动加密。",
+			"把本地目录批量导入知识库（迁移场景）：递归扫描 sourceDir（相对工作目录）下的文本文件（后缀同 kb_write），"
+			+ "目标 = namespace + 原目录结构（md 自动生成 frontmatter，已有的保留；表格/数据格式原样导入不加工）；"
+			+ "非文本/超限文件跳过并列在结果中（大文件用 kb_upload）；vault 目标自动加密。",
 		promptSnippet: "批量导入：kb_import(源目录, 命名空间[, mode]) → 导入摘要",
 		parameters: Type.Object({
 			sourceDir: Type.String({ description: "本地目录路径（相对当前工作目录），如 knowledge/学校论文要求" }),

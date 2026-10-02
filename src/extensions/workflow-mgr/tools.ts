@@ -62,7 +62,7 @@ const noteParams = Type.Object({
 		}),
 	),
 	key: Type.Optional(
-		Type.String({ description: "主题键（仅 add，可选）：同 key 的新记录自动作废旧记录——决策/结论类建议带 key，改主意时再记一条同 key 即顶替，避免两条打架" }),
+		Type.String({ description: "主题键（仅 add，可选）：同 key 的新记录自动作废旧记录——决策/结论类建议带 key，方便改主意时顶替" }),
 	),
 });
 const milestoneParams = Type.Object({
@@ -75,7 +75,7 @@ const milestoneParams = Type.Object({
 const workflowParams = Type.Object({
 	action: StringEnum(["list", "add", "edit", "remove", "archive", "reset", "import", "bind"], {
 		description:
-			"操作类型：list 查看全量；import 初始化一次性导入（见 wf_workflow 描述，建新工作流优先用它）；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段；remove 删除任务；archive 归档整个工作流（收尾退出视野，数据留档）；reset 清空工作流；bind 绑定本会话到某个工作流（多工作流并发场景，配 slot 参数；缺省 slot 时列出可选工作流与当前绑定）",
+			"操作类型：list 查看全量；import 初始化一次性导入（草稿结构见工具描述，建新工作流优先用它）；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段（空数组清空列表字段）；remove 删除任务；archive 归档整个工作流（收尾退出视野，数据留档，无找回）；reset 清空工作流（不可逆）；bind 绑定本会话到某个工作流（多工作流并发场景，配 slot 参数；缺省 slot 时列出可选工作流与当前绑定）",
 	}),
 	mode: Type.Optional(
 		StringEnum(["human-ai", "agent"], {
@@ -84,7 +84,7 @@ const workflowParams = Type.Object({
 	),
 	stageId: Type.Optional(Type.String({ description: "阶段 ID；add 时不存在则自动创建新阶段" })),
 	status: Type.Optional(
-		Type.String({ description: "归档收尾状态描述（仅 archive 用）：如「全部完成」「放弃：改用其他方案」——归档 ≠ 完成，快照保留任务真实状态，此字符串随快照留档追溯" }),
+		Type.String({ description: "归档收尾状态描述（仅 archive 用）：如「全部完成」「放弃：改用其他方案」——随快照留档追溯（归档 ≠ 完成）" }),
 	),
 	stageName: Type.Optional(Type.String({ description: "阶段名（add 创建新阶段时使用，缺省用 stageId）" })),
 	stageGoal: Type.Optional(Type.String({ description: "阶段目标（add 创建新阶段时使用）" })),
@@ -191,14 +191,9 @@ export function registerTools(pi: ExtensionAPI) {
 		name: "wf_workflow",
 		label: "工作流定义",
 		description:
-			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）。" +
+			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）；动作一律作用于本会话绑定的工作流。" +
 			"新建优先用 import：先 write 一份草稿 json 再一次性导入（比逐条 add 省 token）；add 只用于后续增补调整。" +
-			"import 草稿结构：{\"mode\":\"human-ai\", \"stages\":[{\"id\":\"design\", \"name\":\"阶段名\", \"goal\":\"阶段目标\", \"tasks\":[{\"title\":\"任务标题\", \"desc\":\"目标\", \"humanTasks\":[], \"aiTasks\":[], \"deliverable\":\"\", \"doneSignal\":\"\", \"deps\":[\"0.1\"]}]}]}——id 缺省自动生成（0.1/1.2 式），deps 可引用本批未来 id；工作流非空时拒绝导入（先 archive/reset）。" +
-			"list 查看全量；add 新增任务（stageId 不存在自动建阶段）；edit 改任意字段（空数组清空列表字段）；remove 删任务；" +
-			"archive 归档留档（快照移入该槽 archive/，无找回）；reset 清空（不可逆）。" +
-			"多工作流并发隔离：一个项目可存在多个命名工作流（default=项目根默认，其余在 slots/ 下），每个会话绑定一个；" +
-			"bind 绑定本会话（slot 缺省列出可选与当前绑定；slot=新名称创建空工作流；slot=\"auto\" 暂不启用、是否使用交给你判断；slot=\"none\" 明确不用）。" +
-			"其余动作一律作用于本会话绑定的工作流。",
+			"import 草稿结构：{\"mode\":\"human-ai\",\"stages\":[{\"id\":\"design\",\"name\":\"阶段名\",\"goal\":\"阶段目标\",\"tasks\":[{\"title\":\"任务标题\",\"desc\":\"目标\",\"humanTasks\":[],\"aiTasks\":[],\"deliverable\":\"\",\"doneSignal\":\"\",\"deps\":[\"0.1\"]}]}]}——id 缺省自动生成（0.1/1.2 式），deps 可引用本批未来 id；工作流非空时拒绝导入（先 archive/reset）。",
 		promptSnippet: "workflow: create/update the human-AI collaboration workflow definition",
 		parameters: workflowParams,
 		async execute(_id, params: WorkflowParams, _signal, _onUpdate, ctx) {
@@ -840,9 +835,9 @@ export function registerTools(pi: ExtensionAPI) {
 		label: "记录",
 		description:
 			"AI 的记录工具：记录后续步骤需要知晓的信息。进入新步骤先 list 查看已有记录，不再需要的及时 remove。\n" +
-			"记：用户拍板的选择、硬约束、需后续遵守的结论（kind=fact 默认，建议带 key）；会随时间变化的信息（进度/收集情况等）必须 kind=status（任务切换时提醒复核）。\n" +
+			"记：用户拍板的选择、硬约束、需后续遵守的结论、会随时间变化的进度/状态。\n" +
 			"不记：琐碎细节、任务字段已覆盖的内容（分工/交付物/完成信号）。\n" +
-			"同主题更新：带 key 用同 key add（自动作废旧记录），不带 key 用 edit 改原记录——不留两条互相矛盾的记录。",
+			"同主题更新：有 key 用同 key add 顶替，无 key 用 edit 改原记录——不留两条互相矛盾的记录。",
 		promptSnippet: "记录当前步骤产生、后续步骤需要知晓的信息",
 		parameters: noteParams,
 		async execute(_id, params: NoteParams, _signal, _onUpdate, ctx) {

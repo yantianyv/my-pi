@@ -71,18 +71,16 @@ const QuestionSchema = Type.Object({
 	type: Type.Optional(
 		StringEnum([...QUESTION_TYPES], {
 			description:
-				"题型：single 单选 / multi 多选 / text 简答 / confirm 是否 / rating 评分 / number 数字 / note 只读说明" +
-				"（漏传时自动推断：有 options → single、有 content → note，否则 → text）。" +
-				"note 只读说明（不参与作答与必答校验，用来把背景材料或待审草稿原文放进问卷；也占 12 题额度）",
+				"题型：single 单选 / multi 多选 / text 简答 / confirm 是否 / rating 评分 / number 数字 / " +
+				"note 只读说明（装背景材料/待审草稿原文，不参与作答与必答校验，占 12 题额度）；" +
+				"漏传自动推断：有 options → single、有 content → note，否则 → text",
 		}),
 	),
 	question: Type.String({ description: "完整的问题文本（清晰、具体，以问号结尾）；note 题作小标题，可省（省时取 content 正文首行截断）" }),
 	description: Type.Optional(Type.String({ description: "补充说明（背景、权衡），帮助用户决策" })),
 	content: Type.Optional(
 		Type.String({
-			description:
-				"note 说明题的正文（多行保留换行，支持 markdown 轻渲染；超长默认折叠、x 展开）。" +
-				"典型用途：把待用户审阅的草稿/方案原文放进问卷，让用户边看边给意见",
+			description: "note 说明题的正文（多行保留换行，markdown 轻渲染；超长默认折叠，x 展开）",
 		}),
 	),
 	style: Type.Optional(StringEnum([...NOTE_STYLES], { description: "note 说明题样式：info 普通（缺省）/ warn 警示 / quote 引用" })),
@@ -165,13 +163,8 @@ export function registerAskTool(pi: ExtensionAPI): void {
 		name: "ask",
 		label: "问卷",
 		description:
-			"创建一份问卷向用户批量提问（单选/多选/简答/判断/评分/数字/只读说明），或作废（action=cancel）待答问卷。" +
-			"questions 必填（1~12 题；type 漏传自动推断：有 options→单选、有 content→说明、否则→简答；" +
-			"note 说明题占 12 题额度，用 content 装待审草稿/背景原文，不参与作答与必答校验）。" +
-			"问卷整屏弹出会遮住聊天记录：问题依赖你刚发的消息时，用 context 摘要关键背景或 includeLastMessage=true 自动附上上一条回复，" +
-			"上下文会显示在问卷顶部。" +
-			"问卷立即整屏弹出：必答全部完成才能 Enter 提交（答案作为本工具结果返回）；Esc 存草稿搁置（可用 /answer 续答，续答提交的答案以用户消息送达）。用户也可在问卷页删除问卷（你会收到 status=deleted，不要再追问或重建）。" +
-			"作废用 action=cancel + id（问卷即文件，删除即撤回；作答中的无法作废）。一次只创建一份。",
+			"创建问卷向用户批量提问，整屏弹出，用户提交后答案作为本工具结果返回；一次只创建一份。" +
+			"或 action=cancel + id 作废待答问卷（问卷即文件，删除即撤回）。",
 		promptSnippet: "创建问卷向用户批量提问（单选/多选/简答/判断/评分/数字/说明），或作废待答问卷",
 		promptGuidelines: [
 			"需要用户从多个方案中抉择、或有多个问题要确认时，用 ask 工具创建问卷，而不是在正文里罗列问题让用户逐条回复。",
@@ -196,23 +189,19 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			description: Type.Optional(Type.String({ description: "问卷整体背景说明" })),
 			context: Type.Optional(
 				Type.String({
-					description:
-						"问卷顶部展示的背景上下文（markdown 轻渲染，多行保留换行，超长折叠）。问卷整屏弹出会遮住聊天记录，" +
-						"用户看不到你刚发的消息——问题依赖你上一条回复的内容时，把关键背景摘到这里（或直接用 includeLastMessage 自动附上）",
+					description: "问卷顶部展示的背景上下文（markdown 轻渲染，超长折叠）",
 				}),
 			),
 			includeLastMessage: Type.Optional(
 				Type.Boolean({
-					description:
-						"true 时自动把你上一条回复的文本（问卷前的那段话）附到问卷顶部展示，与 context 合并；" +
-						"问题引用刚说的内容时推荐开启，免手动复制",
+					description: "true 时自动把你上一条回复的文本附到问卷顶部（与 context 合并）",
 				}),
 			),
 			questions: Type.Optional(
 				Type.Array(QuestionSchema, {
 					minItems: 1,
 					maxItems: 12,
-					description: "题目列表（create 必填，1~12 题；每题必须含 question 与 type；note 说明题同样占 12 题额度）",
+					description: "题目列表（create 必填，1~12 题；每题必须含 question）",
 				}),
 			),
 		}),
