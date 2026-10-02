@@ -257,10 +257,11 @@ export function formatSchemaOutput(raw: string, maxChars: number): string {
 		});
 		return truncate(`共 ${products.length} 个产品。下钻：dws_schema path=\"<产品id>\"；查参数：dws_schema path=\"<canonical_path>\"\n\n${lines.join("\n")}`, "产品过多");
 	}
-	// 产品/分组层：{ tools: [...] }
-	if (Array.isArray(doc.tools)) {
-		const tools = doc.tools as Record<string, unknown>[];
-		const lines = tools.map((t) =>
+	// 产品/分组层：{ product: { tools: [...] } } 或 { tools: [...] }
+	const tools = (doc.tools ?? (doc.product as Record<string, unknown> | undefined)?.tools ?? (doc.group as Record<string, unknown> | undefined)?.tools) as unknown;
+	if (Array.isArray(tools)) {
+		const list = tools as Record<string, unknown>[];
+		const lines = list.map((t) =>
 			line([
 				String(t.canonical_path ?? t.cli_path ?? t.id ?? "?"),
 				(t.agent_summary ?? t.description) as string,
@@ -268,7 +269,7 @@ export function formatSchemaOutput(raw: string, maxChars: number): string {
 			]),
 		);
 		return truncate(
-			`共 ${tools.length} 个工具。查参数：dws_schema path=\"<canonical_path>\"\n\n${lines.join("\n")}`,
+			`共 ${list.length} 个工具。查参数：dws_schema path=\"<canonical_path>\"\n\n${lines.join("\n")}`,
 			"工具过多",
 		);
 	}
