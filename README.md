@@ -32,6 +32,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `crash-log.ts` — 崩溃黑匣子：崩溃堆栈同步落盘 `~/.pi/agent/pi-crash.log`，`/crash-log` 报告最近一条崩溃与取证路径（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `mimo-omni.ts` — 媒体兼容层（过渡件）：`mimo_transcribe` 解析音频/视频（逐字稿或按需求解析）+ `mimo_speak` 文字合成语音，`/mimo-config` 面板配置（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `dingtalk-bridge.ts` — 钉钉受控桥接：屏蔽 dingtalk-* 技能注入，`dws_schema` 活内省 + `dws_exec` 受控执行（发送两阶段确认/标签强制/防重发）+ `dws_resolve_user` 人员解析（见下） | `~/.pi/agent/extensions/` |
 | `patches/` | 两个 pi 补丁：ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装） | `~/.pi/agent/skills/` |
@@ -361,6 +362,22 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 **API Key**：优先取 pi 注册表的 `xiaomi` provider（`/login xiaomi` 后可用），回落 `~/.pi/agent/auth.json`，再回落环境变量 `MIMO_API_KEY`。
 
 **回归测试**：`node src/extensions/test/mimo-omni.test.mjs [音频] [视频]`（离线 18 项：类型判定、内容块构造、fps/分辨率透传、超大与格式错误拦截）；加 `MIMO_LIVE=1` 则额外用真实文件打一次 API 验证音频与视频两条路径。
+
+## 钉钉受控桥接（src/extensions/dingtalk-bridge.ts）
+
+替代 dingtalk-* 技能的插件方案：技能是「冻结说明书 + 凭记忆拼命令」，对高风险操作（发消息）已被事故史证明不可靠；插件把机械可判的铁律变成工具层硬拦截。
+
+- **技能屏蔽**：启动时把 `dingtalk-*` 从系统提示词的技能清单过滤（不动 dws 托管的文件——它由 npm postinstall 安装、`dws upgrade` 时全量还原，改了也没用）；`/skill:dingtalk-xxx` 手动加载不受影响，留作逃生舱。
+- **`dws_schema(path?)`**：包 `dws schema --compact` 活内省（随 CLI 版本实时更新）。无参看 29 个产品概览 → 传产品 id 看工具清单 → 传 canonical_path 看参数 schema，逐层下钻。
+- **`dws_exec(args[, confirm][, formal])`**：argv 数组直传 spawn（不过 shell，免去转义坑），自动补 `--format json --yes`。发送类命令（`+dm`/`+messages-send`/`ding`）强制：
+  - **两阶段确认**：首次调用只回草稿回执不发送，对话里经用户明确同意后带 `confirm` 重调才真发（草稿 10 分钟有效）
+  - **【AI发送】标签强制**：缺失即拒（用户明确要求的正式通知传 `formal=true` 豁免；可在配置关闭）
+  - **中文姓名目标拒执**：强制先 `dws_resolve_user` 实时解析，严禁凭记忆硬编码 userId
+  - **防重发**：本会话相同目标+内容第二次发送直接拒，提示改用只读查询验证
+- **`dws_resolve_user(name[, pick])`**：包 `aisearch person`，单候选自动确认，多候选列出后带 `pick=<userId>` 确认。
+- 查询类命令结果自动附**当前系统时间**（时间窗一律相对此刻推算）。
+
+配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars`）；`/dws-bridge` 查看状态。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 12 场景，不真实起 dws 进程）。
 
 ## pi-ai usage 缺失防护补丁（patches/apply-pi-ai-usage-guard.mjs）
 

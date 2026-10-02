@@ -109,6 +109,13 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #    pro/v2.5）；播放走系统自带播放器（Win PowerShell SoundPlayer / afplay / paplay），零依赖；
                     #   /mimo-config TUI 面板设置模型与音色；等 pi 支持音频内容类型后这一层即可整体撤掉；
                     #   test/mimo-omni.test.mjs 回归（离线 18 项 + MIMO_LIVE=1 联测真实音频/视频）
+    dingtalk-bridge.ts # 钉钉（dws CLI）受控桥接：dws 官方技能由 npm postinstall 托管、升级即还原不可改，
+                    #   故不碰文件——before_agent_start 把 dingtalk-* 从注入清单过滤（配置化前缀，/skill: 手动
+                    #   加载仍可用）；dws_schema（dws schema --compact 活内省分层下钻）/ dws_exec（argv 数组直调
+                    #   不过 shell；发送类强制两阶段——首次回草稿不发送、对话确认后带 confirm 重调才发 +
+                    #   【AI发送】标签检查（formal 豁免）+ 中文姓名目标拦截（强制 resolve）+ 防重发签名 +
+                    #   查询结果附当前时间锚点）/ dws_resolve_user（aisearch 人员解析，多候选 pick 确认）；
+                    #   配置 ~/.pi/agent/dingtalk-bridge.json；test/dingtalk-bridge.test.mjs 回归（纯函数 12 场景）
     crash-log.ts  #   崩溃黑匣子：prependListener 抢在 pi 的 uncaughtException 处理器（同步 exit）之前把堆栈
                     #   同步落盘 ~/.pi/agent/pi-crash.log（含 unhandledRejection 与 exit 码），崩溃条目与会话文件按时间配对；
                     #   用户入口：/crash-log 报告最近一条崩溃与取证路径（clear 清空），上次会话有崩溃时 session_start 提醒一次
