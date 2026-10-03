@@ -191,6 +191,7 @@ function buildInitSystemPrompt(cwd: string, hasExplore: boolean): string {
 		"- L3 README / docs：给人看，L1 只留一行指路，不复制内容",
 		"- 命令、坑、不变量、跨子系统约定永不搬（必须自动在眼前）；已下沉的细节不要在 L1 重复",
 		"- L1 指向 L2 的写法：写清「细节见 skill <名> 的 references/<文件>.md，改它之前先读」",
+		"- 项目已有子目录 AGENTS.md（各目录自己的约定）时沿用该结构继续维护（子文件放各自的细节、根文件只留一行指路），不要把子文件内容上提到根文件或 skill",
 		"重跑：先盘点现有 AGENTS.md 与 .pi/skills，人工内容只搬不删（原文事实保留），搬移与删除在最终总结里报告；L2 要跟着一起维护——过时内容更新或删除、新细节写进对应 references、文件增删后同步 SKILL.md 的索引与 description，不留孤儿文件与死指针",
 		"",
 		`工作目录：${cwd}`,
@@ -309,14 +310,45 @@ async function compactInitNotes(
 }
 
 /**
- * 产物的确定性结构检查（不依赖模型）：L1 指针可解析、SKILL.md 索引与 references 一一对应、
- * frontmatter 有 name/description、不留空文件。返回人话问题清单（空 = 通过）。
+ * 找出项目里的上下文文件（根 + 子目录的 AGENTS.md / CLAUDE.md，跳过依赖/构建/隐藏目录）。
+ * 很多仓库用子目录 AGENTS.md 做分层，审计与结构检查必须看得见它们。
+ */
+export function findContextFiles(cwd: string, limit = 25): string[] {
+	const names = new Set(["AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "CLAUDE.MD"]);
+	const skip = new Set(["node_modules", ".git", "dist", ".tmp", "vendor"]);
+	const found: string[] = [];
+	const walk = (dir: string, depth: number) => {
+		if (depth > 6 || found.length >= limit) return;
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const e of entries) {
+			if (found.length >= limit) return;
+			const p = path.join(dir, e.name);
+			if (e.isDirectory()) {
+				if (skip.has(e.name) || e.name.startsWith(".")) continue;
+				walk(p, depth + 1);
+			} else if (names.has(e.name)) {
+				found.push(p);
+			}
+		}
+	};
+	const rootFile = path.join(cwd, CONTEXT_FILE);
+	if (fs.existsSync(rootFile)) found.push(rootFile);
+	walk(cwd, 1);
+	return [...new Set(found)];
+}
+
+/**
+ * 产物的确定性结构检查（不依赖模型）：上下文文件指针可解析、SKILL.md 索引与 references
+ * 一一对应、frontmatter 有 name/description、不留空文件。返回人话问题清单（空 = 通过）。
  */
 export function checkContextArtifacts(cwd: string): string[] {
 	const issues: string[] = [];
 	const skillRoot = path.join(cwd, ".pi", "skills");
-	const l1Path = path.join(cwd, CONTEXT_FILE);
-	const l1 = fs.existsSync(l1Path) ? fs.readFileSync(l1Path, "utf8") : "";
 	const skills = fs.existsSync(skillRoot)
 		? fs.readdirSync(skillRoot, { withFileTypes: true }).filter((d) => d.isDirectory())
 		: [];
@@ -344,8 +376,12 @@ export function checkContextArtifacts(cwd: string): string[] {
 			if (!files.includes(m[1])) issues.push(`skill ${s.name}：SKILL.md 指向不存在的 references/${m[1]}`);
 		}
 	}
-	for (const m of l1.matchAll(/references\/([\w.-]+\.md)/g)) {
-		if (!allRefs.has(m[1])) issues.push(`${CONTEXT_FILE} 指向不存在的 references/${m[1]}`);
+	for (const file of findContextFiles(cwd)) {
+		const rel = path.relative(cwd, file) || file;
+		const text = fs.readFileSync(file, "utf8");
+		for (const m of text.matchAll(/references\/([\w.-]+\.md)/g)) {
+			if (!allRefs.has(m[1])) issues.push(`${rel} 指向不存在的 references/${m[1]}`);
+		}
 	}
 	return issues;
 }
@@ -379,7 +415,11 @@ async function runInitAudit(
 	issues?: string[],
 ): Promise<{ ok: boolean; summary: string }> {
 	const skillsDir = path.join(ctx.cwd, ".pi", "skills");
-	const target = fs.existsSync(skillsDir) ? `${CONTEXT_FILE} 与 .pi/skills/` : CONTEXT_FILE;
+	// 把具体文件列给审计（子目录 AGENTS.md 也是产物，不能靠它自己去找）
+	const files = findContextFiles(ctx.cwd).map((f) => path.relative(ctx.cwd, f) || f);
+	const target = [files.length ? `项目上下文文件（${files.join("、")}）` : CONTEXT_FILE, fs.existsSync(skillsDir) ? ".pi/skills/" : ""]
+		.filter(Boolean)
+		.join(" 与 ");
 	const task =
 		`复核并修正 ${target}：只保留值得每轮付钱的内容，按纪律删减、合并、下沉并修好指针。` +
 		(issues?.length ? `\n\n结构检查发现这些问题，请一并修正：\n- ${issues.join("\n- ")}` : "");
@@ -392,7 +432,10 @@ async function runInitAudit(
 	const streamFn = createPiStreamFn(ctx);
 	const auditSystem = systemMessage(buildAuditSystemPrompt(ctx.cwd));
 	let steps = 0;
+	let follows = 0;
+	let lastText = "";
 	onAudit(null);
+	const nudge = (content: string): AgentMessage => ({ role: "user", content, timestamp: Date.now() });
 	try {
 		const messages = await runAgentLoop(
 			[
@@ -403,15 +446,37 @@ async function runInitAudit(
 				},
 			],
 			{ messages: [auditSystem], tools },
-			{ model, maxTokens: AUDIT_MAX_TOKENS, convertToLlm },
+			{
+				model,
+				maxTokens: AUDIT_MAX_TOKENS,
+				convertToLlm,
+				// 打算停下却没干活 / 末句是意图陈述 → 顶回去做完（最多两次）；审计也不能空手交报告
+				getFollowUpMessages: async () => {
+					if (follows >= 2) return [];
+					if (steps === 0) {
+						follows++;
+						return [nudge("你还没有开始复核：现在读上述文件，按验收清单修正，然后用一两句话给出结论。")];
+					}
+					if (looksUnfinished(lastText)) {
+						follows++;
+						return [nudge("你最后一条是意图陈述而非结论：把要做的改动做完，然后用一两句话说明改了什么（没改也说明）。")];
+					}
+					return [];
+				},
+			},
 			(event) => {
 				if (event.type === "tool_execution_start") onAudit(++steps);
+				else if (event.type === "message_end") {
+					const m = event.message as { role?: string; content?: unknown };
+					if (m.role === "assistant") lastText = extractText(m.content).trim() || lastText;
+				}
 			},
 			signal,
 			streamFn,
 		);
 		let text = findAssistantText(messages);
-		if (!text && !signal.aborted) {
+		if (text && !looksUnfinished(text)) return { ok: true, summary: text };
+		if (!signal.aborted) {
 			// 没结论就补问一次（无上限，但必须交回报告）
 			const more = await runAgentLoop(
 				[{ role: "user", content: "请用一两句话给出审计结论：改了什么（没改也说明）。", timestamp: Date.now() }],
@@ -423,7 +488,8 @@ async function runInitAudit(
 			);
 			text = findAssistantText(more);
 		}
-		if (text) return { ok: true, summary: text };
+		if (text && !looksUnfinished(text)) return { ok: true, summary: text };
+		if (text) return { ok: false, summary: `末句是意图陈述而非结论（未动手 ${steps} 步）：${text}` };
 		return { ok: false, summary: findLlmError(messages) ?? "无结论" };
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);

@@ -8,9 +8,9 @@
 - CLAUDE.md 兼容：只有 `CLAUDE.md` 时直接 rename 为 `AGENTS.md` 再走常规流程；两者并存时走合并提示（合并进 AGENTS.md 后删 CLAUDE.md）。
 - 子代理工具：read/ls/grep/find + write/edit + bash + 可选 `explore`。探测 `getExploreApi()?.createSubagentTool(ctx, { alwaysFresh: true })`：在场则提示词切为「大仓库先派 explore 并行摸底、再用 read 抽查」、状态行显「⚙ 初始化 · 探索 n/m」，缺席静默降级为自读。
 - 约束：**不设轮数与墙钟上限**；`NO_PROGRESS_TURNS = 8`（连续 8 轮既没写文件也没派 explore → 注入收尾指令，只提醒不硬停）；「没写完不许停」——打算停下但文件没被写过（mtime `> mtimeBefore + 1` 判定）或末句是意图陈述 → 顶回去做完（最多两次），最终如实报「未完成」。
-- 审计子代理：主流程成功且文件确实写入、摘要不像「未完成」才启动；全新上下文 + 独立 system prompt；工具只有 read/ls/grep/find + write/edit（**无 bash、无 explore**）；与主体同口径**不设轮数/时间上限**（无结论时补问一次必交报告，tools: []）；验收清单——删不值得每轮付费的内容、同一事实只在一层、skill/references 指针真实存在、命令/坑/不变量/跨子系统约定不能丢、人工约定只搬不删；只做删减/合并/下沉/修指针。审计故障只报「审计未完成」，不否定既有产物。
-- 结构检查（`checkContextArtifacts(cwd)`，纯 fs 不依赖模型）：L1 的 `references/x.md` 必须存在、SKILL.md 索引与 `references/` 目录一一对应、frontmatter 有 name/description、不留近乎空文件；审计后再检一次，仍有问题则带清单再审计（最多两轮），最终仍剩则如实附在总结里。
-- 提示词纪律（写进子代理提示词）：只写能改变 AI 行为的行、不写变更史与实现解释、不复制 README 可自行读到的内容；随时把已确认的结论落盘（压缩会丢未落盘的内容）；产出按上下文分层 L1 AGENTS.md / L2 `.pi/skills/<项目名>-dev/`（默认不建，细节成段超载才建，重跑时同步维护：过时更新删除、新细节入对应 references、索引与指针同步）/ L3 README 留一行指路。
+- 审计子代理：主流程成功且文件确实写入、摘要不像「未完成」才启动；全新上下文 + 独立 system prompt；任务里**显式列出**要复核的全部上下文文件（根 + 子目录）与 `.pi/skills/`；工具只有 read/ls/grep/find + write/edit（**无 bash、无 explore**）；与主体同口径**不设轮数/时间上限**，带「没动手 / 末句是意图陈述 → 顶回去做完（最多两次）」与无结论时补问一次（tools: []）；末句仍是意图陈述则报「末句是意图陈述而非结论（未动手 N 步）」（实测别的项目里它曾只输出一句 I'll start by surveying… 就当报告交了）。验收清单——删不值得每轮付费的内容、同一事实只在一层、指针真实存在、命令/坑/不变量/跨子系统约定不能丢、人工约定只搬不删；只做删减/合并/下沉/修指针。审计故障只报「审计未完成」，不否定既有产物。
+- 结构检查（`checkContextArtifacts(cwd)`，纯 fs 不依赖模型）：`findContextFiles` 扫出根与子目录的上下文文件（跳过 node_modules/.git/dist/隐藏目录），逐个检查其 `references/x.md` 真实存在；skill 侧查 SKILL.md 索引与 `references/` 目录一一对应、frontmatter 有 name/description、不留近乎空文件。审计后再检一次，仍有问题则带清单再审计（最多两轮），最终仍剩则如实附在总结里。
+- 提示词纪律（写进子代理提示词）：只写能改变 AI 行为的行、不写变更史与实现解释、不复制 README 可自行读到的内容；随时把已确认的结论落盘（压缩会丢未落盘的内容）；产出按上下文分层 L1 AGENTS.md / L2 `.pi/skills/<项目名>-dev/`（默认不建，细节成段超载才建，重跑时同步维护：过时更新删除、新细节入对应 references、索引与指针同步）/ L3 README 留一行指路；项目已有子目录 AGENTS.md 时沿用该结构（子文件放各自细节、根文件只留指路），不上提合并。
 - 进度经 `ctx.ui.setStatus("init", …)`，由 hud 行 1 显示。
 - Ctrl+C 打断 turn；双击 Ctrl+C（打断后 2s 窗口内）预填 `/rewind`；`/rewind` 回退到上一条用户消息、内容放回输入框（`navigateTree` 是命令 ctx 专属能力）。
 - 裸输入 `exit`（不带 `/`）被拦截直接退出 pi，属刻意设计。

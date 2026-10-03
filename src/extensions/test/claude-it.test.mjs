@@ -6,7 +6,7 @@
  * - 场景 A：estimateTokens —— CJK 与 ASCII 的粗估口径、单调性
  * - 场景 B：pruneOldToolResults —— 超预算才剪、从最旧/最廉价（read/grep）开始、
  *   近期消息与 assistant/user 正文不动、write/edit 结果不剪、explore 报告次之、结构不变
- * - 场景 C：checkContextArtifacts —— L1 死指针、SKILL.md 索引与 references 一一对应、
+ * - 场景 C：checkContextArtifacts / findContextFiles —— L1 与子目录 AGENTS.md 的死指针、索引对应、
  *   frontmatter、空文件、无 skill 时不误报
  * - 场景 D：CONTEXT_OVERFLOW_RE —— 常见超限措辞命中、限流/网络类不误判
  *
@@ -147,6 +147,28 @@ async function main() {
 		mkdirSync(noSkill, { recursive: true });
 		writeFileSync(join(noSkill, "AGENTS.md"), "# AGENTS\n");
 		check("C: 没有 L2 skill 时只要 L1 无指针就通过", it.checkContextArtifacts(noSkill).length === 0);
+
+		// 子目录上下文文件也在检查范围内（分层靠子文件的项目同样受保护）
+		const nested = join(tmp, "nested");
+		mkdirSync(join(nested, "tools", "dingtalk"), { recursive: true });
+		writeFileSync(join(nested, "AGENTS.md"), "# 根\n");
+		writeFileSync(join(nested, "tools", "AGENTS.md"), "细节见 references/tools.md\n");
+		writeFileSync(join(nested, "tools", "dingtalk", "AGENTS.md"), "参考 skill 的 references/dw.md\n");
+		const nestedIssues = it.checkContextArtifacts(nested);
+		check(
+			"C: 子目录 AGENTS.md 的死指针会被发现",
+			nestedIssues.some((s) => s.includes("tools.md")) && nestedIssues.some((s) => s.includes("dw.md")),
+			nestedIssues.join("；"),
+		);
+		check("C: findContextFiles 能列出根与子目录文件", it.findContextFiles(nested).length === 3, String(it.findContextFiles(nested).length));
+		check(
+			"C: findContextFiles 跳过 node_modules",
+			(() => {
+				mkdirSync(join(nested, "node_modules", "x"), { recursive: true });
+				writeFileSync(join(nested, "node_modules", "x", "AGENTS.md"), "# 依赖里的\n");
+				return it.findContextFiles(nested).length === 3;
+			})(),
+		);
 
 		const noFrontmatter = join(tmp, "no-fm");
 		mkdirSync(join(noFrontmatter, ".pi", "skills", "demo-dev"), { recursive: true });
