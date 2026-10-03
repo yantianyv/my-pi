@@ -7,8 +7,9 @@
  *   起算而非按键时刻：沉降期内按下的 Ctrl+C 会把回退意图排队，双击连按永远有效
  * - /rewind 命令：回退到上一条用户消息，消息内容放回输入框
  * - /init 命令：后台独立上下文中分析代码库并生成/更新 AGENTS.md
- *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话；
- *   进度经官方 ctx.ui.setStatus 通道推「init」状态，由 hud 在行 1 动态区显示）
+ *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话；explore 扩展在场时
+ *   子代理可派探索子代理并行摸底，缺席自动降级；进度经官方 ctx.ui.setStatus 通道推
+ *   「init」状态，由 hud 在行 1 动态区显示）
  * - 启动清屏：pi 冷启动（TUI 模式）时清一遍屏，主界面从干净画面开始
  *   （借 setWidget 工厂同步拿到 TUI 实例：清视口 + 强制全量重绘，用完即删）
  */
@@ -23,9 +24,11 @@ import {
 	runAgentLoop,
 	type AgentLoopConfig,
 	type AgentMessage,
+	type AgentTool,
 } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { convertToLlm, createPiStreamFn, systemMessage } from "./shared/agent";
+import { getExploreApi } from "./shared/explore-api";
 import { Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -80,23 +83,27 @@ function extractText(content: unknown): string {
 const CONTEXT_FILE = "AGENTS.md";
 /** init 子代理最多多少轮（一轮 = 一次 LLM 调用 + 其工具调用） */
 const INIT_MAX_TURNS = 30;
-/** init 子代理超时 */
-const INIT_TIMEOUT_MS = 10 * 60_000;
+/** init 子代理超时（可派 explore 并行摸底，故留足预算：单任务探索上限 15 分钟） */
+const INIT_TIMEOUT_MS = 20 * 60_000;
 /** init 子代理单次输出上限 */
 const INIT_MAX_TOKENS = 8192;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyModel = Model<any>;
 
-function buildInitPrompt(mode: "create" | "merge" | "overwrite"): string {
+function buildInitPrompt(mode: "create" | "merge" | "overwrite", hasExplore: boolean): string {
 	const modeInstructions = {
 		create: `当前目录不存在 ${CONTEXT_FILE}，请从头创建它。`,
 		merge:
 			`当前目录已存在 ${CONTEXT_FILE}。先完整读取它，保留其中仍然准确的内容（尤其是人工编写的约定），` +
-			`只更新过时的部分、补充缺失的部分，不要整篇重写。`,
+			`只更新过时的部分、补充缺失的部分，不要整篇重写；同时按提示词纪律压缩冗余：重复条目合并、` +
+			`变更史与解释性长句删掉——事实与约定一条不丢，只是表达变短。`,
 		overwrite:
 			`当前目录已存在 ${CONTEXT_FILE}，但用户要求完全重写：通读现有内容了解项目后，从零生成一份全新的 ${CONTEXT_FILE} 覆盖它。`,
 	};
+	const exploreStep = hasExplore
+		? "大代码库先用 explore 并行摸底（见探索纪律），再精读 grep / find 定位到的关键片段"
+		: "大代码库用 grep / find 定位关键文件后精读片段";
 	return [
 		`分析当前代码库并生成/更新上下文文件 ${CONTEXT_FILE}。`,
 		"",
@@ -106,7 +113,7 @@ function buildInitPrompt(mode: "create" | "merge" | "overwrite"): string {
 		"1. 先看根目录清单（ls）、README、package.json / pyproject.toml / go.mod / Cargo.toml 等清单文件，确定项目用途、技术栈与包管理器",
 		"2. 梳理目录结构，识别入口文件、核心模块、测试目录与配置文件",
 		"3. 从脚本定义、Makefile、CI 配置中提取真实的构建 / 测试 / lint / 运行命令",
-		"4. 大代码库用 grep / find 定位关键文件后精读片段，配合 bash（如 git log 看提交风格）；不要逐文件通读",
+		`4. ${exploreStep}，配合 bash（如 git log 看提交风格）；不要逐文件通读`,
 		"",
 		`${CONTEXT_FILE} 应包含的章节（按需取舍，不需要的章节省略）：`,
 		"- 项目概述：一句话说明这是什么、主要技术栈",
@@ -119,7 +126,7 @@ function buildInitPrompt(mode: "create" | "merge" | "overwrite"): string {
 		"",
 		"硬性要求：",
 		"- 只写经过验证的信息，命令必须真实存在于项目配置中，禁止编造；不确定的内容标注「待确认」",
-		"- 保持精炼（一般不超过 150 行），用路径引用代替粘贴代码原文",
+		"- 保持精炼：用路径引用代替粘贴代码原文，只写能改变 AI 行为的行",
 		"- 内容使用中文（代码、命令、标识符除外）",
 		`- 用 write 工具把结果写入 ${CONTEXT_FILE}；最后一条回复用一两句话总结写入了什么（会展示给用户）`,
 	].join("\n");
@@ -133,8 +140,8 @@ function buildClaudeMergePrompt(): string {
 		"合并步骤：",
 		"1. 完整读取 AGENTS.md 和 CLAUDE.md",
 		"2. 对比两份内容：保留仍然准确的信息（人工编写的约定优先），冲突处以更准确/更新者为准，去重",
-		"3. 同时按 /init 的标准补全：分析代码库（清单文件、scripts、目录结构、CI 配置），更新过时内容、补充缺失章节（常用命令必须真实存在，禁止编造）",
-		"4. 用 write 工具把合并结果写入 AGENTS.md（中文，精炼，一般不超过 150 行）",
+		"3. 同时按 /init 的标准补全：分析代码库（清单文件、scripts、目录结构、CI 配置），更新过时内容、补充缺失章节（常用命令必须真实存在，禁止编造）；重复条目合并、变更史与解释性长句删掉，事实与约定不丢",
+		"4. 用 write 工具把合并结果写入 AGENTS.md（中文，只写能改变 AI 行为的行）",
 		"5. 用 bash 删除 CLAUDE.md（Windows 环境用 del 或 Remove-Item，按当前 shell 而定）",
 		"6. 最后一条回复用一两句话总结：保留了什么、更新了什么、删除了 CLAUDE.md（会展示给用户）",
 	].join("\n");
@@ -144,15 +151,29 @@ function buildClaudeMergePrompt(): string {
 // init 子代理（独立上下文，后台运行）
 // ---------------------------------------------------------------------------
 
-function buildInitSystemPrompt(cwd: string): string {
-	// 固定指令在前、cwd 在后，利于 provider 端 prompt 缓存命中
-	return [
+function buildInitSystemPrompt(cwd: string, hasExplore: boolean): string {
+	const lines = [
 		"你是 init 代理，负责分析代码库并生成/更新 AGENTS.md 上下文文件。",
-		"你拥有工具：read / ls / grep / find（探索）、write / edit（写文件）、bash（辅助命令，如 git log、删除文件）。",
+		hasExplore
+			? "你拥有工具：read / ls / grep / find（探索）、explore（派只读子代理并行摸底）、write / edit（写文件）、bash（辅助命令，如 git log、删除文件）。"
+			: "你拥有工具：read / ls / grep / find（探索）、write / edit（写文件）、bash（辅助命令，如 git log、删除文件）。",
+	];
+	if (hasExplore) {
+		lines.push(
+			"大仓库（目录/文件多）先用 explore 派 2~6 个互不重叠的任务摸底（目录结构与入口、构建/测试/lint 命令、架构要点、代码约定），拿到报告后用 read 抽查关键路径再动笔；小仓库直接读。同一任务不要重复派。",
+		);
+	}
+	lines.push(
 		"要求：高效探索（grep/find 定位 + 精读片段，不逐文件通读）；只写经过验证的信息；完成后的一两条总结要精炼。",
+		"提示词纪律（AGENTS.md 每轮对话都会加载，字数即成本）：",
+		"- 只写能改变 AI 行为的「不写就会做错」的信息；显而易见的常识、README/清单文件里能自行读到的内容不写",
+		"- 不写变更史、自我说明、实现解释；不粘贴代码原文（用路径引用）；常用命令一条一行、不写解释性长句",
+		"- 写完逐行自检：删掉它会不会让 AI 做错事？答不上来就删",
 		"",
 		`工作目录：${cwd}`,
-	].join("\n");
+	);
+	// 固定指令在前、cwd 在后，利于 provider 端 prompt 缓存命中
+	return lines.join("\n");
 }
 
 interface InitRunResult {
@@ -191,14 +212,18 @@ async function runInitAgent(
 	model: AnyModel,
 	prompt: string,
 	signal: AbortSignal,
-	onToolCall: () => void,
+	hooks: { onToolCall: () => void; onExploreProgress: (done: number, total: number) => void },
 ): Promise<InitRunResult> {
-	const tools = [
+	const tools: AgentTool<any>[] = [
 		...createReadOnlyTools(ctx.cwd),
 		createWriteTool(ctx.cwd),
 		createEditTool(ctx.cwd),
 		createBashTool(ctx.cwd),
 	];
+	// explore 扩展在场则一并挂上（缺席静默降级）：大仓库交给子代理并行摸底，
+	// 省下 init 自己逐文件读的上下文与轮数；alwaysFresh——AGENTS.md 必须反映当前代码
+	const exploreTool = getExploreApi()?.createSubagentTool(ctx, { alwaysFresh: true });
+	if (exploreTool) tools.push(exploreTool);
 
 	const streamFn = createPiStreamFn(ctx);
 	// 记录上下文文件写入前的 mtime：轮数用尽/无总结时用于判断代理是否实际完成了写入
@@ -217,10 +242,15 @@ async function runInitAgent(
 		const userMessage: AgentMessage = { role: "user", content: prompt, timestamp: Date.now() };
 		const newMessages = await runAgentLoop(
 			[userMessage],
-			{ messages: [systemMessage(buildInitSystemPrompt(ctx.cwd))], tools },
+			{ messages: [systemMessage(buildInitSystemPrompt(ctx.cwd, !!exploreTool))], tools },
 			config,
 			(event) => {
-				if (event.type === "tool_execution_start") onToolCall();
+				if (event.type === "tool_execution_start") hooks.onToolCall();
+				else if (event.type === "tool_execution_update") {
+					// explore 的进度增量（details.total/succeeded）转成 init 状态行的探索计数
+					const d = event.partialResult?.details as { total?: number; succeeded?: number } | undefined;
+					if (typeof d?.total === "number" && d.total > 0) hooks.onExploreProgress(d.succeeded ?? 0, d.total);
+				}
 			},
 			signal,
 			streamFn,
@@ -242,7 +272,7 @@ async function runInitAgent(
 				};
 				const more = await runAgentLoop(
 					[nudge],
-					{ messages: [systemMessage(buildInitSystemPrompt(ctx.cwd)), ...newMessages], tools: [] },
+					{ messages: [systemMessage(buildInitSystemPrompt(ctx.cwd, !!exploreTool)), ...newMessages], tools: [] },
 					{ model, maxTokens: INIT_MAX_TOKENS, convertToLlm, finishTurn: () => ({ action: "end" as const }) },
 					() => {},
 					signal,
@@ -294,13 +324,17 @@ export default function (pi: ExtensionAPI) {
 		let toolCalls = 0;
 		const modelName = `${model.provider}/${model.id}`;
 		// 进度经官方 setStatus 通道推给 hud 行 1 动态区（与任务完成提醒同一通道，hud 按 key 映射样式）
-		ctx.ui.setStatus("init", `⚙ 初始化 · ${toolCalls} 步`);
+		const setProgress = (text: string) => ctx.ui.setStatus("init", text);
+		setProgress(`⚙ 初始化 · ${toolCalls} 步`);
 
 		void (async () => {
 			try {
-				const result = await runInitAgent(ctx, model, prompt, controller.signal, () => {
-					toolCalls++;
-					ctx.ui.setStatus("init", `⚙ 初始化 · ${toolCalls} 步`);
+				const result = await runInitAgent(ctx, model, prompt, controller.signal, {
+					onToolCall: () => {
+						toolCalls++;
+						setProgress(`⚙ 初始化 · ${toolCalls} 步`);
+					},
+					onExploreProgress: (done, total) => setProgress(`⚙ 初始化 · 探索 ${done}/${total}`),
 				});
 				ctx.ui.notify(
 					result.ok
@@ -365,7 +399,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const label = `${mode === "create" ? "生成" : mode === "merge" ? "更新" : "重写"} ${CONTEXT_FILE}`;
-			launchBackgroundInit(ctx, buildInitPrompt(mode), label);
+			// 与 runInitAgent 同一处探测（同一契约，同一结果）：决定提示词里要不要提 explore
+			launchBackgroundInit(ctx, buildInitPrompt(mode, getExploreApi() !== null), label);
 		},
 	});
 

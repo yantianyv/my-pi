@@ -8,6 +8,7 @@
  * - 场景 C：缓存复用——完整成果优先于半成品；stripTitle 去掉独立阅读用的一级标题
  * - 场景 D：报告渲染——进行中/复用/中断/失败四种状态都能看出状态与已确认正文
  * - 场景 E：上下文超限识别——常见措辞命中、无关错误不误判
+ * - 场景 G：跨扩展契约——__PI_EXPLORE_API__ 挂载（键名/版本/工具形状/alwaysFresh 变体/4 参调用降级）
  *
  * 用法：node src/extensions/test/explore.test.mjs（仓库根目录执行）
  */
@@ -113,6 +114,32 @@ async function main() {
 		const miss = ["fetch failed", "rate limit exceeded", "429 too many requests", "工具执行失败", "子代理超时"];
 		check("E: 常见超限措辞全部命中", hit.every((h) => m.CONTEXT_OVERFLOW_RE.test(h)), hit.filter((h) => !m.CONTEXT_OVERFLOW_RE.test(h)).join(" | "));
 		check("E: 网络/限流/超时类不误判为超限", miss.every((x) => !m.CONTEXT_OVERFLOW_RE.test(x)), miss.filter((x) => m.CONTEXT_OVERFLOW_RE.test(x)).join(" | "));
+	}
+
+	// ---- 场景 G：跨扩展契约（/init 子代理调用 explore） ----
+	console.log("场景 G：跨扩展契约");
+	{
+		m.default({ registerTool: () => {}, on: () => {}, registerCommand: () => {} });
+		const api = globalThis.__PI_EXPLORE_API__;
+		check("G: 按契约键名挂载", !!api);
+		check("G: 契约版本一致", api?.version === 1);
+		if (api) {
+			const ctx = { modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false, find: () => undefined } };
+			const tool = api.createSubagentTool(ctx);
+			check("G: 工具名沿用 explore", tool.name === "explore");
+			check("G: execute 是 4 参签名（ctx 已绑定）", tool.execute.length === 4);
+			check(
+				"G: 默认变体保留 fresh 参数与复用口径",
+				"fresh" in tool.parameters.properties && tool.parameters.properties.tasks.description.includes("复用上次成果"),
+			);
+			const freshTool = api.createSubagentTool(ctx, { alwaysFresh: true });
+			check("G: alwaysFresh 变体去掉 fresh 参数", !("fresh" in freshTool.parameters.properties));
+			check("G: alwaysFresh 改口径为每次现跑", freshTool.parameters.properties.tasks.description.includes("每次调用都重新探索"));
+			// 端到端接线：4 参调用（无 ctx）+ 空模型注册表 → 走「找不到子模型」降级而非崩
+			const res = await freshTool.execute("call-1", { tasks: ["a", "b"] }, undefined, undefined);
+			check("G: 4 参调用可执行并优雅降级", res.content[0].text.includes("找不到可用的子模型"));
+		}
+		delete globalThis.__PI_EXPLORE_API__;
 	}
 
 	check("F: 落盘目录已建立（写盘副作用）", existsSync(join(tmp, ".pi", "explore", "tasks")));

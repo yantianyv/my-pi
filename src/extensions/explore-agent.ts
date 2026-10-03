@@ -33,6 +33,7 @@ import type {
 	AgentToolUpdateCallback,
 	ExtensionAPI,
 	ExtensionContext,
+	ExtensionToolContext,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
@@ -40,6 +41,7 @@ import {
 	runAgentLoop,
 	type AgentLoopConfig,
 	type AgentMessage,
+	type AgentTool,
 } from "@earendil-works/pi-agent-core";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Message } from "@earendil-works/pi-ai";
@@ -57,6 +59,7 @@ import {
 import { convertToLlm, createPiStreamFn, systemMessage } from "./shared/agent";
 import { isModelConfig, loadJsonConfig, saveJsonConfig } from "./shared/config";
 import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
+import { EXPLORE_API_VERSION, publishExploreApi } from "./shared/explore-api";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -196,16 +199,22 @@ function isRetryable(error: string | undefined): boolean {
 /** 已注册的工具定义是否带视觉标注（幂等防抖） */
 let registeredWithVision = false;
 
+/** 任务参数说明（不含缓存口径：口径随调用方策略不同，见下面两个常量） */
+const TASK_PARAM_DESC =
+	"每个任务派一个子代理（任务数 = 子代理数）。任务可按探索问题拆分，也可把大量文件/目录按批次分治，" +
+	"只要各任务范围与目标互不重叠（避免子代理重复探索同一区域）、粒度尽量均匀（各任务耗时相近，" +
+	"别让个别重型任务拖慢整批并行）。一次至少 2 个、最多 " +
+	`${MAX_TASKS} 个任务` +
+	"（超出上限的调用会被拒绝，任务过多可拆成多批调用）。";
+/** 主会话口径：复用历史成果省 token */
+const CACHE_REUSE_NOTE = "同一任务文本第二次调用会直接复用上次成果（不消耗 token）；要重跑传 fresh=true。";
+/** alwaysFresh 口径（/init 要求结果反映当前代码） */
+const ALWAYS_FRESH_NOTE = "每次调用都重新探索，不复用历史成果（中断过的任务会带着已有发现续跑）。";
+
 /** 参数 schema 与视觉无关，静态定义；描述引导在下方 buildExploreToolDefinition */
 const EXPLORE_PARAMS = Type.Object({
 	tasks: Type.Array(Type.String(), {
-		description:
-			"每个任务派一个子代理（任务数 = 子代理数）。任务可按探索问题拆分，也可把大量文件/目录按批次分治，" +
-			"只要各任务范围与目标互不重叠（避免子代理重复探索同一区域）、粒度尽量均匀（各任务耗时相近，" +
-			"别让个别重型任务拖慢整批并行）。一次至少 2 个、最多 " +
-			`${MAX_TASKS} 个任务` +
-			"（超出上限的调用会被拒绝，任务过多可拆成多批调用）。" +
-		"同一任务文本第二次调用会直接复用上次成果（不消耗 token）；要重跑传 fresh=true。",
+		description: TASK_PARAM_DESC + CACHE_REUSE_NOTE,
 		minItems: 2,
 		maxItems: MAX_TASKS,
 	}),
@@ -213,10 +222,20 @@ const EXPLORE_PARAMS = Type.Object({
 	fresh: Type.Optional(Type.Boolean({ description: "强制重新探索（默认复用同任务文本的上次成果）" })),
 });
 
+/** alwaysFresh 变体：没有可复用的缓存，fresh 参数一并去掉（值由适配层强制） */
+const EXPLORE_PARAMS_ALWAYS_FRESH = Type.Object({
+	tasks: Type.Array(Type.String(), {
+		description: TASK_PARAM_DESC + ALWAYS_FRESH_NOTE,
+		minItems: 2,
+		maxItems: MAX_TASKS,
+	}),
+});
+
 function buildExploreToolDefinition(
 	pi: ExtensionAPI,
 	hasVision: boolean,
-): ToolDefinition<typeof EXPLORE_PARAMS, ExploreDetails> {
+	alwaysFresh = false,
+): ToolDefinition<any, ExploreDetails> {
 	const visionNote = hasVision ? "子代理模型支持读图，可派发截图/图片/图表分析任务。" : "";
 	return {
 		name: "explore",
@@ -241,13 +260,39 @@ function buildExploreToolDefinition(
 				? ["explore 子代理支持读图（视觉模型）：涉及截图/图片/图表文件时，可直接让子代理读图分析。"]
 				: []),
 		],
-		parameters: EXPLORE_PARAMS,
+		parameters: alwaysFresh ? EXPLORE_PARAMS_ALWAYS_FRESH : EXPLORE_PARAMS,
 		executionMode: "parallel",
-		execute: (_toolCallId, params, signal, onUpdate, ctx): Promise<AgentToolResult<ExploreDetails>> => {
+		execute: (_toolCallId, params: { tasks: string[]; fresh?: boolean }, signal, onUpdate, ctx): Promise<AgentToolResult<ExploreDetails>> => {
 			// 兜底收敛：模型实际能力与已注册标注不一致时重注册（下个 turn 生效）
 			registerExploreTool(pi, modelHasVision(pickExploreModel(ctx)));
 			return executeExplore(ctx, params, signal, onUpdate);
 		},
+	};
+}
+
+/**
+ * 适配成子代理循环可直接调用的 AgentTool：execute 收 4 参（ctx 与 fresh 策略在闭包里定死）。
+ * ctx 按 ExtensionContext 使用即可（explore 只用 cwd / 模型注册表 / setStatus）。
+ */
+function toSubagentTool(
+	definition: ToolDefinition<any, ExploreDetails>,
+	ctx: ExtensionContext,
+	alwaysFresh: boolean,
+): AgentTool<any> {
+	return {
+		name: definition.name,
+		label: definition.label,
+		description: definition.description,
+		parameters: definition.parameters,
+		executionMode: definition.executionMode,
+		execute: (toolCallId, params, signal, onUpdate) =>
+			definition.execute(
+				toolCallId,
+				alwaysFresh ? { ...(params as Record<string, unknown>), fresh: true } : params,
+				signal,
+				onUpdate,
+				ctx as ExtensionToolContext,
+			),
 	};
 }
 
@@ -780,6 +825,18 @@ interface ExploreDetails {
 }
 
 export default function (pi: ExtensionAPI) {
+	// 跨扩展契约：让 /init 子代理（claude-it）能以工具形式调用 explore。零 import 耦合——
+	// 消费方只认 shared/explore-api 定义的键与形状，explore 缺席时它自行降级。
+	publishExploreApi({
+		version: EXPLORE_API_VERSION,
+		createSubagentTool: (ctx, options) =>
+			toSubagentTool(
+				buildExploreToolDefinition(pi, modelHasVision(pickExploreModel(ctx)), options?.alwaysFresh === true),
+				ctx,
+				options?.alwaysFresh === true,
+			),
+	});
+
 	pi.on("session_shutdown", async () => clearStatusTimers());
 	// 初始注册（未知视觉能力时不标注）；有 ctx 的时机再收敛
 	registerExploreTool(pi, false);
@@ -897,7 +954,7 @@ async function executeExplore(
 					text: `子代理探索中（${modelName} · 并发 ${limiter.limit}/${CONCURRENCY}）：\n${perTask}\n报告文件：${path.relative(ctx.cwd, reportPath)}`,
 				},
 			],
-			details: { model: modelName, total: tasks.length, succeeded: 0, tasks: [] },
+			details: { model: modelName, total: tasks.length, succeeded: doneCount(), tasks: [] },
 		});
 		ctx.ui.setStatus("explore", `🔎 探索 ${doneCount()}/${tasks.length} · 并发 ${limiter.limit}`);
 	};
