@@ -21,6 +21,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { loadJsonConfig, saveJsonConfig } from "./shared/config";
 
 // ---------------- 可调配置 ----------------
 const CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "mimo-omni.json");
@@ -64,20 +65,19 @@ interface MimoConfig {
 	voice?: string;
 }
 
+/** 只接受字符串字段（畸形值回默认，不让坏配置渗进运行逻辑） */
+const isMimoConfig = (v: unknown): v is MimoConfig => {
+	const c = v as { model?: unknown; voice?: unknown } | null;
+	if (!c || typeof c !== "object") return false;
+	return (c.model === undefined || typeof c.model === "string") && (c.voice === undefined || typeof c.voice === "string");
+};
+
 function loadConfig(): MimoConfig {
-	try {
-		return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
-	} catch {
-		return {};
-	}
+	return loadJsonConfig<MimoConfig>(CONFIG_PATH, {}, isMimoConfig);
 }
 
-function saveConfig(cfg: MimoConfig) {
-	try {
-		fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf-8");
-	} catch {
-		/* 配置保存失败不阻断功能 */
-	}
+function saveConfig(cfg: MimoConfig): void {
+	saveJsonConfig(CONFIG_PATH, cfg);
 }
 
 /** 媒体类型判定：按扩展名分音频/视频；不认识的扩展名返回 undefined */
