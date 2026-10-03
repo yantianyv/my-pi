@@ -541,7 +541,8 @@ async function runInitAgent(
 		for (;;) {
 			try {
 				record = [];
-				const initial: AgentMessage[] = [systemMsg(), { role: "user", content: prompt, timestamp: Date.now() }];
+				// prompts 会被追加到 context.messages 之后，系统提示只放 context（否则重复）
+				const initial: AgentMessage[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
 				if (notes) {
 					initial.push(
 						userNudge(
@@ -619,12 +620,21 @@ async function runInitAgent(
 				};
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
-				// 上下文超限 → 压缩记录后重启继续（不设轮数上限，这里是唯一的天花板）
-				if (CONTEXT_OVERFLOW_RE.test(msg) && compactions < MAX_COMPACTIONS && !signal.aborted) {
-					compactions++;
-					hooks.onCompact(compactions);
-					notes = await compactInitNotes(ctx, model, renderProcessRecord(record), notes);
-					continue;
+				// 上下文超限 → 把过程记录压成要点后重启继续（不设轮数上限，这里是唯一的天花板）
+				if (
+					CONTEXT_OVERFLOW_RE.test(msg) &&
+					compactions < MAX_COMPACTIONS &&
+					record.length > 0 &&
+					!signal.aborted
+				) {
+					const compacted = await compactInitNotes(ctx, model, renderProcessRecord(record), notes);
+					// 压不出东西（如首轮就超限）就不重启：同一条提示重试只会白烧 token
+					if (compacted.trim()) {
+						compactions++;
+						hooks.onCompact(compactions);
+						notes = compacted;
+						continue;
+					}
 				}
 				return { ok: false, summary: msg.includes("abort") ? "已中止（会话结束或 /init cancel）" : msg };
 			}
