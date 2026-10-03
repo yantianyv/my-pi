@@ -90,10 +90,6 @@ const INIT_MAX_TOKENS = 8192;
  * 不设轮数与墙钟上限：/init 是稀有大工程，成本按价值配比；要中断用 /init cancel。
  */
 const NO_PROGRESS_TURNS = 8;
-/** 审计子代理最多多少轮（只复核产物，不需要探索） */
-const AUDIT_MAX_TURNS = 12;
-/** 审计子代理超时（只拦子步骤挂死；初稿已落盘，超时只报告不丢产物） */
-const AUDIT_TIMEOUT_MS = 5 * 60_000;
 /** 审计子代理单次输出上限 */
 const AUDIT_MAX_TOKENS = 4096;
 
@@ -255,7 +251,7 @@ async function runInitAudit(
 	ctx: ExtensionContext,
 	model: AnyModel,
 	signal: AbortSignal,
-	onStart: () => void,
+	onAudit: (steps: number | null) => void,
 ): Promise<{ ok: boolean; summary: string }> {
 	const skillsDir = path.join(ctx.cwd, ".pi", "skills");
 	const target = fs.existsSync(skillsDir) ? `${CONTEXT_FILE} 与 .pi/skills/` : CONTEXT_FILE;
@@ -264,10 +260,11 @@ async function runInitAudit(
 		createWriteTool(ctx.cwd),
 		createEditTool(ctx.cwd),
 	];
-	// 自身上限与父级超时取先到者（不为审计单独扩预算）
-	const auditSignal = AbortSignal.any([signal, AbortSignal.timeout(AUDIT_TIMEOUT_MS)]);
-	let turns = 0;
-	onStart();
+	// 与 init 主体同口径：不设轮数/时间上限（审计同样是大工程的收尾；挂在看门狗上只会把修到一半的产物丢下）
+	const streamFn = createPiStreamFn(ctx);
+	const auditSystem = systemMessage(buildAuditSystemPrompt(ctx.cwd));
+	let steps = 0;
+	onAudit(null);
 	try {
 		const messages = await runAgentLoop(
 			[
@@ -277,24 +274,32 @@ async function runInitAudit(
 					timestamp: Date.now(),
 				},
 			],
-			{ messages: [systemMessage(buildAuditSystemPrompt(ctx.cwd))], tools },
-			{
-				model,
-				maxTokens: AUDIT_MAX_TOKENS,
-				convertToLlm,
-				finishTurn: () => (++turns >= AUDIT_MAX_TURNS ? { action: "end" as const } : undefined),
+			{ messages: [auditSystem], tools },
+			{ model, maxTokens: AUDIT_MAX_TOKENS, convertToLlm },
+			(event) => {
+				if (event.type === "tool_execution_start") onAudit(++steps);
 			},
-			() => {},
-			auditSignal,
-			createPiStreamFn(ctx),
+			signal,
+			streamFn,
 		);
-		const text = findAssistantText(messages);
+		let text = findAssistantText(messages);
+		if (!text && !signal.aborted) {
+			// 没结论就补问一次（无上限，但必须交回报告）
+			const more = await runAgentLoop(
+				[{ role: "user", content: "请用一两句话给出审计结论：改了什么（没改也说明）。", timestamp: Date.now() }],
+				{ messages: [auditSystem, ...messages], tools: [] },
+				{ model, maxTokens: AUDIT_MAX_TOKENS, convertToLlm },
+				() => {},
+				signal,
+				streamFn,
+			);
+			text = findAssistantText(more);
+		}
 		if (text) return { ok: true, summary: text };
-		return { ok: false, summary: findLlmError(messages) ?? `无结论（轮数上限 ${AUDIT_MAX_TURNS}）` };
+		return { ok: false, summary: findLlmError(messages) ?? "无结论" };
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);
-		if (signal.aborted) return { ok: false, summary: "已中止" };
-		return { ok: false, summary: msg.includes("abort") ? "审计超时" : msg };
+		return { ok: false, summary: signal.aborted ? "已中止" : msg };
 	}
 }
 
@@ -306,7 +311,7 @@ async function runInitAgent(
 	hooks: {
 		onToolCall: () => void;
 		onExploreProgress: (done: number, total: number) => void;
-		onAudit: () => void;
+		onAudit: (steps: number | null) => void;
 	},
 ): Promise<InitRunResult> {
 	const tools: AgentTool<any>[] = [
@@ -486,7 +491,8 @@ export default function (pi: ExtensionAPI) {
 						setProgress(`⚙ 初始化 · ${toolCalls} 步`);
 					},
 					onExploreProgress: (done, total) => setProgress(`⚙ 初始化 · 探索 ${done}/${total}`),
-					onAudit: () => setProgress("⚙ 初始化 · 审计中"),
+					onAudit: (steps) =>
+						setProgress(steps === null ? "⚙ 初始化 · 审计中" : `⚙ 初始化 · 审计 ${steps} 步`),
 				});
 				ctx.ui.notify(
 					result.ok
