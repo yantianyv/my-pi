@@ -96,7 +96,12 @@ async function runBackgroundSync(ctx: ExtensionContext, cfg: ReturnType<typeof l
 		const notes = formatSyncNotes(stats, 1);
 		push(`✓ ${summary}`, 8_000);
 		// 状态行只放短摘要：完整说明（冲突副本处理办法等长句）留在工具回执里
-		if (notes.length > 0) {
+		if (stats.failedDirs.length) {
+			// 读取失败的目录要指名道姓（否则只看到「N 个目录未读取」无从下手）
+			const f = stats.failedDirs[0];
+			const rest = stats.failedDirs.length > 1 ? ` 等 ${stats.failedDirs.length} 个` : "";
+			push(`⚠ 远端 ${f.dir} 读取失败（${f.reason}）${rest}`.slice(0, 48), 12_000);
+		} else if (notes.length > 0) {
 			const short = notes[0].replace(/^⚠\s*/, "").split(/[：:（(]/)[0].slice(0, 24);
 			push(`⚠ ${short}`, 12_000);
 		}

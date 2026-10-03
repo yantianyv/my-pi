@@ -10,11 +10,15 @@
  *   dav.baseUrl  // http://127.0.0.1:PORT/dav
  *   dav.store    // Map，键=服务器绝对路径（无尾斜杠，根=prefix）——测试可直接注入/篡改远端状态
  *   dav.close()
+ *
+ * 怪癖开关（复现真实服务器的元数据不一致，如 123 云盘）：
+ *   noGetEtag      GET 不返回 ETag（PROPFIND 仍返回）
+ *   getMtimeSkewMs GET 的 Last-Modified 与 PROPFIND 的 getlastmodified 相差该毫秒数
  */
 import { createHash } from "node:crypto";
 import * as http from "node:http";
 
-export async function startMockDav({ user = "test-user", pass = "test-pass", prefix = "/dav" } = {}) {
+export async function startMockDav({ user = "test-user", pass = "test-pass", prefix = "/dav", noGetEtag = false, getMtimeSkewMs = 0 } = {}) {
 	const store = new Map(); // 键 = 服务器绝对路径（无尾斜杠；根 = prefix）；值 = {data|isDir, etag, mtime}
 	store.set(prefix, { isDir: true, mtime: new Date().toUTCString() });
 
@@ -78,11 +82,12 @@ export async function startMockDav({ user = "test-user", pass = "test-pass", pre
 			case "GET": {
 				if (!entry) return send(404, "not found");
 				if (entry.isDir) return send(405, "is a directory");
-				return send(200, entry.data, {
-					ETag: `"${entry.etag}"`,
-					"Last-Modified": entry.mtime,
+				const headers = {
+					"Last-Modified": getMtimeSkewMs ? new Date(Date.parse(entry.mtime) + getMtimeSkewMs).toUTCString() : entry.mtime,
 					"Content-Type": "text/markdown; charset=utf-8",
-				});
+				};
+				if (!noGetEtag) headers.ETag = `"${entry.etag}"`;
+				return send(200, entry.data, headers);
 			}
 			case "PUT": {
 				const parent = norm(key.slice(0, key.lastIndexOf("/")) || prefix);

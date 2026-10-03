@@ -768,12 +768,13 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			};
 			walkMirror(mirror);
 			const syncedAt = ledger.syncedAt ? new Date(ledger.syncedAt).toLocaleString() : "（从未同步）";
-			// 待上传积压：账本有 etag 缺（从未上传成功）的本地文件 + 本地 mtime 新于账本
+			// 待上传积压：既无 etag 也无远端记录才算（从远端下载来的文件账本同样可能没有 etag——
+			// 部分服务器 GET 不返回 ETag，那不是待上传）
 			const local = listNotes(mirror).filter((f) => !f.isDir && !isLfsPath(f.path));
 			let pending = 0;
 			for (const f of local) {
 				const lf = ledger.files[f.path];
-				if (!lf || !lf.etag) pending++;
+				if (!lf || (!lf.etag && !lf.remoteLastModified)) pending++;
 			}
 			const lines = [
 				`上次同步：${syncedAt}`,

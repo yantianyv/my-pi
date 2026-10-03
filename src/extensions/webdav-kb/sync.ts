@@ -26,7 +26,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { WebDavClient, DavError } from "./client";
+import { WebDavClient, DavError, isNetworkFailure } from "./client";
 import {
 	KbConfig,
 	Ledger,
@@ -287,6 +287,14 @@ export interface SyncOptions {
 	lockWaitMs?: number;
 }
 
+/** 遍历失败的远端目录（带失败原因，提示里能直接说清是哪个目录、为什么） */
+export interface FailedDir {
+	/** 相对路径（"/" 表示根目录） */
+	dir: string;
+	/** 失败原因短标签（如 "HTTP 401"/"网络不可达"） */
+	reason: string;
+}
+
 export interface SyncStats {
 	/** 远端 → 本地 下载数 */
 	downloaded: number;
@@ -299,7 +307,7 @@ export interface SyncStats {
 	/** 冲突文件路径（用于向用户指出哪些文件产生了副本） */
 	conflictFiles: string[];
 	/** 遍历失败、内容未纳入同步的远端目录（权限/网络） */
-	failedDirs: string[];
+	failedDirs: FailedDir[];
 	/** 无变化文件数 */
 	unchanged: number;
 	/** 单个文件失败（不影响其它文件，汇总上报） */
@@ -335,11 +343,24 @@ export function formatSyncNotes(stats: SyncStats, maxErrors = 3): string[] {
 		);
 	}
 	if (stats.failedDirs.length) {
-		notes.push(`⚠ ${stats.failedDirs.length} 个远端目录未能读取（权限或网络），本次同步结果可能不完整`);
+		const shown = stats.failedDirs
+			.slice(0, 3)
+			.map((f) => `${f.dir}（${f.reason}）`)
+			.join("、");
+		const more = stats.failedDirs.length > 3 ? ` 等 ${stats.failedDirs.length} 个` : "";
+		notes.push(`⚠ 远端目录读取失败：${shown}${more}，这些目录未纳入本次同步，结果可能不完整`);
 	}
 	for (const err of stats.errors.slice(0, maxErrors)) notes.push(`⚠ ${err}`);
 	if (stats.errors.length > maxErrors) notes.push(`⚠ …另有 ${stats.errors.length - maxErrors} 条失败明细`);
 	return notes;
+}
+
+/** 目录遍历失败的短原因标签：HTTP 状态优先，网络类归一句，其余取原始消息截断 */
+function failureReason(e: unknown): string {
+	if (e instanceof DavError && e.status != null) return `HTTP ${e.status}`;
+	if (isNetworkFailure(e)) return "网络不可达";
+	const msg = e instanceof Error ? e.message : String(e);
+	return msg.length > 40 ? `${msg.slice(0, 40)}…` : msg;
 }
 
 interface RemoteFile {
@@ -347,6 +368,29 @@ interface RemoteFile {
 	etag?: string;
 	lastModified?: string;
 	size?: number;
+}
+
+/**
+ * 下载/冲突落盘后记账。etag 与远端修改时间**优先用遍历（PROPFIND）结果**：
+ * 部分服务器只在 PROPFIND 给 etag（GET 响应无 ETag），且两处的修改时间并不一致；
+ * 只记 GET 的值会让账本与远端永远对不上——文件每次同步都被当成「远端变过」重复下载。
+ */
+function recordDownloaded(
+	ledger: Ledger,
+	rel: string,
+	abs: string,
+	data: Uint8Array,
+	known: RemoteFile | undefined,
+	got: { etag?: string; lastModified?: string },
+): void {
+	const etag = got.etag ?? known?.etag;
+	const lastModified = known?.lastModified ?? got.lastModified;
+	ledger.files[rel] = {
+		...(etag ? { etag } : {}),
+		...(lastModified ? { remoteLastModified: lastModified } : {}),
+		size: data.length,
+		localMtime: fs.statSync(abs).mtimeMs,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -358,9 +402,9 @@ async function walkRemote(
 	client: WebDavClient,
 	onProgress?: (label: string) => void,
 	signal?: AbortSignal,
-): Promise<{ files: Map<string, RemoteFile>; failedDirs: string[] }> {
+): Promise<{ files: Map<string, RemoteFile>; failedDirs: FailedDir[] }> {
 	const out = new Map<string, RemoteFile>();
-	const failedDirs: string[] = [];
+	const failedDirs: FailedDir[] = [];
 	const queue: string[] = ["/"];
 	let dirsDone = 0;
 	while (queue.length > 0) {
@@ -379,7 +423,7 @@ async function walkRemote(
 					try {
 						entries = await client.list(dir);
 					} catch (e) {
-						failedDirs.push(dir);
+						failedDirs.push({ dir, reason: failureReason(e) });
 						onProgress?.(`⚠ 目录 ${dir} 遍历失败已跳过：${e instanceof Error ? e.message : String(e)}`);
 						return;
 					}
@@ -588,7 +632,7 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 	for (const p of Object.keys(ledger.files)) {
 		if (!remote.has(p)) {
 			// 遍历失败的目录子树不可信（远端可能有，只是没爬到）→ 跳过「远端已删」判定，等下次同步
-			if (failedDirs.some((d) => (d === "/" ? p.startsWith("/") : p.startsWith(d + "/")))) continue;
+			if (failedDirs.some((f) => (f.dir === "/" ? p.startsWith("/") : p.startsWith(f.dir + "/")))) continue;
 			if (local.has(p)) {
 				if (ledger.files[p].etag) delLocal.push(p);
 				else toUpload.push(p);
@@ -630,12 +674,7 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 			const abs = safeLocal(mirrorDir, p);
 			fs.mkdirSync(path.dirname(abs), { recursive: true });
 			fs.writeFileSync(abs, data);
-			ledger.files[p] = {
-				...(etag ? { etag } : {}),
-				...(lastModified ? { remoteLastModified: lastModified } : {}),
-				size: data.length,
-				localMtime: fs.statSync(abs).mtimeMs,
-			};
+			recordDownloaded(ledger, p, abs, data, remote.get(p), { etag, lastModified });
 			stats.downloaded++;
 		} catch (e) {
 			stats.errors.push(`下载 ${p}: ${e instanceof Error ? e.message : String(e)}`);
@@ -657,12 +696,7 @@ async function syncAllInner(cfg: KbConfig, mirrorDir: string, opts: SyncOptions 
 			fs.mkdirSync(path.dirname(conflictAbs), { recursive: true });
 			fs.renameSync(abs, conflictAbs); // 本地版挪走
 			fs.writeFileSync(abs, data); // 远端版落位
-			ledger.files[p] = {
-				...(etag ? { etag } : {}),
-				...(lastModified ? { remoteLastModified: lastModified } : {}),
-				size: data.length,
-				localMtime: fs.statSync(abs).mtimeMs,
-			};
+			recordDownloaded(ledger, p, abs, data, remote.get(p), { etag, lastModified });
 			stats.conflicts++;
 			stats.conflictFiles.push(p);
 		} catch (e) {

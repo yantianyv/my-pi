@@ -70,13 +70,16 @@ try {
 		const notes = formatSyncNotes({
 			...empty,
 			conflictFiles: ["/notes/a.md", "/notes/b.md"],
-			failedDirs: ["/private"],
+			failedDirs: [{ dir: "/private", reason: "HTTP 403" }],
 			errors: [
 				"上传 /notes/x.md: 含疑似密钥（API key），已拦截上传，本地文件保留；确认无敏感信息后可移除密钥再同步，或把配置项 allowSecretUpload 设为 true 放行全部",
 			],
 		});
 		check("说明：冲突给出路径与副本处理办法", notes[0].includes("/notes/a.md") && notes[0].includes(".conflict-"));
-		check("说明：不可达目录提醒结果可能不完整", notes.some((n) => n.includes("未能读取")));
+		check(
+			"说明：读取失败的目录带路径与原因，且提醒结果不完整",
+			notes.some((n) => n.includes("/private") && n.includes("HTTP 403") && n.includes("未纳入本次同步")),
+		);
 		check("说明：失败明细原文带可操作指引", notes.some((n) => n.includes("已拦截上传") && n.includes("allowSecretUpload")));
 		const many = formatSyncNotes({ ...empty, errors: ["e1", "e2", "e3", "e4", "e5"] }, 3);
 		check("说明：明细超限时折叠计数", many.length === 4 && many[3].includes("另有 2 条"));
@@ -248,6 +251,23 @@ try {
 	}});
 	check("同步期间锁文件上报进度与心跳", lockMeta !== null && typeof lockMeta.heartbeat === "number", JSON.stringify(lockMeta));
 	check("同步完成锁已释放且无 tmp 残留", !existsSync(lockPath) && readdirSync(mirrorDir).every((f) => !f.includes(".kb-sync.lock.tmp")), "锁或 tmp 残留");
+	// ---- 17) 怪癖服务器：GET 无 ETag 且与 PROPFIND 时间不一致（123 云盘实测行为）→ 不重复下载 ----
+	{
+		const dav2 = await startMockDav({ noGetEtag: true, getMtimeSkewMs: 300_000 });
+		try {
+			const mirror2 = join(tmp, "mirror-quirk");
+			const cfg2 = { baseUrl: dav2.baseUrl, username: USER, password: PASS };
+			dav2.seed("/notes/q.md", "# Q\n怪癖服务器\n");
+			const s1 = await syncAll(cfg2, mirror2);
+			check("怪癖服务器：首次下载", s1.downloaded === 1 && s1.errors.length === 0, JSON.stringify(s1));
+			const lf = loadLedger(mirror2).files["/notes/q.md"];
+			check("怪癖服务器：账本落遍历结果的 etag 与时间", Boolean(lf?.etag), JSON.stringify(lf));
+			const s2 = await syncAll(cfg2, mirror2);
+			check("怪癖服务器：二次同步不重复下载", s2.downloaded === 0 && s2.uploaded === 0, JSON.stringify(s2));
+		} finally {
+			dav2.close();
+		}
+	}
 } finally {
 	dav.close();
 	rmSync(tmp, { recursive: true, force: true });
