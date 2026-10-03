@@ -77,5 +77,6 @@ hud 自己只推 `hud-bash` / `balance-error` / `model-switch` 三个 key，其�
 | `clampScroll` / `scrollByPage` | 滚动窗位置（PgUp/PgDn 整页） |
 | `choiceKey(data, index, count)` | 选项面板按键语义（Esc/↑↓/Enter/1-9/PgUp/PgDn），只解析意图、回调留给调用方 |
 | `editInput` / `renderScrollingInput` / `pasteText` | 输入框编辑与水平滚动 |
+| `ratingIndicator(th, min, max, value, focused)` | 评分行（‹ ●●○○○ 3/5 ›；ask 评分题使用） |
 
 **宽度一律用 pi-tui 的 `visibleWidth`**（中文 2 列）：自己写 `[...str].length` 会低估一半，导致该收口时还在折行。

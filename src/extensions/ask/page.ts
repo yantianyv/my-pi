@@ -935,9 +935,12 @@ export class QuestionnairePage {
 					const o = opts[row.opt!]!;
 					const isMulti = q.type === "multi";
 					const mark = isMulti ? (st.sel.has(row.opt!) ? "[x]" : "[ ]") : st.sel.has(row.opt!) ? "●" : "○";
-					const prefix = (focused ? th.fg("accent", " › ") : "   ") + `${th.fg("dim", `${row.opt! + 1}.`)} ${mark} `;
-					const label = focused ? th.fg("accent", o.label) : o.label;
-					pushWrapped(prefix, `${label}${o.description ? th.fg("dim", ` — ${o.description}`) : ""}`, ri);
+				renderChoiceList(
+					th,
+					[{ label: o.label, note: o.description, index: `${row.opt! + 1}.` }],
+					focused ? 0 : -1,
+					{ boldSelected: false, mark: () => mark, noteFormat: "dash", width: W },
+				).forEach((l, k) => content.push(k === 0 ? { text: l, row: ri } : { text: l }));
 				} else if (row.kind === "other") {
 					content.push({ text: this.renderInputRow(st.other, st.otherCursor, "填写其他内容…", focused, W), row: ri });
 				} else if (row.kind === "input") {
