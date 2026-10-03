@@ -84,4 +84,29 @@ const draft = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】联调
 await show("合规发送 → 草稿待确认", await call("dws_exec", { args: draft }));
 await show("错误 confirm token", await call("dws_exec", { args: draft, confirm: "deadbeef00" }));
 
+// 群发（+broadcast）：草稿前自动预检收件人（只读 dry-run，永不 confirm）
+const bcBad = ["chat", "+broadcast", "--to", `${name},这个人肯定不存在`, "--content", "【AI发送】联调群发预检"];
+await show("群发预检：含未解析收件人 → 整体拦下并给候选", await call("dws_exec", { args: bcBad }));
+const bcOkTo = resolved.details?.userId ?? resolved.details?.candidates?.[0]?.userId ?? uid;
+const bcOk = ["chat", "+broadcast", "--to", bcOkTo, "--content", "【AI发送】联调群发草稿"];
+await show("群发预检：全部唯一解析 → 草稿带收件人表", await call("dws_exec", { args: bcOk }));
+await show("群发 --dry-run 主动预演：两栏解析表", await call("dws_exec", { args: [...bcOk, "--dry-run"] }));
+await show("群发 --dry-run 预演（重名时给候选+部门）", await call("dws_exec", { args: [`chat`, `+broadcast`, `--to`, name, `--content`, `【AI发送】重名预演`, "--dry-run"] }));
+await show("并列无效：重名名字必须被替换（与 userId 并列仍跳过）", await call("dws_exec", { args: [`chat`, `+broadcast`, `--to`, `${name},${bcOkTo}`, `--content`, `【AI发送】并列测试`, "--dry-run"] }));
+
+// 转发/回复/卡片更新同样进确认门（都不 confirm，不会真发）
+await show("引用回复缺【AI发送】→ 拦", await call("dws_exec", { args: ["chat", "+messages-reply", "--group", "cidX", "--content", "已收到"] }));
+await show("转发 → 草稿（无正文，豁免标签检查）", await call("dws_exec", { args: ["chat", "+messages-forward", "--msg-id", "msgX", "--src-conversation-id", "cidX", "--dest-conversation-id", "cidY"] }));
+await show("转发目标群写中文名 → 拦", await call("dws_exec", { args: ["chat", "+messages-forward", "--msg-id", "msgX", "--dest-conversation-id", "教研室群"] }));
+
+// 走一遍「确认」：无界面会话（联调 ctx 没有 UI）必须 fail-closed 拒绝，绝不执行
+const dismissArgs = { args: ["chat", "+chat-dismiss", "--group", "cidX"] };
+const d1 = await call("dws_exec", dismissArgs);
+await show("无界面会话下确认敏感操作 → 拒绝执行（fail-closed）", await call("dws_exec", { ...dismissArgs, confirm: d1.details?.token }));
+
+// 分档（元数据驱动）：破坏性操作必须被拦成草稿——以前是直接 --yes 执行的窟窿。
+// 目标用不存在的 cid，即使门禁失效也只会报错，不会真解散任何群。
+await show("破坏性操作（解散群）→ 草稿待确认", await call("dws_exec", { args: ["chat", "+chat-dismiss", "--group", "cidX"] }));
+await show("普通写入（标已读）→ 草稿（不弹窗）", await call("dws_exec", { args: ["chat", "+conversation-mark-read", "--group", "cidX"] }));
+
 console.log("\n联调结束：未发送任何真实消息。");

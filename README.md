@@ -97,7 +97,7 @@ pi 内置供应商无火山引擎（volcengine/ark/doubao），模板通过 pi �
 | 行1 `~N`（黄） | 改过但没 add 的文件数 |
 | 行1 `?N`（灰） | 新文件还没 add 的文件数 |
 | 行1 `↑N ↓N` | 本地比远程多/少 N 个提交（零值不显示；与 `/git` 面板同一套箭头） |
-| 行2 速率柱状图 + `🔥28/s` | 一格 = 一轮（采样窗口 40 轮），**单色**（不再按均值分亮暗）。**宽度 = 下面那行的消耗文本宽度 − 数字宽 − 1**，因此两行的左边缘对齐（整块右对齐到竖线）。**自适应两行 16 档**：行 1 状态右对齐、柱子贴中列左端，状态不长时柱子正上方是空的，就借来画上半行；状态长到压过来时还回位置，退回单行 8 档。0 档与冷启动占位都画最低档 ▁。**速率口径**：分子 = assistant `usage.output` 增量（供应商上报，已含思考 token），分母 = 模型生成段（`turn_start` → assistant `message_end`，含网络与首字延迟，不含工具执行）；数字取整；满格值 = 会话峰值缓慢衰减（0.5%/轮） |
+| 行2 速率柱状图 + `🔥28/s` | 一格 = 一轮（采样窗口 40 轮），**按速度分档上色**：`<20` 红 / `20–50` 琥珀 / `50–100` 绿 / `≥100` 青（`🔥` 数字跟当前档同色）；**亮度 = 该轮输出 token 数**（越亮 = 输出越长；对数映射 `log(1+10t)/log(11)`，t = 该轮输出 ÷ 会话内单轮输出的粘性峰值，最多向背景混 62.5%，量化 1/8 档；六档大致按输出量翻倍切分；0 输出与无采样占位为 `dim`）。**宽度 = 下面那行的消耗文本宽度 − 数字宽 − 1**，因此两行的左边缘对齐（整块右对齐到竖线）。**自适应两行 16 档**：行 1 状态右对齐、柱子贴中列左端，状态不长时柱子正上方是空的，就借来画上半行；状态长到压过来时还回位置，退回单行 8 档。0 档与冷启动占位都画最低档 ▁。**速率口径**：分子 = assistant `usage.output` 增量（供应商上报，已含思考 token），分母 = 模型生成段（`turn_start` → assistant `message_end`，含网络与首字延迟，不含工具执行）；数字取整；满格值 = 会话峰值缓慢衰减（0.5%/轮） |
 | 行2 `[█▊ 1m]` | 进度条=上下文窗口占用率（绿→黄→红），尾部=窗口总量（占用率高时百分比会顶掉尾部数字，如 `[█████████▏] 90%`）。**宽度跟随右列宽度**（右列按目录名 / 刷新时刻自动缩放，上限 40 格），因此右列是一条整齐的竖带 |
 | 行3 `余额 ¥49.09 + 10.00` | 账户余额（主金额=充值余额，`+ X.XX`=赠送余额，无赠送则省略） |
 | 行3 `订阅 周 123/500` | 订阅额度余量（Kimi Code 周额度 / 小时频限） |
@@ -247,7 +247,7 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 
 bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合命令先拆段**（`shared/shell-split.ts`：按 `&&`/`||`/`;`/`|`/换行拆分，`$()`/反引号子 shell 递归拆出，引号/转义保护）→ **硬拒绝 deny**（命中即拒、不询问，默认覆盖 `rm -rf /`、`mkfs`、`dd` 写块设备、`curl|sh`、`chmod -R 777 /`）→ **已记住的操作 remembered**（**逐段判定：每个子命令段都要命中才放行**，防「git status && rm -rf x」被前半段连带放行）→ **关注项 watch**（命中不打断，只是把命令标记给 AI 要求从严：宁可确认一次也别放过）→ **AI 审核**（未命中名单的命令交给辅助小模型；AI 不可用——超时/无模型/网络错误/输出无法解析——降级为人工确认，文案说明是降级而非任务失败）。
 
-- **人工确认面板**（自绘 `ReviewPanel` overlay）：**默认高亮「允许一次」**，三选项——允许一次 / 允许并永久记住这类操作（旁标将被记住的操作意图）/ 拒绝，`Esc` = 拒绝（不执行）；`↑↓` 选择、`Enter` 确认、`1-3` 直选。面板顶部是**人话信息区**（不随滚动消失）：AI 一句话解读 + 影响面（写/删/联网/凭证等）+ 命中原因（「命中关注项」等分类标签，**不展示正则原文**）；命令全文折行展示不截断，超出可视区 PgUp/PgDn 滚动，滚动余量在分隔行指示；并行工具批里多个待确认命令经 Promise 链串行弹面板。无可泛化规则时只剩两项（允许一次 / 拒绝）。
+- **人工确认面板**（`perm-gate` 自有 `ReviewPanel`；**选项渲染复用 `shared/ui.ts` 的 `renderChoiceList`**，与钉钉审核面板同一套竖排样式）：**默认高亮「允许一次」**，三选项——允许一次 / 允许并永久记住这类操作（旁标将被记住的操作意图）/ 拒绝，`Esc` = 拒绝（不执行）；`↑↓` 选择、`Enter` 确认、`1-3` 直选。面板顶部是**人话信息区**（不随滚动消失）：AI 一句话解读 + 影响面（写/删/联网/凭证等）+ 命中原因（「命中关注项」等分类标签，**不展示正则原文**）；命令全文折行展示不截断，超出可视区 PgUp/PgDn 滚动，滚动余量在分隔行指示；并行工具批里多个待确认命令经 Promise 链串行弹面板。无可泛化规则时只剩两项（允许一次 / 拒绝）。
 - **allow 自动记住意图**（意图缓存，避免常用无害命令反复烧审核 token）：AI 每次 `allow` 都会把「这类操作」写进 `remembered`——规则优先生效 AI 提炼的语义正则（用 `<*>` 占位可变参数，落库前校验必须能命中当前命令，否则退结构化兜底 `^命令\s+子命令`，多段命令退整串精确匹配）；护栏：硬拒绝/关注项永远优先、去重、不覆盖已有规则；每次记住都发通知且**展示人话意图而非正则**（如「已记住「查看 git 提交历史」，以后同类命令直接放行」）；**保鲜机制**：记忆规则带 `addedAt`/`lastHit`/`hits`，命中时刷新，超 30 天未命中在启动/记住时自动清理，`/perm-gate prune` 手动清理（**过期≠失效：清理前仍生效**，状态行会写明）；旧配置（`blacklist`/`whitelist`）自动迁移为 `watch`/`remembered`。
 - **AI 审核**：选模型仿 pi-btw 覆盖项语义——`/perm-gate model` 打开**官方模型选择面板**（`shared/model-selector.ts` 直接复用 pi 导出的 `ModelSelectorComponent`，与内置 `/model` 同组件：搜索/scoped 切换/目录刷新；`ModelRegistry.runtime` 直通组件所需的 ModelRuntime），`/perm-gate model <provider>/<id>|auto` 直接设置；未覆盖时走共享模块 `shared/model-pick.ts` 自动选（与 hud-git 的 AI 提交信息同款「优先列表 + 最便宜已认证兜底」，优先 `deepseek/deepseek-v4-flash`），覆盖模型不可用/未认证时自动回落；`completeSimple` 单次调用不占主会话上下文；进度经官方 `setStatus("perm-gate", …)` 通道推送（hud 行 1 动态区，未登记 key 默认灰字）；allow/reject 结论会话级缓存（同一精确命令不重复审核），review 不缓存（每次由人决定）；
 - **sudo 授权通道（密码即授权，仅当次有效）**：AI 在 bash 里直接写 `sudo` 会被拦截打回并引导改用 `sudo_exec` 工具（`command` 不带 sudo 前缀，整条以 root 执行）；调用时弹整屏授权面板——命令全文折行展示（PgUp/PgDn 滚动）+ 掩码密码框（提示写明「密码仅用于本次执行，每次提权都需重新输入」），Enter 授权 / Esc 拒绝，密码错误原地重试共 3 次；扩展内 `sudo -kS` 从 stdin 喂密执行，`-k` 使凭据不被缓存（收尾再补 `sudo -k` 双保险），**每次调用必重新弹窗授权**；密码只经扩展内存，不进会话历史/工具结果/磁盘；NOPASSWD 免密账户退化为确认弹窗（仍逐次授权）；`requiretty` 或未装 sudo 时明确报错请用户手动执行；`/perm-gate sudo on|off` 开关（配置项 `sudoExec`，默认开）；
@@ -371,14 +371,18 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 
 - **技能屏蔽**：启动时把 `dingtalk-*` 从系统提示词的技能清单过滤（不动 dws 托管的文件——它由 npm postinstall 安装、`dws upgrade` 时全量还原，改了也没用）；`/skill:dingtalk-xxx` 手动加载不受影响，留作逃生舱。
 - **`dws_schema(path?)`**：包 `dws schema --compact` 活内省（随 CLI 版本实时更新）。无参看 29 个产品概览 → 传产品 id 看工具清单 → 传 canonical_path 看参数 schema，逐层下钻。
-- **`dws_exec(args[, confirm][, formal])`**：argv 数组直传 spawn（不过 shell，免去转义坑），自动补 `--format json --yes`。发送类命令（`+dm`/`+messages-send`/`ding`）强制：
+- **`dws_exec(args[, confirm][, formal])`**：argv 数组直传 spawn（不过 shell，免去转义坑），自动补 `--format json --yes`。发送/转发类命令（`+dm`、`+messages-send*`、`+messages-batch-send-by-bot`、`+messages-reply`、`+messages-forward*`、`+messages-update-card`、`+broadcast`、`ding send-*`）强制：
   - **两阶段确认**：首次调用只回草稿回执不发送，对话里经用户明确同意后带 `confirm` 重调才真发（草稿 10 分钟有效）
-  - **【AI发送】标签强制**：缺失即拒（用户明确要求的正式通知传 `formal=true` 豁免；可在配置关闭）
+  - **【AI发送】标签强制**：缺失即拒（用户明确要求的正式通知传 `formal=true` 豁免；可在配置关闭）。转发（`+messages-forward*`）与卡片更新（`+messages-update-card`）无正文也无 `--ai-tag`，豁免此项、仍走两阶段
   - **中文姓名目标拒执**：强制先 `dws_resolve_user` 实时解析，严禁凭记忆硬编码 userId
   - **防重发**：相同目标+内容第二次发送直接拒——会话内存 + 跨会话台账（`~/.pi/agent/dingtalk-bridge-sent.json`，保留 `dedupMinutes` 分钟），重开会话重跑也拦得住
-- **`dws_resolve_user(name[, pick])`**：包 `aisearch person`，单候选自动确认，多候选列出后带 `pick=<userId>` 确认。
+- **`dws_resolve_user(name[, pick])`**：包 `aisearch person` + `contact user get`——候选带部门路径/职务/工号（重名消歧靠的就是这个），无部门/工号者标注为家长或外部联系人账号；单候选自动确认，多候选列出后带 `pick=<userId>` 确认。
 - **`dws_resolve_group(name[, pick])`**：包 `chat +chat-search` 解析群 `openConversationId`——实测搜「教研室」返回两个同名群（7 人/8 人）加一个集团群，群名作目标会被直接拦截，必须用 cid。
 - **撤回也要过两阶段**：`+messages-recall` 等撤回命令同样先回草稿（预览标出「撤回后双方均不可见，不可恢复」），确认后执行，且同一 messageId 不会重复撤回。
+- **群发也要过两阶段 + 发送前预检**：`+broadcast` 首次同样只回草稿（自动附加的 `--yes` 绕不过去），且草稿前先跑一次只读 `--dry-run` 预检收件人，草稿里列出「将发给谁（含解析出的单聊 ID）」。有任何一个收件人未唯一解析（多候选/零候选）就整体拦下——不生成草稿、不做半批次发送，并把候选与稳定 ID 一并列出。消歧办法是**把重名的名字直接换成候选里的 userId，其余名字照旧**（同一条命令里姓名与 userId 可混用，实测 `--to "苗文硕,016113645862842894"` 两人都发；而把重名名字与 userId **并列**——`--to "李娜,016113645862842894"`——不解决歧义，重名那个 token 仍会被跳过）。「中文姓名目标拒执」对群发不适用（其目标按设计就是姓名），改由预检把关；转发的 `--dest-conversation-id` 会按群目标同等把关（中文群名直接拦）。
+- **预检失败不再只给一句笼统报错**：dws 在「一个都没解析出来」时会直接 exit 3 且不给计划（只有一句「没有任何人收到消息，请检查姓名是否正确」）。工具改为退回**逐名自探**：用 CLI 自己的解析链（`+messages-send --user-query`，与 broadcast 同源）拿到结构化候选，再补部门/职务/工号，输出「可发 N 人 / 有问题 N 人」（多候选附部门路径与 userId、查无此人给手机号反查入口）。每次收件人也可主动跑 `dws_exec ["chat","+broadcast",…,"--dry-run"]` 拿这份两栏预演（只读，不进两阶段）。
+- **候选带部门/职务/工号**：`dws_resolve_user` 在 aisearch 候选基础上再拉 `contact user get`（批量、失败则静默降级）补部门全路径/职务/工号；同名的两个李娜一眼分出（班主任-诚毅校区 vs 英语教研组）。**无部门且无工号会被标注为「可能是家长或外部联系人账号」**（实测家长账号 depts 为空、jobNumber 为 null）——单候选自动确认时也带着这行标注。
+- **`--dry-run` 是只读预演**：不进两阶段门（不会生成草稿待确认）、不记防重发台账（不会拦掉随后的真发），结果尾部明确标注未发送。
 - **发送后自核验入口**：结果里直接给出 `openTaskId`（查发送状态/转 DING 用）与只读核验命令（`+search-msg --sender <本人>`），叉住「输出看不清就重跑发送」的冲动。
 - **文件存在性预检**：`--file` 路径不存在时直接拦下（不再真去捅 dws）。
 - **`dws_skill([topic])`（逃生舱）**：消息收发之外的复杂操作（表格/文档/日历/审批/组织/听记等）按需拉取官方技能正文——无参给技能索引（14 个 + 一句话），传 topic 取完整 SKILL.md。技能文件不动，只是不再常驻系统提示词。
@@ -388,7 +392,13 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 - **消息发送的三处硬处理（实测沉淀）**：① 正文里的字面 `\n`（模型常把换行写成两个字符）自动归一为真换行——dws 会把它吃成空格；② 多行正文自动补 markdown **行尾双空格**硬换行——钉钉客户端把单个换行当段落内空格拼成一行（实测有效；空行分段也可但行距松，纯文本 `--text` 更会直接拼行，故多行走 `--markdown`，`--text` 多行会提示）；③ 文件/媒体消息（`--file`/`--media-id`）与正文协议层互斥，发出后明确回报「本条不含正文」（`--title` 只作文件卡标题、不显示给收件人），说明文字必须另发一条。
 - 查询类命令结果自动附**当前系统时间**（时间窗一律相对此刻推算）。
 
-配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars` / `dedupMinutes` / `skillsDir`）；`/dws-bridge` 查看状态。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 12 场景，不真实起 dws 进程）。
+  - **面板统一布局**（`shared/review-panel.ts`）：弱化标题 → `动作 | 对象` 表头（对象是名单时按可用宽度塞名字、剩余收口为「等 N 人」，仅重名才带部门括注）→ 固定 5 行正文（超出用 PgUp/PgDn 翻页，分隔线内 ▲▼ 给余量）→ `⚠` 影响行 → 竖排选项。撤回类在弹窗前用只读查询补齐对象（`+messages-mget` + `conversation-info`：会话名 + 时间 + 正文预览）。**面板内不放 argv / flag / JSON / ID**（有单测断言）。
+  - **实测纠错**：官方 `capability-limits.md` 写「个人身份发送的消息无法通过 API 撤回」，实测**能撤**（25 分钟前的消息也撤成功了）；撤回后面板/回执按真实 `recallStatus` 报，同一 messageId 不会重复撤回。
+- **三步走：读直通 / 写两阶段 / 敏感档弹窗**（不再靠提示词自觉）：分档由 dws 自己的 schema 元数据决定（`dws schema --cli-path <path> --compact` 的 `effect`/`confirmation`，本地缓存 `~/.pi/agent/dingtalk-bridge-schema.json`，手写表兜底；查不到就当写入）。
+  - **读**：直通（`list/get/search/info/query…` 类词快速判定，命中写词则一律按写处理）。
+  - **写**：首次只回草稿/计划（不执行），AI 把计划展示给用户、经明确同意后带 `confirm` 重调才执行。
+  - **敏感档**（破坏性 + 会对外发出内容：发送/群发/转发/撤回/邀请/删除/清空/审批发起…）：在**真正执行的最后一瞬弹人工审核面板**——面板只写人话（要做什么 / 对谁 / 内容预览 / 影响与可逆性），**不放 argv、JSON、ID**；选项为「允许一次 / 当前工作区不再询问 / 拒绝」（destructive 不开放记住），Esc=拒绝。`当前工作区不再询问` 按命令路径记，可用 `/dws-bridge forget` 查看或清除。**无界面会话（print/RPC）直接拒绝敏感档**，绝不因为弹不出窗就放行。（面板复用 `shared/review-panel.ts`；与 perm-gate 的复核面板同一套串行链，避免并行工具批里浮层打架。）
+配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars` / `dedupMinutes` / `skillsDir` / `remembered`）；`/dws-bridge` 查看状态，`/dws-bridge forget <命令|all>` 清除「当前工作区不再询问」，`/dws-bridge refresh` 清空命令元数据缓存。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 A~Z 场景，不真实起 dws 进程）；真实联调 `node src/extensions/test/dingtalk-bridge-live.mjs [姓名]`（发送只走到草稿/预检即停，永不 confirm）。
 
 ## pi-ai usage 缺失防护补丁（patches/apply-pi-ai-usage-guard.mjs）
 

@@ -38,7 +38,12 @@
 - 工具 6 个：`dws_schema`（`dws schema --compact` 活内省分层下钻）、`dws_exec`（argv 数组直调不过 shell）、`dws_fetch`（钉盘/云盘分享落地：文件直下、文件夹镜像到本地）、`dws_resolve_user`（aisearch 人员解析，多候选 pick 确认）、`dws_resolve_group`（chat +chat-search 群解析，同名群强制用 cid）、`dws_skill`（逃生舱：按需拉取官方技能正文，无参给索引）；命令 `/dws-bridge`。
 - 配置 `~/.pi/agent/dingtalk-bridge.json`（含 `skillsDir`，默认 `~/.agents/skills`）；防重发台账 `~/.pi/agent/dingtalk-bridge-sent.json`（会话内存 + 跨会话台账，`dedupMinutes` 默认 60）。
 - 背景：dws 官方技能由 npm postinstall 托管、升级即还原不可改，故不碰文件——`before_agent_start` 把 `dingtalk-*` 从注入清单过滤（配置化前缀，`/skill:` 手动加载仍可用）。
-- 安全硬约束：发送类**两阶段**——首次只回草稿不发送，对话确认后带 `confirm` 重调才发；发送前检查 `【AI发送】` 标签（formal 豁免）+ 中文姓名目标拦截（强制先 resolve）；撤回命令同样两阶段 + 防重复撤回；发送后给 `openTaskId` 与只读核验命令；`--file` 存在性预检。
+- 安全硬约束（**读直通 / 写两阶段 / 敏感档弹窗**，元数据驱动）：分档 = `effect`（`dws schema --cli-path <path> --compact -f json`；缓存 `~/.pi/agent/dingtalk-bridge-schema.json`，手写表兜底，取不到当写入）+ `presumedRead` 只读快判（读词命中且无写词）。写操作首次只回草稿（`pending` 存 `tier`/`canRemember`/`review`），带 `confirm` 重调才执行；敏感档（destructive 或发送/转发/撤回/邀请/删除/清空等）在执行前 `askReview`（`shared/review-panel.ts`：弱化标题 + `动作|对象` 表头 + 固定 5 行正文 + `⚠` 影响行 + 竖排选项；串行链 + status-beacon wait，**无 argv/ID**），无 `hasUI` 直接拒绝；面板「当前工作区不再询问」写 `remembered`（cli_path，destructive 不可记），`/dws-bridge forget|refresh` 管理。发送/转发类**两阶段**
+- 敏感档面板字段：`verb`（动作 2~4 字）+ `object`/`objectItems`（对象 = 收件人名册，弹窗前用 `contact user get --ids` 换「姓名（部门）」、仅重名带部门、按可用宽度收口「等 N 人」；撤回 = 会话名 + 时间 + 正文预览）+ `content`（固定 5 行正文）+ `impact`（⚠ 影响）。面板内无 argv/flag/JSON/ID（单测锁住）。官方 capability-limits 那句「个人身份消息无法撤回」与实测不符（实测可撤）。
+- 群发 `chat +broadcast`：同样两阶段（不被自动附加的 `--yes` 绕过），且草稿前先跑一次只读 `--dry-run` 预检收件人——有任一收件人未唯一解析（多候选/零候选）就整体拦下、不生成草稿、不做半批次发送，报出候选与消歧办法；消歧 = **把重名的名字换成候选里的 userId**（同命令内可与其它姓名混用；与 userId **并列不解决歧义**，重名 token 仍跳过）。“中文姓名即拦”对群发不适用（其目标按设计就是姓名），由预检把关。收件人也可主动 `--dry-run` 拿「将发给谁 / 未唯一解析」两栏预演。
+- 预检明细：dws 在“一个都没解析出来”时直接 exit 3 且不给计划（只有一句笼统报错），插件退回 `probeTarget` **逐名自探**（`+messages-send --user-query`，与 broadcast 同源，**失败 JSON 在 stderr**）；多候选补 `parseOrgInfo` 拿到的部门路径/职务/工号，查无此人给手机号反查入口。
+- 人员解析 `dws_resolve_user`：aisearch 候选（名字在 `meta.name`/`author`，不在顶层 `name`）+ `contact user get --ids` 批量补部门/职务/工号；无部门且无工号 = 家长/外部联系人账号（家长账号实测 `depts: []`、`jobNumber: null`），已标注。
+- `--dry-run` 一律视为只读预演：不进两阶段门、不记防重发台账（否则会拦掉随后的真发）、结果尾部附明确提示。
 - 其他：字面 `\n` 归一 + 多行自动补 markdown 行尾双空格硬换行（钉钉单换行会拼成一行）；文件/媒体消息回报「本条不含正文」（`--title` 不显示给收件人）；查询结果附当前时间锚点；字段拼写不一致自解释（群成员 `openDingtalkId` / 消息 `openDingTalkId`，解析大小写不敏感）。
 - 已知限制：这类分享消息用 `+messages-resource-download` 会 `TABLE_NOT_FOUND`——`resourceRefs` 是缺 spaceId 的数字 dentryId，spaceId 藏在正文 yunpan 链接里，只读结果会自动附结构化下载指引；「[文件夹] 姓名」形式无任何引用、实测不可读，直接提示让对方重发 zip。
 

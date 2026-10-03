@@ -14,7 +14,7 @@
  *   ctrl+←→ 按词移动、ctrl+w 删词、grapheme 安全步进），吸收 KbOverlay 的 bracketed paste
  *   精华，弃 5 处逐字重复的手感不一实现
  */
-import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
 /** 在输入框可见窗口文本上叠加反显光标：CURSOR_MARKER 标记 + 当前字符反白 */
@@ -255,4 +255,59 @@ function nextWordEnd(text: string, cursor: number): number {
 	while (p < text.length && !isWordChar(text[p]!)) p++;
 	while (p < text.length && isWordChar(text[p]!)) p++;
 	return p;
+}
+
+/**
+ * 选项列表竖排渲染（确认类浮层共用一套样式）：选中行 accent + 「› 」，括注灰色。
+ * notes[i] 给出该项的补充说明（如「将被记住的操作」），仅作灰字括注，不参与选中态。
+ */
+export function renderChoiceList(th: Theme, items: string[], selected: number, notes?: (string | undefined)[]): string[] {
+	return items.map((it, i) => {
+		const note = notes?.[i] ? th.fg("dim", `（${notes[i]}）`) : "";
+		return i === selected ? `${th.fg("accent", ` › ${th.bold(it)}`)}${note}` : `   ${it}${note}`;
+	});
+}
+
+/** 正文区滚动提示行：嵌在分隔线里的 ▲/▼ 余量说明（面板滚动窗共用；宽度走 visibleWidth，中文算 2 列） */
+export function dividerScrollNote(th: Theme, border: (s: string) => string, innerW: number, above: number, below: number): string {
+	const label = above > 0 && below > 0 ? ` ▲${above} ▼${below}（PgUp/PgDn） ` : above > 0 ? ` ▲${above}（PgUp） ` : ` ▼${below}（PgDn） `;
+	return border(`├${th.fg("dim", label)}${"—".repeat(Math.max(0, innerW - 1 - visibleWidth(label)))}┤`);
+}
+
+/** 按显示宽度折行并统一左缩进（面板正文/表头共用） */
+export function wrapIndented(text: string, width: number, indent = 1): string[] {
+	const out: string[] = [];
+	for (const w of wrapTextWithAnsi(text, Math.max(8, width - indent))) out.push(`${" ".repeat(indent)}${w}`);
+	return out;
+}
+
+/** 滚动窗位置：夹到 [0, 行数-窗口高]；scrollByPage 按整页移动（面板共用一套） */
+export function clampScroll(scroll: number, lineCount: number, budget: number): number {
+	return Math.max(0, Math.min(Math.max(0, scroll), Math.max(0, lineCount - budget)));
+}
+
+export function scrollByPage(scroll: number, dir: -1 | 1, lineCount: number, budget: number): number {
+	return clampScroll(scroll + dir * budget, lineCount, budget);
+}
+
+/** 选项面板按键语义（Esc/↑↓/Enter/1-9 + PgUp/PgDn 翻页）：只解析意图，业务回调由调用方处理 */
+export type ChoiceKeyResult =
+	| { kind: "move"; index: number }
+	| { kind: "select"; index: number }
+	| { kind: "cancel" }
+	| { kind: "page"; dir: -1 | 1 }
+	| { kind: "skip" };
+
+export function choiceKey(data: string, index: number, count: number): ChoiceKeyResult {
+	if (matchesKey(data, Key.escape)) return { kind: "cancel" };
+	if (matchesKey(data, Key.up)) return { kind: "move", index: Math.max(0, index - 1) };
+	if (matchesKey(data, Key.down)) return { kind: "move", index: Math.min(count - 1, index + 1) };
+	if (matchesKey(data, Key.pageUp)) return { kind: "page", dir: -1 };
+	if (matchesKey(data, Key.pageDown)) return { kind: "page", dir: 1 };
+	if (matchesKey(data, Key.enter)) return { kind: "select", index: Math.min(Math.max(0, index), count - 1) };
+	if (/^[1-9]$/.test(data)) {
+		const i = Number(data) - 1;
+		if (i < count) return { kind: "select", index: i };
+	}
+	return { kind: "skip" };
 }

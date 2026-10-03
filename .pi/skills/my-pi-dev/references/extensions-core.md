@@ -50,7 +50,7 @@
 - `watch` 关注项：命中不打断，只把命令标记给 AI 要求从严（宁可 review 不 allow）。
 - `remembered` 意图缓存：命中即放行，带人类可读 intent，30 天未命中自动清理（`/perm-gate prune` 手动清）；**逐段判定，每个子命令段都要命中才放行**（防「git status && rm -rf x」被前半段连带放行）。
 - AI 审核：输出 `{action, reason, impact[], pattern}`，`pattern` 用 `<*>` 占位可变参数、落库前校验能命中当前命令否则退结构化兜底；`allow` 自动记住意图（通知写人话意图，不暴露正则），`reject` 拒绝；AI 不可用（超时/无模型/网络错/输出无法解析）降级人工确认，文案说明是降级而非任务失败；allow/reject 结论有会话级缓存，`completeSimple` 单次调用不占主会话上下文。
-- 人工确认面板 ReviewPanel：顶部人话信息区（一句解读/影响面/命中原因），命令全文折行可滚、不展示正则原文；默认高亮「允许一次」，选项 = 允许一次 / 允许并永久记住这类操作（旁标将被记住的意图）/ 拒绝，Esc = 拒绝不执行。
+- 人工确认面板 ReviewPanel（自有实现；**选项行渲染改用 `shared/ui.ts` 的 `renderChoiceList`**，与钉钉审核面板同一份代码）：顶部人话信息区（一句解读/影响面/命中原因），命令全文折行可滚、不展示正则原文；默认高亮「允许一次」，选项 = 允许一次 / 允许并永久记住这类操作（旁标将被记住的意图）/ 拒绝，Esc = 拒绝不执行。滚动提示、折行、按键语义、滚动位置已抽到 shared（见 hud-and-shared.md）。
 - 配置 `~/.pi/agent/perm-gate.json`：`enabled`、`deny`、`watch`、`remembered`、`aiReview`、`aiTimeoutMs`、`sudoExec`、`model`；旧配置自动迁移（blacklist → watch、whitelist → remembered）；首次运行写默认配置。
 - 命令 `/perm-gate`：`on/off`、`sudo on|off`、`reload`、`prune`、`model [provider/id|auto]`（无参开官方模型选择面板，未覆盖时回落 shared/model-pick 自动选）。
 - sudo 专用授权通道：bash 里的段首 `sudo` 被拦截、引导改用 `sudo_exec` 工具；整屏授权面板（命令全文折行可滚 + 掩码密码框，错误原地重试 3 次，Esc 拒绝），扩展内 `spawn sudo -kS` 喂密执行（`-k` 不缓存 + 收尾 `sudo -k` 双保险，每次调用必重新授权）；密码只经扩展内存进 sudo stdin，不进会话/结果/磁盘；NOPASSWD 账户退化为确认弹窗（仍逐次授权）；requiretty / 无 sudo 明确报错请用户手动执行。

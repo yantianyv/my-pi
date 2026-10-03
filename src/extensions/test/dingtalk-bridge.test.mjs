@@ -15,6 +15,11 @@
  * - 场景 J：草稿 token 过期 → 拦截
  * - 场景 K：requireAiTag=false 时无标签放行（仍走两阶段）
  * - 场景 L：签名剔除易变 flag（--format/--yes 不影响「同一条消息」判定）
+ * - 场景 X：群发/批量/转发/回复/卡片更新均两阶段、姓名目标不拦（群发、转发目标群除外）、--dry-run 不进两阶段
+ * - 场景 Y：群发预检解析表（resolved/skipped）解析与格式化
+ * - 场景 Z：群发 --content 视为 Markdown，多行补硬换行
+ * - 场景 AA：人员候选富化（meta 取名、部门/职务/工号、家长账号标注、CLI 结构化候选）
+ * - 场景 AB/AC/AD/AE：命令分档（读/写/敏感）、元数据解析、人工审核文案（不出 argv/ID）、撤回对象识别
  *
  * 用法：node src/extensions/test/dingtalk-bridge.test.mjs（仓库根目录执行）
  */
@@ -42,7 +47,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -68,7 +73,7 @@ console.log("C、两阶段确认");
 	const st = newExecState();
 	const d1 = decideExec(SEND, {}, st, CFG, NOW);
 	check("首次 → pending（不执行）", d1.action === "pending" && d1.token.length === 10);
-	check("回执含命令预览", d1.action === "pending" && d1.preview.includes("+dm"));
+	check("回执是人话（动作/影响），不带原始 argv", d1.action === "pending" && d1.preview.includes("动作：") && !d1.preview.includes("--content"));
 	const d2 = decideExec(SEND, { confirm: d1.token }, st, CFG, NOW);
 	check("正确 token → run", d2.action === "run");
 	const d3 = decideExec(SEND, { confirm: "deadbeef00" }, newExecState(), CFG, NOW);
@@ -248,7 +253,7 @@ console.log("T、撤回两阶段与防重复");
 	const st = newExecState();
 	const rec = ["chat", "+messages-recall", "--msg-id", "msgABC"];
 	const d1 = decideExec(rec, {}, st, CFG, NOW);
-	check("首次撤回 → 草稿待确认", d1.action === "pending" && d1.preview.includes("msgABC"));
+	check("首次撤回 → 草稿待确认", d1.action === "pending" && d1.preview.includes("撤回"));
 	check("预览含不可恢复提示", d1.action === "pending" && d1.preview.includes("不可恢复"));
 	const d2 = decideExec(rec, { confirm: d1.token }, st, CFG, NOW);
 	check("正确 token → run", d2.action === "run");
@@ -302,6 +307,190 @@ console.log("W、字段拼写不一致（群成员小写 t / 消息大写 T）")
 	check("解析对字段大小写容错", people.length === 1 && people[0].extra === "数学组");
 }
 
+console.log("X、群发两阶段与只读预演");
+{
+	const st = newExecState();
+	const bc = ["chat", "+broadcast", "--to", "李娜,苗文硕", "--content", "【AI发送】今晚 8 点上线"];
+	const d1 = decideExec(bc, {}, st, CFG, NOW);
+	check("群发首次 → pending（不被 --yes 绕过）", d1.action === "pending" && d1.preview.includes("李娜,苗文硕"));
+	const d2 = decideExec(bc, { confirm: d1.token }, st, CFG, NOW);
+	check("确认 token → run", d2.action === "run");
+	check("群发目标为中文姓名不拦（预检把关）", decideExec(bc, {}, newExecState(), CFG, NOW).action === "pending");
+	check("群发缺【AI发送】标签仍拦", decideExec(["chat", "+broadcast", "--to", "李娜", "--content", "无标签"], {}, newExecState(), CFG, NOW).action === "block");
+	check("--dry-run 不进两阶段（发送类）", isDryRun(["chat", "+broadcast", "--to", "李娜", "--dry-run"]) && decideExec(["chat", "+messages-send", "--as", "user", "--user", "u1", "--text", "【AI发送】x", "--dry-run"], {}, newExecState(), CFG, NOW).action === "run");
+	check("--dry-run 不进两阶段（撤回类）", decideExec(["chat", "+messages-recall", "--msg-id", "m1", "--dry-run"], {}, newExecState(), CFG, NOW).action === "run");
+	check("机器人批量单聊 → pending", decideExec(["chat", "+messages-batch-send-by-bot", "--robot-code", "rc", "--users", "u1", "--title", "周报", "--content", "【AI发送】周报"], {}, newExecState(), CFG, NOW).action === "pending");
+	check("引用回复无标签 → block", decideExec(["chat", "+messages-reply", "--group", "cid1", "--content", "收到"], {}, newExecState(), CFG, NOW).action === "block");
+	check("引用回复带标签 → pending", decideExec(["chat", "+messages-reply", "--group", "cid1", "--content", "【AI发送】收到"], {}, newExecState(), CFG, NOW).action === "pending");
+	check("转发 → pending（无正文，豁免标签）", decideExec(["chat", "+messages-forward", "--msg-id", "m1", "--src-conversation-id", "cidA", "--dest-conversation-id", "cidB"], {}, newExecState(), CFG, NOW).action === "pending");
+	check("转发目标群写中文名 → block", decideExec(["chat", "+messages-forward", "--msg-id", "m1", "--dest-conversation-id", "教研室群"], {}, newExecState(), CFG, NOW).action === "block");
+	check("卡片更新 → pending（豁免标签）", decideExec(["chat", "+messages-update-card", "--biz-id", "b1", "--content", "卡片正文", "--flow-status", "3"], {}, newExecState(), CFG, NOW).action === "pending");
+}
+
+console.log("Y、群发预检解析表");
+{
+	const raw = JSON.stringify({
+		actionCount: 1,
+		actions: [{ arguments: { receiverOpenDingTalkId: "Dbl2UHLkdwFi" }, recipient: "苗文硕", tool: "send_personal_message" }],
+		dry_run: true,
+		executed: false,
+		failed: ["李娜（\"李娜\" 匹配到多个用户：李娜(016113645862842894)；请提供更精确的名称或直接传稳定 ID）"],
+		sent: ["苗文硕"],
+	});
+	const p = parseBroadcastPreflight(raw);
+	check("已解析收件人带 openDingTalkId", p.resolved.length === 1 && p.resolved[0].recipient === "苗文硕" && p.resolved[0].openId === "Dbl2UHLkdwFi");
+	check("未唯一解析者原样透传（含候选 ID）", p.skipped.length === 1 && p.skipped[0].includes("016113645862842894"));
+	check("坏输出不抛", parseBroadcastPreflight("nope").resolved.length === 0);
+	const tbl = formatBroadcastPreflight(p);
+	check("解析表列出收件人与人数", tbl.includes("苗文硕") && tbl.includes("1 人"));
+}
+
+console.log("Z、群发多行正文按 markdown 硬换行");
+{
+	const NL = String.fromCharCode(10);
+	const n = normalizeContent(["chat", "+broadcast", "--to", "李娜", "--content", `【AI发送】第一行${NL}第二行`]);
+	check("+broadcast 的 --content 视为 Markdown", isMarkdownBody(["chat", "+broadcast", "--content", "x"]) && !isMarkdownBody(["chat", "+send-to-group", "--content", "x"]));
+	check("行尾补双空格硬换行", n.hardBreaks === 1);
+}
+
+console.log("AA、人员候选富化（重名消歧靠部门/职务/工号）");
+{
+	// 真实 aisearch 形状：名字在 author/title 与 meta.name，没有部门
+	const aisearch = JSON.stringify({
+		result: [
+			{ author: "李娜", title: "李娜", userId: "016113645862842894", openDingTalkId: "DC6iPsiSXqXyhuQJpSFaiiAys", meta: { name: "李娜", jobNumber: "016113645862842894", position: "" } },
+		],
+	});
+	const p = parsePeople(aisearch);
+	check("名字取自 meta.name/author（不再“无名”）", p.length === 1 && p[0].name === "李娜", JSON.stringify(p));
+	check("不带出无关 title 当附加信息", !p[0].extra.includes("李娜") && p[0].extra.includes("工号 016113645862842894"), p[0].extra);
+	check("带出 openDingTalkId（用于对回预检结果）", p[0]?.openId === "DC6iPsiSXqXyhuQJpSFaiiAys");
+
+	// 真实 contact user get 形状：部门路径 + 职务 + 工号
+	const orgRaw = JSON.stringify({
+		result: [
+			{
+				isAdmin: false,
+				orgEmployeeModel: {
+					depts: [
+						{ deptId: 964992494, deptName: "诚毅校区班主任", deptPathName: "班主任-诚毅校区班主任" },
+						{ deptId: 36962143, deptName: "办公室", deptPathName: "办公室" },
+					],
+					jobNumber: "016113645862842894",
+					orgTitle: "班主任",
+					orgUserId: "016113645862842894",
+					orgUserName: "李娜",
+				},
+			},
+			{ isAdmin: false, orgEmployeeModel: { depts: [], jobNumber: null, orgTitle: null, orgUserId: "1786188376900", orgUserName: "胡琰松妈妈" } },
+		],
+		success: true,
+	});
+	const orgs = parseOrgInfo(orgRaw);
+	check("部门路径优先于单层部门名", orgs.get("016113645862842894")?.depts[0] === "班主任-诚毅校区班主任", JSON.stringify(orgs.get("016113645862842894")?.depts));
+	check("职务/工号取到", orgs.get("016113645862842894")?.title === "班主任" && orgs.get("016113645862842894")?.jobNumber === "016113645862842894");
+	check("无部门无工号的家长账号也入表", orgs.get("1786188376900")?.depts.length === 0);
+	check("坏 JSON 不抛", parseOrgInfo("nope").size === 0);
+
+	const line = formatPersonLine({ userId: "016113645862842894", name: "李娜", extra: "" }, orgs.get("016113645862842894"));
+	check("人员行带部门/职务/工号与 userId", line.includes("班主任-诚毅校区班主任") && line.includes("工号") && line.endsWith("016113645862842894"), line);
+	const parentLine = formatPersonLine({ userId: "1786188376900", name: "胡琰松妈妈", extra: "" }, orgs.get("1786188376900"));
+	check("家长/外部账号被标注", parentLine.includes("无部门/工号") && parentLine.includes("家长", 0), parentLine);
+	check("无组织详情时退回搜索附加信息", formatPersonLine({ userId: "u9", name: "张三", extra: "数学组" }).includes("数学组"));
+
+	// 真实 CLI 歧义输出：结构化的 candidates（不必抠中文报错文案）
+	const cli = JSON.stringify({ error: { details: { candidates: [{ userId: "016113645862842894", openDingTalkId: "DC6i", name: "李娜" }, { userId: "2131204145842894", openDingTalkId: "D63z", name: "李娜" }], subtype: "ambiguous" }, message: '"李娜" 匹配到多个用户：…' } });
+	const cands = parseCliCandidates(cli);
+	check("CLI 候选解析（带 openDingTalkId）", cands.length === 2 && cands[1].userId === "2131204145842894" && cands[0].openId === "DC6i");
+	check("非候选 JSON 不误取", parseCliCandidates(JSON.stringify({ result: [{ userId: "u1" }] })).length === 0);
+	check("从失败条目取输入名", failingName('李娜（"李娜" 匹配到多个用户：…）') === "李娜" && failingName("没有找到与 X") === "没有找到与 X");
+	check("群发目标名去重保序", targetNames(["chat", "+broadcast", "--to", "李娜,苗文硕,李娜"]).join("|") === "李娜|苗文硕");
+	check("重复 --to 与 --users 都收", targetNames(["x", "+broadcast", "--to", "a", "--to", "b,c", "--users", "u1"]).join("|") === "a|b|c|u1");
+}
+
+console.log("AB、命令分档（读 / 写 / 敏感）");
+{
+	check("cliPathOf 只取第一个 flag 前的命令词", cliPathOf(["chat", "+broadcast", "--to", "李娜"]) === "chat +broadcast", cliPathOf(["chat", "+broadcast", "--to", "李娜"]));
+	check("cliPathOf 认 --flag=value", cliPathOf(["todo", "task", "list", "--status=false"]) === "todo task list");
+	check("cliPathOf 全 flag 时为空", cliPathOf(["--help"]) === "");
+
+	check("读命令识别：list/get/search/me 类", presumedRead(["todo", "task", "list"]) && presumedRead(["chat", "+chat-messages"]) && presumedRead(["chat", "+search-msg"]) && presumedRead(["chat", "+at-me"]));
+	check("写命令不误判为读", !presumedRead(["chat", "+broadcast"]) && !presumedRead(["chat", "+messages-send"]) && !presumedRead(["chat", "+messages-recall"]) && !presumedRead(["chat", "+chat-create"]) && !presumedRead(["chat", "+messages-set-pin"]));
+
+	const compact = '{ "effect": "write", "risk": "medium", "confirmation": "user_required", "availability": "available", }';
+	const meta = parseCmdMeta(compact);
+	check("元数据解析（容忍紧凑输出的尾逗号）", meta && meta.effect === "write" && meta.confirmation === "user_required", JSON.stringify(meta));
+	check("元数据缺失时返回 null（不瞎猜）", parseCmdMeta("{ \"risk\": \"low\" }") === null);
+
+	check("元数据说只读 → read", tierOf(["todo", "task", "list"], { effect: "read", risk: "low", confirmation: "not_required", availability: "available" }).tier === "read");
+	check("元数据说破坏性 → sensitive", tierOf(["chat", "+chat-dismiss"], { effect: "destructive", risk: "high", confirmation: "user_required", availability: "available" }).tier === "sensitive");
+	check("发送类无元数据也 sensitive", tierOf(["chat", "+dm", "--to", "u1"], null).tier === "sensitive" && tierFromTables(["chat", "+broadcast"]) === "sensitive");
+	check("普通写入 → write（只两阶段，不弹窗）", tierOf(["todo", "task", "create"], { effect: "write", risk: "low", confirmation: "not_required", availability: "available" }).tier === "write");
+	check("取不到元数据 → 当写入处理", tierOf(["unknown", "thing"], null).tier === "write");
+}
+
+console.log("AC、人工审核文案（只给人看的信息）");
+{
+	const args = ["chat", "+broadcast", "--to", "李娜,苗文硕", "--content", "【AI发送】今晚 8 点线上教研"];
+	const review = buildReview(args, { effect: "write", risk: "medium", confirmation: "user_required", availability: "available" }, "会对外发出消息", { recipients: ["李娜（诚毅校区班主任）", "苗文硕"] });
+	const text = JSON.stringify(review);
+	check("外框标题固定、动作压到 2~4 字", review.title === "agent请求操作钉钉" && review.verb === "群发单聊", review.verb);
+	check("对象带前缀且一眼看到收件人", review.object.startsWith("收件人：") && review.object.includes("苗文硕"), review.object);
+	check("正文进内容区", review.content.join(" ").includes("今晚 8 点"));
+	check("影响常驻底部且是事实", review.impact.join(" ").includes("每人各收到一条单聊") && !review.impact.join(" ").includes("无法撤回"));
+	check("不带 argv / flag / ID", !text.includes("--to") && !text.includes("--content") && !text.includes("dws "), text.slice(0, 120));
+	check("普通发送可记住、破坏性不可记住", review.canRemember === true && buildReview(["chat", "+chat-dismiss"], { effect: "destructive", risk: "high", confirmation: "user_required", availability: "available" }, "破坏性").canRemember === false);
+	check("破坏类：动作与对象做 highlight、不可恢复进底部", (() => {
+		const r = buildReview(["chat", "+chat-dismiss"], { effect: "destructive", risk: "high", confirmation: "user_required", availability: "available" }, "破坏性操作（不可逆）");
+		return r.verb === "解散群聊" && r.impact.join(" ").includes("不可恢复") && r.content.length === 0;
+	})());
+	check("撤回也走敏感档并写明不可恢复", buildReview(["chat", "+messages-recall", "--msg-id", "m1"], null, "撤回会改变双方可见内容").impact.join(" ").includes("不可恢复"));
+
+	check("正文预览截行并给全文字数提示", (() => {
+		const long = Array.from({ length: 14 }, (_, i) => `第${i}行`).join(String.fromCharCode(10));
+		const p = contentPreview(["chat", "+dm", "--to", "u1", "--content", long], 10);
+		return p.length === 11 && p[10].includes("共 14 行");
+	})());
+	check("只有 userId 时不展示裸 ID", (() => {
+		const t = targetSummary(["chat", "+dm", "--to", "016113645862842894"]).join(" ");
+		return !t.includes("016113645862842894") && t.includes("1 个账号");
+	})());
+}
+
+console.log("AD、撤回对象识别（弹窗要能看出撤的是哪条）");
+{
+	const digest = parseMessageDigest(JSON.stringify({ messages: [{ conversationId: "cidX", createTime: "2026-10-03 23:43:11", sender: "严天宇", text: "【AI发送】新版审核面板测试\n\n第二行" }] }));
+	check("取到会话/时间/正文预览", digest.length === 1 && digest[0].conversationId === "cidX" && digest[0].preview.startsWith("【AI发送】") && digest[0].createTime === "2026-10-03 23:43:11");
+	check("正文折成一行（预览不散成多行）", !digest[0].preview.includes(String.fromCharCode(10)));
+	check("长正文截断到 90 字", (() => { const d = parseMessageDigest(JSON.stringify({ messages: [{ text: "啊".repeat(200) }] })); return d[0].preview.length <= 91; })());
+	check("无文字消息不报错", parseMessageDigest(JSON.stringify({ messages: [{ conversationId: "c" }] }))[0].preview === "");
+	check("坏输入返回空", parseMessageDigest("nope").length === 0);
+	const single = parseConversationInfo(JSON.stringify({ result: { conversationInfo: { title: "严天宇", singleChat: true, memberCount: 2 } } }));
+	const group = parseConversationInfo(JSON.stringify({ result: { conversationInfo: { title: "教研室", singleChat: false, memberCount: 8 } } }));
+	check("单聊认得出对方姓名", single && single.title === "严天宇" && single.singleChat === true);
+	check("群聊给群名与人数", group && group.title === "教研室" && group.memberCount === 8 && group.singleChat === false);
+	check("坏输入返回 null", parseConversationInfo("nope") === null);
+}
+
+console.log("AE、人多时的名单排版");
+{
+	const { layoutList } = __test__;
+	const names = ["李娜（诚毅校区班主任）", "苗文硕", "王明睿妈妈", "胡琰松妈妈", "李梓钰家长妈妈", "张伟", "刘洋", "陈晨", "赵磊", "孙倩", "周洋", "吴敏", "郑昊"];
+	const lines3 = layoutList(names, 3, 96);
+	check("13 人排成 5 行（3 列）", lines3.length === 5, String(lines3.length));
+	check("每行不超过面板宽度", lines3.every((l) => [...l].length <= 96), JSON.stringify(lines3[0]));
+	check("名单不丢项（拼起来含每个人名首字）", names.map((n) => [...n].slice(0, 2).join("")).every((h) => lines3.join(" ").includes(h)));
+	check("空名单返回空", layoutList([], 3, 80).length === 0);
+	check("两人时不硬凑三列", layoutList(["甲", "乙"], 3, 80).length === 1);
+	const review = buildReview(["chat", "+broadcast", "--to", "x", "--content", "【AI发送】今晚 8 点线上教研"], { effect: "write", risk: "medium", confirmation: "user_required", availability: "available" }, "会对外发出消息", { recipients: names });
+	check("名单交给面板按宽度排版（不在构造期截断）", review.objectItems && review.objectItems.items.length === 13 && review.objectItems.label === "收件人");
+	check("窄宽度下只显示能塞下的几个 + 等 N 人", (() => { const t = __test__.fitItems("收件人", review.objectItems.items, 40); return t.includes("等 13 人") && [...t].length <= 40; })(), __test__.fitItems("收件人", review.objectItems.items, 40));
+	check("正文仍在内容区", review.content.join(" ").includes("今晚 8 点"));
+	const few = buildReview(["chat", "+dm", "--to", "x", "--content", "【AI发送】在吗"], null, "会对外发出消息", { recipients: ["李娜（诚毅校区班主任）", "苗文硕"] });
+	check("宽宽度下人少时全部列出（不出现等 N 人）", (() => { const t = __test__.fitItems("收件人", few.objectItems.items, 100); return t.includes("李娜") && t.includes("苗文硕") && !t.includes("等 "); })());
+}
+
 const failed = results.filter((r) => !r.ok);
+
 console.log(failed.length ? `\n${failed.length} 项失败` : "\n全部通过 ✓");
 process.exit(failed.length ? 1 : 0);

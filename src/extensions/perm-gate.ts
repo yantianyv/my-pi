@@ -50,7 +50,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
 import { loadJsonConfig, saveJsonConfig } from "./shared/config";
-import { createBoxRenderer, editInput, renderScrollingInput } from "./shared/ui";
+import { createBoxRenderer, editInput, renderChoiceList, renderScrollingInput } from "./shared/ui";
 import { pickAuxModel, type AnyModel } from "./shared/model-pick";
 import { pickModelViaSelector } from "./shared/model-selector";
 import { splitShellSegments } from "./shared/shell-split";
@@ -480,14 +480,14 @@ export class ReviewPanel {
 		lines.push(dividerLine);
 		for (const ln of visible) lines.push(row(ln));
 		lines.push(row(th.fg("accent", " 如何处理？")));
-		actions.forEach((a, i) => {
-			const prefix = i === this.idx ? th.fg("accent", " › ") : "   ";
-			const withIntent =
-				i === 1 && this.info.canRemember && this.info.intent
-					? `${a}${th.fg("dim", `（${this.info.intent}）`)}`
-					: a;
-			lines.push(row(`${prefix}${i === this.idx ? th.fg("accent", withIntent) : withIntent}`));
-		});
+		lines.push(
+			...renderChoiceList(
+				th,
+				actions,
+				this.idx,
+				actions.map((_, i) => (i === 1 && this.info.canRemember ? this.info.intent : undefined)),
+			).map((l) => row(l)),
+		);
 		lines.push(
 			row(th.fg("dim", ` ↑↓ 选择 · Enter 确认 · 1-${actions.length} 直选 · PgUp/PgDn 滚动命令 · Esc 拒绝（不执行）`)),
 		);

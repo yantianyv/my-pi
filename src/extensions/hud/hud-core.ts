@@ -37,13 +37,13 @@
  * hud 只 append 到 footer 底部；注册方经 notifyExtraRowsUpdate 请求重绘（零耦合，无 import）。
  */
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { getCapabilities, hyperlink, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { getCapabilities, hyperlink, mixColors, parseColor, rgbColor, truncateToWidth, visibleWidth, type Color } from "@earendil-works/pi-tui";
 import path from "node:path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { clearStatusTimers, setStatusWithTTL } from "../shared/status";
-import { RATE_REF_DECAY, SPARK_WIDTH, sparkline, sparklineBars } from "./hud-spark";
+import { FADE_STEP, RATE_REF_DECAY, outputFade, rateBand, sparkBarsCells, sparklineCells } from "./hud-spark";
 
 const execFileAsync = promisify(execFile);
 
@@ -67,6 +67,8 @@ const RATE_REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 实时汇率刷新间隔（�
 let lastRateRefresh = 0;
 const GIT_REFRESH_INTERVAL_MS = 5_000; // git 状态刷新间隔
 const LEFT_LABEL_W = 15; // 左侧标签栏固定宽度（⎇ master / [DeepSeek] / 余额 ¥x.xx）
+/** 速率柱配色（按速度分档，下标同 rateBand）：红 <20 / 琥珀 20–50 / 绿 50–100 / 青 ≥100 */
+const RATE_BAND_COLORS = ["#ff5470", "#ffe066", "#00ff41", "#00ffd5"];
 const THINKING_LABEL: Record<string, string> = {
 	off: "off",
 	minimal: "min",
@@ -311,18 +313,28 @@ export default async function (pi: ExtensionAPI) {
 	}
 
 	// 速率采样环：**每轮记一次**（turn_end，此时本轮原始速率与 EMA 都已更新），一格 = 一轮。
-	// 曲线画本轮原始速率（起伏真实），均值作为基准线（颜色分档 + 📊 数字）。
-	// rateRef 是曲线的满格参考值 = 会话峰值随时间缓慢衰减（不因峰值滚出窗口而突然重缩放）。
+	// 曲线画本轮原始速率（起伏真实），颜色按速度分档（红/琥珀/绿/青），亮度按本轮输出 token 数
+	// （越亮 = 输出越长）。rateRef 是曲线的满格参考值 = 会话峰值随时间缓慢衰减（不因峰值滚出
+	// 窗口而突然重缩放）；turnOutputs 与 rateHistory 逐轮并行（该轮输出 token 数，亮度依据），
+	// outputRef 同理取粘性峰值——按峰值归一才能把亮度档真正拉开。
 	const RATE_TURNS = 40; // 采样窗口（远大于图表格数，保证曲线宽度变化时都有数据）
 	const rateHistory: number[] = [];
+	const turnOutputs: number[] = [];
 	let rateRef = 0;
-	const sampleRate = (): void => {
+	let outputRef = 0;
+	const sampleRate = (ctx: ExtensionContext): void => {
 		if (!costMod) return;
 		try {
 			const v = Math.max(0, costMod.getTurnRate() ?? costMod.getTokenRate(Date.now()) ?? 0);
+			const out = Math.max(0, costMod.getTurnOutput() ?? 0);
 			rateHistory.push(v);
-			if (rateHistory.length > RATE_TURNS) rateHistory.splice(0, rateHistory.length - RATE_TURNS);
+			turnOutputs.push(out);
+			if (rateHistory.length > RATE_TURNS) {
+				rateHistory.splice(0, rateHistory.length - RATE_TURNS);
+				turnOutputs.splice(0, turnOutputs.length - RATE_TURNS);
+			}
 			rateRef = Math.max(v, rateRef * RATE_REF_DECAY);
+			outputRef = Math.max(out, outputRef * RATE_REF_DECAY);
 		} catch {
 			/* 采样失败不影响 HUD */
 		}
@@ -658,21 +670,55 @@ export default async function (pi: ExtensionAPI) {
 					const midW = Math.max(6, width - colLeftW - GAP - 3 - colRightW);
 					const ctxCell = buildCtxCell(colRightW);
 
-					// 行 2 中列：速率柱状图（一格 = 一轮，单色）+ 🔥本轮速率。
+					// 行 2 中列：速率柱状图（一格 = 一轮）+ 🔥本轮速率。
 					// 宽度与下面那一行（消耗）等宽——两行的左边缘因此对齐（整块右对齐到竖线）。
 					// **自适应两行**：行 1 的状态右对齐、柱子贴中列左端，状态不长时柱子正上方是空的，
 					// 就把那块借来画上半行（16 档）；状态长到压过来时把位置还回去，退回单行（8 档）。
+					// 速率柱配色：速度档决定色相（红/琥珀/绿/青），亮度 = 该轮输出 token 数
+					// （越长越亮：开方映射 + 最多向背景混 62.5%）；每轮输出起伏大，亮度档才拉得开。
+					// 淡化量量化到 1/8 档，相邻同色合并成一段，少出 ANSI 序列。
+					const bgTarget = theme.appearance === "light" ? rgbColor(255, 255, 255) : rgbColor(0, 0, 0);
+					const colorCache = new Map<string, Color>();
+					const cellKey = (value: number, out?: number): string =>
+						value > 0 ? `${rateBand(value)}:${Math.round(outputFade(out, outputRef) / FADE_STEP)}` : "dim";
+					const colorOf = (key: string): Color => {
+						const hit = colorCache.get(key);
+						if (hit) return hit;
+						let color: Color;
+						if (key === "dim") color = theme.colors.dim;
+						else {
+							const [band, fade] = key.split(":");
+							const base = parseColor(RATE_BAND_COLORS[Number(band)] ?? RATE_BAND_COLORS[0]!);
+							const amount = Number(fade) * FADE_STEP;
+							color = amount > 0 ? mixColors(base, bgTarget, amount, "oklch") : base;
+						}
+						colorCache.set(key, color);
+						return color;
+					};
+					/** 逐格上色：同色相邻合并成一段，纯空格段不上色 */
+					const paintCells = (chars: string[], keys: string[]): string => {
+						let out = "";
+						for (let i = 0; i < chars.length; ) {
+							let j = i + 1;
+							while (j < chars.length && keys[j] === keys[i]) j++;
+							const seg = chars.slice(i, j).join("");
+							out += seg.trim() ? theme.style(seg, { fg: colorOf(keys[i]!) }) : seg;
+							i = j;
+						}
+						return out;
+					};
 					const rateChart = ((): { bottom: string; top: string | null } => {
 						if (!costMod) return { bottom: "", top: null };
-						// 双口径数字：🔥 本轮（未平滑）+ 📊 均值（EMA）；图表本身单色，不再按均值分亮暗
-						const nums = `${theme.fg("muted", `🔥${fmtRate(turnRateNow)}`)} ${theme.fg("dim", `📊${fmtRate(emaRate)}`)}`;
+						// 双口径数字：🔥 本轮（未平滑，颜色跟速度档）+ 📊 均值（EMA）
+						const nums = `${theme.style(`🔥${fmtRate(turnRateNow)}`, { fg: colorOf(cellKey(turnRateNow)) })} ${theme.fg("dim", `📊${fmtRate(emaRate)}`)}`;
 						const costW = visibleWidth(costCell);
 						const chartW = Math.max(8, Math.min(40, costW - visibleWidth(nums) - 1));
-						const paint = (bars: { lower: string; upper: string }): { bottom: string; top: string } => ({
-							bottom: theme.fg("accent", bars.lower),
-							top: theme.fg("accent", bars.upper),
-						});
-						const two = paint(sparklineBars(rateHistory, chartW, { ref: rateRef }));
+						const cols = sparkBarsCells(rateHistory, chartW, { ref: rateRef, weights: turnOutputs });
+						const keys = cols.map((c) => cellKey(c.value, c.weight));
+						const two = {
+							bottom: paintCells(cols.map((c) => c.lower), keys),
+							top: paintCells(cols.map((c) => c.upper), keys),
+						};
 						const bottom2 = `${two.bottom} ${nums}`;
 						// 柱子上方是否放得下上半行：状态左端（中列内偏移）要在柱子右侧留出 1 格
 						const chartCol = midW - visibleWidth(bottom2);
@@ -680,8 +726,11 @@ export default async function (pi: ExtensionAPI) {
 							return { bottom: bottom2, top: " ".repeat(chartCol) + two.top };
 						}
 						// 还位置：单行 8 档（按同一参考值重新归一）
-						const single = theme.fg("accent", sparkline(rateHistory, chartW, { ref: rateRef }));
-						return { bottom: `${single} ${nums}`, top: null };
+						const single = sparklineCells(rateHistory, chartW, { ref: rateRef, weights: turnOutputs });
+						return {
+							bottom: `${paintCells(single.map((c) => c.char), single.map((c) => cellKey(c.value, c.weight)))} ${nums}`,
+							top: null,
+						};
 					})();
 					// 有上半行就把它放在柱子正上方，状态仍右对齐；没有就退回纯状态右对齐
 					const statusCell = rateChart.top
@@ -732,7 +781,7 @@ export default async function (pi: ExtensionAPI) {
 		// 记录本 turn 消耗（成本增量入 10 分钟窗口 + 输出 token 速率 EMA 平滑）
 		if (costMod) {
 			costMod.recordTurnCosts(ctx);
-			sampleRate(); // 本轮速率入曲线（一格 = 一轮）
+			sampleRate(ctx); // 本轮速率与输出 token 数入曲线（一格 = 一轮）
 			// Z.AI Coding CN：积分轨只能远端采样（消息 usage 不含积分），
 			// turn_end 拉一次 quota 接口做差分（fire-and-forget，内部 30s 节流）
 			if (ctx.model?.provider === "zai-coding-cn") void costMod.recordZaiCreditUsage(ctx);

@@ -57,6 +57,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 - 缩进 **Tab**；中文注释与文档；文件头有块注释说明用途与实现要点。
 - 扩展导出 `export default function (pi: ExtensionAPI)`，配置常量集中在文件顶部「可调配置」区。
 - 配置 JSON 读写一律走 `shared/config.ts`（原子写 + 损坏隔离 `.corrupt-`），不要自己 `writeFileSync`。
+- **UI 与通用能力一律复用 `shared/`**：浮层边框/输入框/截断/宽度计算走 `shared/ui.ts`（宽度优先用 pi-tui 的 `visibleWidth` / `truncateToWidth`，不要手写全角宽度表），选择列表与确认面板等成块 UI 也收在 shared；shared 里缺能力就补进去、写得不好就改那一处，禁止各扩展自维护一套同类实现。
 - **提示词瘦身（所有插件 + 本文档）**：注入给模型的文本（工具 description / promptSnippet / promptGuidelines / 系统提示词 / 注入消息）只写模型需要且别处没有的信息——不解释实现、不复述参数名已表达的内容、不写变更史与自我说明；同一事实只写一处；成段子系统细节下沉到 skill 的 `references/`，所有插件注释不记变更史。改完逐句自问「删掉它会损失什么」，答不上来就删。
 - 提交信息：中文 conventional commits（`feat:` / `fix:` / `refactor:` / `chore:` / `docs:`，scope 写扩展名或模块名），单行主题，必要时附正文要点。
 

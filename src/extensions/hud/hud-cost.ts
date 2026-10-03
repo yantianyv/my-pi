@@ -188,6 +188,7 @@ let turnStartTime: number | null = null;
 let modelPhaseEnd: number | null = null; // 本轮 assistant 消息流式结束时刻（模型生成段的终点）
 let smoothedTokenRate: number | null = null;
 let lastTurnRate: number | null = null; // 最近一轮的原始速率（未平滑），供 HUD 与平滑值并显
+let lastTurnOutput: number | null = null; // 最近一轮的输出 token 数，供 HUD 做柱状图视觉加权（越长越亮）
 
 /** 会话启动时刻（供 HUD 行 1 动态区占位“会话时长”显示）。 */
 export function getStartupTime(): number {
@@ -390,6 +391,7 @@ export function resetCostTracking(ctx: ExtensionContext): void {
 	modelPhaseEnd = null;
 	smoothedTokenRate = null;
 	lastTurnRate = null;
+	lastTurnOutput = null;
 	resetZaiCreditTracking(); // Z.AI 积分轨同步清零（换会话/换供应商后旧采样无意义）
 }
 
@@ -436,6 +438,7 @@ export function recordTurnCosts(ctx: ExtensionContext): void {
 	const outputTotal = sumOutputTokens(ctx);
 	const outputDelta = outputTotal - lastRecordedOutputTotal;
 	lastRecordedOutputTotal = outputTotal;
+	lastTurnOutput = Math.max(0, outputDelta);
 	if (outputDelta > 0 && turnStartTime != null) {
 		// 分母优先用模型生成段终点（message_end）；没有 assistant 消息的异常轮退化为 turn 全长
 		const turnRate = computeModelPhaseRate(outputDelta, turnStartTime, modelPhaseEnd ?? Date.now());
@@ -471,6 +474,11 @@ export function getTokenRate(now: number): number | null {
 /** 最近一轮的原始输出速率（/s，未平滑）——与平滑值并显，看清"这一轮有多快 / 平时多快"。 */
 export function getTurnRate(): number | null {
 	return lastTurnRate;
+}
+
+/** 最近一轮的输出 token 数（未平滑）——HUD 速率柱按它做视觉加权（输出越长越亮）。 */
+export function getTurnOutput(): number | null {
+	return lastTurnOutput;
 }
 
 // ---------------------------------------------------------------------------
