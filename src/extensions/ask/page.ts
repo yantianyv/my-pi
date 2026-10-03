@@ -35,7 +35,7 @@ import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from
 import type { TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { renderAnswer } from "../shared/markdown";
-import { createBoxRenderer, editInput, renderScrollingInput } from "../shared/ui";
+import { createBoxRenderer, editInput, ratingIndicator, renderChoiceList, renderScrollingInput, wrapIndented } from "../shared/ui";
 import type { ListedQuestionnaire } from "./store";
 import {
 	answeredProgress,
@@ -910,10 +910,7 @@ export class QuestionnairePage {
 		/** 长逻辑行折行推入 content：prefix（含 ANSI）定首行起点与续行缩进，body 折行不截断；row 焦点标记只挂在首行 */
 		const pushWrapped = (prefix: string, body: string, row?: number): void => {
 			const indent = visibleWidth(prefix);
-			const parts = wrapTextWithAnsi(body, Math.max(8, W - indent));
-			parts.forEach((p, k) => {
-				content.push(k === 0 ? { text: prefix + p, row } : { text: " ".repeat(indent) + p });
-			});
+			wrapIndented(body, W, indent).forEach((p, k) => content.push(k === 0 ? { text: prefix + p.trimStart(), row } : { text: p }));
 		};
 		const answerable = answerableQuestions(this.qn);
 		this.qn.questions.forEach((q) => {
@@ -956,15 +953,7 @@ export class QuestionnairePage {
 				} else {
 					const min = q.min ?? 1;
 					const max = q.max ?? 5;
-					const filled = st.rating === undefined ? 0 : st.rating - min + 1;
-					const dots = Array.from({ length: max - min + 1 }, (_, k) => (k < filled ? "●" : "○")).join(" ");
-					const prefix = focused ? th.fg("accent", " › ") : "   ";
-					content.push({
-						text:
-							`${prefix} ${th.fg("dim", "‹")} ${dots} ${st.rating ?? "–"}/${max} ${th.fg("dim", "›")}` +
-							(focused ? th.fg("dim", `   ←→ 调整 · 数字直选 ${min}-${max}`) : ""),
-						row: ri,
-					});
+					content.push({ text: ratingIndicator(th, min, max, st.rating, focused), row: ri });
 				}
 				ri++;
 			}
@@ -1127,20 +1116,24 @@ export class QuestionnairePicker {
 		const budget = QuestionnairePicker.MAX_ROWS;
 		const start = Math.max(0, Math.min(this.idx - Math.floor(budget / 2), this.items.length - budget));
 		const view = this.items.slice(start, start + budget);
-		view.forEach((item, k) => {
-			const i = start + k;
-			const q = item.q;
-			const total = answerableQuestions(q).length;
-			const answered = answeredProgress(q, q.answers);
-			const when = q.createdAt.length >= 16 ? q.createdAt.slice(11, 16) : "";
-			const meta = th.fg(
-				"dim",
-				`（${q.id} · ${q.questions.length} 题${total !== q.questions.length ? ` · ${total} 可答` : ""}${answered > 0 ? ` · 已答 ${answered}` : ""}${q.status === "draft" ? " · 草稿" : ""}${when ? ` · ${when}` : ""}）`,
-			);
-			const prefix = i === this.idx ? th.fg("accent", " › ") : "   ";
-			const title = i === this.idx ? th.fg("accent", q.title) : q.title;
-			lines.push(row(`${prefix}📝 ${title} ${meta}`));
-		});
+		lines.push(
+			...renderChoiceList(
+				th,
+				view.map((item) => {
+					const q = item.q;
+					const total = answerableQuestions(q).length;
+					const answered = answeredProgress(q, q.answers);
+					const when = q.createdAt.length >= 16 ? q.createdAt.slice(11, 16) : "";
+					return {
+						label: q.title,
+						icon: "📝",
+						note: `${q.id} · ${q.questions.length} 题${total !== q.questions.length ? ` · ${total} 可答` : ""}${answered > 0 ? ` · 已答 ${answered}` : ""}${q.status === "draft" ? " · 草稿" : ""}${when ? ` · ${when}` : ""}`,
+					};
+				}),
+				this.idx - start,
+				{ boldSelected: false },
+			).map((l) => row(l)),
+		);
 		if (this.flash) lines.push(row(th.fg("warning", ` ${this.flash}`)));
 		lines.push(row(th.fg("dim", " ↑↓ 选择 · Enter 打开 · D 删除（按两次） · Esc 取消选择")));
 		lines.push(bottomBorder());

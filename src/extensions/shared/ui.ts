@@ -311,6 +311,17 @@ export function renderChoiceList(th: Theme, items: ChoiceItem[], selected: numbe
 	return out;
 }
 
+/** 评分行（‹ ●●○○○ 3/5 ›；焦点行尾附键位提示） */
+export function ratingIndicator(th: Theme, min: number, max: number, value: number | undefined, focused: boolean): string {
+	const filled = value === undefined ? 0 : value - min + 1;
+	const dots = Array.from({ length: max - min + 1 }, (_, k) => (k < filled ? "●" : "○")).join(" ");
+	const prefix = focused ? th.fg("accent", " › ") : "   ";
+	return (
+		`${prefix} ${th.fg("dim", "‹")} ${dots} ${value ?? "–"}/${max} ${th.fg("dim", "›")}` +
+		(focused ? th.fg("dim", `   ←→ 调整 · 数字直选 ${min}-${max}`) : "")
+	);
+}
+
 /** 正文区滚动提示行：嵌在分隔线里的 ▲/▼ 余量说明（面板滚动窗共用；宽度走 visibleWidth，中文算 2 列） */
 export function dividerScrollNote(th: Theme, border: (s: string) => string, innerW: number, above: number, below: number): string {
 	if (above <= 0 && below <= 0) return border(`├${"—".repeat(Math.max(0, innerW - 1))}┤`);
