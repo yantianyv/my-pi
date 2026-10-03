@@ -391,9 +391,9 @@ const EXPLORE_DIR = path.join(".pi", "explore");
 const MAX_TURNS_PER_TASK = 40;
 /** 单任务最多做几次「上下文压缩后续跑」 */
 const MAX_COMPACTIONS = 2;
-/** 上下文超限类错误特征（各家措辞不同，宽匹配） */
-export const CONTEXT_OVERFLOW_RE =
-	/context (length|window|limit)|maximum context|too many tokens|token.{0,16}(limit|exceed)|413|request entity too large|prompt is too long|input is too long|超过.{0,6}(长度|上限)/i;
+/** 上下文超限类错误特征（各家措辞不同，宽匹配；与 claude-it 共用一份，见 shared/context-budget） */
+import { CONTEXT_OVERFLOW_RE } from "./shared/context-budget";
+export { CONTEXT_OVERFLOW_RE };
 
 interface TaskArtifacts {
 	key: string;

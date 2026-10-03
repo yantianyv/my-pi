@@ -29,7 +29,9 @@ import {
 	type AgentTool,
 } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm, createPiStreamFn, systemMessage } from "./shared/agent";
+import { CONTEXT_OVERFLOW_RE, estimateTokens, pruneOldToolResults } from "./shared/context-budget";
 import { getExploreApi } from "./shared/explore-api";
 import { Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
@@ -90,6 +92,14 @@ const INIT_MAX_TOKENS = 8192;
  * 不设轮数与墙钟上限：/init 是稀有大工程，成本按价值配比；要中断用 /init cancel。
  */
 const NO_PROGRESS_TURNS = 8;
+/** 上下文预算：超过这个占比（按模型窗口估）就把旧工具结果剪成占位文本 */
+const CONTEXT_BUDGET_RATIO = 0.55;
+/** 一次运行最多做几次「超限 → 压缩 → 继续」 */
+const MAX_COMPACTIONS = 2;
+/** 压缩时送入模型的记录上限（尾部截断） */
+const COMPACT_RECORD_CHARS = 24_000;
+/** 压缩记录兜底保留长度（模型压缩不可用时直接用记录尾巴） */
+const COMPACT_FALLBACK_CHARS = 6_000;
 /** 审计子代理单次输出上限 */
 const AUDIT_MAX_TOKENS = 4096;
 
@@ -170,7 +180,7 @@ function buildInitSystemPrompt(cwd: string, hasExplore: boolean): string {
 		);
 	}
 	lines.push(
-		"要求：高效探索（grep/find 定位 + 精读片段，不逐文件通读）；只写经过验证的信息；完成后的一两条总结要精炼。",
+		"要求：高效探索（grep/find 定位 + 精读片段，不逐文件通读）；只写经过验证的信息；随时把已确认的结论落盘（别攒到最后——上下文超限被压缩时，没落盘的会丢）；完成后的一两条总结要精炼。",
 		"提示词纪律（AGENTS.md 每轮对话都会加载，字数即成本）：",
 		"- 只写能改变 AI 行为的「不写就会做错」的信息；显而易见的常识、README/清单文件里能自行读到的内容不写",
 		"- 不写变更史、自我说明、实现解释；不粘贴代码原文（用路径引用）；常用命令一条一行、不写解释性长句",
@@ -181,7 +191,7 @@ function buildInitSystemPrompt(cwd: string, hasExplore: boolean): string {
 		"- L3 README / docs：给人看，L1 只留一行指路，不复制内容",
 		"- 命令、坑、不变量、跨子系统约定永不搬（必须自动在眼前）；已下沉的细节不要在 L1 重复",
 		"- L1 指向 L2 的写法：写清「细节见 skill <名> 的 references/<文件>.md，改它之前先读」",
-		"重跑：先盘点现有 AGENTS.md 与 .pi/skills，人工内容只搬不删（原文事实保留），搬移与删除在最终总结里报告",
+		"重跑：先盘点现有 AGENTS.md 与 .pi/skills，人工内容只搬不删（原文事实保留），搬移与删除在最终总结里报告；L2 要跟着一起维护——过时内容更新或删除、新细节写进对应 references、文件增删后同步 SKILL.md 的索引与 description，不留孤儿文件与死指针",
 		"",
 		`工作目录：${cwd}`,
 	);
@@ -226,6 +236,120 @@ function findLlmError(messages: AgentMessage[]): string | null {
 	return null;
 }
 
+/** init 运行期间的回调（状态行 / 探索进度 / 审计进度 / 压缩） */
+interface InitHooks {
+	onToolCall: () => void;
+	onExploreProgress: (done: number, total: number) => void;
+	onAudit: (steps: number | null) => void;
+	onCompact: (n: number) => void;
+}
+
+/** 把消息列表渲染成「过程记录」文本（压缩与兜底总结用；单条截尾） */
+function renderProcessRecord(messages: AgentMessage[]): string {
+	const parts: string[] = [];
+	for (const m of messages) {
+		const role = (m as { role?: string }).role;
+		if (role === "user" || role === "assistant") {
+			const t = extractText((m as { content?: unknown }).content).trim();
+			if (t) parts.push(`【${role === "user" ? "指令" : "产出"}】${t.slice(0, 4_000)}`);
+		} else if (role === "toolResult") {
+			const tm = m as { toolName?: string; content?: unknown };
+			const t = extractText(tm.content).trim();
+			if (t) parts.push(`【工具 ${tm.toolName ?? "?"}】${t.slice(0, 1_500)}`);
+		}
+	}
+	return parts.join("\n\n");
+}
+
+/**
+ * 上下文超限时把过程记录压成要点（供重启继续）。压缩模型或认证不可用时回退到记录尾部——
+ * 宁可带一份粗糙的起点重跑，也不要让整轮工作白费。
+ */
+async function compactInitNotes(
+	ctx: ExtensionContext,
+	model: AnyModel,
+	record: string,
+	previous: string | null,
+): Promise<string> {
+	const merged = [previous ? `（更早的压缩记录）\n${previous}` : "", record].filter(Boolean).join("\n\n");
+	const fallback = merged.trim().slice(-COMPACT_FALLBACK_CHARS);
+	try {
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) return fallback;
+		const res = await completeSimple(
+			model,
+			{
+				systemPrompt:
+					"你在压缩一次 /init（生成/维护项目上下文文件）的过程记录。保留：已确认的项目事实（命令、目录职责、不变量、约定、坑、子系统细节要点与出处）、已写入文件的内容摘要与位置、未完成的待办。丢弃：冗余叙述、重复内容、工具调用外壳、已被压缩过的内容。输出纯文本要点清单，不要客套。",
+				messages: [
+					{
+						role: "user",
+						content: `--- 过程记录 ---\n${merged.slice(-COMPACT_RECORD_CHARS)}`,
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{
+				apiKey: auth.apiKey,
+				headers: { ...auth.headers },
+				maxTokens: 2_000,
+				temperature: 0,
+				signal: AbortSignal.timeout(60_000),
+			},
+		);
+		const text = res.content
+			.filter((b) => b.type === "text")
+			.map((b) => (b as { type: "text"; text: string }).text)
+			.join("\n")
+			.trim();
+		return text || fallback;
+	} catch {
+		return fallback;
+	}
+}
+
+/**
+ * 产物的确定性结构检查（不依赖模型）：L1 指针可解析、SKILL.md 索引与 references 一一对应、
+ * frontmatter 有 name/description、不留空文件。返回人话问题清单（空 = 通过）。
+ */
+export function checkContextArtifacts(cwd: string): string[] {
+	const issues: string[] = [];
+	const skillRoot = path.join(cwd, ".pi", "skills");
+	const l1Path = path.join(cwd, CONTEXT_FILE);
+	const l1 = fs.existsSync(l1Path) ? fs.readFileSync(l1Path, "utf8") : "";
+	const skills = fs.existsSync(skillRoot)
+		? fs.readdirSync(skillRoot, { withFileTypes: true }).filter((d) => d.isDirectory())
+		: [];
+	const allRefs = new Set<string>();
+	for (const s of skills) {
+		const dir = path.join(skillRoot, s.name);
+		const skillFile = path.join(dir, "SKILL.md");
+		if (!fs.existsSync(skillFile)) {
+			issues.push(`skill ${s.name}：缺 SKILL.md`);
+			continue;
+		}
+		const skillText = fs.readFileSync(skillFile, "utf8");
+		const fm = skillText.match(/^---\n([\s\S]*?)\n---/);
+		if (!fm || !/^name:\s*\S/m.test(fm[1]) || !/^description:\s*\S/m.test(fm[1])) {
+			issues.push(`skill ${s.name}：frontmatter 缺 name 或 description`);
+		}
+		const refDir = path.join(dir, "references");
+		const files = fs.existsSync(refDir) ? fs.readdirSync(refDir).filter((f) => f.endsWith(".md")) : [];
+		for (const f of files) {
+			allRefs.add(f);
+			if (fs.statSync(path.join(refDir, f)).size < 80) issues.push(`skill ${s.name}：references/${f} 近乎空文件`);
+			if (!skillText.includes(f)) issues.push(`skill ${s.name}：references/${f} 未写进 SKILL.md 索引`);
+		}
+		for (const m of skillText.matchAll(/references\/([\w.-]+\.md)/g)) {
+			if (!files.includes(m[1])) issues.push(`skill ${s.name}：SKILL.md 指向不存在的 references/${m[1]}`);
+		}
+	}
+	for (const m of l1.matchAll(/references\/([\w.-]+\.md)/g)) {
+		if (!allRefs.has(m[1])) issues.push(`${CONTEXT_FILE} 指向不存在的 references/${m[1]}`);
+	}
+	return issues;
+}
+
 // ---------------------------------------------------------------------------
 // 产物审计：全新上下文按纪律复核并直接修正（审计自身故障只报告，不影响产物）
 // ---------------------------------------------------------------------------
@@ -252,9 +376,13 @@ async function runInitAudit(
 	model: AnyModel,
 	signal: AbortSignal,
 	onAudit: (steps: number | null) => void,
+	issues?: string[],
 ): Promise<{ ok: boolean; summary: string }> {
 	const skillsDir = path.join(ctx.cwd, ".pi", "skills");
 	const target = fs.existsSync(skillsDir) ? `${CONTEXT_FILE} 与 .pi/skills/` : CONTEXT_FILE;
+	const task =
+		`复核并修正 ${target}：只保留值得每轮付钱的内容，按纪律删减、合并、下沉并修好指针。` +
+		(issues?.length ? `\n\n结构检查发现这些问题，请一并修正：\n- ${issues.join("\n- ")}` : "");
 	const tools: AgentTool<any>[] = [
 		...createReadOnlyTools(ctx.cwd),
 		createWriteTool(ctx.cwd),
@@ -270,7 +398,7 @@ async function runInitAudit(
 			[
 				{
 					role: "user",
-					content: `复核并修正 ${target}：只保留值得每轮付钱的内容，按纪律删减、合并、下沉并修好指针。`,
+					content: task,
 					timestamp: Date.now(),
 				},
 			],
@@ -308,11 +436,7 @@ async function runInitAgent(
 	model: AnyModel,
 	prompt: string,
 	signal: AbortSignal,
-	hooks: {
-		onToolCall: () => void;
-		onExploreProgress: (done: number, total: number) => void;
-		onAudit: (steps: number | null) => void;
-	},
+	hooks: InitHooks,
 ): Promise<InitRunResult> {
 	const tools: AgentTool<any>[] = [
 		...createReadOnlyTools(ctx.cwd),
@@ -326,21 +450,27 @@ async function runInitAgent(
 	if (exploreTool) tools.push(exploreTool);
 
 	const streamFn = createPiStreamFn(ctx);
+	const systemMsg = () => systemMessage(buildInitSystemPrompt(ctx.cwd, !!exploreTool));
 	// 记录上下文文件写入前的 mtime：判断代理是否实际完成了写入
 	const contextFile = path.join(ctx.cwd, CONTEXT_FILE);
 	const mtimeBefore = fs.existsSync(contextFile) ? fs.statSync(contextFile).mtimeMs : 0;
+	const written = () => fs.existsSync(contextFile) && fs.statSync(contextFile).mtimeMs > mtimeBefore + 1;
+	// 上下文预算：超了就把旧工具结果剪成占位文本（工具结果都能 read 重取），防长跑撞天花板
+	const contextBudget = Math.floor((model.contextWindow ?? 200_000) * CONTEXT_BUDGET_RATIO);
 
-	// 无进展保护 +「没写完不许停」：不设轮数/时间上限，靠这两条兜底
+	// 无进展保护 +「没写完不许停」（跨压缩重启保留计数）
 	let idleTurns = 0;
 	let turnHadProgress = false;
 	let wrapUpRequested = false;
 	let followUps = 0;
 	let lastAssistantText = "";
+	let record: AgentMessage[] = []; // 过程记录（message_end 累积；压缩与兜底总结用）
 	const userNudge = (content: string): AgentMessage => ({ role: "user", content, timestamp: Date.now() });
 	const config: AgentLoopConfig = {
 		model,
 		maxTokens: INIT_MAX_TOKENS,
 		convertToLlm,
+		transformContext: async (messages) => pruneOldToolResults(messages, contextBudget),
 		// 连续多轮没有产出（既没写文件也没派 explore）→ 注入收尾指令，让它落盘而不是空转
 		getSteeringMessages: async () => {
 			if (!wrapUpRequested) return [];
@@ -354,8 +484,7 @@ async function runInitAgent(
 		// 打算停下但没写完（文件没被写过 / 末句是意图陈述）→ 顶回去做完（最多两次）
 		getFollowUpMessages: async () => {
 			if (followUps >= 2) return [];
-			const written = fs.existsSync(contextFile) && fs.statSync(contextFile).mtimeMs > mtimeBefore + 1;
-			if (!written) {
+			if (!written()) {
 				followUps++;
 				return [
 					userNudge(`你还没有写入 ${CONTEXT_FILE}：立即把当前成果写入并给出一两句总结；确实无法完成就说明原因。`),
@@ -371,91 +500,138 @@ async function runInitAgent(
 		},
 	};
 
-	try {
-		const userMessage: AgentMessage = { role: "user", content: prompt, timestamp: Date.now() };
-		const newMessages = await runAgentLoop(
-			[userMessage],
-			{ messages: [systemMessage(buildInitSystemPrompt(ctx.cwd, !!exploreTool))], tools },
-			config,
-			(event) => {
-				if (event.type === "tool_execution_start") {
-					hooks.onToolCall();
-					// 「有产出」= 写文件或派子代理摸底（纯读取不算，防陷在无限翻阅里）
-					const t = event.toolName;
-					if (t === "write" || t === "edit" || t === "explore") turnHadProgress = true;
-				} else if (event.type === "turn_end") {
-					idleTurns = turnHadProgress ? 0 : idleTurns + 1;
-					turnHadProgress = false;
-					if (idleTurns >= NO_PROGRESS_TURNS) {
-						idleTurns = 0;
-						wrapUpRequested = true;
-					}
-				} else if (event.type === "message_end") {
-					const m = event.message as { role?: string; content?: unknown };
-					if (m.role === "assistant") lastAssistantText = extractText(m.content).trim() || lastAssistantText;
-				} else if (event.type === "tool_execution_update") {
-					// explore 的进度增量（details.total/succeeded）转成 init 状态行的探索计数
-					const d = event.partialResult?.details as { total?: number; succeeded?: number } | undefined;
-					if (typeof d?.total === "number" && d.total > 0) hooks.onExploreProgress(d.succeeded ?? 0, d.total);
-				}
-			},
-			signal,
-			streamFn,
-		);
-
-		// 有文本不等于写完了：文件必须真被写过（半途而废的意图陈述、轮数用尽都会只留文本）
-		const summary = findAssistantText(newMessages);
-		if (summary) {
-			if (!(fs.existsSync(contextFile) && fs.statSync(contextFile).mtimeMs > mtimeBefore + 1)) {
-				return { ok: false, summary: `${summary}（未检测到 ${CONTEXT_FILE} 写入，可能只是中途说明）` };
+	const onEvent = (event: { type: string; [k: string]: unknown }) => {
+		switch (event.type) {
+			case "tool_execution_start": {
+				hooks.onToolCall();
+				// 「有产出」= 写文件或派子代理摸底（纯读取不算，防陷在无限翻阅里）
+				const t = event.toolName as string;
+				if (t === "write" || t === "edit" || t === "explore") turnHadProgress = true;
+				break;
 			}
-			const blockers = looksUnfinished(summary) ? ["最后一条消息像未完成的意图陈述"] : [];
-			const base = blockers.length ? `${summary}（${blockers.join("；")}）` : summary;
-			// 半成品不让审计动手（改一份没写完的产物只会更乱）
-			if (blockers.length || signal.aborted) return { ok: false, summary: base };
-			const audit = await runInitAudit(ctx, model, signal, hooks.onAudit);
-			const auditNote = audit.ok ? `审计：${audit.summary}` : `审计未完成（${audit.summary}）`;
-			return { ok: true, summary: `${base}；${auditNote}` };
+			case "turn_end": {
+				idleTurns = turnHadProgress ? 0 : idleTurns + 1;
+				turnHadProgress = false;
+				if (idleTurns >= NO_PROGRESS_TURNS) {
+					idleTurns = 0;
+					wrapUpRequested = true;
+				}
+				break;
+			}
+			case "message_end": {
+				const m = event.message as AgentMessage;
+				record.push(m);
+				if ((m as { role?: string }).role === "assistant") {
+					lastAssistantText = extractText((m as { content?: unknown }).content).trim() || lastAssistantText;
+				}
+				break;
+			}
+			case "tool_execution_update": {
+				// explore 的进度增量（details.total/succeeded）转成 init 状态行的探索计数
+				const d = (event.partialResult as { details?: { total?: number; succeeded?: number } } | undefined)?.details;
+				if (typeof d?.total === "number" && d.total > 0) hooks.onExploreProgress(d.succeeded ?? 0, d.total);
+				break;
+			}
 		}
+	};
 
-		// 没有任何文本输出：先取真实原因（模型错误 vs 轮数用尽），再兑底续问一轮拿总结
-		const llmError = findLlmError(newMessages);
-		if (!signal.aborted) {
+	let compactions = 0;
+	let notes: string | null = null; // 上次压缩后的要点（重启后作为起点）
+	try {
+		for (;;) {
 			try {
-				const nudge: AgentMessage = {
-					role: "user",
-					content: llmError
-						? "刚才的模型调用出现了错误。请用一两句话向用户说明：AGENTS.md 写到哪一步、遇到了什么问题。"
-						: "请立即停止工具调用，用一两句话总结你完成的工作（AGENTS.md 写入了/更新了什么；若未完成也请说明当前进度）。",
-					timestamp: Date.now(),
-				};
-				const more = await runAgentLoop(
-					[nudge],
-					{ messages: [systemMessage(buildInitSystemPrompt(ctx.cwd, !!exploreTool)), ...newMessages], tools: [] },
-					{ model, maxTokens: INIT_MAX_TOKENS, convertToLlm, finishTurn: () => ({ action: "end" as const }) },
-					() => {},
+				record = [];
+				const initial: AgentMessage[] = [systemMsg(), { role: "user", content: prompt, timestamp: Date.now() }];
+				if (notes) {
+					initial.push(
+						userNudge(
+							`上下文超限，已把此前工作压缩成下面的记录。先读当前 ${CONTEXT_FILE} 与 .pi/skills 现状，再据此继续（需要原文时用 read 重读，不要凭空补写）：\n\n${notes}`,
+						),
+					);
+				}
+				const newMessages = await runAgentLoop(
+					initial,
+					{ messages: [systemMsg()], tools },
+					config,
+					onEvent,
 					signal,
 					streamFn,
 				);
-				const text = findAssistantText(more);
-				if (text) {
-					if (llmError) return { ok: false, summary: `${text}（模型调用出错：${llmError}）` };
-					// 轮数用尽场景：文件确实被写入过才视为完成，否则如实告知未完成
-					const written = fs.existsSync(contextFile) && fs.statSync(contextFile).mtimeMs > mtimeBefore + 1;
-					if (written) return { ok: true, summary: text };
-					return { ok: false, summary: `${text}（未检测到 ${CONTEXT_FILE} 写入，可重跑 /init）` };
+				record = newMessages;
+
+				// 有文本不等于写完了：文件必须真被写过（半途而废的意图陈述会只留文本）
+				const summary = findAssistantText(newMessages);
+				if (summary) {
+					if (!written()) {
+						return { ok: false, summary: `${summary}（未检测到 ${CONTEXT_FILE} 写入，可能只是中途说明）` };
+					}
+					const blockers = looksUnfinished(summary) ? ["最后一条消息像未完成的意图陈述"] : [];
+					const base = blockers.length ? `${summary}（${blockers.join("；")}）` : summary;
+					// 半成品不让审计动手（改一份没写完的产物只会更乱）
+					if (blockers.length || signal.aborted) return { ok: false, summary: base };
+					// 审计 → 结构检查 → 还有问题就带问题再审计一轮（最多两轮），形成闭环
+					const auditNotes: string[] = [];
+					let issues: string[] = [];
+					for (let round = 0; round < 2; round++) {
+						const audit = await runInitAudit(ctx, model, signal, hooks.onAudit, issues.length ? issues : undefined);
+						auditNotes.push(audit.ok ? audit.summary : `未完成（${audit.summary}）`);
+						issues = checkContextArtifacts(ctx.cwd);
+						if (!issues.length) break;
+					}
+					const structureNote = issues.length
+						? `结构检查仍有 ${issues.length} 项：${issues.join("；")}`
+						: "结构检查通过";
+					return { ok: true, summary: `${base}；审计：${auditNotes.join(" / ")}；${structureNote}` };
 				}
-			} catch {
-				// 兑底续问失败不掩盖主因，落到下面的如实上报
+
+				// 没有任何文本输出：先取真实原因（模型错误 vs 其他），再兜底续问一轮拿总结
+				const llmError = findLlmError(newMessages);
+				if (!signal.aborted) {
+					try {
+						const nudge: AgentMessage = {
+							role: "user",
+							content: llmError
+								? "刚才的模型调用出现了错误。请用一两句话向用户说明：AGENTS.md 写到哪一步、遇到了什么问题。"
+								: "请立即停止工具调用，用一两句话总结你完成的工作（AGENTS.md / skill 写入了或更新了什么；若未完成也请说明当前进度）。",
+							timestamp: Date.now(),
+						};
+						const more = await runAgentLoop(
+							[nudge],
+							{ messages: [systemMsg(), ...newMessages], tools: [] },
+							{ model, maxTokens: INIT_MAX_TOKENS, convertToLlm },
+							() => {},
+							signal,
+							streamFn,
+						);
+						const text = findAssistantText(more);
+						if (text) {
+							if (llmError) return { ok: false, summary: `${text}（模型调用出错：${llmError}）` };
+							if (written()) return { ok: true, summary: text };
+							return { ok: false, summary: `${text}（未检测到 ${CONTEXT_FILE} 写入，可重跑 /init）` };
+						}
+					} catch {
+						// 兜底续问失败不掩盖主因，落到下面的如实上报
+					}
+				}
+				return {
+					ok: false,
+					summary: llmError ? `模型调用出错：${llmError}` : `未产出总结，${CONTEXT_FILE} 可能未写完（可重跑 /init）`,
+				};
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				// 上下文超限 → 压缩记录后重启继续（不设轮数上限，这里是唯一的天花板）
+				if (CONTEXT_OVERFLOW_RE.test(msg) && compactions < MAX_COMPACTIONS && !signal.aborted) {
+					compactions++;
+					hooks.onCompact(compactions);
+					notes = await compactInitNotes(ctx, model, renderProcessRecord(record), notes);
+					continue;
+				}
+				return { ok: false, summary: msg.includes("abort") ? "已中止（会话结束或 /init cancel）" : msg };
 			}
 		}
-		return {
-			ok: false,
-			summary: llmError ? `模型调用出错：${llmError}` : `未产出总结，${CONTEXT_FILE} 可能未写完（可重跑 /init）`,
-		};
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);
-		return { ok: false, summary: msg.includes("abort") ? "已中止（超时或会话结束）" : msg };
+		return { ok: false, summary: msg.includes("abort") ? "已中止（会话结束或 /init cancel）" : msg };
 	}
 }
 
@@ -493,6 +669,7 @@ export default function (pi: ExtensionAPI) {
 					onExploreProgress: (done, total) => setProgress(`⚙ 初始化 · 探索 ${done}/${total}`),
 					onAudit: (steps) =>
 						setProgress(steps === null ? "⚙ 初始化 · 审计中" : `⚙ 初始化 · 审计 ${steps} 步`),
+					onCompact: (n) => setProgress(`⚙ 初始化 · 压缩上下文 ${n}/${MAX_COMPACTIONS}`),
 				});
 				ctx.ui.notify(
 					result.ok

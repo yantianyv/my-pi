@@ -3,12 +3,14 @@
 ## claude-it.ts
 
 - 命令：`/init`（后台独立上下文生成/更新 `AGENTS.md`，**只产出 AGENTS.md**，不生成 CLAUDE.md）、`/exit` 别名、`/rewind`。
-- `/init` 流程：检查目录 → 无文件则 create，有则询问「合并更新 / 完全重写 / 取消」→ 后台 `runAgentLoop`（当前会话模型，主会话零污染、期间可继续对话；同时只允许一个，`/init cancel` 中止，会话结束自动中止）→ 审计子代理复核。
+- `/init` 流程：检查目录 → 无文件则 create，有则询问「合并更新 / 完全重写 / 取消」→ 后台 `runAgentLoop`（当前会话模型，主会话零污染、期间可继续对话；同时只允许一个，`/init cancel` 中止，会话结束自动中止）→ 审计子代理复核 → 确定性结构检查（有问题带问题再审计一轮，最多两轮）。
+- 上下文预算（与 explore 共用 `shared/context-budget`）：预算 = 模型窗口 × 0.55；每请求前 `transformContext` 把超预算的旧工具结果剪成占位文本（按重读代价：read/grep/find/ls/bash → explore → 其他，write/edit 不剪，最近 10 条不动）；仍超限（错误命中 `CONTEXT_OVERFLOW_RE`）则把过程记录压成要点后重启继续（`compactInitNotes`，最多 2 次，失败回退记录尾部），状态行显「⚙ 初始化 · 压缩上下文 n/2」。
 - CLAUDE.md 兼容：只有 `CLAUDE.md` 时直接 rename 为 `AGENTS.md` 再走常规流程；两者并存时走合并提示（合并进 AGENTS.md 后删 CLAUDE.md）。
 - 子代理工具：read/ls/grep/find + write/edit + bash + 可选 `explore`。探测 `getExploreApi()?.createSubagentTool(ctx, { alwaysFresh: true })`：在场则提示词切为「大仓库先派 explore 并行摸底、再用 read 抽查」、状态行显「⚙ 初始化 · 探索 n/m」，缺席静默降级为自读。
 - 约束：**不设轮数与墙钟上限**；`NO_PROGRESS_TURNS = 8`（连续 8 轮既没写文件也没派 explore → 注入收尾指令，只提醒不硬停）；「没写完不许停」——打算停下但文件没被写过（mtime `> mtimeBefore + 1` 判定）或末句是意图陈述 → 顶回去做完（最多两次），最终如实报「未完成」。
-- 审计子代理：主流程成功且文件确实写入、摘要不像「未完成」才启动；全新上下文 + 独立 system prompt；工具只有 read/ls/grep/find + write/edit（**无 bash、无 explore**）；上限 12 轮 / 5 分钟 / maxTokens 4096；验收清单——删不值得每轮付费的内容、同一事实只在一层、skill/references 指针真实存在、命令/坑/不变量/跨子系统约定不能丢、人工约定只搬不删；只做删减/合并/下沉/修指针。审计故障只报「审计未完成」，不否定既有产物。
-- 提示词纪律（写进子代理提示词）：只写能改变 AI 行为的行、不写变更史与实现解释、不复制 README 可自行读到的内容；产出按上下文分层 L1 AGENTS.md / L2 `.pi/skills/<项目名>-dev/`（默认不建，细节成段超载才建）/ L3 README 留一行指路。
+- 审计子代理：主流程成功且文件确实写入、摘要不像「未完成」才启动；全新上下文 + 独立 system prompt；工具只有 read/ls/grep/find + write/edit（**无 bash、无 explore**）；与主体同口径**不设轮数/时间上限**（无结论时补问一次必交报告，tools: []）；验收清单——删不值得每轮付费的内容、同一事实只在一层、skill/references 指针真实存在、命令/坑/不变量/跨子系统约定不能丢、人工约定只搬不删；只做删减/合并/下沉/修指针。审计故障只报「审计未完成」，不否定既有产物。
+- 结构检查（`checkContextArtifacts(cwd)`，纯 fs 不依赖模型）：L1 的 `references/x.md` 必须存在、SKILL.md 索引与 `references/` 目录一一对应、frontmatter 有 name/description、不留近乎空文件；审计后再检一次，仍有问题则带清单再审计（最多两轮），最终仍剩则如实附在总结里。
+- 提示词纪律（写进子代理提示词）：只写能改变 AI 行为的行、不写变更史与实现解释、不复制 README 可自行读到的内容；随时把已确认的结论落盘（压缩会丢未落盘的内容）；产出按上下文分层 L1 AGENTS.md / L2 `.pi/skills/<项目名>-dev/`（默认不建，细节成段超载才建，重跑时同步维护：过时更新删除、新细节入对应 references、索引与指针同步）/ L3 README 留一行指路。
 - 进度经 `ctx.ui.setStatus("init", …)`，由 hud 行 1 显示。
 - Ctrl+C 打断 turn；双击 Ctrl+C（打断后 2s 窗口内）预填 `/rewind`；`/rewind` 回退到上一条用户消息、内容放回输入框（`navigateTree` 是命令 ctx 专属能力）。
 - 裸输入 `exit`（不带 `/`）被拦截直接退出 pi，属刻意设计。

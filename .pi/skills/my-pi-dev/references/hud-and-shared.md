@@ -60,4 +60,5 @@ hud 自己只推 `hud-bash` / `balance-error` / `model-switch` 三个 key，其�
 | `shell-split.ts` | `splitShellSegments`：`&&`/`||`/`;`/`|`/换行切段、`$()`/反引号递归拆出、引号与转义保护、单个 `&` 不切、**heredoc 主体是数据不逐行拆**（但主体内 `$()` 仍递归拆出）；启发式，宁多拆不漏拆 | perm-gate |
 | `presence.ts` | 跨实例「用户在场」判定 + 提示音全局去重：`getOsIdleMs()`（Windows GetLastInputInfo 常驻 PowerShell 每 2s 上报、macOS ioreg、Linux xprintidle；`PI_OS_IDLE_MS` 可注入）、一实例一文件的在场记录（`~/.pi/agent/presence/<sid>.json`，原子替换、死进程/陈旧档忽略）、`computeActive`/`computeAway`、`claimSoundSlot`（`wx` 独占创建 + 超龄回收的跨进程名额）、`disposeIdleProbe` | status-beacon |
 | `explore-api.ts` | 跨扩展契约单点定义：`EXPLORE_API_KEY="__PI_EXPLORE_API__"`、`EXPLORE_API_VERSION=1`、`publishExploreApi`/`getExploreApi`（版本不符或未加载返回 null） | explore-agent 发布、claude-it 消费 |
+| `context-budget.ts` | `estimateTokens`（CJK 按 1 字 1 token、ASCII 按 3.5 字符）、`pruneOldToolResults(messages, budget)`（超预算从最旧/最廉价开始把工具结果换成占位文本：read/grep/find/ls/bash → explore → 其他，write/edit 不剪，最近 10 条不动）、`CONTEXT_OVERFLOW_RE`（各家超限措辞，explore 转出） | claude-it /init、explore-agent |
 | `turndown-gfm.d.ts` | `turndown-plugin-gfm` 的类型声明 | web-tool |

@@ -2,7 +2,7 @@
 
 ## 运行方式
 
-**无框架、无 runner、无 test script**：24 个 `*.test.mjs` 都是独立可执行脚本（`#!/usr/bin/env node`），自带断言与 exit code：
+**无框架、无 runner、无 test script**：25 个 `*.test.mjs` 都是独立可执行脚本（`#!/usr/bin/env node`），自带断言与 exit code：
 
 - 多数：自写 `check(name, cond, extra)` 累加 failures，末尾 `process.exit(failures === 0 ? 0 : 1)`
 - `shared/test/shell-split.test.mjs`：唯一用 `node:assert/strict`（失败即抛）
@@ -49,6 +49,7 @@ const mod = await import(pathToFileURL(bundle).href);
 | `test/presence.test.mjs` | `shared/presence` 与 status-beacon 接线：computeActive/computeAway 三态、在场文件写/删/死进程忽略、`claimSoundSlot` 去重、人不在才出声；会起 win32 空闲探测，测完 `disposeIdleProbe()` |
 | `test/dingtalk-bridge.test.mjs` | 纯函数策略层（buildArgv / 标签拦截 / 两阶段确认 / 防重发 / parsePeople / schema 截断），不起真实 dws 进程 |
 | `test/mimo-omni.test.mjs` | 媒体内容块构造离线 18 项；`MIMO_LIVE=1` + 传音频/视频路径才真打 API |
+| `test/claude-it.test.mjs` | /init 闭环的纯逻辑：`estimateTokens` 口径、`pruneOldToolResults`（超预算才剪/按重读代价排序/write-edit 与近期不剪）、`checkContextArtifacts`（L1 死指针、索引与 references 对应、frontmatter、空文件、无 skill 不误报）、`CONTEXT_OVERFLOW_RE` 命中与不误判 |
 | `ask/test/ask.test.mjs` | A~T 场景 + 渲染不变量 |
 | `qr/test/qr.test.mjs` | A~L 共 12 场景（编码/半块渲染/PNG 往返/JPEG 往返/钳制/错误路径/`/qr` 命令） |
 | `hud/test/*` | 见 `hud-and-shared.md` |

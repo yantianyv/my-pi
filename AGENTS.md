@@ -50,7 +50,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 - **hud 供外部扩展挂底部行**：`__PI_HUD_API__` 的 `registerExtraRows` / `notifyExtraRowsUpdate`；当前 workflow-mgr 已依赖（hud 开启时其常驻面板由 hud 渲染在 footer 最底、自绘面板隐藏，靠 `process.emit("hud:state-change")` 切换）。
 - **vendor**：`src/vendor/` 收录社区插件源码副本（当前 pi-rtk-optimizer；pi-subagents / pi-btw 曾收录后回退自研 explore-agent / btw），收录原则、出处表、对齐更新流程、回退记录见 `src/vendor/README.md`。rtk 二进制不入库，由 install.js 按平台下载。
 - **多工作流并发隔离**：一个项目可并存多个命名工作流（default 槽 = `.pi/workflow/` 根三 JSON；命名槽 = `slots/<名称>/`），每会话经 `bindings.json` 绑一个槽——解决多 pi 会话同项目跑不同任务互相干扰。session_start 自动判定：单槽/无槽直接绑定（零行为变化）；多槽或有其他活跃会话已绑定 → TUI 弹选择浮窗（「暂不启用」默认高亮 = 绑定 `auto`、不占槽位、AI 自行判断是否用；「从 resume 中加载」放弃本会话转 `/wf-resume`），非 TUI 退化为注入指引让 AI 用 `ask` 问后 `wf_workflow action=bind` 落地。
-- **claude-it `/init`**：后台 fork 独立上下文写 `AGENTS.md`（主会话零污染，只产出 AGENTS.md），explore 在场则子代理可派 explore 并行摸底；不设轮数与墙钟上限（`/init cancel` 中止），有「没写完不许停」与完成度核对；产出按**上下文分层** L1 `AGENTS.md` / L2 `.pi/skills/<项目名>-dev/`（默认不建，细节成段超载才建）/ L3 README 只留一行指路，写完后由全新上下文的审计子代理复核修正（只做删减/合并/下沉/修指针）。
+- **claude-it `/init`**：后台 fork 独立上下文写 `AGENTS.md`（主会话零污染），explore 在场则子代理可派 explore 并行摸底；不设轮数与墙钟上限（`/init cancel` 中止），有「没写完不许停」与完成度核对；**上下文超限自动压缩后续跑**（预算内每请求前剪旧工具结果，超限则把过程记录压成要点重启，最多 2 次）；产出按**上下文分层** L1 `AGENTS.md` / L2 `.pi/skills/<项目名>-dev/`（默认不建，细节成段超载才建，重跑同步维护 L2）/ L3 README 只留一行指路；写完后由全新上下文的审计子代理复核修正（只做删减/合并/下沉/修指针），再做**确定性结构检查**（L1 死指针 / SKILL.md 索引与 references 一一对应 / frontmatter），有问题带问题再审计一轮（最多两轮）。
 
 ## 代码风格与约定
 
@@ -62,7 +62,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 
 ## 测试说明
 
-- **无框架、无 runner、无 CI、无 lint**：24 个 `*.test.mjs` 都是独立可执行脚本（自定义 `check()` + exit code，唯一例外 `shared/test/shell-split.test.mjs` 用 `node:assert/strict`），每个文件单独跑：`node src/extensions/<...>/test/<name>.test.mjs`（仓库根执行）。
+- **无框架、无 runner、无 CI、无 lint**：25 个 `*.test.mjs` 都是独立可执行脚本（自定义 `check()` + exit code，唯一例外 `shared/test/shell-split.test.mjs` 用 `node:assert/strict`），每个文件单独跑：`node src/extensions/<...>/test/<name>.test.mjs`（仓库根执行）。
 - 测试需要 `.ts` 时用 esbuild 现场 bundle 成 `.tmp-*.mjs` 再 import（external 白名单同 build.js，tsconfig 用 `config/tsconfig.build.json`）；`qr` 例外（用 jiti 加载产物，与运行时一致）。
 - 集成类测试（ask / qr / workflow-mgr / `src/extensions/test/`）依赖 `test/node_modules`（指向 pi 全局包的 link/junction ，**仓库无脚本创建、不入库**，换机器需手工重建）；`hud/test` 与 `shared/test` 不需要。
 - 缺省全部离线可跑；`MIMO_LIVE=1`、各 `*-live.mjs` 才需要真实网络/环境（硬编码本机路径，换机器不可用）。
