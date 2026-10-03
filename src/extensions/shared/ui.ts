@@ -270,8 +270,14 @@ export function renderChoiceList(th: Theme, items: string[], selected: number, n
 
 /** 正文区滚动提示行：嵌在分隔线里的 ▲/▼ 余量说明（面板滚动窗共用；宽度走 visibleWidth，中文算 2 列） */
 export function dividerScrollNote(th: Theme, border: (s: string) => string, innerW: number, above: number, below: number): string {
+	if (above <= 0 && below <= 0) return border(`├${"—".repeat(Math.max(0, innerW - 1))}┤`);
 	const label = above > 0 && below > 0 ? ` ▲${above} ▼${below}（PgUp/PgDn） ` : above > 0 ? ` ▲${above}（PgUp） ` : ` ▼${below}（PgDn） `;
 	return border(`├${th.fg("dim", label)}${"—".repeat(Math.max(0, innerW - 1 - visibleWidth(label)))}┤`);
+}
+
+/** 底部键位提示行（整行 dim；文案由各面板给，避免把业务文案固化进公共层） */
+export function keyHintRow(th: Theme, text: string): string {
+	return th.fg("dim", ` ${text}`);
 }
 
 /** 按显示宽度折行并统一左缩进（面板正文/表头共用） */

@@ -50,7 +50,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
 import { loadJsonConfig, saveJsonConfig } from "./shared/config";
-import { createBoxRenderer, editInput, renderChoiceList, renderScrollingInput } from "./shared/ui";
+import { choiceKey, createBoxRenderer, dividerScrollNote, editInput, keyHintRow, renderChoiceList, renderScrollingInput, scrollByPage, wrapIndented } from "./shared/ui";
 import { pickAuxModel, type AnyModel } from "./shared/model-pick";
 import { pickModelViaSelector } from "./shared/model-selector";
 import { splitShellSegments } from "./shared/shell-split";
@@ -403,34 +403,23 @@ export class ReviewPanel {
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, Key.escape)) {
-			this.done(null); // Esc = 拒绝（不执行）
-			return;
-		}
 		const actions = this.actions();
-		if (matchesKey(data, Key.up)) {
-			this.idx = Math.max(0, this.idx - 1);
-			return;
-		}
-		if (matchesKey(data, Key.down)) {
-			this.idx = Math.min(actions.length - 1, this.idx + 1);
-			return;
-		}
-		if (matchesKey(data, Key.pageUp)) {
-			this.scroll = Math.max(0, this.scroll - this.lastBudget);
-			return;
-		}
-		if (matchesKey(data, Key.pageDown)) {
-			this.scroll = Math.min(this.lastMaxScroll, this.scroll + this.lastBudget);
-			return;
-		}
-		if (matchesKey(data, Key.enter)) {
-			this.done(actions[this.idx] ?? actions[0]!);
-			return;
-		}
-		if (/^[1-9]$/.test(data)) {
-			const pick = actions[Number(data) - 1];
-			if (pick) this.done(pick);
+		const r = choiceKey(data, this.idx, actions.length);
+		switch (r.kind) {
+			case "move":
+				this.idx = r.index;
+				return;
+			case "select":
+				this.done(actions[r.index] ?? actions[0]!);
+				return;
+			case "cancel":
+				this.done(null); // Esc = 拒绝（不执行）
+				return;
+			case "page":
+				this.scroll = scrollByPage(this.scroll, r.dir, this.lastMaxScroll + this.lastBudget, this.lastBudget);
+				return;
+			case "skip":
+				return;
 		}
 	}
 
@@ -450,9 +439,7 @@ export class ReviewPanel {
 
 		// 下部：命令全文（可滚动）
 		const cmdLines: string[] = [];
-		for (const ln of this.command.split("\n")) {
-			for (const w of wrapTextWithAnsi(ln, Math.max(8, innerW - 4))) cmdLines.push(`  ${w}`);
-		}
+		for (const ln of this.command.split("\n")) cmdLines.push(...wrapIndented(ln, innerW - 2, 2));
 
 		// 高度预算：终端 80% 减去固定行（框/分隔/标题/选项/提示）与信息区
 		const termRows = this.tui.terminal.rows || 24;
@@ -465,15 +452,7 @@ export class ReviewPanel {
 
 		// 分隔行兼滚动指示（不吃内容行）
 		const below = cmdLines.length - (this.scroll + visible.length);
-		const scrollNote =
-			this.scroll > 0 && below > 0
-				? ` ▲${this.scroll} 行 ▼${below} 行（PgUp/PgDn） `
-				: this.scroll > 0
-					? ` ▲ 上方还有 ${this.scroll} 行（PgUp） `
-					: below > 0
-						? ` ▼ 下方还有 ${below} 行（PgDn） `
-						: "";
-		const dividerLine = border(`├${th.fg("dim", scrollNote)}${"─".repeat(Math.max(0, innerW - visibleWidth(scrollNote)))}┤`);
+		const dividerLine = dividerScrollNote(th, border, innerW, this.scroll, below);
 
 		const lines: string[] = [topBorder(` ${this.title} `)];
 		lines.push(...head.map((l) => row(l)));
@@ -489,7 +468,7 @@ export class ReviewPanel {
 			).map((l) => row(l)),
 		);
 		lines.push(
-			row(th.fg("dim", ` ↑↓ 选择 · Enter 确认 · 1-${actions.length} 直选 · PgUp/PgDn 滚动命令 · Esc 拒绝（不执行）`)),
+			row(keyHintRow(th, `↑↓ 选择 · Enter 确认 · 1-${actions.length} 直选 · PgUp/PgDn 滚动命令 · Esc 拒绝（不执行）`)),
 		);
 		lines.push(bottomBorder());
 		return lines;
@@ -721,9 +700,7 @@ export class SudoPanel {
 
 		// 命令全文折行（不截断，PgUp/PgDn 滚动，滚动余量在分隔行指示）
 		const cmdLines: string[] = [];
-		for (const ln of this.command.split("\n")) {
-			for (const w of wrapTextWithAnsi(ln, Math.max(8, innerW - 4))) cmdLines.push(`  ${w}`);
-		}
+		for (const ln of this.command.split("\n")) cmdLines.push(...wrapIndented(ln, innerW - 2, 2));
 		const termRows = this.tui.terminal.rows || 24;
 		const budget = Math.max(3, Math.min(cmdLines.length, Math.floor(termRows * 0.8) - 10));
 		this.lastBudget = budget;
@@ -732,15 +709,7 @@ export class SudoPanel {
 		const visible = cmdLines.slice(this.scroll, this.scroll + budget);
 
 		const below = cmdLines.length - (this.scroll + visible.length);
-		const scrollNote =
-			this.scroll > 0 && below > 0
-				? ` ▲${this.scroll} 行 ▼${below} 行（PgUp/PgDn） `
-				: this.scroll > 0
-					? ` ▲ 上方还有 ${this.scroll} 行（PgUp） `
-					: below > 0
-						? ` ▼ 下方还有 ${below} 行（PgDn） `
-						: "";
-		const dividerLine = border(`├${th.fg("dim", scrollNote)}${"─".repeat(Math.max(0, innerW - visibleWidth(scrollNote)))}┤`);
+		const dividerLine = dividerScrollNote(th, border, innerW, this.scroll, below);
 
 		// 掩码输入行（• 与密码等长，光标位置经水平滚动窗口换算）
 		const masked = "•".repeat(this.password.length);
