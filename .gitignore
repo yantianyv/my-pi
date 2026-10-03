@@ -26,3 +26,5 @@ src/extensions/test/.tmp-*
 
 # 临时工作目录（冒烟/联调脚本产物）
 .tmp/
+# scratch/ 本地手跑实验/预览脚本与下载遗留，不入库
+scratch/
