@@ -8,8 +8,9 @@
  * - /rewind 命令：回退到上一条用户消息，消息内容放回输入框
  * - /init 命令：后台独立上下文中分析代码库并生成/更新 AGENTS.md
  *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话；explore 扩展在场时
- *   子代理可派探索子代理并行摸底，缺席自动降级；进度经官方 ctx.ui.setStatus 通道推
- *   「init」状态，由 hud 在行 1 动态区显示）
+ *   子代理可派探索子代理并行摸底，缺席自动降级；产出按上下文分层纪律（L1 AGENTS.md /
+ *   L2 .pi/skills / L3 README），完成后由全新上下文的审计子代理复核修正；进度经官方
+ *   ctx.ui.setStatus 通道推「init」状态，由 hud 在行 1 动态区显示）
  * - 启动清屏：pi 冷启动（TUI 模式）时清一遍屏，主界面从干净画面开始
  *   （借 setWidget 工厂同步拿到 TUI 实例：清视口 + 强制全量重绘，用完即删）
  */
@@ -87,6 +88,12 @@ const INIT_MAX_TURNS = 50;
 const INIT_TIMEOUT_MS = 20 * 60_000;
 /** init 子代理单次输出上限 */
 const INIT_MAX_TOKENS = 8192;
+/** 审计子代理最多多少轮（只复核产物，不需要探索） */
+const AUDIT_MAX_TURNS = 12;
+/** 审计子代理超时（与父级 init 超时取先到者，不为它单独扩预算） */
+const AUDIT_TIMEOUT_MS = 5 * 60_000;
+/** 审计子代理单次输出上限 */
+const AUDIT_MAX_TOKENS = 4096;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyModel = Model<any>;
@@ -128,6 +135,7 @@ function buildInitPrompt(mode: "create" | "merge" | "overwrite", hasExplore: boo
 		"- 只写经过验证的信息，命令必须真实存在于项目配置中，禁止编造；不确定的内容标注「待确认」",
 		"- 保持精炼：用路径引用代替粘贴代码原文，只写能改变 AI 行为的行",
 		"- 内容使用中文（代码、命令、标识符除外）",
+		"- 新建了 .pi/skills/ 下的技能时，总结里说明它首次会触发一次项目信任确认",
 		`- 用 write 工具把结果写入 ${CONTEXT_FILE}；最后一条回复用一两句话总结写入了什么（会展示给用户）`,
 	].join("\n");
 }
@@ -169,6 +177,13 @@ function buildInitSystemPrompt(cwd: string, hasExplore: boolean): string {
 		"- 只写能改变 AI 行为的「不写就会做错」的信息；显而易见的常识、README/清单文件里能自行读到的内容不写",
 		"- 不写变更史、自我说明、实现解释；不粘贴代码原文（用路径引用）；常用命令一条一行、不写解释性长句",
 		"- 写完逐行自检：删掉它会不会让 AI 做错事？答不上来就删",
+		"上下文分层（决定内容放哪一层；同一事实只出现在一层）：",
+		"- L1 AGENTS.md（每轮都加载）：常用命令、目录与职责（一行一项）、架构不变量、代码风格、注意事项与坑",
+		"- L2 .pi/skills/<项目名>-dev/（按需加载，默认不建）：仅当子系统细节成段、L1 放不下时才建——SKILL.md 写概览与 references 索引（何时读哪个），references/<主题>.md 放子系统细节与长流程；frontmatter 的 description 必须写明「何时该用」",
+		"- L3 README / docs：给人看，L1 只留一行指路，不复制内容",
+		"- 命令、坑、不变量、跨子系统约定永不搬（必须自动在眼前）；已下沉的细节不要在 L1 重复",
+		"- L1 指向 L2 的写法：写清「细节见 skill <名> 的 references/<文件>.md，改它之前先读」",
+		"重跑：先盘点现有 AGENTS.md 与 .pi/skills，人工内容只搬不删（原文事实保留），搬移与删除在最终总结里报告",
 		"",
 		`工作目录：${cwd}`,
 	);
@@ -213,12 +228,84 @@ function findLlmError(messages: AgentMessage[]): string | null {
 	return null;
 }
 
+// ---------------------------------------------------------------------------
+// 产物审计：全新上下文按纪律复核并直接修正（审计自身故障只报告，不影响产物）
+// ---------------------------------------------------------------------------
+
+function buildAuditSystemPrompt(cwd: string): string {
+	return [
+		"你是 init 审计代理：复核刚生成的上下文文件是否符合下面的纪律。",
+		"你拥有工具：read / ls / grep / find（核对）、write / edit（修正）。",
+		"",
+		"验收清单：",
+		"1. AGENTS.md 每一行都值得每轮付钱：常用命令、目录与职责、架构不变量、代码风格、注意事项与坑；不该有的：变更史与自我说明、实现细节的长篇解释、README/清单文件里能自行读到的内容、显而易见的常识、粘贴的代码原文",
+		"2. 同一事实只出现在一层；已下沉到 skill 的细节不在 AGENTS.md 重复；AGENTS.md 指向的 skill / references 文件必须真实存在",
+		"3. 不该丢的没丢：命令、坑、不变量、跨子系统约定仍在 AGENTS.md；skill 的 description 写明「何时该用」",
+		"4. 修正只做删减、合并、搬移与指针修复：不新增事实、不改变项目的技术结论；人工编写的约定只搬不删（原文事实保留）",
+		"",
+		"最后用一两句话报告改了什么（没改也说明）。",
+		"",
+		`工作目录：${cwd}`,
+	].join("\n");
+}
+
+async function runInitAudit(
+	ctx: ExtensionContext,
+	model: AnyModel,
+	signal: AbortSignal,
+	onStart: () => void,
+): Promise<{ ok: boolean; summary: string }> {
+	const skillsDir = path.join(ctx.cwd, ".pi", "skills");
+	const target = fs.existsSync(skillsDir) ? `${CONTEXT_FILE} 与 .pi/skills/` : CONTEXT_FILE;
+	const tools: AgentTool<any>[] = [
+		...createReadOnlyTools(ctx.cwd),
+		createWriteTool(ctx.cwd),
+		createEditTool(ctx.cwd),
+	];
+	// 自身上限与父级超时取先到者（不为审计单独扩预算）
+	const auditSignal = AbortSignal.any([signal, AbortSignal.timeout(AUDIT_TIMEOUT_MS)]);
+	let turns = 0;
+	onStart();
+	try {
+		const messages = await runAgentLoop(
+			[
+				{
+					role: "user",
+					content: `复核并修正 ${target}：只保留值得每轮付钱的内容，按纪律删减、合并、下沉并修好指针。`,
+					timestamp: Date.now(),
+				},
+			],
+			{ messages: [systemMessage(buildAuditSystemPrompt(ctx.cwd))], tools },
+			{
+				model,
+				maxTokens: AUDIT_MAX_TOKENS,
+				convertToLlm,
+				finishTurn: () => (++turns >= AUDIT_MAX_TURNS ? { action: "end" as const } : undefined),
+			},
+			() => {},
+			auditSignal,
+			createPiStreamFn(ctx),
+		);
+		const text = findAssistantText(messages);
+		if (text) return { ok: true, summary: text };
+		return { ok: false, summary: findLlmError(messages) ?? `无结论（轮数上限 ${AUDIT_MAX_TURNS}）` };
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		if (signal.aborted) return { ok: false, summary: "已中止" };
+		return { ok: false, summary: msg.includes("abort") ? "审计超时" : msg };
+	}
+}
+
 async function runInitAgent(
 	ctx: ExtensionContext,
 	model: AnyModel,
 	prompt: string,
 	signal: AbortSignal,
-	hooks: { onToolCall: () => void; onExploreProgress: (done: number, total: number) => void },
+	hooks: {
+		onToolCall: () => void;
+		onExploreProgress: (done: number, total: number) => void;
+		onAudit: () => void;
+	},
 ): Promise<InitRunResult> {
 	const tools: AgentTool<any>[] = [
 		...createReadOnlyTools(ctx.cwd),
@@ -275,12 +362,16 @@ async function runInitAgent(
 			if (!(fs.existsSync(contextFile) && fs.statSync(contextFile).mtimeMs > mtimeBefore + 1)) {
 				return { ok: false, summary: `${summary}（未检测到 ${CONTEXT_FILE} 写入，可能只是中途说明）` };
 			}
-			const caveats = [
+			const blockers = [
 				hitTurnCap ? `已达最大轮数 ${INIT_MAX_TURNS}，可能有未完成的部分` : "",
 				looksUnfinished(summary) ? "最后一条消息像未完成的意图陈述" : "",
 			].filter(Boolean);
-			if (caveats.length) return { ok: false, summary: `${summary}（${caveats.join("；")}）` };
-			return { ok: true, summary };
+			const base = blockers.length ? `${summary}（${blockers.join("；")}）` : summary;
+			// 半成品不让审计动手（改一份没写完的产物只会更乱）
+			if (blockers.length || signal.aborted) return { ok: false, summary: base };
+			const audit = await runInitAudit(ctx, model, signal, hooks.onAudit);
+			const auditNote = audit.ok ? `审计：${audit.summary}` : `审计未完成（${audit.summary}）`;
+			return { ok: true, summary: `${base}；${auditNote}` };
 		}
 
 		// 没有任何文本输出：先取真实原因（模型错误 vs 轮数用尽），再兑底续问一轮拿总结
@@ -359,6 +450,7 @@ export default function (pi: ExtensionAPI) {
 						setProgress(`⚙ 初始化 · ${toolCalls} 步`);
 					},
 					onExploreProgress: (done, total) => setProgress(`⚙ 初始化 · 探索 ${done}/${total}`),
+					onAudit: () => setProgress("⚙ 初始化 · 审计中"),
 				});
 				ctx.ui.notify(
 					result.ok
