@@ -9,8 +9,9 @@
  * - /init 命令：后台独立上下文中分析代码库并生成/更新 AGENTS.md
  *   （已有 CLAUDE.md 会被归并进来；主会话零污染，期间可继续对话；explore 扩展在场时
  *   子代理可派探索子代理并行摸底，缺席自动降级；产出按上下文分层纪律（L1 AGENTS.md /
- *   L2 .pi/skills / L3 README），完成后由全新上下文的审计子代理复核修正；进度经官方
- *   ctx.ui.setStatus 通道推「init」状态，由 hud 在行 1 动态区显示）
+ *   L2 .pi/skills / L3 README），完成后由全新上下文的审计子代理复核修正；不设轮数与
+ *   墙钟上限（稀有长跑，成本按价值配比），无进展保护与完成度核对兜底、/init cancel 中止；
+ *   进度经官方 ctx.ui.setStatus 通道推「init」状态，由 hud 在行 1 动态区显示）
  * - 启动清屏：pi 冷启动（TUI 模式）时清一遍屏，主界面从干净画面开始
  *   （借 setWidget 工厂同步拿到 TUI 实例：清视口 + 强制全量重绘，用完即删）
  */
@@ -82,15 +83,16 @@ function extractText(content: unknown): string {
 
 /** 唯一的上下文文件目标：AGENTS.md（pi 原生读取；CLAUDE.md 只会被归并，不会被生成） */
 const CONTEXT_FILE = "AGENTS.md";
-/** init 子代理最多多少轮（一轮 = 一次 LLM 调用 + 其工具调用；探索子代理也算一轮） */
-const INIT_MAX_TURNS = 50;
-/** init 子代理超时（可派 explore 并行摸底，故留足预算：单任务探索上限 15 分钟） */
-const INIT_TIMEOUT_MS = 20 * 60_000;
 /** init 子代理单次输出上限 */
 const INIT_MAX_TOKENS = 8192;
+/**
+ * 无进展保护阈值：连续这么多轮既没写文件也没派 explore → 注入收尾指令（只提醒不做硬停）。
+ * 不设轮数与墙钟上限：/init 是稀有大工程，成本按价值配比；要中断用 /init cancel。
+ */
+const NO_PROGRESS_TURNS = 8;
 /** 审计子代理最多多少轮（只复核产物，不需要探索） */
 const AUDIT_MAX_TURNS = 12;
-/** 审计子代理超时（与父级 init 超时取先到者，不为它单独扩预算） */
+/** 审计子代理超时（只拦子步骤挂死；初稿已落盘，超时只报告不丢产物） */
 const AUDIT_TIMEOUT_MS = 5 * 60_000;
 /** 审计子代理单次输出上限 */
 const AUDIT_MAX_TOKENS = 4096;
@@ -319,22 +321,48 @@ async function runInitAgent(
 	if (exploreTool) tools.push(exploreTool);
 
 	const streamFn = createPiStreamFn(ctx);
-	// 记录上下文文件写入前的 mtime：轮数用尽/无总结时用于判断代理是否实际完成了写入
+	// 记录上下文文件写入前的 mtime：判断代理是否实际完成了写入
 	const contextFile = path.join(ctx.cwd, CONTEXT_FILE);
 	const mtimeBefore = fs.existsSync(contextFile) ? fs.statSync(contextFile).mtimeMs : 0;
 
-	let turns = 0;
-	let hitTurnCap = false;
+	// 无进展保护 +「没写完不许停」：不设轮数/时间上限，靠这两条兜底
+	let idleTurns = 0;
+	let turnHadProgress = false;
+	let wrapUpRequested = false;
+	let followUps = 0;
+	let lastAssistantText = "";
+	const userNudge = (content: string): AgentMessage => ({ role: "user", content, timestamp: Date.now() });
 	const config: AgentLoopConfig = {
 		model,
 		maxTokens: INIT_MAX_TOKENS,
 		convertToLlm,
-		finishTurn: () => {
-			if (++turns >= INIT_MAX_TURNS) {
-				hitTurnCap = true;
-				return { action: "end" as const };
+		// 连续多轮没有产出（既没写文件也没派 explore）→ 注入收尾指令，让它落盘而不是空转
+		getSteeringMessages: async () => {
+			if (!wrapUpRequested) return [];
+			wrapUpRequested = false;
+			return [
+				userNudge(
+					`已连续 ${NO_PROGRESS_TURNS} 轮没有产出：立即把已确认的结论写入 ${CONTEXT_FILE} 并收尾；确实还需要探索就说明还缺什么。`,
+				),
+			];
+		},
+		// 打算停下但没写完（文件没被写过 / 末句是意图陈述）→ 顶回去做完（最多两次）
+		getFollowUpMessages: async () => {
+			if (followUps >= 2) return [];
+			const written = fs.existsSync(contextFile) && fs.statSync(contextFile).mtimeMs > mtimeBefore + 1;
+			if (!written) {
+				followUps++;
+				return [
+					userNudge(`你还没有写入 ${CONTEXT_FILE}：立即把当前成果写入并给出一两句总结；确实无法完成就说明原因。`),
+				];
 			}
-			return undefined;
+			if (looksUnfinished(lastAssistantText)) {
+				followUps++;
+				return [
+					userNudge("你最后一条回复是意图陈述而非总结：还有要应用的改动就现在做完；否则用一两句话总结结果。"),
+				];
+			}
+			return [];
 		},
 	};
 
@@ -345,8 +373,22 @@ async function runInitAgent(
 			{ messages: [systemMessage(buildInitSystemPrompt(ctx.cwd, !!exploreTool))], tools },
 			config,
 			(event) => {
-				if (event.type === "tool_execution_start") hooks.onToolCall();
-				else if (event.type === "tool_execution_update") {
+				if (event.type === "tool_execution_start") {
+					hooks.onToolCall();
+					// 「有产出」= 写文件或派子代理摸底（纯读取不算，防陷在无限翻阅里）
+					const t = event.toolName;
+					if (t === "write" || t === "edit" || t === "explore") turnHadProgress = true;
+				} else if (event.type === "turn_end") {
+					idleTurns = turnHadProgress ? 0 : idleTurns + 1;
+					turnHadProgress = false;
+					if (idleTurns >= NO_PROGRESS_TURNS) {
+						idleTurns = 0;
+						wrapUpRequested = true;
+					}
+				} else if (event.type === "message_end") {
+					const m = event.message as { role?: string; content?: unknown };
+					if (m.role === "assistant") lastAssistantText = extractText(m.content).trim() || lastAssistantText;
+				} else if (event.type === "tool_execution_update") {
 					// explore 的进度增量（details.total/succeeded）转成 init 状态行的探索计数
 					const d = event.partialResult?.details as { total?: number; succeeded?: number } | undefined;
 					if (typeof d?.total === "number" && d.total > 0) hooks.onExploreProgress(d.succeeded ?? 0, d.total);
@@ -362,10 +404,7 @@ async function runInitAgent(
 			if (!(fs.existsSync(contextFile) && fs.statSync(contextFile).mtimeMs > mtimeBefore + 1)) {
 				return { ok: false, summary: `${summary}（未检测到 ${CONTEXT_FILE} 写入，可能只是中途说明）` };
 			}
-			const blockers = [
-				hitTurnCap ? `已达最大轮数 ${INIT_MAX_TURNS}，可能有未完成的部分` : "",
-				looksUnfinished(summary) ? "最后一条消息像未完成的意图陈述" : "",
-			].filter(Boolean);
+			const blockers = looksUnfinished(summary) ? ["最后一条消息像未完成的意图陈述"] : [];
 			const base = blockers.length ? `${summary}（${blockers.join("；")}）` : summary;
 			// 半成品不让审计动手（改一份没写完的产物只会更乱）
 			if (blockers.length || signal.aborted) return { ok: false, summary: base };
@@ -399,7 +438,7 @@ async function runInitAgent(
 					// 轮数用尽场景：文件确实被写入过才视为完成，否则如实告知未完成
 					const written = fs.existsSync(contextFile) && fs.statSync(contextFile).mtimeMs > mtimeBefore + 1;
 					if (written) return { ok: true, summary: text };
-					return { ok: false, summary: `${text}（已达最大轮数 ${INIT_MAX_TURNS}，未检测到 ${CONTEXT_FILE} 写入，可重跑 /init）` };
+					return { ok: false, summary: `${text}（未检测到 ${CONTEXT_FILE} 写入，可重跑 /init）` };
 				}
 			} catch {
 				// 兑底续问失败不掩盖主因，落到下面的如实上报
@@ -407,9 +446,7 @@ async function runInitAgent(
 		}
 		return {
 			ok: false,
-			summary: llmError
-				? `模型调用出错：${llmError}`
-				: `已达最大轮数（${INIT_MAX_TURNS} 轮）仍未产出总结，${CONTEXT_FILE} 可能未写完（可重跑 /init）`,
+			summary: llmError ? `模型调用出错：${llmError}` : `未产出总结，${CONTEXT_FILE} 可能未写完（可重跑 /init）`,
 		};
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);
@@ -423,7 +460,7 @@ export default function (pi: ExtensionAPI) {
 
 	function launchBackgroundInit(ctx: ExtensionContext, prompt: string, label: string) {
 		if (initAbort) {
-			ctx.ui.notify("已有后台 init 进行中，请等待完成", "warning");
+			ctx.ui.notify("已有后台 init 进行中（/init cancel 可中止）", "warning");
 			return;
 		}
 		const model = ctx.model as AnyModel | undefined;
@@ -434,7 +471,6 @@ export default function (pi: ExtensionAPI) {
 
 		const controller = new AbortController();
 		initAbort = controller;
-		const timer = setTimeout(() => controller.abort(new Error("init 超时")), INIT_TIMEOUT_MS);
 
 		let toolCalls = 0;
 		const modelName = `${model.provider}/${model.id}`;
@@ -459,21 +495,31 @@ export default function (pi: ExtensionAPI) {
 					result.ok ? "info" : "warning",
 				);
 			} finally {
-				clearTimeout(timer);
 				ctx.ui.setStatus("init", undefined); // init 结束，清除进度状态
 				initAbort = null;
 			}
 		})();
 
-		ctx.ui.notify(`已在后台开始 init（${label}，${modelName}）`, "info");
+		ctx.ui.notify(`已在后台开始 init（${label}，${modelName}；/init cancel 可中止）`, "info");
 	}
 
 	// /init：分析代码库并生成/更新 AGENTS.md（后台独立上下文）
 	pi.registerCommand("init", {
-		description: "后台分析代码库，生成或更新 AGENTS.md（已有 CLAUDE.md 会被合并进来）",
+		description: "后台分析代码库，生成或更新 AGENTS.md（已有 CLAUDE.md 会被合并进来；/init cancel 中止）",
 		handler: async (args, ctx) => {
-			if (args?.trim()) {
-				ctx.ui.notify("/init 不接受参数，固定生成 AGENTS.md", "warning");
+			const arg = args?.trim() ?? "";
+			if (arg) {
+				// 不设轮数/时间上限，所以给一个显式的中断通道（已写入的内容保留在磁盘）
+				if (arg === "cancel" || arg === "stop") {
+					if (initAbort) {
+						initAbort.abort(new Error("用户取消 /init"));
+						ctx.ui.notify("已中止正在进行的 init（已写入的内容保留）", "info");
+					} else {
+						ctx.ui.notify("当前没有正在进行的 init", "info");
+					}
+					return;
+				}
+				ctx.ui.notify("/init 不接受参数（/init cancel 可中止进行中的任务）", "warning");
 				return;
 			}
 
