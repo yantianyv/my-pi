@@ -81,8 +81,8 @@ function extractText(content: unknown): string {
 
 /** 唯一的上下文文件目标：AGENTS.md（pi 原生读取；CLAUDE.md 只会被归并，不会被生成） */
 const CONTEXT_FILE = "AGENTS.md";
-/** init 子代理最多多少轮（一轮 = 一次 LLM 调用 + 其工具调用） */
-const INIT_MAX_TURNS = 30;
+/** init 子代理最多多少轮（一轮 = 一次 LLM 调用 + 其工具调用；探索子代理也算一轮） */
+const INIT_MAX_TURNS = 50;
 /** init 子代理超时（可派 explore 并行摸底，故留足预算：单任务探索上限 15 分钟） */
 const INIT_TIMEOUT_MS = 20 * 60_000;
 /** init 子代理单次输出上限 */
@@ -181,6 +181,12 @@ interface InitRunResult {
 	summary: string;
 }
 
+/** 末句像「我将要做…」的意图陈述（而非已完成的总结）——出现它多半意味着 loop 提前结束 */
+const UNFINISHED_RE = /^(?:now\s+i|next,?\s+i|i'?ll\b|i will\b|let me\b|接下来|下一步|我将|我会|让我)/i;
+function looksUnfinished(summary: string): boolean {
+	return UNFINISHED_RE.test(summary.trim().split("\n")[0]?.trim() ?? "");
+}
+
 /** 从消息列表倒序找第一条带正文文本的 assistant 消息（无则 null）。 */
 function findAssistantText(messages: AgentMessage[]): string | null {
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -231,11 +237,18 @@ async function runInitAgent(
 	const mtimeBefore = fs.existsSync(contextFile) ? fs.statSync(contextFile).mtimeMs : 0;
 
 	let turns = 0;
+	let hitTurnCap = false;
 	const config: AgentLoopConfig = {
 		model,
 		maxTokens: INIT_MAX_TOKENS,
 		convertToLlm,
-		finishTurn: () => (++turns >= INIT_MAX_TURNS ? { action: "end" as const } : undefined),
+		finishTurn: () => {
+			if (++turns >= INIT_MAX_TURNS) {
+				hitTurnCap = true;
+				return { action: "end" as const };
+			}
+			return undefined;
+		},
 	};
 
 	try {
@@ -256,8 +269,19 @@ async function runInitAgent(
 			streamFn,
 		);
 
+		// 有文本不等于写完了：文件必须真被写过（半途而废的意图陈述、轮数用尽都会只留文本）
 		const summary = findAssistantText(newMessages);
-		if (summary) return { ok: true, summary };
+		if (summary) {
+			if (!(fs.existsSync(contextFile) && fs.statSync(contextFile).mtimeMs > mtimeBefore + 1)) {
+				return { ok: false, summary: `${summary}（未检测到 ${CONTEXT_FILE} 写入，可能只是中途说明）` };
+			}
+			const caveats = [
+				hitTurnCap ? `已达最大轮数 ${INIT_MAX_TURNS}，可能有未完成的部分` : "",
+				looksUnfinished(summary) ? "最后一条消息像未完成的意图陈述" : "",
+			].filter(Boolean);
+			if (caveats.length) return { ok: false, summary: `${summary}（${caveats.join("；")}）` };
+			return { ok: true, summary };
+		}
 
 		// 没有任何文本输出：先取真实原因（模型错误 vs 轮数用尽），再兑底续问一轮拿总结
 		const llmError = findLlmError(newMessages);
