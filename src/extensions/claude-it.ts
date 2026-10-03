@@ -160,7 +160,7 @@ function buildInitSystemPrompt(cwd: string, hasExplore: boolean): string {
 	];
 	if (hasExplore) {
 		lines.push(
-			"大仓库（目录/文件多）先用 explore 派 2~6 个互不重叠的任务摸底（目录结构与入口、构建/测试/lint 命令、架构要点、代码约定），拿到报告后用 read 抽查关键路径再动笔；小仓库直接读。同一任务不要重复派。",
+			"大仓库（目录/文件多）先用 explore 并行摸底（目录结构与入口、构建/测试/lint 命令、架构要点、代码约定），拿到报告后用 read 抽查关键路径再动笔；小仓库直接读。一批摸不透就再派第二批，基于首批报告收窄范围。",
 		);
 	}
 	lines.push(
