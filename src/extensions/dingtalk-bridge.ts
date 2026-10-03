@@ -427,12 +427,14 @@ export function parsePeople(text: string): { userId: string; name: string; extra
 		if (Array.isArray(v)) return v.forEach(walk);
 		if (typeof v !== "object" || v === null) return;
 		const o = v as Record<string, unknown>;
-		if (typeof o.userId === "string" && o.userId) {
-			const name = typeof o.name === "string" ? o.name : typeof o.userName === "string" ? o.userName : "";
-			const extra = [o.department, o.dept, o.title, o.jobNumber]
+		const uid = ci(o, "userId");
+		if (typeof uid === "string" && uid) {
+			const rawName = ci(o, "name") ?? ci(o, "userName");
+			const name = typeof rawName === "string" ? rawName : "";
+			const extra = [ci(o, "department"), ci(o, "dept"), ci(o, "title"), ci(o, "jobNumber")]
 				.filter((x): x is string => typeof x === "string" && Boolean(x))
 				.join("/");
-			if (!found.has(o.userId)) found.set(o.userId, { userId: o.userId, name, extra });
+			if (!found.has(uid)) found.set(uid, { userId: uid, name, extra });
 		}
 		Object.values(o).forEach(walk);
 	};
@@ -443,8 +445,8 @@ export function parsePeople(text: string): { userId: string; name: string; extra
 /** 从 contact +me 输出取本人身份（发后核验命令需要「自己姓名」作 --sender） */
 export function parseSelf(text: string): { name: string; userId: string } | null {
 	try {
-		const found = parsePeopleLike(JSON.parse(text), (o) => typeof o.userId === "string" && typeof o.name === "string");
-		return found.length ? { name: String(found[0]!.name), userId: String(found[0]!.userId) } : null;
+		const found = parsePeopleLike(JSON.parse(text), (o) => typeof ci(o, "userId") === "string" && typeof ci(o, "name") === "string");
+		return found.length ? { name: String(ci(found[0]!, "name")), userId: String(ci(found[0]!, "userId")) } : null;
 	} catch {
 		return null;
 	}
@@ -453,12 +455,17 @@ export function parseSelf(text: string): { name: string; userId: string } | null
 /** 从 chat +chat-search 输出提取群候选（openConversationId 为稳定 ID） */
 export function parseGroups(text: string): { cid: string; name: string; extra: string }[] {
 	try {
-		const out = parsePeopleLike(JSON.parse(text), (o) => typeof o.openConversationId === "string");
-		return out.map((o) => ({
-			cid: String(o.openConversationId),
-			name: typeof o.name === "string" ? o.name : typeof o.title === "string" ? o.title : "",
-			extra: [o.memberCount !== undefined ? `${o.memberCount} 人` : "", typeof o.groupType === "string" ? o.groupType : ""].filter(Boolean).join("/"),
-		}));
+		const out = parsePeopleLike(JSON.parse(text), (o) => typeof ci(o, "openConversationId") === "string");
+		return out.map((o) => {
+			const rawName = ci(o, "name") ?? ci(o, "title");
+			const mc = ci(o, "memberCount");
+			const gt = ci(o, "groupType");
+			return {
+				cid: String(ci(o, "openConversationId")),
+				name: typeof rawName === "string" ? rawName : "",
+				extra: [mc !== undefined ? `${mc} 人` : "", typeof gt === "string" ? gt : ""].filter(Boolean).join("/"),
+			};
+		});
 	} catch {
 		return [];
 	}
@@ -486,6 +493,30 @@ export function parseDriveRefs(text: string): { spaceId: string; fileId: string;
 	const bare = /["'](\d{6,})&type=(file|folder)["']/g;
 	for (const m of text.matchAll(bare)) push("", m[1]!, m[2]!);
 	return out;
+}
+
+/** 大小写不敏感地取字段（dws 上游拼写不一致：群成员 openDingtalkId / 消息 openDingTalkId，同一标识） */
+export function ci(o: Record<string, unknown>, name: string): unknown {
+	if (name in o) return o[name];
+	const lower = name.toLowerCase();
+	for (const k of Object.keys(o)) {
+		if (k.toLowerCase() === lower) return o[k];
+	}
+	return undefined;
+}
+
+/** 结果中是否出现小写 t 变体 */
+export function hasLowercaseDingtalkId(text: string): boolean {
+	return /openDingtalkId/.test(text);
+}
+
+/** 字段拼写自解释提示（实测：群成员接口小写 t、消息接口大写 T；上游不一致，插件不擅自改写数据） */
+export function formatFieldSpellingNote(text: string): string {
+	if (!hasLowercaseDingtalkId(text)) return "";
+	return (
+		"\n\nℹ️ 字段拼写：本结果所在接口返回 openDingtalkId（小写 t），消息等接口返回 openDingTalkId（大写 T）——" +
+		"同一标识，读取时两种拼写都要认（dws 上游命名不一致，插件不擅自改写返回数据）。"
+	);
 }
 
 /** 消息是否为「文件夹」形式（钉钉只给一句 display text，无任何引用字段，无法读取） */
@@ -519,10 +550,10 @@ function parsePeopleLike(v: unknown, pred: (o: Record<string, unknown>) => boole
 		Object.values(o).forEach(walk);
 	};
 	walk(v);
-	// 按 openConversationId/userId 去重
+	// 按 openConversationId/userId 去重（拼写不敏感）
 	const seen = new Set<string>();
 	return out.filter((o) => {
-		const k = String(o.openConversationId ?? o.userId ?? "");
+		const k = String(ci(o, "openConversationId") ?? ci(o, "userId") ?? "");
 		if (seen.has(k)) return false;
 		seen.add(k);
 		return true;
@@ -838,6 +869,7 @@ export default function (pi: ExtensionAPI) {
 			// 只读结果：云盘分享引用结构化成可直接下载的指引；[文件夹] 消息给出明确结论
 			if (!matchPrefix(args, SEND_PREFIXES) && !matchPrefix(args, RECALL_PREFIXES)) {
 				out += formatDriveRefs(parseDriveRefs(out));
+				out += formatFieldSpellingNote(out);
 				if (isFolderMessage(out)) {
 					out +=
 						"\n\n⚠️ 上述含「[文件夹] xxx」的消息：钉钉不提供任何可下载引用（实测：无 resourceRefs、无 id、无 mediaId，连 download-media 也无从下手），插件无法读取。" +

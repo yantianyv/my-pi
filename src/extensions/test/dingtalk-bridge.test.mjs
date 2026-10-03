@@ -42,7 +42,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, parseSkillDescription, formatSkillIndex, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -286,6 +286,20 @@ console.log("V、钉盘/云盘分享解析");
 	check("下载指引含 spaceId 与命令名", tips.includes("drive download") && tips.includes("26810061928"));
 	check("裸 id 指引提示换 drive 或让对方重发", formatDriveRefs(r2).includes("重发"));
 	check("文件夹指引用 pull", formatDriveRefs(r4).includes("pull"));
+}
+
+console.log("W、字段拼写不一致（群成员小写 t / 消息大写 T）");
+{
+	const memberApi = JSON.stringify({ users: [{ name: "马晓玉", openDingtalkId: "DHZxOiPQtiP3gz" }], bots: [{ name: "小钉", openDingtalkId: "X1" }] });
+	check("小写变体被识别", hasLowercaseDingtalkId(memberApi));
+	check("大写变体不误报", !hasLowercaseDingtalkId(JSON.stringify({ senderId: "x", openDingTalkId: "y" })));
+	check("自解释提示只在小写接口出现", formatFieldSpellingNote(memberApi).includes("两种拼写都要认") && formatFieldSpellingNote(String.fromCharCode(123)+String.fromCharCode(34)+"openDingTalkId"+String.fromCharCode(34)+":1"+String.fromCharCode(125)) === "");
+	const o = { openDingtalkId: "lower", openDingTalkId_T: 1 };
+	check("ci 大小写不敏感取值", ci(o, "openDingTalkId") === "lower");
+	check("ci 精确优先", ci({ name: "a", Name: "b" }, "name") === "a");
+	check("ci 缺失返回 undefined", ci({}, "nope") === undefined);
+	const people = parsePeople(JSON.stringify({ data: { items: [{ userId: "u1", name: "张三", Department: "数学组" }] } }));
+	check("解析对字段大小写容错", people.length === 1 && people[0].extra === "数学组");
 }
 
 const failed = results.filter((r) => !r.ok);
