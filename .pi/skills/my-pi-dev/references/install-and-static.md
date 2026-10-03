@@ -11,7 +11,7 @@ CLI 参数（仅 4 个）：`--dry-run`/`-n`、`--skip-build`、`-y`/`--yes`（�
 
 | 位置 | 行为 |
 |---|---|
-| `~/.pi/agent/extensions/` | 复制 dist 产物；**删除** `LEGACY_REMOVED_EXTENSIONS` 名单里的历史扩展（explore-agent/token-saver/webui/paste-image/task-alert/btf-think/voice-call/mimo-media 的 stale 副本） |
+| `~/.pi/agent/extensions/` | 复制 dist 产物；**删除** `LEGACY_REMOVED_EXTENSIONS` 名单里的历史扩展（explore-agent/token-saver/webui/paste-image/task-alert/btf-think/mimo-media 的 stale 副本） |
 | `~/.pi/agent/themes/`、`sounds/`、`skills/` | 复制 static 对应目录；copyDir 带扩展名白名单（themes/extensions = `.json`+`.ts`，sounds = `.wav`，skills = `.md`，递归且跳过 node_modules） |
 | `~/.pi/agent/vendor/` | 复制 src/vendor 各包；`settings.json.packages` 注册本地路径；**注销**已移除包时连目录一起 `rmSync` 删除 |
 | `~/.pi/agent/settings.json` | `applySettings` 写 `theme="matrix"` 与 `hideThinkingBlock=true`（硬置）；`registerVendorPackages` 写 `packages` |
