@@ -79,7 +79,9 @@
 
 ## crash-log.ts
 
-崩溃黑匣子：`prependListener` 抢在 pi 的 `uncaughtException` 处理器（同步 exit）之前把堆栈同步落盘 `~/.pi/agent/pi-crash.log`（含 unhandledRejection 与 exit 码；滚动上限 2MB、保留尾部 1MB），崩溃条目与会话文件按时间配对；命令 `/crash-log` 报告最近一条崩溃与取证路径（`clear` 清空），上次会话有崩溃时 `session_start` 提醒一次。
+崩溃黑匣子：`prependListener` 抢在 pi 的 `uncaughtException` 处理器（同步 exit）之前把堆栈同步落盘 `~/.pi/agent/pi-crash.log`（含 unhandledRejection 与 exit 码；滚动上限 2MB、保留尾部 1MB），崩溃条目与会话文件按时间配对；命令 `/crash-log` 报告最近一条崩溃与取证路径（`clear` 清空日志与 ack）。
+
+启动提醒去重：`session_start` 只在「日志里最新崩溃时间戳 ≠ `~/.pi/agent/crash-log-ack.json` 里已提示的时间」时提醒（无 UI 不提醒、也不写 ack），避免同一条崩溃每次启动都念叨——提醒一次或用户 `/crash-log` 看过即标已看，记录仍在日志里。进程级监听与启动头用 `globalThis.__PI_CRASH_LOG_HOOKED__` 守住只挂一次（`/reload` 会重新执行模块，而 process 监听器不随扩展卸载消失，重复挂会写出重复条目）。日志路径可用 `PI_CRASH_LOG_FILE` 注入（回归测试用，ack 落同目录）。
 
 ## img-slim.ts
 

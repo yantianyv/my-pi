@@ -20,12 +20,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { loadJsonConfig, saveJsonConfig } from "./shared/config";
 
 // ------------------------------------------------------------------
 // 可调配置
 // ------------------------------------------------------------------
-/** 崩溃日志路径 */
-const LOG_FILE = path.join(os.homedir(), ".pi", "agent", "pi-crash.log");
+/** 崩溃日志路径（`PI_CRASH_LOG_FILE` 可注入，供回归测试） */
+const LOG_FILE = process.env.PI_CRASH_LOG_FILE || path.join(os.homedir(), ".pi", "agent", "pi-crash.log");
+/** 已提示过的崩溃时间戳（同一条崩溃只提示一次，记录仍在日志里） */
+const ACK_FILE = path.join(path.dirname(LOG_FILE), "crash-log-ack.json");
+/** 进程级守卫：/reload 会重新执行本模块，而 process 上的监听器不随扩展卸载消失——重复挂会写出重复条目 */
+const HOOK_KEY = "__PI_CRASH_LOG_HOOKED__";
 /** 日志滚动上限：超过则只保留尾部（防无限膨胀） */
 const MAX_BYTES = 2 * 1024 * 1024;
 /** 滚动后保留的尾部大小 */
@@ -95,17 +100,29 @@ function lastCrashSummary(): string | null {
 	return null;
 }
 
-/** 本次启动之前的崩溃记录（用于启动时提示；本次启动写进日志的标记不算） */
-function crashSinceLastStart(): string | null {
-	const tail = readTail();
-	const idx = tail.lastIndexOf(`=== [${START_ISO}]`);
-	const before = idx > 0 ? tail.slice(0, idx) : tail;
-	const lines = before.split("\n");
+/** 日志尾部最近一条崩溃的时间戳（无记录返回 null） */
+function lastCrashTime(): string | null {
+	const lines = readTail().split("\n");
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const m = lines[i]?.match(/^--- \[(.+?)\] (UNCAUGHT EXCEPTION|UNHANDLED REJECTION) /);
-		if (m) return m[1];
+		if (m) return m[1] ?? null;
 	}
 	return null;
+}
+
+function readAck(): string {
+	const ack = loadJsonConfig(ACK_FILE, { crash: "" }, (v): v is { crash: string } =>
+		typeof (v as { crash?: unknown })?.crash === "string",
+	);
+	return ack.crash;
+}
+
+function writeAck(crash: string): void {
+	try {
+		saveJsonConfig(ACK_FILE, { crash });
+	} catch {
+		// 记不上就下次再提示一遍，无妨
+	}
 }
 
 export default function (pi: ExtensionAPI) {
@@ -115,31 +132,37 @@ export default function (pi: ExtensionAPI) {
 	} catch {
 		// 拿不到就算了
 	}
-	logSync(`\n=== [${START_ISO}] pi ${piVersion} / node ${process.version} / pid ${process.pid} / cwd ${process.cwd()} ===`);
-
 	// prepend：pi 的 uncaughtException 处理器会同步 process.exit(1)，
 	// 普通注册顺序下本监听器永远执行不到，必须插队到最前
-	process.prependListener("uncaughtException", (error) => {
-		logSync(`--- [${new Date().toISOString()}] UNCAUGHT EXCEPTION (pid ${process.pid}) ---\n${fmtError(error)}`);
-	});
+	if (!(globalThis as Record<string, unknown>)[HOOK_KEY]) {
+		(globalThis as Record<string, unknown>)[HOOK_KEY] = true;
+		logSync(
+			`\n=== [${START_ISO}] pi ${piVersion} / node ${process.version} / pid ${process.pid} / cwd ${process.cwd()} ===`,
+		);
 
-	process.prependListener("unhandledRejection", (reason) => {
-		logSync(`--- [${new Date().toISOString()}] UNHANDLED REJECTION (pid ${process.pid}) ---\n${fmtError(reason)}`);
-		// 保持 node 默认崩溃语义：转成 uncaughtException，走 pi 的退出路径
-		throw reason;
-	});
+		process.prependListener("uncaughtException", (error) => {
+			logSync(`--- [${new Date().toISOString()}] UNCAUGHT EXCEPTION (pid ${process.pid}) ---\n${fmtError(error)}`);
+		});
 
-	process.on("exit", (code) => {
-		logSync(`--- [${new Date().toISOString()}] EXIT code=${code} (pid ${process.pid}) ---`);
-	});
+		process.prependListener("unhandledRejection", (reason) => {
+			logSync(`--- [${new Date().toISOString()}] UNHANDLED REJECTION (pid ${process.pid}) ---\n${fmtError(reason)}`);
+			// 保持 node 默认崩溃语义：转成 uncaughtException，走 pi 的退出路径
+			throw reason;
+		});
 
-	// 会话标记：崩溃条目与会话文件配对用；上次会话有异常记录时告知用户去哪看
+		process.on("exit", (code) => {
+			logSync(`--- [${new Date().toISOString()}] EXIT code=${code} (pid ${process.pid}) ---`);
+		});
+	}
+
+	// 会话标记：崩溃条目与会话文件配对用；有未看过的崩溃时告知用户去哪看（同一条只提醒一次）
 	pi.on("session_start", async (_event, ctx) => {
 		logSync(`    [${new Date().toISOString()}] session_start cwd=${ctx.cwd}`);
 		try {
-			const prev = crashSinceLastStart();
-			if (prev && ctx.hasUI) {
-				ctx.ui.notify(`上次会话有崩溃记录（${prev}），详情见 ${LOG_FILE}\n（/crash-log 查看最近一条；stderr 与内存报告在 ~/.pi/agent/pi-stderr*.log、reports/）`, "warning");
+			const crash = lastCrashTime();
+			if (crash && crash !== readAck() && ctx.hasUI) {
+				writeAck(crash);
+				ctx.ui.notify(`上次会话有崩溃记录（${crash}），详情见 ${LOG_FILE}\n（/crash-log 查看最近一条；stderr 与内存报告在 ~/.pi/agent/pi-stderr*.log、reports/）`, "warning");
 			}
 		} catch {
 			// 黑匣子的提示绝不值得影响会话启动
@@ -153,6 +176,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.trim().toLowerCase() === "clear") {
 				try {
 					fs.rmSync(LOG_FILE, { force: true });
+					fs.rmSync(ACK_FILE, { force: true });
 					ctx.ui.notify(`已清空崩溃日志 ${LOG_FILE}`, "info");
 				} catch (e) {
 					ctx.ui.notify(`清空失败：${e instanceof Error ? e.message : String(e)}`, "error");
@@ -160,6 +184,9 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const recent = lastCrashSummary();
+			// 看过了就不再每次启动提醒（记录仍在日志里）
+			const seen = lastCrashTime();
+			if (seen) writeAck(seen);
 			ctx.ui.notify(
 				[
 					recent ? `最近一条崩溃记录：\n${recent}` : "没有崩溃记录（自上次清空以来）",
