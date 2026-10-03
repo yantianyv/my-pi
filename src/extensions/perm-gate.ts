@@ -431,7 +431,7 @@ export class ReviewPanel {
 
 		// 上部：人话信息区（不参与滚动，任何情况下都看得见）
 		const head: string[] = [];
-		const wrap = (s: string): string[] => wrapTextWithAnsi(s, Math.max(8, innerW - 1));
+		const wrap = (s: string): string[] => wrapIndented(s.trimStart(), innerW, 1);
 		if (this.info.summary) head.push(...wrap(` ${th.fg("text", this.info.summary)}`));
 		if (this.info.impact.length > 0)
 			head.push(...wrap(` ${th.fg("dim", `影响面：${this.info.impact.join("；")}`)}`));
@@ -462,9 +462,8 @@ export class ReviewPanel {
 		lines.push(
 			...renderChoiceList(
 				th,
-				actions,
+				actions.map((a, i) => ({ label: a, note: i === 1 && this.info.canRemember ? this.info.intent : undefined })),
 				this.idx,
-				actions.map((_, i) => (i === 1 && this.info.canRemember ? this.info.intent : undefined)),
 			).map((l) => row(l)),
 		);
 		lines.push(

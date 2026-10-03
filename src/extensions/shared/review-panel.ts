@@ -201,9 +201,8 @@ export class ReviewPanel {
 		lines.push(
 			...renderChoiceList(
 				th,
-				this.req.actions,
+				this.req.actions.map((a) => ({ label: a, note: a === REVIEW_REMEMBER ? this.req.rememberNote : undefined })),
 				this.idx,
-				this.req.actions.map((a) => (a === REVIEW_REMEMBER ? this.req.rememberNote : undefined)),
 			).map((l) => row(l)),
 		);
 		lines.push(bottomBorder());

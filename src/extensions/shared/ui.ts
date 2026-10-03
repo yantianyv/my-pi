@@ -257,15 +257,58 @@ function nextWordEnd(text: string, cursor: number): number {
 	return p;
 }
 
+/** 选项列表项（label 之外都可选） */
+export interface ChoiceItem {
+	label: string;
+	/** 尾部灰字括注（说明 / 将被记住的意图） */
+	note?: string;
+	/** label 前图标（如 📝） */
+	icon?: string;
+	/** 显式序号前缀（需要非 1 起序号时给，如「3.」） */
+	index?: string;
+}
+
+export interface ChoiceStyle {
+	/** 选中行文字加粗（默认 true） */
+	boldSelected?: boolean;
+	/** 自动显示 1 起序号（item.index 优先） */
+	numbers?: boolean;
+	/** 每项状态标记（单选 ●/○、多选 [x]/[ ]）——焦点(›)与已选是两件事，标记对所有行都画 */
+	mark?: (i: number) => string;
+	/** 括注样式：paren 全角括号（默认）/ dash 破折号 */
+	noteFormat?: "paren" | "dash";
+	/** 传宽度即折行，续行缩进对齐到项首 */
+	width?: number;
+}
+
 /**
- * 选项列表竖排渲染（确认类浮层共用一套样式）：选中行 accent + 「› 」，括注灰色。
- * notes[i] 给出该项的补充说明（如「将被记住的操作」），仅作灰字括注，不参与选中态。
+ * 选项列表竖排渲染（浮层共用一套样式）：选中行 accent + 「› 」，括注灰字。
+ * 覆盖单选/多选标记、序号、图标、括注样式、折行；键位提示与分页由调用方处理。
  */
-export function renderChoiceList(th: Theme, items: string[], selected: number, notes?: (string | undefined)[]): string[] {
-	return items.map((it, i) => {
-		const note = notes?.[i] ? th.fg("dim", `（${notes[i]}）`) : "";
-		return i === selected ? `${th.fg("accent", ` › ${th.bold(it)}`)}${note}` : `   ${it}${note}`;
+export function renderChoiceList(th: Theme, items: ChoiceItem[], selected: number, style: ChoiceStyle = {}): string[] {
+	const { boldSelected = true, numbers = false, mark, noteFormat = "paren", width } = style;
+	const out: string[] = [];
+	items.forEach((it, i) => {
+		const focused = i === selected;
+		const numText = it.index ?? (numbers ? `${i + 1}.` : "");
+		const prefix =
+			(focused ? th.fg("accent", " › ") : "   ") +
+			(numText ? `${th.fg("dim", numText)} ` : "") +
+			(mark ? `${mark(i)} ` : "") +
+			(it.icon ? `${it.icon} ` : "");
+		const label = focused ? th.fg("accent", boldSelected ? th.bold(it.label) : it.label) : it.label;
+		const note = it.note ? th.fg("dim", noteFormat === "dash" ? ` — ${it.note}` : `（${it.note}）`) : "";
+		const body = `${label}${note}`;
+		if (!width) {
+			out.push(prefix + body);
+			return;
+		}
+		const indent = visibleWidth(prefix);
+		wrapTextWithAnsi(body, Math.max(8, width - indent)).forEach((p, k) =>
+			out.push(k === 0 ? prefix + p : " ".repeat(indent) + p),
+		);
 	});
+	return out;
 }
 
 /** 正文区滚动提示行：嵌在分隔线里的 ▲/▼ 余量说明（面板滚动窗共用；宽度走 visibleWidth，中文算 2 列） */
