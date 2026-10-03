@@ -117,11 +117,14 @@ src/                # 全部源码 / 原始素材 + npm 生态 + 构建脚本（
                     #   （会话内存 + 跨会话台账 ~/.pi/agent/dingtalk-bridge-sent.json，dedupMinutes 默认 60）+
                     #   查询结果附当前时间锚点；字面 \n 归一 + 多行自动补 markdown 行尾双空格硬换行
                     #   （钉钉单换行会拼成一行）、文件/媒体消息回报「本条不含正文」
-                    #   （--title 不显示给收件人））/ dws_resolve_user（aisearch 人员解析，多候选 pick 确认）/
+                    #   （--title 不显示给收件人））/ dws_fetch（钉盘/云盘分享落地：文件直下、文件夹镜像到本地；
+                    #   这类消息用 +messages-resource-download 会 TABLE_NOT_FOUND——resourceRefs 是缺 spaceId 的
+                    #   数字 dentryId，spaceId 藏在正文 yunpan 链接里，只读结果会自动附结构化下载指引；
+                    #   「[文件夹] 姓名」形式无任何引用，实测不可读，直接提示让对方重发 zip）/ dws_resolve_user（aisearch 人员解析，多候选 pick 确认）/
                     #   dws_resolve_group（chat +chat-search 群解析，同名群强制用 cid）/ 撤回命令同样两阶段
                     #   + 防重复撤回 / 发送后给 openTaskId 与只读核验命令 / --file 存在性预检 /
                     #   dws_skill（逃生舱：复杂管理操作按需拉取官方技能正文，无参给索引）；
-                    #   配置 ~/.pi/agent/dingtalk-bridge.json；test/dingtalk-bridge.test.mjs 回归（纯函数 12 场景）
+                    #   配置 ~/.pi/agent/dingtalk-bridge.json；test/dingtalk-bridge.test.mjs 回归（纯函数 73 项）
     crash-log.ts  #   崩溃黑匣子：prependListener 抢在 pi 的 uncaughtException 处理器（同步 exit）之前把堆栈
                     #   同步落盘 ~/.pi/agent/pi-crash.log（含 unhandledRejection 与 exit 码），崩溃条目与会话文件按时间配对；
                     #   用户入口：/crash-log 报告最近一条崩溃与取证路径（clear 清空），上次会话有崩溃时 session_start 提醒一次

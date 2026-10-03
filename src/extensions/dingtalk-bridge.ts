@@ -464,6 +464,50 @@ export function parseGroups(text: string): { cid: string; name: string; extra: s
 	}
 }
 
+/**
+ * 解析消息文本里的钉盘/云盘分享引用。
+ * 这类消息（老师转发的钉盘文件/文件夹）resourceRefs 给的是 `238322429838&type=file`
+ * （数字 dentryId、缺 spaceId），走 +messages-resource-download 报 TABLE_NOT_FOUND；
+ * 真正能下载的 spaceId 藏在正文的 yunpan 链接里。
+ */
+export function parseDriveRefs(text: string): { spaceId: string; fileId: string; type: string }[] {
+	const seen = new Set<string>();
+	const out: { spaceId: string; fileId: string; type: string }[] = [];
+	const push = (spaceId: string, fileId: string, type: string) => {
+		const k = `${spaceId}|${fileId}|${type}`;
+		if (seen.has(k)) return;
+		seen.add(k);
+		out.push({ spaceId, fileId, type });
+	};
+	// ① 完整链接：spaceId=..&fileId=..&type=file|folder
+	const full = /spaceId=(\d+)&(?:amp;)?fileId=(\d+)&(?:amp;)?type=(file|folder)/g;
+	for (const m of text.matchAll(full)) push(m[1]!, m[2]!, m[3]!);
+	// ② 裸 resource id："238322429838&type=file"（缺 spaceId，只能识别、不可下载）
+	const bare = /["'](\d{6,})&type=(file|folder)["']/g;
+	for (const m of text.matchAll(bare)) push("", m[1]!, m[2]!);
+	return out;
+}
+
+/** 消息是否为「文件夹」形式（钉钉只给一句 display text，无任何引用字段，无法读取） */
+export function isFolderMessage(text: string): boolean {
+	return /\[文件夹\]/.test(text);
+}
+
+/** 钉盘引用的下载指引（附加在只读查询结果尾部） */
+export function formatDriveRefs(refs: { spaceId: string; fileId: string; type: string }[]): string {
+	if (!refs.length) return "";
+	const lines = refs.map((r) => {
+		if (!r.spaceId) {
+			return `- ${r.fileId}（type=${r.type}）：仅数字 dentryId、缺 spaceId，不能用 +messages-resource-download 下载；spaceId 在正文的 yunpan 链接里，或让对方重发。`;
+		}
+		if (r.type === "folder") {
+			return `- 文件夹 spaceId=${r.spaceId} fileId=${r.fileId}：用 dws_fetch 直接拿整个文件夹（或 drive pull --space-id --remote-folder <绝对路径>）`;
+		}
+		return `- 文件 spaceId=${r.spaceId} fileId=${r.fileId}：用 dws_fetch 直接下载（或 drive download --space-id ${r.spaceId} --node ${r.fileId}）`;
+	});
+	return `\n\n🔗 钉盘/云盘分享资源（这类消息用 +messages-resource-download 会报 TABLE_NOT_FOUND，需走 drive）：\n${lines.join("\n")}`;
+}
+
 /** 递归收集满足谓词的对象（仅取 userId/name 等稳定字段，不猜层级） */
 function parsePeopleLike(v: unknown, pred: (o: Record<string, unknown>) => boolean): Record<string, unknown>[] {
 	const out: Record<string, unknown>[] = [];
@@ -662,7 +706,9 @@ export default function (pi: ExtensionAPI) {
 			"消息收发之外的复杂钉钉操作（表格/文档/日历/审批/组织/听记等）先 dws_skill 拉取对应官方技能正文再照做——技能已移出系统提示词，需要时按需加载。";
 		const g4 =
 			"发钉钉消息：多行正文用真换行（写在字符串里就是换行，勿写两个字面反斜杠-n）；文件/图片消息不含正文（--title 不显示给收件人），说明文字必须另发一条文本——文件与说明分开发。";
-		if (!guidelines.includes(g1)) guidelines.push(g1, g2, g3, g4);
+		const g5 =
+			"读消息遇到钉盘/云盘分享（正文带 yunpan 链接、resourceId 形如 238322429838&type=file）时，不要用 +messages-resource-download（会报 TABLE_NOT_FOUND），用 dws_fetch 直接拿到本地路径；若是「[文件夹] 名字」形式则钉钉未提供引用，只能请对方打包 zip 重发。";
+		if (!guidelines.includes(g1)) guidelines.push(g1, g2, g3, g4, g5);
 	});
 
 	pi.on("session_start", () => {
@@ -789,6 +835,15 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			out = annotateQuery(args, out, new Date());
+			// 只读结果：云盘分享引用结构化成可直接下载的指引；[文件夹] 消息给出明确结论
+			if (!matchPrefix(args, SEND_PREFIXES) && !matchPrefix(args, RECALL_PREFIXES)) {
+				out += formatDriveRefs(parseDriveRefs(out));
+				if (isFolderMessage(out)) {
+					out +=
+						"\n\n⚠️ 上述含「[文件夹] xxx」的消息：钉钉不提供任何可下载引用（实测：无 resourceRefs、无 id、无 mediaId，连 download-media 也无从下手），插件无法读取。" +
+						"请让对方打包成 zip 或逐个文件重发——不要反复尝试下载。";
+				}
+			}
 			return text(truncateOut(out, cfg.maxOutputChars) || "（无输出）", { kind: "ok" });
 		},
 	});
@@ -871,6 +926,86 @@ export default function (pi: ExtensionAPI) {
 			const g = groups[0]!;
 			state.resolvedGroups.add(g.cid);
 			return text(`✓ ${g.name || params.name}（openConversationId: ${g.cid}）${g.extra ? `｜${g.extra}` : ""}`, { kind: "ok", cid: g.cid });
+		},
+	});
+
+	// 钉盘/云盘资源落地（消息里分享的文件/文件夹：文件直接下载，文件夹整目录镜像）
+	pi.registerTool({
+		name: "dws_fetch",
+		label: "钉盘资源下载",
+		description:
+			"下载消息里分享的钉盘/云盘文件或整个文件夹。这类分享（正文带 yunpan 链接、resourceId 形如 238322429838&type=file）用 +messages-resource-download 会失败，必须走 drive。" +
+			"传 link（消息正文原文/链接）或 spaceId+nodeId；文件夹会递归镜像到本地并列回文件清单（绝对路径，可直接用 read 工具读）。" +
+			"⚠️ 若消息是「[文件夹] 名字」形式（无任何链接），钉钉未提供引用，下载不了——请让对方打包 zip 重发。",
+		promptSnippet: "下载钉盘资源：dws_fetch(link 或 spaceId+nodeId[, outDir]) → 本地路径",
+		parameters: Type.Object({
+			link: Type.Optional(Type.String({ description: "消息正文原文或链接（含 spaceId/fileId/type 的 yunpan 链接）" })),
+			spaceId: Type.Optional(Type.String({ description: "钉盘空间 ID（纯数字）" })),
+			nodeId: Type.Optional(Type.String({ description: "节点 fileId（数字 dentryId 或 32 位 dentryUuid）" })),
+			outDir: Type.Optional(Type.String({ description: "输出目录（工作目录内相对路径），缺省 .tmp/dingtalk-fetch" })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const cwd = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+			const refs = params.link ? parseDriveRefs(params.link) : [];
+			const spaceId = params.spaceId?.trim() || refs.find((r) => r.spaceId)?.spaceId || "";
+			const nodeId = params.nodeId?.trim() || refs[0]?.fileId || "";
+			if (!nodeId) {
+				const hint = isFolderMessage(params.link ?? "")
+					? "这是「[文件夹] 名字」形式的分享——钉钉不提供引用，无法下载，请让对方打包 zip 或逐个文件重发。"
+					: "请传 link（消息原文/链接）或 spaceId + nodeId。";
+				return text(`🚫 ${hint}`, { kind: "error" });
+			}
+			const rel = params.outDir?.trim() || ".tmp/dingtalk-fetch";
+			const abs = path.isAbsolute(rel) ? rel : path.join(cwd, rel);
+			if (!abs.startsWith(cwd)) return text(`🚫 outDir 必须在工作目录内：${cwd}`, { kind: "error" });
+			fs.mkdirSync(abs, { recursive: true });
+
+			// 元信息：判文件/文件夹（数字 dentryId 需配合 spaceId）
+			const infoArgs = ["drive", "+info", "--node", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--format", "json"];
+			const info = await runDws(cfg, infoArgs);
+			let kind = refs[0]?.type ?? "";
+			let name = "";
+			const infoText = info.stdout || "";
+			if (/"type"\s*:\s*"FOLDER"/.test(infoText) || /"isFolder"\s*:\s*true/.test(infoText)) kind = "folder";
+			if (kind !== "folder" && /"type"\s*:\s*"(FILE|DOC)"/.test(infoText)) kind = "file";
+			const nm = /"name"\s*:\s*"([^"]+)"/.exec(infoText);
+			if (nm) name = nm[1]!;
+
+			if (kind === "folder") {
+				const pullArgs = ["drive", "pull", "--remote-folder", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--local-folder", abs, "--if-exists", "skip", "--yes", "--format", "json"];
+				const r = await runDws(cfg, pullArgs);
+				if (r.code !== 0) return text(`文件夹镜像失败（exit ${r.code}）：${(r.stderr || r.stdout).trim().slice(0, 400)}`, { kind: "error" });
+				const files: string[] = [];
+				const walk = (dir: string) => {
+					for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+						const p = path.join(dir, e.name);
+						if (e.isDirectory()) walk(p);
+						else files.push(p);
+					}
+				};
+				try {
+					walk(abs);
+				} catch { /* 目录不存在则视为空 */ }
+				const list = files.length ? files.map((f) => `  ${f}`).join("\n") : "  （文件夹为空）";
+				return text(`✓ 文件夹已镜像${name ? `「${name}」` : ""}到 ${abs}（${files.length} 个文件）：\n${list}\n\n（可直接用 read 工具读这些绝对路径）`, {
+					kind: "ok",
+					localDir: abs,
+					files,
+				});
+			}
+
+			const dlArgs = ["drive", "download", "--node", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--output", abs, "--format", "json"];
+			const r = await runDws(cfg, dlArgs);
+			if (r.code !== 0) {
+				return text(`下载失败（exit ${r.code}）：${(r.stderr || r.stdout).trim().slice(0, 400)}\n如消息是「[文件夹] 名字」形式，钉钉不提供引用，只能让对方重发。`, { kind: "error" });
+			}
+			const saved = /"savedPath"\s*:\s*"([^"]+)"/.exec(r.stdout)?.[1] ?? name ?? nodeId;
+			const size = /"sizeBytes"\s*:\s*(\d+)/.exec(r.stdout)?.[1];
+			const localPath = path.isAbsolute(saved) ? saved : path.join(abs, path.basename(saved));
+			return text(`✓ 已下载${name ? `「${name}」` : ""}：${localPath}${size ? `（${Math.round(Number(size) / 1024)} KB）` : ""}\n\n（可直接用 read 工具读此绝对路径）`, {
+				kind: "ok",
+				localPath,
+			});
 		},
 	});
 

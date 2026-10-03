@@ -42,7 +42,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, parseSelf, parseGroups, parseSkillDescription, formatSkillIndex, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, parseSkillDescription, formatSkillIndex, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -264,6 +264,28 @@ console.log("U、群与本人解析");
 	const me = parseSelf(JSON.stringify({ ok: true, data: { name: "严天宇", userId: "u1", dept: "教研室" } }));
 	check("本人身份提取", me && me.name === "严天宇" && me.userId === "u1");
 	check("坏输入不抛", parseSelf("nope") === null && parseGroups("nope").length === 0);
+}
+
+console.log("V、钉盘/云盘分享解析");
+{
+	const NL = String.fromCharCode(10);
+	const real = "王应明材料.zip" + NL + "4.1MB" + NL + "[dingtalk://dingtalkclient/page/yunpan?route=previewDentry&spaceId=26810061928&fileId=238322429838&type=file](dingtalk://x)";
+	const r1 = parseDriveRefs(real);
+	check("完整链接解析出 spaceId+fileId", r1.length === 1 && r1[0].spaceId === "26810061928" && r1[0].fileId === "238322429838" && r1[0].type === "file");
+	const r2 = parseDriveRefs(JSON.stringify({ resourceId: "238322429838&type=file" }));
+	check("裸 dentryId 能识别但无 spaceId", r2.length === 1 && r2[0].spaceId === "" && r2[0].type === "file");
+	const r3 = parseDriveRefs(real + NL + real);
+	check("重复链接去重", r3.length === 1);
+	const r4 = parseDriveRefs("[dingtalk://dingtalkclient/page/yunpan?route=previewDentry&spaceId=26810061928&fileId=238322429838&type=folder](x)");
+	check("文件夹链接识别为 folder", r4[0].type === "folder");
+	check("无链接不误报", parseDriveRefs("普通消息没有分享").length === 0);
+	const f = "【AI发送】马老师好，您发的材料是「文件夹」形式" + NL + JSON.stringify({text:"[文件夹] 马晓玉"});
+	check("[文件夹] 消息识别", isFolderMessage(f));
+	check("普通消息不误判为文件夹消息", !isFolderMessage("文件夹里的文件我看了"));
+	const tips = formatDriveRefs(r1);
+	check("下载指引含 spaceId 与命令名", tips.includes("drive download") && tips.includes("26810061928"));
+	check("裸 id 指引提示换 drive 或让对方重发", formatDriveRefs(r2).includes("重发"));
+	check("文件夹指引用 pull", formatDriveRefs(r4).includes("pull"));
 }
 
 const failed = results.filter((r) => !r.ok);
