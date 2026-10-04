@@ -388,7 +388,7 @@ export function buildReview(
 		else if (ids.length) object = `收件人：${ids.length} 个账号`;
 		else if (groups.length) object = `群：${groups.join("、")}`;
 		else if (files.length) object = `文件：${files.join("、")}`;
-		else if (flagValues(args, RECALL_ID_FLAGS).length) object = "对象：指定的那条消息";
+		else if (flagValues(args, RECALL_ID_FLAGS).length) object = `对象：${extra.note ?? "指定的那条消息"}`;
 	}
 	return {
 		title: "agent请求操作钉钉",
@@ -635,6 +635,8 @@ export function decideExec(
 		why?: string;
 		/** 审核文案补充（如群发预检得到的收件人列表） */
 		reviewExtra?: { recipients?: string[]; note?: string };
+		/** 本命令的 schema 参数名（去横线的下划线形式，由调用方从缓存带出；用于草稿里列“其余未用参数”） */
+		flags?: string[];
 	},
 	state: ExecState,
 	cfg: Pick<BridgeConfig, "requireAiTag">,
@@ -664,10 +666,9 @@ export function decideExec(
 			return { action: "block", reason: "确认标记无效或已过期（草稿 10 分钟有效）。请重新发起并让用户再次确认。" };
 		}
 		const token = createHash("sha1").update(`${sig}:${now}`).digest("hex").slice(0, 10);
-		const review = buildReview(args, opts.meta ?? null, why, opts.reviewExtra);
+		const review = buildReview(args, opts.meta ?? null, why, { ...opts.reviewExtra, note: opts.reviewExtra?.note ?? `撤回对象：${recallIds.join("、")}` });
 		state.pending.set(token, { sig, args: [...args], expiresAt: now + PENDING_TTL_MS, tier, canRemember: review.canRemember, review });
-		const preview = ["动作：撤回一条已发出的消息", "影响：⚠ 撤回后双方均不可见，不可恢复"].join("\n");
-		return { action: "pending", token, preview };
+		return { action: "pending", token, preview: formatDraft(token, args, { tier, why, review, hints: [] }) };
 	}
 
 	const isSend = matchPrefix(args, SEND_PREFIXES);
@@ -733,13 +734,49 @@ export function decideExec(
 	state.pending.set(token, { sig, args: [...args], expiresAt: now + PENDING_TTL_MS, tier, canRemember: review.canRemember, review });
 	const media = mediaKind(args);
 	const channel = dingChannel(args);
-	const preview = [
-		review.verb ? `动作：${review.verb}${review.object ? `  ${review.object}` : ""}` : null,
-		review.impact[0] ? `影响：${review.impact[0]}` : null,
-		channel && channel !== "app" ? `⚠️ 本条为${channel === "sms" ? "短信" : "电话"} DING：会产生实际费用与强打扰（默认 app 应用内 DING 免费）——确认前先与用户核对是否必要` : null,
-		media ? `本条为${media === "file" ? "文件" : "图片/音视频"}消息：不含正文——解释文字必须另发一条文本消息（--text/--markdown/--content）` : null,
-	].filter(Boolean).join("\n");
-	return { action: "pending", token, preview };
+		const hints = [
+			channel && channel !== "app" ? `⚠️ 本条为${channel === "sms" ? "短信" : "电话"} DING：会产生实际费用与强打断（默认 app 应用内 DING 免费）——确认前先与用户核对是否必要` : null,
+			media ? `本条为${media === "file" ? "文件" : "图片/音视频"}消息：不含正文——解释文字必须另发一条文本消息` : null,
+		].filter((h): h is string => Boolean(h));
+	return { action: "pending", token, preview: formatDraft(token, args, { tier, why, review, hints, flags: opts.flags ?? [] }) };
+	}
+
+/**
+ * 给 AI 的草稿回执（信息齐全版）。与给人看的面板分工：面板只写人话，草稿面向执行者写全协议——
+ * 动作/对象/影响之外，还要让 AI 看得到：完整参数（含桥自动附加的）、确认的精确重调形态、有效期与失效后果、
+ * 档位与理由、以及它可能不知道的解析行为（换行归一/DING 通道/媒体消息）。
+ */
+export function formatDraft(
+	token: string,
+	args: string[],
+	opts: { tier: Tier; why: string; review: ReturnType<typeof buildReview>; hints: string[]; flags?: string[] },
+): string {
+	const { tier, why, review, hints, flags: schemaFlags } = opts;
+	const ttlMin = Math.round(PENDING_TTL_MS / 60_000);
+	const used = new Set<string>();
+	for (const a of args) {
+		const key = a.startsWith("-") ? (a.includes("=") ? a.slice(0, a.indexOf("=")) : a) : null;
+		if (key) used.add(key.slice(key.startsWith("--") ? 2 : 1));
+	}
+	for (const g of ["format", "yes", "dry-run", "timeout", "jq", "fields"]) used.add(`(全局)${g}`);
+	const label = (f: string): string => (f.startsWith("(全局)") ? f : `--${f}`);
+	const unused = (schemaFlags ?? []).filter((f) => !used.has(f));
+	const lines = [
+		`📋 执行计划（未执行）。确认执行：带 confirm="${token}" 整个 argv 原样重调 dws_exec；草稿 ${ttlMin} 分钟有效，过期即作废（重发需重新生成草稿并重新确认）。`,
+		"",
+		`动作与对象：${[review.verb, review.object].filter(Boolean).join("  ") || "（见下）"}`,
+		...(review.content.length ? ["内容：", ...review.content.map((l) => `  ${l}`)] : []),
+		`影响：${review.impact[0] ?? "（见上）"}`,
+		`档位：${tier === "sensitive" ? "敏感（执行前会弹人工审核面板，由用户拍板）" : tier === "write" ? "写入（两阶段：确认后直接执行，不弹窗）" : "读"}——${why}`,
+		...hints.map((h) => `⚠ ${h}`),
+		"",
+		`完整参数（执行时实际下发，含桥自动附加的部分）：`,
+		...buildArgv(args).map((a) => `  ${a}`),
+	];
+	if (unused.length) {
+		lines.push("", `本命令其余可用参数（本次未用）：${schemaFlags!.map(label).join("、")}`); 
+	}
+	return lines.join("\n");
 }
 
 /** 查询类结果附当前系统时间（防沿用对话记忆中的旧日期锚点） */
@@ -1551,7 +1588,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			// 先偷看草稿（decideExec 确认时会把它删掉）：确认路径需要知道分档与审核内容
 			const peek = params.confirm ? state.pending.get(params.confirm) : undefined;
-			const decision = decideExec(args, { confirm: params.confirm, formal: params.formal, tier, meta, why }, state, cfg, Date.now());
+			const decision = decideExec(args, { confirm: params.confirm, formal: params.formal, tier, meta, why, flags: schema?.params }, state, cfg, Date.now());
 			const dryRun = isDryRun(args);
 			if (decision.action === "block") {
 				stats.blocked++;
