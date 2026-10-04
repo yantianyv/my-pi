@@ -71,6 +71,7 @@
 - 状态 key（`STATUS_STYLE` 中登记）：`task-alert`（完成闪烁帧）/`task-alert-error`/`task-alert-wait`（等待人工）/`task-alert-run`（思考中/当前工具；run 开局重置防残留，块间隙与收尾不显）。key 沿用 task-alert* 旧名（前身即 task-alert）。
 - 五音效（`~/.pi/agent/sounds/`，由 install.js 部署 static/sounds）：`task_complete`（正常结束）/`error`（stopReason=error）/`attention`（阻塞等人工）/`idle_prompt`（完成提醒后 60s 无操作，且人真的离开时才补）/`subagent_complete`（工具名 ∈ {explore, subagent, Task} 成功）。超时自动撤销提醒 600s。
 - 提示音经 `shared/presence` 在场门控：系统空闲 <20s 或任一实例 20s 内有输入 → 只闪不出声；`claimSoundSlot` 全局去重（窗口 2.5s）只响第一声。
+- **扩展侧适配纪律**（AGENTS.md「提醒适配」条目的实施细节）：① 等人 UI 不要自己做声音——pi 把 `ctx.ui.custom/select/confirm/input/editor` 全部包进 `ui_prompt_start/end`（`wrapUIPromptContext`），自绘 overlay 也自动进 waiting 告警链；② 要让 Working 行显示具体等待内容，弹层前 `waitApi()?.wait?.(text)`、结束 `wait(null)`（dingtalk 的 review-panel 与 perm-gate 两处已按此实现，`wait` 在 `ui_prompt_start`（microtask 异步 emit）之前登记即生效）；③ 子代理完成音按工具名集合自动（`SUBAGENT_TOOLS` = subagent/explore/Task，新子代理工具名要手动加进该集合）；④ 完成/出错声音只在 turn 收尾触发一次，工具级完成不响。
 - 发布 `__PI_STATUS_BEACON_API__ = { wait(text|null) }`（session_shutdown 删除）；读 pair-guard 注册表的 `work` 字段。Ctrl+C 打断不触发完成提醒：`agent_end` 记 `lastEndStopReason`，`agent_settled` 时若为 `aborted` 则跳过（零耦合，不依赖 claude-it）。
 
 ## clipboard.ts
