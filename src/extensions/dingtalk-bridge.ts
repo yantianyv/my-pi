@@ -211,7 +211,33 @@ export function parseCmdMeta(text: string): CmdMeta | null {
 	return { effect, risk: pick("risk") ?? "", confirmation: pick("confirmation") ?? "", availability: pick("availability") ?? "" };
 }
 
+/** 命令参数表（schema 的 parameters 键 = flag 名去横线的下划线形式，如 open-dingtalk-id） */
+export interface CmdSchema {
+	meta: CmdMeta;
+	params: string[];
+}
+
 /** 手写补充：会"发出去/影响他人/不可逆"但未必被 dws 标成 destructive 的命令（弹窗档位用） */
+/** 从 parameters 块提参数名（下划线形式）；非严格 JSON（尾逗号/内嵌引号）不能 json.parse，宽松扫块提取 */
+export function parseCmdParams(text: string): string[] {
+	const m = /"parameters"\s*:\s*\{/.exec(text);
+	if (!m) return [];
+	let depth = 0;
+	const names: string[] = [];
+	const re = /"([a-z0-9-]+)"\s*:\s*\{|\}/g;
+	re.lastIndex = m.index + m[0].length;
+	let mm: RegExpExecArray | null;
+	while ((mm = re.exec(text))) {
+		if (mm[1]) {
+			if (depth === 0 && !names.includes(mm[1])) names.push(mm[1]);
+			depth++;
+		} else if (depth > 0) {
+			depth--;
+			if (depth < 0) break;
+		}
+	}
+	return names;
+}
 const SENSITIVE_EXTRA: string[][] = [
 	["mail", "message", "send"], ["mail", "message", "reply"], ["mail", "message", "reply-all"], ["mail", "message", "forward"], ["mail", "sent-message", "recall"], ["mail", "message", "batch-delete"],
 	["oa", "approval", "create-instance"], ["oa", "approval", "approve"], ["oa", "approval", "reject"], ["oa", "approval", "revert-task"], ["oa", "approval", "append-task"], ["oa", "approval", "redirect-task"], ["oa", "approval", "revoke"],
@@ -552,6 +578,24 @@ function saveLedger(cfg: BridgeConfig, state: ExecState, now = Date.now()): void
 		.sort((a, b) => b.at - a.at)
 		.slice(0, 200);
 	saveJsonConfig(LEDGER_FILE, entries);
+}
+
+/** dws 全局自愿 flag：不属于命令参数表，校验时豁免（桥自动附的 format/yes + 运行控制/调试类） */
+const GLOBAL_FLAGS = new Set([
+	...VOLATILE_FLAGS, "-y", "--dry-run", "--debug", "--verbose", "--mock", "--profile", "--help", "-h", "--client-id", "--client-secret", "--webhook-token", "--identity", "--profile",
+]);
+
+/** 报出参数表里没有的 flag：参数表为空（未取到 schema）→ 空数组（fail-open，交给 dws 自己拦） */
+export function unknownFlags(args: string[], params: string[]): string[] {
+	if (!params.length) return [];
+	const known = new Set(params.map((p) => `--${p.replace(/_/g, "-")}`));
+	const out: string[] = [];
+	for (const a of args) {
+		const key = a.startsWith("-") ? (a.indexOf("=") > 0 ? a.slice(0, a.indexOf("=")) : a) : null;
+		if (key && !known.has(key) && !GLOBAL_FLAGS.has(key) && !out.includes(key)) out.push(key);
+	}
+	// 位置参数（非 flag 开头）不拦：部分命令合法收位置参数（如 contact user get --ids 无位置参数，但 drive push 有路径）
+	return out;
 }
 
 /** 消息签名：命令前缀 + 目标 + 内容相关 flag 值（剔除易变 flag），判定「同一条消息」 */
@@ -1140,32 +1184,38 @@ async function whoAmI(cfg: BridgeConfig): Promise<{ name: string; userId: string
 	return cachedSelf;
 }
 
-/** 命令元数据：本地缓存优先，未命中再问 CLI（~2.5s，只对首次出现的新命令付一次） */
-async function commandMeta(cfg: BridgeConfig, args: string[]): Promise<CmdMeta | null> {
+/** 命令元数据：本地缓存优先，未命中再问 CLI（~2.5s，只对首次出现的新命令付一次）；缓存值兼容旧版（旧值只存 meta，无参数表则不校验 flag） */
+async function commandSchema(cfg: BridgeConfig, args: string[]): Promise<CmdSchema | null> {
 	const key = cliPathOf(args);
 	if (!key) return null;
-	const cache = loadJsonConfig<Record<string, CmdMeta>>(SCHEMA_CACHE_FILE, {}, (v): v is Record<string, CmdMeta> => typeof v === "object" && v !== null);
-	if (cache[key]) return cache[key]!;
+	const cache = loadJsonConfig<Record<string, CmdSchema>>(SCHEMA_CACHE_FILE, {}, (v): v is Record<string, CmdSchema> => typeof v === "object" && v !== null);
+	const hit = cache[key];
+	if (hit && Array.isArray(hit.params)) return hit;
 	try {
 		const r = await runDws(cfg, ["schema", "--cli-path", key, "--compact", "--format", "json"]);
-		if (r.timedOut || r.code !== 0) return null;
-		const meta = parseCmdMeta(r.stdout || r.stderr);
-		if (meta) {
-			cache[key] = meta;
-			saveJsonConfig(SCHEMA_CACHE_FILE, cache);
+		if (r.timedOut || r.code !== 0) {
+			// 旧缓存尚存 meta 时沿用，别让一次网络抖动丢掉已知的分档
+			return hit && hit.meta ? { ...hit, params: [] } : null;
 		}
-		return meta;
+		const text = r.stdout || r.stderr;
+		const meta = parseCmdMeta(text);
+		if (!meta) return hit && hit.meta ? { ...hit, params: hit.params ?? [] } : null;
+		const schema: CmdSchema = { meta, params: parseCmdParams(text) };
+		cache[key] = schema;
+		saveJsonConfig(SCHEMA_CACHE_FILE, cache);
+		return schema;
 	} catch {
-		return null;
+		return hit && hit.meta ? { ...hit, params: hit.params ?? [] } : null;
 	}
 }
 
 /** 分档：明显只读的直接放行，其余问元数据（取不到就当写入，宁多一次确认不放过写操作） */
-async function classifyCommand(cfg: BridgeConfig, args: string[]): Promise<{ tier: Tier; why: string; meta: CmdMeta | null }> {
-	if (presumedRead(args)) return { tier: "read", why: "只读", meta: null };
-	const meta = await commandMeta(cfg, args);
+async function classifyCommand(cfg: BridgeConfig, args: string[]): Promise<{ tier: Tier; why: string; meta: CmdMeta | null; schema: CmdSchema | null }> {
+	if (presumedRead(args)) return { tier: "read", why: "只读", meta: null, schema: null };
+	const schema = await commandSchema(cfg, args);
+	const meta = schema?.meta ?? null;
 	const { tier, why } = tierOf(args, meta);
-	return { tier, why: meta ? why : `${why}`, meta };
+	return { tier, why: meta ? why : `${why}`, meta, schema };
 }
 
 /** 「记住这类操作」按 cli_path 记（稳定、可解释，比正则好维护） */
@@ -1465,7 +1515,7 @@ export default function (pi: ExtensionAPI) {
 		label: "钉钉执行",
 		description:
 			"执行钉钉 dws CLI 命令。args 为完整子命令的 argv 数组（不含 dws 本身），如 [\"chat\", \"+dm\", \"--to\", \"<userId>\", \"--content\", \"【AI发送】…\"]；" +
-			"数组直传不过 shell，内容含空格/引号/换行都安全。自动附加 --format json 与 --yes。命令用法先用 dws_schema 查。" +
+			"数组直传不过 shell，内容含空格/引号/换行都安全。自动附加 --format json 与 --yes；写/敏感命令在生成草稿前按 schema 参数表校验 flag，未知 flag 直接拒绝（同类命令参数名不一定相同，先 dws_schema 查）。" +
 			"读操作直通；写操作两阶段：首次只回执行计划（不执行），带 confirm 重调即执行。" +
 			"破坏性与对外发出内容（发送/群发/转发/撤回/删除等）在执行前弹窗请用户本人确认，无界面会话直接拒绝。" +
 			"发送缺【AI发送】标签、目标为中文姓名、同内容重复发送都会被拒；--dry-run 只读预演。",
@@ -1486,7 +1536,19 @@ export default function (pi: ExtensionAPI) {
 					return text(`🚫 待发文件不存在：${f}（--file 需为工作目录内相对路径；当前目录 ${baseDir}）`, { kind: "blocked" });
 				}
 			}
-			const { tier, why, meta } = await classifyCommand(cfg, args);
+			const { tier, why, meta, schema } = await classifyCommand(cfg, args);
+			// 草稿前 flag 校验：unknown flag 不生成草稿、不弹窗——dws 草稿阶段不验参数，带 confirm 才炸（假信号）
+			if (!params.confirm) {
+				// 读直通不校验（无后果，dws 自拦）；写/敏感档用刚拿到的参数表拦
+				const bad = tier === "read" ? [] : unknownFlags(args, schema?.params ?? []);
+				if (bad.length) {
+					stats.blocked++;
+					return text(
+						`🚫 flag 与参数表不符（未生成草稿、未执行）：${bad.join("、")}\n\n本命令可用参数：${schema?.params.map((p) => `--${p}`).join("、") || "（未取到）"}\n\n先用 dws_schema 查正确参数再重调；同类命令参数名不一定相同（如群发用 --to/--content，单发用 --open-dingtalk-id/--markdown）。`,
+						{ kind: "blocked" },
+					);
+				}
+			}
 			// 先偷看草稿（decideExec 确认时会把它删掉）：确认路径需要知道分档与审核内容
 			const peek = params.confirm ? state.pending.get(params.confirm) : undefined;
 			const decision = decideExec(args, { confirm: params.confirm, formal: params.formal, tier, meta, why }, state, cfg, Date.now());
@@ -1902,4 +1964,6 @@ export const __test__ = {
 	QUERY_PREFIXES,
 	sendSignature,
 	flagValues,
+	parseCmdParams,
+	unknownFlags,
 };

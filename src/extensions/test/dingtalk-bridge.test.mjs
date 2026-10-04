@@ -47,7 +47,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -427,6 +427,31 @@ console.log("AB、命令分档（读 / 写 / 敏感）");
 	check("发送类无元数据也 sensitive", tierOf(["chat", "+dm", "--to", "u1"], null).tier === "sensitive" && tierFromTables(["chat", "+broadcast"]) === "sensitive");
 	check("普通写入 → write（只两阶段，不弹窗）", tierOf(["todo", "task", "create"], { effect: "write", risk: "low", confirmation: "not_required", availability: "available" }).tier === "write");
 	check("取不到元数据 → 当写入处理", tierOf(["unknown", "thing"], null).tier === "write");
+}
+
+// 场景 AG：草稿前 flag 校验（unknownFlags / parseCmdParams）
+{
+	const compact = [
+		'{ \n  "cli_path": "chat +messages-send", "effect": "write", "risk": "medium", "confirmation": "user_required", "availability": "available",',
+		'  "parameters": {',
+		'    "ai-tag": { "type": "boolean" },',
+		'    "as": { "type": "string" },',
+		'    "at-open-dingtalk-ids": { "type": "array" },',
+		'    "markdown": { "type": "string", "required": false, "description": "正文，内嵌 \\"引号\\" 也没事" },',
+		'    "open-dingtalk-id": { "type": "string", "required": false },',
+		'    "open-dingtalk-ids": { "type": "array" },',
+		'    "user": { "type": "string" },',
+		'  },',
+		'  "risk2": 1,',
+		'}',
+	].join("\n");
+	const params = parseCmdParams(compact);
+	check("参数名提取（限 parameters 块，容忍内嵌引号与尾逗号）", params.includes("markdown") && params.includes("open-dingtalk-id") && !params.includes("risk2"), JSON.stringify(params));
+	check("flag 拦截：群发参数用到单发命令", (() => { const bad = unknownFlags(["chat", "+messages-send", "--to", "u1", "--content", "【AI发送】x", "--open-dingtalk-id", "d1"], params); return bad.includes("--to") && bad.includes("--content") && !bad.includes("--open-dingtalk-id"); })(), JSON.stringify(unknownFlags(["--to"], params)));
+	check("合法 flag 全放行", unknownFlags(["chat", "+messages-send", "--open-dingtalk-id", "d1", "--markdown", "【AI发送】x", "--ai-tag=false"], params).length === 0, JSON.stringify(unknownFlags(["--open-dingtalk-id", "d1", "--markdown", "x"], params)));
+	check("= 形式也认", unknownFlags(["--markdown=x", "--open-dingtalk-id=y"], params).length === 0, JSON.stringify(unknownFlags(["--open-dingtalk-id=y", "--markdown=x"], params)));
+	check("全局 flag 豁免（dry-run/timeout/format 等）", unknownFlags(["--dry-run", "--timeout", "90", "--format", "json", "--unknown-x"], params).join() === "--unknown-x", JSON.stringify(unknownFlags(["--dry-run", "--unknown-x"], params)));
+	check("参数表为空 → 不拦（fail-open，交给 dws）", unknownFlags(["chat", "+messages-send", "--to", "x"], []).length === 0);
 }
 
 console.log("AC、人工审核文案（只给人看的信息）");
