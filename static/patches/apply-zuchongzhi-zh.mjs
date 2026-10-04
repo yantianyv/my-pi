@@ -16,6 +16,8 @@
  *   - login-dialog.js        登录对话框（提示 fallback 文本）
  *   - trust-selector.js      项目信任选择器
  *   - config-selector.js     /config 资源配置器（扩展/技能/主题等节名）
+ *   - settings-submenu.js    settings 子菜单（底部提示行）
+ *   - scoped-models-selector.js  /model scoped 模型配置器
  *   - footer.js              底部状态栏（no-model / thinking off / sub / auto）
  *   - interactive-mode.js    命令反馈、usage 信息面板、警告提示（~152 条，含底部快捷键提示）
  *   - session-share.js       /share 会话分享（gh gist 上传流程，0.85.1 从
@@ -26,7 +28,7 @@
  *                                主界面 UI 全在压缩 chunks 里——全表并集（仅引号条目）逐 chunk 替换；
  *                                压缩产物把非 ASCII 转义成 \xNN 序列，这类条目放 BUNDLE_EXTRA 单独配表
  *   - dist/modes/interactive/*   未打包构建，只服务扩展经包导入（exports "." → dist/index.js）
- *   - pi-tui/dist/components/*   扩展经 @earendil-works/pi-tui 导入渲染的组件（PATCHES_TUI）
+ *   - pi-tui/dist/components/*   扩展经 @earendil-works/pi-tui 导入渲染的组件（PATCHES_TUI，暂空）
  *
  * 安全策略（逐个核对过 dist 源码上下文，见上方替换表注释）：
  *   1. 只替换首字母大写的 UI 展示文案（label/标题/描述/提示）；
@@ -188,11 +190,17 @@ const PATCHES = {
 	"components/session-selector.js": [
 		["Cannot delete the currently active session", "无法删除当前活动会话"],
 		["Resume Session (Current Folder)", "恢复会话（当前文件夹）"],
+		["○ Current Folder | ", "○ 当前文件夹 | "],
+		["◉ Current Folder", "◉ 当前文件夹"],
 		["Resume Session (All)", "恢复会话（全部）"],
 		["Session moved to trash", "会话已移入回收站"],
+		["  No sessions in current folder. Press Tab to view all.", "  当前文件夹中没有会话。按 Tab 查看全部。"],
+		["  No sessions found", "  未找到会话"],
 		["Rename Session", "重命名会话"],
 		["Session deleted", "会话已删除"],
 		["Current folder", "当前文件夹"],
+		[" | ○ All", " | ○ 全部"],
+		["◉ All", "◉ 全部"],
 		["Name: ", "名称："],
 		["Sort: ", "排序："],
 		["Threaded", "线程化"],
@@ -204,6 +212,7 @@ const PATCHES = {
 	],
 	// ---- /tree 树选择器 ----
 	"components/tree-selector.js": [
+		["  Session Tree", "  会话树"],
 		["context edit", "上下文编辑"],
 		["label time", "标签时间"],
 		["Label (empty to remove):", "标签（留空删除）："],
@@ -214,11 +223,23 @@ const PATCHES = {
 	],
 	// ---- /model 模型选择器 ----
 	"components/model-selector.js": [
+		["  No matching models", "  没有匹配的模型"],
 		["Model refresh timed out; showing cached models.", "模型刷新超时；正在显示缓存的模型。"],
 		["Model catalogs refreshed.", "模型目录已刷新。"],
 		["Only showing models from configured providers. Use /login to add providers.", "仅显示已配置提供商的模型。使用 /login 添加提供商。"],
 		["Scope: ", "范围："],
 		["no results", "无结果"],
+	],
+	// ---- /model scoped 模型配置器 ----
+	"components/scoped-models-selector.js": [
+		["  No matching models", "  没有匹配的模型"],
+		["Model Configuration", "模型配置"],
+		["Model unavailable", "模型不可用"],
+	],
+	// ---- settings 子菜单（底部提示行；文件里 · 写作字面 \u00b7 转义）----
+	"components/settings-submenu.js": [
+		["  Type to filter \\u00b7 Enter to select \\u00b7 Esc to go back", "  输入以筛选 · Enter 选择 · Esc 返回"],
+		["  Enter to select \\u00b7 Esc to go back", "  Enter 选择 · Esc 返回"],
 	],
 	// ---- 登录对话框：keyHint 的英文 fallback（快捷键找不到时显示），替换后为 "(esc 取消)" 形式 ----
 	"components/login-dialog.js": [
@@ -388,19 +409,23 @@ const PATCHES = {
 	],
 };
 
-// ---- pi-tui 未打包组件（扩展经 @earendil-works/pi-tui 包导入渲染的列表；主 CLI 用的是 bundle 内副本，由下方并集覆盖）----
-const PATCHES_TUI = {
-	"components/settings-list.js": [
-		["  Type to search · Enter/Space to change · Esc to cancel", "  输入以搜索 · Enter/空格 修改 · Esc 取消"],
-		["  Enter/Space to change · Esc to cancel", "  Enter/空格 修改 · Esc 取消"],
-	],
-};
+// ---- pi-tui 未打包组件（扩展经包导入渲染时与主 CLI 共用同一替换思路；1.0.1 起
+//      settings-list 提示行移到主包 settings-submenu.js，暂无可替换条目）----
+const PATCHES_TUI = {};
 
-// ---- 仅 bundle 并集使用的条目：压缩产物把非 ASCII 字符转义成了 \xNN 字面序列，
-//      与未打包文件里的原始字符不是同一串，需单独配表（打进 chunk 后译文写原始字符即可）----
+// ---- 仅 bundle 并集使用的条目：一是不存在于 dist/modes 的新版文案；二是压缩产物把非 ASCII
+//      转义成 \xNN/\uNNNN 字面序列的条目（打进 chunk 后译文写原始字符即可）----
 const BUNDLE_EXTRA = [
 	["  Type to search \\xB7 Enter/Space to change \\xB7 Esc to cancel", "  输入以搜索 · Enter/空格 修改 · Esc 取消"],
 	["  Enter/Space to change \\xB7 Esc to cancel", "  Enter/空格 修改 · Esc 取消"],
+	["  Type to filter \\xB7 Enter to select \\xB7 Esc to go back", "  输入以筛选 · Enter 选择 · Esc 返回"],
+	["  Enter to select \\xB7 Esc to go back", "  Enter 选择 · Esc 返回"],
+	["\\u25CB Current Folder | ", "○ 当前文件夹 | "],
+	["\\u25C9 Current Folder", "◉ 当前文件夹"],
+	[" | \\u25CB All", " | ○ 全部"],
+	["\\u25C9 All", "◉ 全部"],
+	["Resume a different session", "恢复其他会话"],
+	["Resume a session", "恢复会话"],
 ];
 
 /** 探测 pi 安装根目录（含 dist/modes/interactive/ 的包根）。 */
@@ -505,13 +530,34 @@ function main() {
 	let totalMissing = 0;
 	const missingReports = [];
 	let syntaxError = null;
+	// 跨全部目标文件共享命中记录：只有任何文件都没命中的条目才报零命中，
+	// 避免「只在 modes / 只在 bundle」的结构性误报
+	const hitMap = new Map();
+
+	// 全表并集（仅引号条目，无引号/含转义序列的条目按目标形态单独配表，不扩散）
+	const unionAll = new Map();
+	for (const table of [PATCHES, PATCHES_TUI]) {
+		for (const entries of Object.values(table)) {
+			for (const [from, to, quoted = true] of entries) {
+				if (!quoted) continue;
+				if (from.includes("\\")) continue;
+				const prev = unionAll.get(from);
+				if (prev !== undefined && prev !== to) {
+					syntaxError = `并集冲突: ${JSON.stringify(from)} 存在两个译文`;
+					break;
+				}
+				unionAll.set(from, to);
+			}
+		}
+	}
+	for (const [from, to] of BUNDLE_EXTRA) unionAll.set(from, to);
 
 	/**
 	 * 对单个文件应用替换表：状态跳过 / 按原文长度降序替换 / 缺失记录 / 语法校验 / 备份写盘。
-	 * reportMissing=false 时不记缺失（bundle chunk 共享并集表，单 chunk 缺条目属正常）；
-	 * hitMap 传入时记录每条命中数（供并集零命中统计）。返回 false 表示语法错误中止。
+	 * reportMissing=false 时不记缺失（bundle chunk 共享并集表，单 chunk 缺条目属正常）。
+	 * 命中数记入外层共享的 hitMap。返回 false 表示语法错误中止。
 	 */
-	function applyToFile(absPath, entries, backupRel, label, { reportMissing = true, hitMap = null } = {}) {
+	function applyToFile(absPath, entries, backupRel, label, { reportMissing = true } = {}) {
 		if (!fs.existsSync(absPath)) {
 			console.warn(`⚠ 文件不存在（pi 版本可能已变动）: ${label}`);
 			return true;
@@ -544,7 +590,7 @@ function main() {
 				if (reportMissing && !src.includes(needle)) missing.push(from);
 			} else {
 				replaced += count;
-				if (hitMap) hitMap.set(from, (hitMap.get(from) ?? 0) + count);
+				hitMap.set(from, (hitMap.get(from) ?? 0) + count);
 			}
 		}
 
@@ -578,6 +624,7 @@ function main() {
 	}
 
 	for (const [rel, entries] of Object.entries(PATCHES)) {
+		if (syntaxError) break;
 		if (!applyToFile(path.join(interactiveDir, rel), entries, rel, rel)) break;
 	}
 
@@ -591,44 +638,25 @@ function main() {
 
 	// 1.0.0 起 CLI 入口是 dist/bundle/cli.js（package.json 的 bin 指向它），主界面 UI 代码
 	// 在压缩 chunks 里；dist/modes 与 pi-tui/dist 只服务扩展导入。字符串字面量在压缩后
-	// 原样保留，故把全表并集（仅引号条目）打到每个 chunk。
+	// 原样保留，故把全表并集打到每个 chunk。
 	if (!syntaxError) {
 		const chunksDir = path.join(root, "dist", "bundle", "chunks");
 		if (fs.existsSync(chunksDir)) {
-			const union = new Map();
-			for (const table of [PATCHES, PATCHES_TUI]) {
-				for (const entries of Object.values(table)) {
-					for (const [from, to, quoted = true] of entries) {
-						if (!quoted) continue; // 无引号条目针对特定模板上下文，不扩散到压缩产物
-						const prev = union.get(from);
-						if (prev !== undefined && prev !== to) {
-							syntaxError = `并集冲突: ${JSON.stringify(from)} 存在两个译文`;
-							break;
-						}
-						union.set(from, to);
-					}
-				}
+			for (const file of fs.readdirSync(chunksDir)) {
+				if (!file.endsWith(".js")) continue;
+				const rel = path.join("chunks", file);
+				if (!applyToFile(path.join(chunksDir, file), [...unionAll.entries()], path.join("bundle", rel), `bundle/${rel.replaceAll(path.sep, "/")}`, { reportMissing: false })) break;
 			}
-			for (const [from, to] of BUNDLE_EXTRA) union.set(from, to);
-			if (!syntaxError) {
-				const hitMap = new Map();
-				let processed = 0;
-				for (const file of fs.readdirSync(chunksDir)) {
-					if (!file.endsWith(".js")) continue;
-					const rel = path.join("chunks", file);
-					const before = totalSkipped;
-					if (!applyToFile(path.join(chunksDir, file), [...union.entries()], path.join("bundle", rel), `bundle/${rel.replaceAll(path.sep, "/")}`, { reportMissing: false, hitMap })) break;
-					if (totalSkipped === before) processed++;
-				}
-				if (!syntaxError && processed > 0) {
-					const zeroHit = [...union.keys()].filter((k) => !hitMap.has(k));
-					if (zeroHit.length > 0) {
-						console.log(`ℹ 并集 ${union.size} 条中 ${zeroHit.length} 条在 bundle 未命中（可能只在 dist/modes 或文案已变）:`);
-						for (const k of zeroHit.slice(0, 20)) console.log(`    - ${JSON.stringify(k)}`);
-						if (zeroHit.length > 20) console.log(`    … 等 ${zeroHit.length} 条`);
-					}
-				}
-			}
+		}
+	}
+
+	// 零命中报告：条目在任何目标文件（modes / pi-tui / bundle）都没命中才算数
+	if (!syntaxError) {
+		const zeroHit = [...unionAll.keys()].filter((k) => !hitMap.has(k));
+		if (zeroHit.length > 0) {
+			console.log(`ℹ ${unionAll.size} 条中 ${zeroHit.length} 条在所有目标文件均未命中（pi 升级后文案已变？可清理）:`);
+			for (const k of zeroHit.slice(0, 20)) console.log(`    - ${JSON.stringify(k)}`);
+			if (zeroHit.length > 20) console.log(`    … 等 ${zeroHit.length} 条`);
 		}
 	}
 
