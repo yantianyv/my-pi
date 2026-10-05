@@ -73,7 +73,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 ## 注意事项
 
 - **改完不重装不生效**：源码在 `src/extensions/`，运行时是 `~/.pi/agent/extensions/` 的副本（dist 产物），两处易不同步。流程：改 `src/extensions/` → `node src/build.js` → `node install.js`（或一步 `node install.js`）→ pi 内 `/reload`。只改静态资源（主题色、提示音）可 `node install.js --skip-build`。
-- **install.js 会改用户全局文件/目录**（`~/.pi/agent/` 下 settings.json 的 theme + hideThinkingBlock + packages、models.json、AGENTS.md 标记块、extensions 并删历史扩展、vendor 并删已移除包、themes/sounds/skills、rtk 二进制、全局 npm）；先跑 `--dry-run` 预览。models.json 是深度合并（模板键为准），用户文件 JSON 解析失败会被模板覆盖。
+- **install.js 会改用户全局文件/目录**（`~/.pi/agent/` 下 settings.json 的 theme + hideThinkingBlock + packages、models.json、AGENTS.md 标记块、extensions 并删历史扩展、vendor 并删已移除包、themes/sounds/skills、rtk 二进制、全局 npm；Linux 另写 `~/.config/fontconfig/conf.d/99-pi-symbols.conf` 修符号字形回退）；先跑 `--dry-run` 预览。models.json 是深度合并（模板键为准），用户文件 JSON 解析失败会被模板覆盖。
 - `static/patches/` 三个补丁**不由 install.js 执行**，需手工 `node static/patches/<脚本>.mjs`；pi 升级后都要重跑（祖冲之脚本重跑即自动收敛）。
 - `src/config/tsconfig.json` 是 install.js 生成物（gitignore）：`npm root -g` 探测失败会回落常见全局目录候选，全找不到才跳过生成并给出提示。换机器/pi 升级重跑 `node install.js` 即可。
 - **`tool_result` 钩子改写 content 必须透传 `structuredContent`**（`structuredContent: event.structuredContent`）：pi ≥ 0.99 的 runner 见到 content 被替换而未带 structuredContent 会丢弃它。img-slim / pair-guard 已遵此约束。

@@ -7,7 +7,8 @@
  *   2. 检测 pi 本体（@earendil-works/pi-coding-agent），缺失则自动 npm i -g
  *   3. 检测构建依赖（src/package.json 声明清单 vs src/node_modules 实况全量比对，不只查 esbuild），缺失则自动 npm install（src/ 下）
  *   4. 自动构建扩展产物（src/build.js → dist/extensions/）
- *   5. 安装配置到 ~/.pi/agent/（扩展/主题/提示音/skills/models.json/settings）
+ *   5. 安装配置到 ~/.pi/agent/（扩展/主题/提示音/skills/models.json/settings）；
+ *      Linux 上另生成 ~/.config/fontconfig/conf.d/99-pi-symbols.conf（符号字形回退修复，见 installFontFallback）
  *   6. 可选依赖 rtk 二进制（pi-rtk-optimizer 的命令改写引擎）：PATH 上缺失时询问并自动
  *      下载安装（按平台选 release 资产，GitHub 直连优先、加速镜像回落，checksums.txt 校验；
  *      失败不阻塞安装，插件侧安全降级）
@@ -23,6 +24,9 @@
  *   static/models.json → ~/.pi/agent/models.json  （OpenRouter 路由等模型配置，已存在则深度合并）
  *   static/AGENTS.md   → ~/.pi/agent/AGENTS.md    （全局输出受众纪律：标记块合并，块外用户手写内容保留）
  * 并把 settings.json 的 theme 设为本项目主题。
+ *
+ * Linux 额外一步（installFontFallback）：生成 fontconfig 规则，把系统等宽字体缺的非 CJK 符号
+ * （块元素/几何图形/箭头等）钉给 DejaVu Sans Mono，避免回退到比例字体或 CJK 字体后字形高度不一。
  *
  * 用法：
  *   node install.js               交互式安装（每一步询问确认，默认 yes）
@@ -57,6 +61,18 @@ const VENDOR_DST = path.join(PI_AGENT, "vendor");
 // 已删除的自研扩展（src/extensions/ 中删除源码后，install 时同步清理已安装的 stale 副本，
 // 避免与 vendor 版命令/工具冲突，如 /btw、bash 输出 hook）
 const LEGACY_REMOVED_EXTENSIONS = ["explore-agent.ts", "token-saver.ts", "webui.ts", "paste-image.ts", "task-alert.ts", "btf-think.ts", "mimo-media.ts"]; // task-alert.ts 改名 status-beacon.ts（全链路状态感知）；btf-think 已删除（其折叠标签动画未保留，pi 默认静态标签 + Working 行行首 pi 自带 spinner）
+
+// ── 字体回退修复（仅 Linux）──
+// 系统等宽字体（如 Ubuntu Sans Mono）只有 █░▒▓ 四个块元素，sparkline 的 ▁▂▃▄▅▆▇、余额条的 ▰▱、
+// ▲▼○● 等都要回退：fontconfig 会挑中比例字体（DejaVu Sans）或 CJK 字体（Noto Sans CJK），
+// 后者字形高 1.2em 越格、前者与后者基线也不同，于是同一条进度条里实心/空心一高一矮。
+// 这里生成 per-codepoint 规则，把「等宽字体缺、回退字体有」的非 CJK 符号钉给 DejaVu Sans Mono——
+// 实测唯一所有字形都恰好占满一格、且成对字形（▰▱）等高同基线的候选。
+const FONTCONF_DST = path.join(os.homedir(), ".config", "fontconfig", "conf.d", "99-pi-symbols.conf");
+const FONT_FALLBACK_FAMILY = "DejaVu Sans Mono";
+// 覆盖范围：终端与 pi 界面会用到的非 CJK 符号区。CJK 汉字/标点、全角区、私用区（Nerd Font 图标）
+// 不在内——它们本该由 CJK 字体渲染，钉给 DejaVu Sans Mono 反而会丢字形或撑错宽度。
+const FONT_SYMBOL_RANGES = [[0x2000, 0x2bff], [0x2e00, 0x2e7f], [0x1f300, 0x1faff]];
 
 const THEME_NAME = "matrix"; // 默认启用的主题（对应 static/themes/matrix.json）
 const PI_PACKAGE = "@earendil-works/pi-coding-agent"; // pi 本体包名
@@ -645,6 +661,116 @@ function generateTsconfig() {
 	if (!dryRun) fs.writeFileSync(outPath, out, "utf8");
 }
 
+/** 执行外部查询命令；命令不存在或报错返回 null（供整步静默跳过）。 */
+function probe(cmd, args) {
+	try {
+		const r = spawnSync(cmd, args, { encoding: "utf8" });
+		if (r.status !== 0 || !r.stdout) return null;
+		const out = r.stdout.trim();
+		return out === "" ? null : out;
+	} catch {
+		return null;
+	}
+}
+
+/** 终端实际在用的等宽字体族名：gnome-terminal 显式配置 > 系统等宽字体 > fontconfig 的 monospace 别名。 */
+function terminalFontFamily() {
+	const strip = (s) => (s ? s.replace(/^['"]|['"]$/g, "").replace(/\s+\d+(\.\d+)?$/, "") : null);
+	const profiles = probe("gsettings", ["get", "org.gnome.Terminal.ProfilesList", "default"]);
+	const id = profiles ? profiles.replace(/['\s]/g, "") : null;
+	if (id) {
+		const profile = `/org/gnome/terminal/legacy/profiles:/:${id}/`;
+		// use-system-font 未设置时默认 true（跟随系统等宽字体），此处只在显式设为 false 时读专有字体
+		if ((probe("dconf", ["read", `${profile}use-system-font`]) ?? "").includes("false")) {
+			const family = strip(probe("dconf", ["read", `${profile}font`]));
+			if (family) return family;
+		}
+	}
+	return strip(probe("gsettings", ["get", "org.gnome.desktop.interface", "monospace-font-name"])) ?? "monospace";
+}
+
+/** 字体族/文件名 → 字体文件路径；fontconfig 不可用时返回 null。 */
+function resolveFontFile(pattern) {
+	return probe("fc-match", ["-f", "%{file}", pattern]);
+}
+
+/** 解析 fontconfig 的 charset 输出（形如 "20-7e a0-10a5"）为码点数组。 */
+function parseCharset(text) {
+	const cps = [];
+	for (const part of (text ?? "").split(/[\s,]+/)) {
+		if (!part) continue;
+		const [a, b] = part.split("-");
+		const lo = parseInt(a, 16);
+		if (!Number.isFinite(lo)) continue;
+		const hi = b ? parseInt(b, 16) : lo;
+		for (let c = lo; c <= hi; c++) cps.push(c);
+	}
+	return cps;
+}
+
+/**
+ * Linux：生成 fontconfig 规则，把终端等宽字体缺的非 CJK 符号钉给 DejaVu Sans Mono。
+ * 覆盖范围随本地字体覆盖情况现场计算，幂等（内容不变不重写）；非 Linux / 无 fontconfig / 无需处理时跳过。
+ */
+function installFontFallback() {
+	if (process.platform !== "linux") return;
+	const family = terminalFontFamily();
+	const monoFile = resolveFontFile(family);
+	const fallbackFile = resolveFontFile(FONT_FALLBACK_FAMILY);
+	if (!monoFile || !fallbackFile) {
+		log("跳过字体回退修复（无 fontconfig 或字体查询失败）");
+		return;
+	}
+	if (path.resolve(monoFile) === path.resolve(fallbackFile)) {
+		log(`字体回退修复无需处理（终端字体已是 ${FONT_FALLBACK_FAMILY}）`);
+		return;
+	}
+	const monoSet = new Set(parseCharset(probe("fc-list", ["-f", "%{charset}", `:file=${monoFile}`])));
+	const fallbackSet = new Set(parseCharset(probe("fc-list", ["-f", "%{charset}", `:file=${fallbackFile}`])));
+	// 读不到终端字体覆盖范围时不敢乱钉：会把该字体已有的字形也抢过来
+	if (monoSet.size === 0 || fallbackSet.size === 0) {
+		log("跳过字体回退修复（读取字体覆盖范围失败）");
+		return;
+	}
+	const pinned = [];
+	for (const [lo, hi] of FONT_SYMBOL_RANGES) {
+		for (let c = lo; c <= hi; c++) if (fallbackSet.has(c) && !monoSet.has(c)) pinned.push(c);
+	}
+	if (pinned.length === 0) {
+		log(`字体回退修复无需处理（${family} 已覆盖全部符号区）`);
+		return;
+	}
+	const lines = [
+		'<?xml version="1.0"?>',
+		'<!DOCTYPE fontconfig SYSTEM "fonts.dtd">',
+		"<!-- 由 my_pi install.js 生成，重跑安装会覆盖本文件。",
+		`     ${family} 不含这些符号时，fontconfig 会回退到比例字体或 CJK 字体（字形高约 1.2em，越出格子且基线不同），`,
+		`     使同一条进度条里实心与空心字形一高一矮；改由 ${FONT_FALLBACK_FAMILY} 统一提供。 -->`,
+		"<fontconfig>",
+	];
+	for (const c of pinned) {
+		lines.push(
+			'\t<match target="pattern">',
+			`\t\t<test name="charset" compare="contains"><charset><int>0x${c.toString(16)}</int></charset></test>`,
+			`\t\t<edit name="family" mode="prepend" binding="strong"><string>${FONT_FALLBACK_FAMILY}</string></edit>`,
+			"\t</match>",
+		);
+	}
+	lines.push("</fontconfig>", "");
+	const content = lines.join("\n");
+	const existing = fs.existsSync(FONTCONF_DST) ? fs.readFileSync(FONTCONF_DST, "utf8") : null;
+	if (existing === content) {
+		log(`字体回退修复已是最新（${pinned.length} 个符号 → ${FONT_FALLBACK_FAMILY}）`);
+		return;
+	}
+	log(`字体回退修复：${family} 缺的 ${pinned.length} 个非 CJK 符号改由 ${FONT_FALLBACK_FAMILY} 提供 → ${FONTCONF_DST}`);
+	if (!dryRun) {
+		fs.mkdirSync(path.dirname(FONTCONF_DST), { recursive: true });
+		fs.writeFileSync(FONTCONF_DST, content, "utf8");
+		log("  需新开终端窗口/标签才生效（运行中的终端不会重读字体配置）");
+	}
+}
+
 async function main() {
 	console.log(`pi 一键环境安装 → ${PI_AGENT}\n`);
 
@@ -699,6 +825,7 @@ async function main() {
 	installModelsJson();
 	await installAgentsMd();
 	generateTsconfig();
+	installFontFallback();
 
 	// 5. 可选依赖 rtk（失败不阻塞）；dry-run 下只预览
 	await ensureRtk();

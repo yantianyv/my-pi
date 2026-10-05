@@ -2,7 +2,7 @@
 
 ## install.js（仓库根目录唯一安装入口）
 
-单文件向导，`main()` 顺序：环境检测 → `ensurePi` → `ensureDeps`+（询问后）构建 → 安装确认 → copyDir 各目录 → `installVendor` → `removeLegacyExtensions` → `applySettings` → `installModelsJson` → `installAgentsMd` → `generateTsconfig` → `ensureRtk`（rtk 在最后询问下载）。
+单文件向导，`main()` 顺序：环境检测 → `ensurePi` → `ensureDeps`+（询问后）构建 → 安装确认 → copyDir 各目录 → `installVendor` → `removeLegacyExtensions` → `applySettings` → `installModelsJson` → `installAgentsMd` → `generateTsconfig` → `installFontFallback`（仅 Linux）→ `ensureRtk`（rtk 在最后询问下载）。
 所有写操作都有 `dryRun` 守卫；`confirm()` 在 `--dry-run` / `-y` / 非 TTY 三态下短路为默认值。
 
 CLI 参数（仅 4 个）：`--dry-run`/`-n`、`--skip-build`、`-y`/`--yes`（非 TTY 自动等价）、（无位置参数）。`ROOT = __dirname`，任意目录下 `node <绝对路径>/install.js` 均可。
@@ -17,12 +17,25 @@ CLI 参数（仅 4 个）：`--dry-run`/`-n`、`--skip-build`、`-y`/`--yes`（�
 | `~/.pi/agent/settings.json` | `applySettings` 写 `theme="matrix"` 与 `hideThinkingBlock=true`（硬置）；`registerVendorPackages` 写 `packages` |
 | `~/.pi/agent/models.json` | 不存在则写模板；存在则 `deepMerge(existing, repo)`（模板键为 override、只增不删，保留用户手改的其他 provider）；**用户文件 JSON 解析失败会用仓库模板覆盖**，坏内容丢失 |
 | `~/.pi/agent/AGENTS.md` | static/AGENTS.md 包进 `<!-- my_pi:begin -->…<!-- my_pi:end -->` 标记块写入；块外用户手写内容保留；已有无标记块文件时交互询问追加（`-y` 默认追加） |
+| `~/.config/fontconfig/conf.d/99-pi-symbols.conf` | 仅 Linux：`installFontFallback` 生成的符号字形回退规则（终端等宽字体缺的非 CJK 符号钉给 DejaVu Sans Mono）；幂等，内容不变不重写 |
 | 全局 npm | pi 缺失时 `npm i -g @earendil-works/pi-coding-agent` |
 | `src/node_modules/` | `ensureDeps` 按 src/package.json 清单全量比对，任一缺失即 `npm install` |
 | rtk 二进制 | 按平台下载 GitHub release（直连优先、gh-proxy 镜像回落、checksums.txt 校验）；Windows → `%APPDATA%\npm\`，Unix 优先 `~/.local/bin`，否则 `~/.pi/agent/bin` |
 | `src/config/tsconfig.json` | `generateTsconfig` 探测 `npm root -g` 替换模板 `__PI_ROOT__`；模板缺失或探测失败只打 log **静默跳过**（不报错） |
 
 vendor 包若有运行时 `dependencies`：`npm install --omit=dev --no-audit --no-fund`，失败 `process.exit(1)` 中断整个安装。
+
+### installFontFallback（Linux 符号字形回退修复）
+
+系统等宽字体常缺块元素/几何图形（如 Ubuntu Sans Mono 只有 `█░▒▓`，没有 `▁▂▃▄▅▆▇` `▰▱` `▲▼○●`）。缺字形时 fontconfig 会回退到比例字体（DejaVu Sans）或 CJK 字体（Noto Sans CJK，字形高约 1.2em 越出格子、基线也不同），HUD 余额条 `▰▱` 与 sparkline 就会一高一矮。本步生成 fontconfig 规则把这类符号钉给 **DejaVu Sans Mono**——唯一所有字形恰好占满一格、且成对字形（`▰▱`）等高同基线的候选（Noto Sans Mono / Noto Sans Symbols2 / Noto Sans CJK 都把 `▰▱` 画成两格宽，会把进度条撑歪）。
+
+- 覆盖集现场计算：`terminalFontFamily()` 取 gnome-terminal 专有字体（`use-system-font=false` 时）→ gsettings `monospace-font-name` → `monospace` 别名；`fc-list -f '%{charset}' ':file=<字体文件>'` 取字体覆盖范围，`pinned = (DejaVu Sans Mono ∩ 符号区) \ 终端字体`
+- 符号区白名单 `FONT_SYMBOL_RANGES`：`0x2000–0x2BFF`、`0x2E00–0x2E7F`、`0x1F300–0x1FAFF`；**不含** CJK/全角/私用区（Nerd Font 图标）——它们本该由 CJK 字体渲染，钉走会丢字形或撑错宽度
+- 每码点一条 `<match target="pattern">`（fontconfig 一个 match 内多个 test 是 AND、无 OR，区间无法合并，只能逐点展开）
+- 跳过（只打 log 不报错）：非 Linux、无 fontconfig、终端字体已是 DejaVu Sans Mono、无待钉字符；`--dry-run` 打印条数与目标路径但不写文件
+- 生效：`~/.config/fontconfig/conf.d/` 由 fontconfig 自身加载（不依赖 `/etc/fonts/fonts.conf` 的 xdg include）；运行中的终端不会重读配置，需新开窗口/标签
+- 验证/回退：`fc-match 'Ubuntu Sans Mono:charset=25b0' family` 应回 `DejaVu Sans Mono`；删掉该文件即恢复系统默认回退
+
 
 ## src/build.js（伪编译）
 
