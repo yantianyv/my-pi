@@ -49,7 +49,7 @@ hud 自己只推 `hud-bash` / `balance-error` / `model-switch` 三个 key，其�
 
 | 模块 | 导出 / 职责 | 消费方 |
 |---|---|---|
-| `agent.ts` | `convertToLlm`（只放行 system/user/assistant/toolResult，**system 必须放行**：0.86 起系统提示词以前导 system 消息挂在 messages 里）、`systemMessage`、`createPiStreamFn(ctx)`（走 pi 已登录通道，每次调用前取最新认证，并按供应商规则注入会话/归因头——深加载 pi 内部 `dist/core/provider-attribution.js`，查不到就降级不带头） | claude-it /init、btw、workflow-mgr 审计、explore-agent |
+| `agent.ts` | `convertToLlm`（只放行 system/user/assistant/toolResult，**system 必须放行**：0.86 起系统提示词以前导 system 消息挂在 messages 里）、`systemMessage`、`createPiStreamFn(ctx)`（走 pi 已登录通道，每次调用前取最新认证，并按供应商规则注入会话/归因头——深加载 pi 内部 `dist/core/provider-attribution.js`，查不到就降级不带头） | context-init、btw、workflow-mgr 审计、explore-agent |
 | `config.ts` | `loadJsonConfig`（缺失/校验不过回默认；JSON 损坏则改名 `.corrupt-<时间戳>` 隔离留证；顺带清理 `.tmp-<pid>` 残档）、`saveJsonConfig`（临时文件 + rename 原子写）、`isModelConfig` | 几乎所有扩展 |
 | `status.ts` | `setStatusWithTTL(ctx,key,text,ttl)`（同 key 重置定时器；text=undefined 只清）、`clearStatusTimers()`；对失效 ctx 抛错有 try/catch 兜底 | hud-core、explore-agent、web-tool、webdav-kb、clipboard、qr 等 |
 | `ui.ts` | `createBoxRenderer`（╭╮│╰╯ 全封闭浮层边框 + `…` 截断，可选 borderMuted）、`editInput`（输入编辑键统一：backspace/delete/home/end/ctrl+u/ctrl+←→按词移动/ctrl+w 删词/粘贴，grapheme 安全步进）、`renderScrollingInput`、`renderInputWithCursor`、`charIndexAtWidth`/`sliceByWidth` | 所有浮层面板 |
@@ -60,8 +60,9 @@ hud 自己只推 `hud-bash` / `balance-error` / `model-switch` 三个 key，其�
 | `net.ts` | `makeTimeoutSignal`（超时 + 外部取消 + cleanup）、`makeProxyConnection`（HTTP 代理 CONNECT 隧道，仅支持 `http://` 代理，TLS 目标再套 tls；原 web-tool 与 webdav-kb 逐字重复的实现收敛于此） | web-tool、webdav-kb |
 | `shell-split.ts` | `splitShellSegments`：`&&`/`||`/`;`/`|`/换行切段、`$()`/反引号递归拆出、引号与转义保护、单个 `&` 不切、**heredoc 主体是数据不逐行拆**（但主体内 `$()` 仍递归拆出）；启发式，宁多拆不漏拆 | perm-gate |
 | `presence.ts` | 跨实例「用户在场」判定 + 提示音全局去重：`getOsIdleMs()`（Windows GetLastInputInfo 常驻 PowerShell 每 2s 上报、macOS ioreg、Linux xprintidle；`PI_OS_IDLE_MS` 可注入）、一实例一文件的在场记录（`~/.pi/agent/presence/<sid>.json`，原子替换、死进程/陈旧档忽略）、`computeActive`/`computeAway`、`claimSoundSlot`（`wx` 独占创建 + 超龄回收的跨进程名额）、`disposeIdleProbe` | status-beacon |
-| `explore-api.ts` | 跨扩展契约单点定义：`EXPLORE_API_KEY="__PI_EXPLORE_API__"`、`EXPLORE_API_VERSION=1`、`publishExploreApi`/`getExploreApi`（版本不符或未加载返回 null） | explore-agent 发布、claude-it 消费 |
-| `context-budget.ts` | `estimateTokens`（CJK 按 1 字 1 token、ASCII 按 3.5 字符）、`pruneOldToolResults(messages, budget)`（超预算从最旧/最廉价开始把工具结果换成占位文本：read/grep/find/ls/bash → explore → 其他，write/edit 不剪，最近 10 条不动）、`CONTEXT_OVERFLOW_RE`（各家超限措辞，explore 转出） | claude-it /init、explore-agent |
+| `explore-api.ts` | 跨扩展契约单点定义：`EXPLORE_API_KEY="__PI_EXPLORE_API__"`、`EXPLORE_API_VERSION=1`、`publishExploreApi`/`getExploreApi`（版本不符或未加载返回 null） | explore-agent 发布、context-init 消费 |
+| `context-budget.ts` | `estimateTokens`（CJK 按 1 字 1 token、ASCII 按 3.5 字符）、`pruneOldToolResults(messages, budget)`（超预算从最旧/最廉价开始把工具结果换成占位文本：read/grep/find/ls/bash → explore → 其他，write/edit 不剪，最近 10 条不动）、`CONTEXT_OVERFLOW_RE`（各家超限措辞，explore 转出） | context-init、explore-agent |
+| `context-files.ts` | `CONTEXT_FILE`、`findContextFiles(cwd)`（根 + 子目录的 AGENTS.md/CLAUDE.md，跳过 node_modules/.git/dist/.tmp/vendor 与隐藏目录）、`checkContextArtifacts(cwd)`（references 死指针、SKILL.md 索引与 references 一一对应、frontmatter name/description、近乎空文件）；纯 fs、无 pi 依赖 | context-init、`test/context-init.test.mjs` |
 | `turndown-gfm.d.ts` | `turndown-plugin-gfm` 的类型声明 | web-tool |
 
 ## shared/ui.ts（浮层 UI 公共层）

@@ -1,19 +1,25 @@
 # 扩展细节 A：会话 / 状态 / 权限 / 子代理
 
-## claude-it.ts
+## context-init.ts
 
-- 命令：`/init`（后台独立上下文生成/更新 `AGENTS.md`，**只产出 AGENTS.md**，不生成 CLAUDE.md）、`/exit` 别名、`/rewind`。
-- `/init` 流程：检查目录 → 无文件则 create，有则询问「合并更新 / 完全重写 / 取消」→ 后台 `runAgentLoop`（当前会话模型，主会话零污染、期间可继续对话；同时只允许一个，`/init cancel` 中止，会话结束自动中止）→ 审计子代理复核 → 确定性结构检查（有问题带问题再审计一轮，最多两轮）。
-- 上下文预算（与 explore 共用 `shared/context-budget`）：预算 = 模型窗口 × 0.55；每请求前 `transformContext` 把超预算的旧工具结果剪成占位文本（按重读代价：read/grep/find/ls/bash → explore → 其他，write/edit 不剪，最近 10 条不动）；仍超限（错误命中 `CONTEXT_OVERFLOW_RE`）则把过程记录压成要点后重启继续（`compactInitNotes`，最多 2 次，失败回退记录尾部），状态行显「⚙ 初始化 · 压缩上下文 n/2」。
-- CLAUDE.md 兼容：只有 `CLAUDE.md` 时直接 rename 为 `AGENTS.md` 再走常规流程；两者并存时走合并提示（合并进 AGENTS.md 后删 CLAUDE.md）。
-- 子代理工具：read/ls/grep/find + write/edit + bash + 可选 `explore`。探测 `getExploreApi()?.createSubagentTool(ctx, { alwaysFresh: true })`：在场则提示词切为「大仓库先派 explore 并行摸底、再用 read 抽查」、状态行显「⚙ 初始化 · 探索 n/m」，缺席静默降级为自读。
-- 约束：**不设轮数与墙钟上限**；`NO_PROGRESS_TURNS = 8`（连续 8 轮既没写文件也没派 explore → 注入收尾指令，只提醒不硬停）；「没写完不许停」——打算停下但文件没被写过（mtime `> mtimeBefore + 1` 判定）或末句是意图陈述 → 顶回去做完（最多两次），最终如实报「未完成」。
-- 审计子代理：主流程成功且文件确实写入、摘要不像「未完成」才启动；全新上下文 + 独立 system prompt；任务里**显式列出**要复核的全部上下文文件（根 + 子目录）与 `.pi/skills/`；工具只有 read/ls/grep/find + write/edit（**无 bash、无 explore**）；与主体同口径**不设轮数/时间上限**，带「没动手 / 末句是意图陈述 → 顶回去做完（最多两次）」与无结论时补问一次（tools: []）；末句仍是意图陈述则报「末句是意图陈述而非结论（未动手 N 步）」（实测别的项目里它曾只输出一句 I'll start by surveying… 就当报告交了）。验收清单——删不值得每轮付费的内容、同一事实只在一层、指针真实存在、命令/坑/不变量/跨子系统约定不能丢、人工约定只搬不删；只做删减/合并/下沉/修指针。审计故障只报「审计未完成」，不否定既有产物。
-- 结构检查（`checkContextArtifacts(cwd)`，纯 fs 不依赖模型）：`findContextFiles` 扫出根与子目录的上下文文件（跳过 node_modules/.git/dist/隐藏目录），逐个检查其 `references/x.md` 真实存在；skill 侧查 SKILL.md 索引与 `references/` 目录一一对应、frontmatter 有 name/description、不留近乎空文件。审计后再检一次，仍有问题则带清单再审计（最多两轮），最终仍剩则如实附在总结里。
-- 提示词纪律（写进子代理提示词）：只写能改变 AI 行为的行、不写变更史与实现解释、不复制 README 可自行读到的内容；随时把已确认的结论落盘（压缩会丢未落盘的内容）；产出按上下文分层 L1 AGENTS.md / L2 `.pi/skills/<项目名>-dev/`（默认不建，细节成段超载才建，重跑时同步维护：过时更新删除、新细节入对应 references、索引与指针同步）/ L3 README 留一行指路；项目已有子目录 AGENTS.md 时沿用该结构（子文件放各自细节、根文件只留指路），不上提合并。
-- 进度经 `ctx.ui.setStatus("init", …)`，由 hud 行 1 显示。
-- Ctrl+C 打断 turn；双击 Ctrl+C（打断后 2s 窗口内）预填 `/rewind`；`/rewind` 回退到上一条用户消息、内容放回输入框（`navigateTree` 是命令 ctx 专属能力）。
-- 裸输入 `exit`（不带 `/`）被拦截直接退出 pi，属刻意设计。
+- 命令 `/init`（`/init cancel`/`stop` 中止进行中的运行）。唯一职责：生成与维护项目唯一的 `AGENTS.md`。
+- **内容规范就是它存在的理由**（写进子代理提示词）：写每行前过两问——不写它 AI 会做错事吗？换一年、换个项目还成立吗？信息按「多常被需要」分四处：每轮用 → `AGENTS.md`；相关才用 → `.pi/skills/<前缀>-<领域>/`（`description` 写明何时用）；在办（进度/待办/当前批次）→ 该工作目录 `STATUS.md`；跨项目经验 → 知识库。禁止：子目录 `AGENTS.md`、进度与待办、变更史、插件已经强制的规则（如钉钉发送纪律）、README 里能读到的、代码原文。产物必含 `## 关于 AGENTS.md 自身`（四条元规则，常量 `SELF_SECTION`）。
+- **目录对齐**（提示词层面的引导，不是校验器）：判据「同类只住一处，一处只放一类」——脚本进 `tools/`、共享基准数据进 `data/`、再生品进 `output/`、临时进 `.tmp/`、旧批次进归档；同名不同义的目录（`工具/` vs `tools/`）归并、缺失的机制目录顺手创建；本项目约定写进 `AGENTS.md` 一小段。不强制固定目录树。
+- **迁移**：发现子目录 `AGENTS.md` → 内容分流（长期→skill、在办→`STATUS.md`、通用→根）后**删除源文件**，并在总结里附「哪个文件 → 去了哪里」映射表；`CLAUDE.md` 合并后删除。
+- 流程：检查目录 → 无文件则 create，有则询问「合并更新 / 完全重写 / 取消」→ 后台 `runAgentLoop`（当前会话模型，主会话零污染、期间可继续对话；同时只允许一个，会话结束自动中止）→ 审计子代理复核 → 结构检查（有问题带问题再审计一轮，最多两轮）。
+- 上下文预算（与 explore 共用 `shared/context-budget`）：预算 = 模型窗口 × 0.55；每请求前 `transformContext` 剪超预算的旧工具结果（read/grep/find/ls/bash → explore → 其他，write/edit 不剪，最近 10 条不动）；仍超限则把过程记录压成要点后重启继续（`compactInitNotes`，最多 2 次，失败回退记录尾部），状态行显「⚙ 初始化 · 压缩上下文 n/2」。
+- 子代理工具：read/ls/grep/find + write/edit + bash + 可选 `explore`（`getExploreApi()?.createSubagentTool(ctx, { alwaysFresh: true })`，缺席静默降级为自读）。
+- 约束：**不设轮数与墙钟上限**；`NO_PROGRESS_TURNS = 8`（连续 8 轮既没写文件也没派 explore → 注入收尾指令，只提醒不硬停）；「没写完不许停」——打算停下但文件没被写过（mtime `> mtimeBefore + 1`）或末句是意图陈述 → 顶回去做完（最多两次），最终如实报「未完成」。
+- 审计子代理：主流程成功、文件确实写入、摘要不像「未完成」才启动；全新上下文 + 独立 system prompt；任务里显式列出全部上下文文件与 `.pi/skills/`；工具只有 read/ls/grep/find + write/edit（无 bash、无 explore）；不设轮数上限，带「没动手 / 末句是意图陈述 → 顶回去」与无结论补问一次；验收清单围绕上面的内容规范（两问、四处去向、该留的没丢、元规则板块在场），只做删减/合并/移出/修指针。审计故障只报「审计未完成」，不否定既有产物。
+- 纯 fs 的产物检查放在 `shared/context-files.ts`（`findContextFiles` / `checkContextArtifacts`，与本插件、`test/context-init.test.mjs` 共用，不依赖 pi 运行时）。
+- 进度经官方 `ctx.ui.setStatus("init", …)`（hud 行 1；hud 缺席回落 pi 原生 footer）。
+
+## claude-it.ts（会话体验，文档生成已拆出）
+
+- `exit` 拦截：裸输入 `exit`（不带 `/`）与 `/exit` 命令都直接退出 pi，属刻意设计。
+- `/rewind`：回退到上一条用户消息、内容放回输入框（`navigateTree` 是命令 ctx 专属能力，只返回 `{cancelled}`，文本回填由 interactive-mode 完成）。
+- Ctrl+C：打断当前 turn；打断沉降完成（`agent_end`）后 2s 窗口内再按 → 预填 `/rewind` 回车即执行；沉降期内按下的只排队（30s 窗口内有效），不刷新窗口，双击连按永远有效。
+- 启动清屏：仅 TUI 冷启动（`session_start` reason=startup）；借 `setWidget` 工厂同步拿 TUI 实例，清视口 + `requestRender(true)` 全量重绘，随即移除占位 widget。
 
 ## explore-agent.ts
 

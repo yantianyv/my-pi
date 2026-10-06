@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * claude-it 产物契约回归测试
+ * context-init 产物契约回归测试
  *
  * 覆盖 /init 闭环里不依赖模型的两个纯逻辑件：
  * - 场景 A：estimateTokens —— CJK 与 ASCII 的粗估口径、单调性
@@ -10,7 +10,7 @@
  *   frontmatter、空文件、无 skill 时不误报
  * - 场景 D：CONTEXT_OVERFLOW_RE —— 常见超限措辞命中、限流/网络类不误判
  *
- * 用法：node src/extensions/test/claude-it.test.mjs（仓库根目录执行）
+ * 用法：node src/extensions/test/context-init.test.mjs（仓库根目录执行）
  */
 import { build } from "esbuild";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -21,7 +21,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
 const SRC_DIR = join(TEST_DIR, "../..");
 const BUDGET_BUNDLE = join(TEST_DIR, ".tmp-context-budget.mjs");
-const IT_BUNDLE = join(TEST_DIR, ".tmp-claude-it-bundle.mjs");
+const IT_BUNDLE = join(TEST_DIR, ".tmp-context-files.mjs");
 
 let failures = 0;
 const check = (name, cond, extra = "") => {
@@ -32,7 +32,7 @@ const check = (name, cond, extra = "") => {
 	}
 };
 
-const tmp = mkdtempSync(join(tmpdir(), "claude-it-test-"));
+const tmp = mkdtempSync(join(tmpdir(), "context-init-test-"));
 
 async function bundle(entry, outfile) {
 	await build({
@@ -61,7 +61,7 @@ const toolResult = (toolName, text) => ({
 
 async function main() {
 	const budget = await bundle(join(SRC_DIR, "extensions", "shared", "context-budget.ts"), BUDGET_BUNDLE);
-	const it = await bundle(join(SRC_DIR, "extensions", "claude-it.ts"), IT_BUNDLE);
+	const it = await bundle(join(SRC_DIR, "extensions", "shared", "context-files.ts"), IT_BUNDLE);
 
 	// ---- 场景 A：token 粗估 ----
 	console.log("场景 A：estimateTokens");

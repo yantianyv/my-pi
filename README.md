@@ -21,7 +21,8 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `themes/` | `matrix.json` — 黑客帝国风格荧光绿主题 | `~/.pi/agent/themes/` |
 | `extensions/` | `hud/`（源码多文件：`index.ts` + `hud-core.ts` + `hud-balance.ts` + `hud-cost.ts` + `hud-git.ts`；build.js 合并为单文件 `hud.ts` 产物）— 3 行 HUD 状态栏，见下 | `~/.pi/agent/extensions/` |
 | `extensions/` | `btw/` — `/btw` 旁支问答：侧栏浮层多轮追问、`m` 转正附带、`/btw-config` 模型 auto 最便宜故障转移（见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `claude-it.ts` — `/init` 生成上下文文件、`/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`） | `~/.pi/agent/extensions/` |
+| `extensions/` | `claude-it.ts` — `/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`）（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `context-init.ts` — `/init` 生成/维护项目唯一的 `AGENTS.md`：内容两问 + 信息四去向（`AGENTS.md` / skill / `STATUS.md` / 知识库）+ 目录对齐 + 审计复核（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `status-beacon.ts` — 全链路状态感知：执行中标题进度（spinner+工具活动）+ 五状态五音效 + 状态栏闪烁 + 提醒标题动画（见下；前身 task-alert） | `~/.pi/agent/extensions/` |
 | `extensions/` | `perm-gate.ts` — bash 命令权限门：硬拒绝 / 关注项 / 已记住的操作（意图缓存）+ AI 审核与人工确认面板（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
@@ -164,11 +165,19 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 
 说明：DeepSeek 按量付费，余额过低变色警示；Kimi For Coding 为订阅制 + 加油包（Extra Usage）混合，优先显示加油包余额，没有加油包则显示订阅额度，订阅额度耗尽或余额过低变色警示，右下角显示会话 token 累计；Kimi 开放平台（`moonshotai`/`moonshotai-cn`）为按量付费，显示现金 + 赠金余额；MiMo Token Plan CN（`xiaomi-token-plan-cn`）与火山方舟 Coding（`volcengine-coding`）均无公开余量 API（官方仅提供控制台查看，5h/周/月限额），余额行以灰色 OSC 8 超链接短文本显示控制台查询链接（Windows Terminal 等终端 Ctrl/⌘+点击打开；单击需 pi 端支持），完整 URL 在 `/balance` 通知里，右下角显示会话 token 累计。Z.AI Coding CN（智谱 GLM Coding Plan）为订阅积分制：余额行画 MCP月/周/5h 三窗口额度条（大周期在前，百分比 + 5h 窗口重置倒计时），积分绝对值与套餐档位收进 `/balance` 通知；消耗统计走**积分轨**（积分视为独立货币，不换算 ¥/$，统一用 🪙 符号——`CREDIT_SYMBOL`，未来所有非货币计费复用）：因消息 usage 不含积分，turn_end / 余额刷新时采样 quota 接口的「5h 窗口已用积分」做差分（30s 节流；负增量/窗口滚动仅换基线不记增量），显示 `🪙X.XX/min + 🪙累计`（采样接口不可用时自动回落为会话 token 数）。数字与颜色解耦：🪙 数字只反映额度消耗速率，颜色按 pi 内置 provider 价格（`usage.cost.total`，USD 等效成本）的速率染色——积分/min 高 ≠ 花钱多，成本速率才是价格信号。所有供应商都在 HUD 第 2 行统一显示输出 token 速率。
 
+## 上下文初始化（src/extensions/context-init.ts）
+
+`/init`：在**后台独立上下文**中分析项目，生成/维护项目唯一的上下文文件 `AGENTS.md`——它每轮对话都会加载，所以只有「不写就会让 AI 做错」的信息才配留在里面。
+
+- **信息按「多常被需要」分四处放**（写每行前过两问：不写它会做错吗？换一年、换个项目还成立吗？）：每轮都要用 → `AGENTS.md`；相关时才用（子系统流程、口径、坑）→ `.pi/skills/<前缀>-<领域>/`（启动只暴露一行 description，正文按需加载）；在办的事（进度、待办、当前批次）→ 该工作目录的 `STATUS.md`；跨项目可复用的经验 → 知识库。
+- **一个项目一份 `AGENTS.md`**：发现子目录 `AGENTS.md` 就按上面四处分流，然后删除源文件并在总结里附映射表；`CLAUDE.md` 合并后删除。
+- **顺手对齐目录**（判据「同类只住一处，一处只放一类」：脚本进 `tools/`、共享数据进 `data/`、再生品进 `output/`、临时文件进 `.tmp/`），同名不同义的目录归并；不强制固定目录树。
+- 已存在时询问「合并更新 / 完全重写 / 取消」；不设轮数与时间上限（`/init cancel` 中止）；完成后由全新上下文的**审计子代理**按同一套纪律删减、合并、移出、修指针，再做结构检查（指针可达、skill 索引与 references 对应）。
+
 ## Claude Code 风格增强（src/extensions/claude-it.ts）
 
 让 pi 的操作习惯更接近 Claude Code：
 
-- `/init`：对齐 Claude Code 的 `/init`——在**后台独立上下文**中分析代码库并生成上下文文件 `AGENTS.md`（独立 agentLoop + 当前会话模型，主会话零污染，期间可继续对话；状态栏显示进度，完成后通知总结；不设轮数与时间上限，`/init cancel` 随时中止；打算停下却没写入文件、或末句是意图陈述时会被自动顶回去做完）。文件已存在时会询问「合并更新 / 完全重写 / 取消」。同时兼容已有 Claude Code 项目：只有 `CLAUDE.md` 时直接重命名为 `AGENTS.md` 再继续；两者并存时合并为一份 `AGENTS.md` 并删除 `CLAUDE.md`。探索子代理插件在场时，子代理可自行派 explore 并行摸底大仓库（未装/被禁用则退回自读；详见「探索子代理」一节）。产出物按**提示词纪律**约束：只写能改变 AI 行为的「不写就会做错」的信息，不写变更史、实现解释、README 里能自行读到的内容（`AGENTS.md` 每轮对话都会加载，字数即长期成本）；已存在时允许压缩冗余（事实与约定一条不丢，只是表达变短）。**上下文分层**：`AGENTS.md` 只留每轮都用得上的（命令、目录职责、不变量、约定、坑），子系统细节成段超载时下沉为项目 skill `.pi/skills/<项目名>-dev/`（`SKILL.md` + `references/`，启动只暴露一行描述、按需加载；首次使用会弹一次项目信任确认），README/docs 只留一行指路；写完后由全新上下文的**审计子代理**按验收清单复核修正。
 - `/exit`：与 `/quit` 等效的斜杠命令。
 - `exit`：直接输入 `exit`（不带 `/`）也能立即退出 pi，不会把该文本当作普通消息发送给模型。
 - **Ctrl+C**：当前 turn 正在生成时，按 `Ctrl+C` 会取消该轮输出（Claude Code 风格）；空闲时不拦截，保留默认行为。打断后 2 秒内**再按一次 `Ctrl+C`**：输入框预填 `/rewind`，回车即**回退到上一条用户消息**（丢弃其后的全部内容，消息文本放回输入框，可修改后重发）——回答不满意时的快速回退；打断本身**不触发 status-beacon 完成提醒**（视为中断而非完成）。
@@ -454,6 +463,7 @@ node static/patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
 rm ~/.pi/agent/themes/matrix.json
 rm ~/.pi/agent/extensions/hud.ts
 rm ~/.pi/agent/extensions/claude-it.ts
+rm ~/.pi/agent/extensions/context-init.ts
 rm ~/.pi/agent/extensions/status-beacon.ts
 rm ~/.pi/agent/extensions/web-tool.ts
 rm ~/.pi/agent/extensions/webdav-kb.ts

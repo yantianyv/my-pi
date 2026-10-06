@@ -31,7 +31,7 @@ src/                  # 全部源码 + npm 生态 + 构建脚本（build.js 的�
     shared/           #     共享模块：只被扩展 import、不直接部署，build.js 内联进各产物
     hud/              #     3 行 HUD（多文件，入口 index.ts → 产物 hud.ts）
     ask/ btw/ web-tool/ webdav-kb/ workflow-mgr/   # 多文件扩展（入口 index.ts）
-    claude-it / explore-agent / status-beacon / perm-gate / pair-guard / crash-log / clipboard / img-slim / dingtalk-bridge / mimo-omni / qr   # 单文件扩展
+    context-init / claude-it / explore-agent / status-beacon / perm-gate / pair-guard / crash-log / clipboard / img-slim / dingtalk-bridge / mimo-omni / qr   # 单文件扩展
     test/             #     跨扩展回归测试（status-keys / explore / perm-gate / presence / dingtalk-bridge / mimo-omni + *-live.mjs 联调）
   vendor/             #   社区插件源码收录区（当前仅 pi-rtk-optimizer）+ README.md（出处表/收录原则/回退记录）
 static/               # 静态部署物（无需编译）：AGENTS.md / themes/ / sounds/(5 音效) / skills/markitdown/ / models.json / patches/(3 个手工补丁)
@@ -51,7 +51,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 - **hud 供外部扩展挂底部行**：`__PI_HUD_API__` 的 `registerExtraRows` / `notifyExtraRowsUpdate`；当前 workflow-mgr 已依赖（hud 开启时其常驻面板由 hud 渲染在 footer 最底、自绘面板隐藏，靠 `process.emit("hud:state-change")` 切换）。
 - **vendor**：`src/vendor/` 收录社区插件源码副本（当前 pi-rtk-optimizer；pi-subagents / pi-btw 曾收录后回退自研 explore-agent / btw），收录原则、出处表、对齐更新流程、回退记录见 `src/vendor/README.md`。rtk 二进制不入库，由 install.js 按平台下载。
 - **多工作流并发隔离**：一个项目可并存多个命名工作流（default 槽 = `.pi/workflow/` 根三 JSON；命名槽 = `slots/<名称>/`），每会话经 `bindings.json` 绑一个槽——解决多 pi 会话同项目跑不同任务互相干扰。session_start 自动判定：单槽/无槽直接绑定（零行为变化）；多槽或有其他活跃会话已绑定 → TUI 弹选择浮窗（「暂不启用」默认高亮 = 绑定 `auto`、不占槽位、AI 自行判断是否用；「从 resume 中加载」放弃本会话转 `/wf-resume`），非 TUI 退化为注入指引让 AI 用 `ask` 问后 `wf_workflow action=bind` 落地。
-- **claude-it `/init`**：后台 fork 独立上下文写 `AGENTS.md`（主会话零污染），explore 在场则子代理可派 explore 并行摸底；不设轮数与墙钟上限（`/init cancel` 中止），有「没写完不许停」与完成度核对；**上下文超限自动压缩后续跑**（预算内每请求前剪旧工具结果，超限则把过程记录压成要点重启，最多 2 次）；产出按**上下文分层** L1 `AGENTS.md` / L2 `.pi/skills/<项目名>-dev/`（默认不建，细节成段超载才建，重跑同步维护 L2）/ L3 README 只留一行指路，项目已有子目录 AGENTS.md 时沿用该结构；写完后由全新上下文的审计子代理复核修正（任务里显式列出根+子目录的全部上下文文件，只做删减/合并/下沉/修指针，没动手或末句是意图陈述会被顶回去），再做**确定性结构检查**（各上下文文件死指针 / SKILL.md 索引与 references 一一对应 / frontmatter），有问题带问题再审计一轮（最多两轮）。
+- **context-init `/init`**：后台 fork 独立上下文维护项目唯一的 `AGENTS.md`（主会话零污染）。核心是**内容规范**：写每行前过两问（不写会做错吗 / 换一年还成立吗），信息按「多常被需要」分四处——每轮用 → `AGENTS.md`、相关才用 → `.pi/skills/`、在办状态 → 该目录 `STATUS.md`、跨项目经验 → 知识库；子目录 `AGENTS.md` 分流后删除（附映射表），`CLAUDE.md` 合并后删除；顺手做目录对齐（同类只住一处），不强制目录树。explore 在场则派子代理并行摸底（缺席自读）；不设轮数与墙钟上限（`/init cancel` 中止）；上下文超限自动压缩后续跑（≤2 次）；收尾由审计子代理复核 + `shared/context-files.ts` 的结构检查（死指针 / skill 索引对应），有问题带问题再审一轮（最多两轮）。该插件只依赖 pi 的 fs、模型与官方 `setStatus`，其余（explore / hud / 知识库）全是可选增强，缺席静默降级。
 
 ## 代码风格与约定
 
