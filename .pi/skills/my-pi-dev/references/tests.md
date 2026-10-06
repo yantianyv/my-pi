@@ -47,7 +47,8 @@ const mod = await import(pathToFileURL(bundle).href);
 | `test/explore.test.mjs` | 落盘原语：任务哈希稳定、渐进落盘续跑、缓存复用、报告四状态渲染、上下文超限识别；场景 G 校验 `__PI_EXPLORE_API__` 契约（键名/版本/工具形状/alwaysFresh/4 参降级） |
 | `test/perm-gate.test.mjs` | ReviewPanel（信息区/折行/键位/canRemember 收敛）+ `shared/shell-split` 拆段判定 + `/perm-gate-config` 名单编辑的正则校验与命中测试（`compilePatternError`/`patternHits`） |
 | `test/presence.test.mjs` | `shared/presence` 与 status-beacon 接线：computeActive/computeAway 三态、在场文件写/删/死进程忽略、`claimSoundSlot` 去重、人不在才出声；会起 win32 空闲探测，测完 `disposeIdleProbe()` |
-| `test/dingtalk-bridge.test.mjs` | 纯函数策略层（buildArgv / 标签拦截 / 两阶段确认 / 防重发 / parsePeople / schema 截断），不起真实 dws 进程 |
+| `test/dingtalk-bridge.test.mjs` | 纯函数策略层（buildArgv / 标签拦截与豁免 / 两阶段确认 / 防重发 / parsePeople / schema 截断 / 命令路径归一与上游可用性），不起真实 dws 进程 |
+| `test/dingtalk-intents.test.mjs` | 语义层纯映射（intents.ts：时间/优先级/单元格规范化 + 消息/待办/日程/审批/文件/文档六域的业务参数 → dws argv），不联网不起进程 |
 | `test/mimo-omni.test.mjs` | 媒体内容块构造离线 18 项；`MIMO_LIVE=1` + 传音频/视频路径才真打 API |
 | `test/context-init.test.mjs` | /init 闭环的纯逻辑（不依赖 pi 包）：`estimateTokens` 口径、`pruneOldToolResults`（超预算才剪/按重读代价排序/write-edit 与近期不剪）、`checkContextArtifacts`（各上下文文件死指针、索引与 references 对应、frontmatter、空文件、无 skill 不误报）、`CONTEXT_OVERFLOW_RE` 命中与不误判 |
 | `test/crash-log.test.mjs` | 用 `PI_CRASH_LOG_FILE` 注入临时日志 + 打两份 bundle（同进程两实例 = 模拟 /reload）：启动头/process 监听器只挂一次；同一条崩溃只提醒一次（新建崩溃再提醒）、无 UI 不提醒也不写 ack、`/crash-log` 视图即标已看、`clear` 清日志与 ack |
@@ -64,5 +65,5 @@ const mod = await import(pathToFileURL(bundle).href);
 ## 联调脚本（不自动跑、需真实环境）
 
 - `webdav-kb/test/live-*.mjs`：真实 123 云盘联调（e2e / lfs / probe / proto-update / status / curl-probe）。**硬编码本机绝对路径**，跨机器必失败。
-- `test/dingtalk-bridge-live.mjs`：真实 dws 进程 + 钉钉网络；发送只到「草稿待确认」，绝不 confirm。
+- `test/dingtalk-bridge-live.mjs`：真实 dws 进程 + 钉钉网络；发送只到「草稿待确认」，绝不 confirm。含命令路径归一（技能文档旧写法 → cli_path、canonical 当 argv）、上游不可用与不存在路径的报错文案。
 - `test/mimo-omni.test.mjs` 加 `MIMO_LIVE=1`。

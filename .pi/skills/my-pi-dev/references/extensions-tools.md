@@ -33,21 +33,20 @@
 - 审计：`config.json` 开 `auditOnComplete` 后，`wf_switch` 完成推进前派全新上下文的只读 + bash 子代理核验 `doneSignal`，不通过则打回（`kind=evidence` 证据不足 / `format` 审计输出无法解析，失败提示附任务交付物 + 完成信号）；审计自身故障放行（增强不是门禁）；审计模型按用途 `audit` 解析（默认策略 AUTO = 当前会话模型，可在 `/model-config` 改指）。
 - 测试：`test/render.test.mjs`（16 场景 A~R，含 `__PI_HUD_API__` 注册/通知/注销）、`test/stale-ctx.test.mjs`。
 
-## dingtalk-bridge.ts（钉钉 dws CLI 受控桥接）
+## dingtalk-bridge/（钉钉 dws CLI 受控桥接 + 业务语义层）
 
-- 工具 6 个：`dws_schema`（`dws schema --compact` 活内省分层下钻）、`dws_exec`（argv 数组直调不过 shell）、`dws_fetch`（钉盘/云盘分享落地：文件直下、文件夹镜像到本地）、`dws_resolve_user`（aisearch 人员解析，多候选 pick 确认）、`dws_resolve_group`（chat +chat-search 群解析，同名群强制用 cid）、`dws_skill`（逃生舱：按需拉取官方技能正文，无参给索引）；命令 `/dws`（状态 + forget/refresh 子命令）。
-- 配置 `~/.pi/agent/dingtalk-bridge.json`（含 `skillsDir`，默认 `~/.agents/skills`）；防重发台账 `~/.pi/agent/dingtalk-bridge-sent.json`（会话内存 + 跨会话台账，`dedupMinutes` 默认 60）。
-- 背景：dws 官方技能由 npm postinstall 托管、升级即还原不可改，故不碰文件——`before_agent_start` 把 `dingtalk-*` 从注入清单过滤（配置化前缀，`/skill:` 手动加载仍可用）。
-- 安全硬约束（**读直通 / 写两阶段 / 敏感档弹窗**，元数据驱动）：分档 = `effect`（`dws schema --cli-path <path> --compact -f json`；缓存 `~/.pi/agent/dingtalk-bridge-schema.json`，手写表兜底，取不到当写入）+ `presumedRead` 只读快判（读词命中且无写词）。写操作首次只回草稿（`pending` 存 `tier`/`canRemember`/`review`），带 `confirm` 重调才执行；敏感档（destructive 或发送/转发/撤回/邀请/删除/清空等）在执行前 `askReview`（`shared/review-panel.ts`：弱化标题 + `动作|对象` 表头 + 固定 5 行正文 + `⚠` 影响行 + 竖排选项；串行链 + status-beacon wait，**无 argv/ID**），无 `hasUI` 直接拒绝；面板「当前工作区不再询问」写 `remembered`（cli_path，destructive 不可记），`/dws forget|refresh` 管理。**草稿前 flag 校验**（未变）+ **草稿信息齐全版 `formatDraft`**：确认协议（整个 argv 原样重调 + 10 分钟有效期与失效后果）、执行时实际下发的完整参数（含桥自动附加的 `--format/--yes`）、schema 参数表传入时列出未用参数、档位与理由；撤回对象带真实 msgId（AI 核对用；人看面板仍走富化，纪律不变）。发送/转发类**两阶段**
-- 敏感档面板字段：`verb`（动作 2~4 字）+ `object`/`objectItems`（对象 = 收件人名册，弹窗前用 `contact user get --ids` 换「姓名（部门）」、仅重名带部门、按可用宽度收口「等 N 人」；撤回 = 会话名 + 时间 + 正文预览）+ `content`（固定 5 行正文）+ `impact`（⚠ 影响）。面板内无 argv/flag/JSON/ID（单测锁住）。官方 capability-limits 那句「个人身份消息无法撤回」与实测不符（实测可撤）。
-- 群发 `chat +broadcast`：同样两阶段（不被自动附加的 `--yes` 绕过），且草稿前先跑一次只读 `--dry-run` 预检收件人——有任一收件人未唯一解析（多候选/零候选）就整体拦下、不生成草稿、不做半批次发送，报出候选与消歧办法；消歧 = **把重名的名字换成候选里的 userId**（同命令内可与其它姓名混用；与 userId **并列不解决歧义**，重名 token 仍跳过）。“中文姓名即拦”对群发不适用（其目标按设计就是姓名），由预检把关。收件人也可主动 `--dry-run` 拿「将发给谁 / 未唯一解析」两栏预演。
-- 预检明细：dws 在“一个都没解析出来”时直接 exit 3 且不给计划（只有一句笼统报错），插件退回 `probeTarget` **逐名自探**（`+messages-send --user-query`，与 broadcast 同源，**失败 JSON 在 stderr**）；多候选补 `parseOrgInfo` 拿到的部门路径/职务/工号，查无此人给手机号反查入口。
-- 人员解析 `dws_resolve_user`：aisearch 候选（名字在 `meta.name`/`author`，不在顶层 `name`）+ `contact user get --ids` 批量补部门/职务/工号；无部门且无工号 = 家长/外部联系人账号（家长账号实测 `depts: []`、`jobNumber: null`），已标注。
-- `--dry-run` 一律视为只读预演：不进两阶段门、不记防重发台账（否则会拦掉随后的真发）、结果尾部附明确提示。
-- 其他：字面 `\n` 归一 + 多行自动补 markdown 行尾双空格硬换行（钉钉单换行会拼成一行）；文件/媒体消息回报「本条不含正文」（`--title` 不显示给收件人）；查询结果附当前时间锚点；字段拼写不一致自解释（群成员 `openDingtalkId` / 消息 `openDingTalkId`，解析大小写不敏感）。
-- 已知限制：这类分享消息用 `+messages-resource-download` 会 `TABLE_NOT_FOUND`——`resourceRefs` 是缺 spaceId 的数字 dentryId，spaceId 藏在正文 yunpan 链接里，只读结果会自动附结构化下载指引；「[文件夹] 姓名」形式无任何引用、实测不可读，直接提示让对方重发 zip。
-- **非 NTFS 卷（exFAT/网络盘）上的下载自动重定向**：dws 落盘用「写 `.part` 临时文件 → 硬链接到正式名」做原子发布（link 天然实现“不覆盖”语义），硬链接需 NTFS，exFAT 上必然报 `link …: Incorrect function`（与参数无关）。桥只在「下载类命令 + 硬链接失败」时触发重试（`isDownloadCommand` 白名单：`+messages-resource-download`/`+messages-mget --download-resources`/`drive download|pull`；发送类不重试，避免重复外发），把 `--output`/`--output-dir`/`--local-folder` 改到 `os.tmpdir()`（通常在 NTFS 主盘）重跑，成功后 `copyTree` 搬回原目标（默认不覆盖，`--overwrite` 才覆盖）、`cleanPartFiles` 清残留、`relocateLocalPaths` 把结果 JSON 的 `localPath` 改写成用户视角路径，并在回执尾部附一句说明。
-- **群发逐人个性化**：`chat +broadcast` 的 schema 是单值 content（“所有人收到同一条”），所以正文含 `{{变量}}` 时改走逐人循环（`sendPersonalized`）：预检拿每人 `receiverOpenDingTalkId` → `renderVars` 逐人渲染 → `chat +messages-send --as user --open-dingtalk-id <id> --markdown <正文> --ai-tag --idempotency-key <personalKey>`。`--vars`/`--vars-file` 由 `stripVarsFlags` 在进入 schema 校验前剥离（否则会被 unknown flag 拦下）；`parseVarsMap`（值可为对象，或单占位符时字符串简写）/`validateVars`（每人每变量覆盖检查）/`extractPlaceholders`（`{{名}}`，名限中英文数字下划线 1~24 字）三道校验全部在草稿前，拦下时不发一条；台账按人记（`send:<openId>:<正文哈希>`），`personalKey` 是确定性 UUID（同一人同一正文固定），重跑自动跳过；草稿给人话渲染样例，人审面板用预检名单。实测逐人 argv（含 UUID 形状幂等键）dws 接受。
+- 目录：`index.ts`（注册工具 + 受控管线 + 解析层）、`intents.ts`（语义层纯映射：业务参数 → dws argv，离线可测）。
+- **模型侧只有 7 个工具**：语义层 6 个（`dingtalk_msg` / `dingtalk_todo` / `dingtalk_calendar` / `dingtalk_approval` / `dingtalk_file` / `dingtalk_doc`）+ 唯一逃生舱 `dws_skill`（只给官方技能正文当知识，**没有任何命令执行通道**）；命令 `/dws`（状态 + forget/refresh）。
+- 语义层设计：`intents.ts` 一动作一行纯映射；`index.ts` 负责解析（姓名→userId、DING 另补 openDingTalkId、群名→openConversationId、消息关键词+会话→msgId、文档标题→nodeId、多维表名→baseId/tableId、钉盘名→nodeId、完整手机号→账号、本人 userId）后调 `runGuarded`——**与内部执行管线共用同一条门禁链**（换行归一→分档→参数自检→两阶段→人工面板→台账→结果注解），语义层绕不开任何一道拦截。
+- **同名/同名群不弹人工确认**：把候选（含部门/职务/工号与账号 ID）作为结果回给 AI，由 AI 自己挑定后把该项换成候选 ID 重调（提示词第 3 条明确要求）；查无此人时改用手机号即可（插件走 `contact user search-mobile`）。
+- **AI 角标由插件带**：发送类映射统一加 `--ai-tag`（dws 原生角标），模型不必在正文写【AI发送】；正文里的字面反斜杠-n 仍自动归一为真换行。
+- 覆盖范围即上表六个域的主用动作；长尾（听记/考勤/邮箱/组织/表格结构/多维表视图等）**AI 做不了**，只能读 `dws_skill` 判断可行性后回报用户——需要时按动作表补进行。
+- 安全门禁（`decideExec` + `runGuarded`）：读直通 / 写两阶段（草稿 + confirm）/ 敏感档人工面板（`shared/review-panel.ts`，面板只写人话、无 argv/ID，无界面会话直接拒绝）；面板「当前工作区不再询问」写 `remembered`（cli_path，destructive 不可记）。分档由 dws schema 元数据的 `effect`/`availability` 决定（缓存 `~/.pi/agent/dingtalk-bridge-schema.json` + 手写表兜底）：上游标 `availability≠available` 的命令直接报不可用与原因，不掩成内容错；命令路径（canonical/点分/本地旧写法）统一归一到可执行 cli_path。
+- 群发逐人个性化：`dingtalk_msg` 的 `vars` 参数（`{收件人: 值}` 或 `{收件人: {变量: 值}}`）映射到管线的私有 `--vars`，正文含 `{{变量}}` 时由管线逐人渲染发送；缺变量表在草稿前拦下。
+- 群发 `chat +broadcast`：草稿前先跑只读 dry-run 预检收件人，有人未唯一解析就整体拦下（不半批次发送）；正文含 `{{变量}}` 时改走逐人单聊（`sendPersonalized`，每人一份变量表 + 确定性幂等键，重跑自动跳过）。
+- 分享链接落地走 `dingtalk_file action="fetch"`（link 或 spaceId+nodeId；文件直下、文件夹递归镜像，非 NTFS 卷自动改到系统临时区下载再搬回）。
+- 配置 `~/.pi/agent/dingtalk-bridge.json`；防重发台账 `~/.pi/agent/dingtalk-bridge-sent.json`（`dedupMinutes` 默认 60）；官方 `dingtalk-*` 技能不再常驻系统提示词（`before_agent_start` 过滤，`dws_skill` 按需取回）。
+- 回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层 A~AH）、`node src/extensions/test/dingtalk-intents.test.mjs`（语义层映射 A~G）；真实联调 `dingtalk-bridge-live.mjs`。
 
 ## mimo-omni.ts（媒体兼容层，过渡件）
 

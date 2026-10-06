@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * dingtalk-bridge 回归测试（复用 mimo-omni 测试基建：esbuild bundle + node_modules junction）
+ * dingtalk-bridge（src/extensions/dingtalk-bridge/index.ts）回归测试（复用 mimo-omni 测试基建：esbuild bundle + node_modules junction）
  *
  * 只测纯函数策略层（不真实起 dws 进程）：
  * - 场景 A：buildArgv 自动补 --format json / --yes，已有则不重复
@@ -11,7 +11,6 @@
  * - 场景 F：formal=true 豁免标签检查
  * - 场景 G：parsePeople 单候选/多候选/零候选/坏 JSON
  * - 场景 H：annotateQuery 查询类附时间锚点、非查询原样
- * - 场景 I：formatSchemaOutput 产品层/工具层/叶子层截断
  * - 场景 J：草稿 token 过期 → 拦截
  * - 场景 K：requireAiTag=false 时无标签放行（仍走两阶段）
  * - 场景 L：签名剔除易变 flag（--format/--yes 不影响「同一条消息」判定）
@@ -20,6 +19,7 @@
  * - 场景 Z：群发 --content 视为 Markdown，多行补硬换行
  * - 场景 AA：人员候选富化（meta 取名、部门/职务/工号、家长账号标注、CLI 结构化候选）
  * - 场景 AB/AC/AD/AE：命令分档（读/写/敏感）、元数据解析、人工审核文案（不出 argv/ID）、撤回对象识别
+ * - 场景 AH：命令路径归一（三版拼写 ↔ canonical/cli_path）、上游能力不可用先说清、DING 转提醒豁免标签
  *
  * 用法：node src/extensions/test/dingtalk-bridge.test.mjs（仓库根目录执行）
  */
@@ -30,7 +30,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const EXT = join(HERE, "..", "dingtalk-bridge.ts");
+const EXT = join(HERE, "..", "dingtalk-bridge", "index.ts");
 const OUT = join(HERE, ".tmp-dingtalk-bridge-bundle.mjs");
 
 const results = [];
@@ -49,7 +49,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, formatSchemaOutput, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, parseCanonicalPath, matchToolByPath, localAliases, formalFlagError, reviewKind, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -91,7 +91,7 @@ console.log("D、防重发");
 	// 执行层成功后记录签名（此处模拟）
 	st.sent.set(__test__.sendSignature(SEND), { at: NOW, snippet: "" });
 	const d = decideExec(SEND, {}, st, CFG, NOW);
-	check("同目标同内容 → block", d.action === "block" && d.reason.includes("台账防重发"));
+	check("同目标同内容 → block", d.action === "block" && d.reason.includes("防重发"));
 	const other = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】改到四点"];
 	check("不同内容放行", decideExec(other, {}, st, CFG, NOW).action === "pending");
 }
@@ -99,7 +99,7 @@ console.log("D、防重发");
 console.log("E、中文姓名目标拦截");
 {
 	const d = decideExec(["chat", "+dm", "--to", "张艳", "--content", "【AI发送】x"], {}, newExecState(), CFG, NOW);
-	check("姓名作目标 → block 并引导 resolve", d.action === "block" && d.reason.includes("dws_resolve_user"));
+	check("姓名作目标 → block（姓名必须先解析成账号）", d.action === "block" && d.reason.includes("账号"));
 }
 
 console.log("F、formal 豁免");
@@ -122,21 +122,6 @@ console.log("H、查询时间锚点");
 	const q = annotateQuery(["chat", "+search-msg"], "[]", new Date(NOW));
 	check("查询类附当前时间", q.includes("当前系统时间") && q.includes("2026-10-02"));
 	check("非查询类原样", annotateQuery(["todo", "task", "list"], "[]", new Date(NOW)) === "[]");
-}
-
-console.log("I、schema 输出摘要");
-{
-	const products = formatSchemaOutput(JSON.stringify({
-		level: "products",
-		products: [{ id: "todo", agent_summary: "待办任务管理" }, { id: "chat", description: "群聊/消息" }],
-	}), 12_000);
-	check("产品层一行一个", products.includes("todo｜待办任务管理") && products.includes("chat｜群聊/消息"));
-	const tools = formatSchemaOutput(JSON.stringify({
-		tools: [{ canonical_path: "todo.add_task", agent_summary: "创建待办", effect: "write", risk: "low" }],
-	}), 12_000);
-	check("工具层带路径与读写标注", tools.includes("todo.add_task") && tools.includes("[write/low]"));
-	const big = formatSchemaOutput(JSON.stringify({ level: "tool", blob: "x".repeat(20_000) }), 12_000);
-	check("叶子/未识别层超长截断", big.length < 13_500 && big.includes("截断"));
 }
 
 console.log("J、草稿过期");
@@ -227,7 +212,7 @@ console.log("R、发送入口覆盖与群名拦截");
 {
 	const st = newExecState();
 	const g1 = decideExec(["chat","+send-to-group","--group","教研组长群","--markdown","【AI发送】通知"], {}, st, CFG, NOW);
-	check("+send-to-group 纳入两阶段（群名先拦）", g1.action === "block" && g1.reason.includes("+chat-search"));
+	check("+send-to-group 纳入两阶段（群名先拦）", g1.action === "block" && g1.reason.includes("群名"));
 	const g2 = decideExec(["chat","+send-to-group","--group","cid123","--markdown","通知没标签"], {}, st, CFG, NOW);
 	check("群发同样受【AI发送】标签约束", g2.action === "block" && g2.reason.includes("【AI发送】"));
 	const g3 = decideExec(["chat","+send-to-group","--group","cid123","--markdown","【AI发送】通知"], {}, st, CFG, NOW);
@@ -291,9 +276,9 @@ console.log("V、钉盘/云盘分享解析");
 	check("[文件夹] 消息识别", isFolderMessage(f));
 	check("普通消息不误判为文件夹消息", !isFolderMessage("文件夹里的文件我看了"));
 	const tips = formatDriveRefs(r1);
-	check("下载指引含 spaceId 与命令名", tips.includes("drive download") && tips.includes("26810061928"));
+	check("下载指引含 spaceId 与工具名", tips.includes("dingtalk_file") && tips.includes("26810061928"));
 	check("裸 id 指引提示换 drive 或让对方重发", formatDriveRefs(r2).includes("重发"));
-	check("文件夹指引用 pull", formatDriveRefs(r4).includes("pull"));
+	check("文件夹指向 fetch（镜像）", formatDriveRefs(r4).includes("fetch"));
 }
 
 console.log("W、字段拼写不一致（群成员小写 t / 消息大写 T）");
@@ -606,6 +591,51 @@ console.log("AE、人多时的名单排版");
 	const k1 = personalKey("abc", "你好");
 	check("AB: 幂等键确定且为 UUID 形状", k1 === personalKey("abc", "你好") && /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/.test(k1), k1);
 	check("AB: 人不同/正文不同则幂等键不同", k1 !== personalKey("abc", "你好！") && k1 !== personalKey("abd", "你好"));
+}
+
+console.log("AH、命令路径与上游可用性（DING 转提醒场景）");
+{
+	// 真实 ding 产品工具表（co `dws schema ding --compact` 原字段）
+	const DING_TOOLS = [
+		{ canonical_path: "ding.recall_ding_message", cli_path: "ding message recall", agent_summary: "撤回已发送的机器人 DING" },
+		{ canonical_path: "ding.send_ding_message", cli_path: "ding message send", agent_summary: "以企业机器人发送应用内/短信/电话 DING" },
+		{ canonical_path: "ding.shortcut_list", cli_path: "ding +list", agent_summary: "查询 DING 消息列表" },
+		{ canonical_path: "ding.shortcut_recall_personal", cli_path: "ding +recall-personal", agent_summary: "撤回本人发起的 DING" },
+		{ canonical_path: "ding.shortcut_receiver_status", cli_path: "ding +receiver-status", agent_summary: "查询 DING 接收人已读状态" },
+		{ canonical_path: "ding.shortcut_send_by_message", cli_path: "ding +send-by-message", agent_summary: "针对某条消息发起 DING 提醒" },
+		{ canonical_path: "ding.shortcut_send_personal", cli_path: "ding +send-personal", agent_summary: "以本人身份发送 DING 给指定人" },
+	];
+	check("AH: canonical 路径解析", parseCanonicalPath("ding.shortcut_send_by_message")?.product === "ding" && parseCanonicalPath("todo task list") === null);
+	check("AH: 技能文档旧写法 → schema 的 cli_path（归一到 +send-by-message）", matchToolByPath(DING_TOOLS, "ding message send-by-message") === 5);
+	check("AH: canonical 与 cli_path 写法也各自命中同一条", matchToolByPath(DING_TOOLS, "ding.shortcut_send_by_message") === 5 && matchToolByPath(DING_TOOLS, "ding +send-by-message") === 5);
+	check("AH: 点分段写法（dws_schema 里查不到的那种）也能归一", matchToolByPath(DING_TOOLS, "ding.message.send-by-message") === 5);
+	check("AH: 机器人 DING（ding message send）不被抢到别的工具", matchToolByPath(DING_TOOLS, "ding message send") === 1);
+	check("AH: 候选并列/查无此名时不瞎猜", matchToolByPath(DING_TOOLS, "ding message") === -1 && matchToolByPath(DING_TOOLS, "ding zzz") === -1);
+	check("AH: 上游不可用时给出的旧写法（同一命令的本地命令路径）", localAliases("ding +send-by-message").join() === "ding message send-by-message" && localAliases("todo task list").length === 0);
+
+	// 标签规则：转 DING 无正文（--group/--message-id/--users）— 不应再被要求加【AI发送】
+	const sbm = ["ding", "+send-by-message", "--group", "cid1", "--message-id", "m1", "--users", "uid1"];
+	const legacy = ["ding", "message", "send-by-message", "--group", "cid1", "--message-id", "m1", "--users", "uid1"];
+	check("AH: 转 DING（cli_path 写法）缺标签 → 仍进两阶段（不误拦）", decideExec(sbm, {}, newExecState(), CFG, NOW).action === "pending");
+	check("AH: 转 DING（技能文档旧写法）同样进两阶段", decideExec(legacy, {}, newExecState(), CFG, NOW).action === "pending");
+	check("AH: 两版写法都算发送类（敏感档）", tierFromTables(sbm) === "sensitive" && tierFromTables(legacy) === "sensitive");
+	check("AH: 机器人 DING（有正文）仍要标签，没被顺带豁免", tierFromTables(["ding", "message", "send", "--robot-code", "rc"]) === "sensitive" && decideExec(["ding", "message", "send", "--robot-code", "rc", "--users", "u1", "--content", "无标签"], {}, newExecState(), CFG, NOW).action === "block");
+	check("AH: 转 DING 的审核文案是人话（动作/对象）", (() => { const r = buildReview(sbm, null, "会对外发出消息"); return r.verb === "转DING提醒" && r.impact.join(" ").includes("强提醒") && r.content.length === 0; })());
+	check("AH: 弹窗富化按命令分流（转 DING 不说成撤回）", reviewKind(sbm) === "ding" && reviewKind(legacy) === "ding" && reviewKind(["chat", "+messages-recall", "--msg-id", "m1"]) === "recall" && reviewKind(["chat", "+dm", "--to", "u1"]) === "send");
+	check("AH: 短信/电话转 DING 也报费用与强打扰", dingChannel([...sbm, "--type", "sms"]) === "sms" && dingChannel([...legacy, "--type=call"]) === "call" && dingChannel(["ding", "+send-personal", "--type", "call"]) === "call");
+
+	// --formal 是工具参数，不是 CLI flag：提示不能把人引向 args 里的 --formal
+	const formalLeak = [...sbm, "--formal"];
+	check("AH: args 里塞 --formal → 拦下并说明角标由插件带", (() => { const d = decideExec(formalLeak, {}, newExecState(), CFG, NOW); return d.action === "block" && d.reason.includes("--formal") && d.reason.includes("角标"); })(), formalFlagError(formalLeak));
+	check("AH: 缺标签的提示只要求补标记（不再指向 formal/--formal）", (() => { const d = decideExec(["chat", "+dm", "--to", "u1", "--content", "无标签"], {}, newExecState(), CFG, NOW); return d.action === "block" && d.reason.includes("【AI发送】") && !d.reason.includes("--formal"); })());
+
+	// 上游把能力对 AI 关掉（schema availability）：先说不可用，不报内容错
+	const meta = parseCmdMeta('{ "availability": "unavailable", "cli_path": "ding +send-by-message", "effect": "write", "interface_reason": "下游没有稳定接收人身份和可查询撤回终态", "risk": "medium" }');
+	check("AH: 元数据取到 cli_path 与 interface_reason", meta?.cliPath === "ding +send-by-message" && meta?.reason.includes("稳定接收人身份"));
+	const un = decideExec(sbm, { meta, why: "会对外发出消息" }, newExecState(), CFG, NOW);
+	check("AH: 不可用 → 报不可用及原因", un.action === "block" && un.kind === "unavailable" && un.reason.includes("对 AI 关闭") && un.reason.includes("稳定接收人身份"), un.action === "block" ? un.reason.slice(0, 60) : un.action);
+	check("AH: 不可用优先于内容校验（不会伪装成缺标签）", un.action === "block" && !un.reason.includes("【AI发送】"));
+	check("AH: 可用（available）不受影响", decideExec(sbm, { meta: { ...meta, availability: "available" } }, newExecState(), CFG, NOW).action === "pending");
 }
 
 const failed = results.filter((r) => !r.ok);

@@ -30,9 +30,9 @@ src/                  # 全部源码 + npm 生态 + 构建脚本（build.js 的�
   extensions/         #   扩展源码（产物 dist/extensions/）
     shared/           #     共享模块：只被扩展 import、不直接部署，build.js 内联进各产物
     hud/              #     3 行 HUD（多文件，入口 index.ts → 产物 hud.ts）
-    ask/ btw/ web-tool/ webdav-kb/ workflow-mgr/ model-config/ perm-gate/   # 多文件扩展（入口 index.ts）
-    context-init / claude-it / explore-agent / status-beacon / pair-guard / crash-log / clipboard / img-slim / dingtalk-bridge / mimo-omni / qr   # 单文件扩展
-    test/             #     跨扩展回归测试（status-keys / explore / perm-gate / presence / dingtalk-bridge / mimo-omni + *-live.mjs 联调）
+    ask/ btw/ web-tool/ webdav-kb/ workflow-mgr/ model-config/ perm-gate/ dingtalk-bridge/   # 多文件扩展（入口 index.ts）
+    context-init / claude-it / explore-agent / status-beacon / pair-guard / crash-log / clipboard / img-slim / mimo-omni / qr   # 单文件扩展
+    test/             #     跨扩展回归测试（status-keys / explore / perm-gate / presence / dingtalk-bridge / dingtalk-intents / mimo-omni + *-live.mjs 联调）
   vendor/             #   社区插件源码收录区（当前仅 pi-rtk-optimizer）+ README.md（出处表/收录原则/回退记录）
 static/               # 静态部署物（无需编译）：AGENTS.md / themes/ / sounds/(5 音效) / skills/markitdown/ / models.json / patches/(3 个手工补丁)
 dist/                 # 扩展产物（gitignore 不入库，install.js 每次重建）

@@ -1,48 +1,71 @@
 /**
- * dingtalk-bridge：钉钉（dws CLI）受控桥接
+ * dingtalk-bridge：钉钉受控桥接（业务语义层 + 安全门禁）
  *
  * 背景：dingtalk-* 技能（dws npm postinstall 安装、升级即还原，不可改）以「冻结说明书 +
- * 凭记忆拼命令」的方式驱动 dws，教研室项目事故史（误发/重发/记岔 ID/时间锚点漂移）证明
- * 文档约束对高风险操作不可靠。本扩展把机械可判的铁律变成工具层硬拦截：
+ * 凭记忆拼命令」驱动 dws，真实事故（误发/重发/记岔 ID/时间锚点漂移）证明文档约束对
+ * 高风险操作不可靠。本扩展把 dws 的命名与参数彻底挡在模型之外，并把铁律做成工具层硬拦截。
  *
- * - L0 技能过滤：before_agent_start 把 dingtalk-* 从注入清单摘掉（配置化前缀），
- *   /skill:dingtalk-* 手动加载不受影响（逃生舱）
- * - L1 执行底座：dws_schema（包 dws schema --compact 活内省，分层下钻防大块 schema 糊脸）、
- *   dws_exec（argv 数组直传 spawn，不过 shell，自动补 --format json -y）
- * - L2 安全拦截（decideExec 纯函数）：
+ * - L3 语义层（模型看到的只有这一层，7 个工具）：`dingtalk_msg` / `dingtalk_todo` /
+ *   `dingtalk_calendar` / `dingtalk_approval` / `dingtalk_file` / `dingtalk_doc`——
+ *   AI 只说业务话（收件人姓名、群名、「明天 09:30」），命令/flags/ID 由本文件解析
+ *   （姓名→userId、群名→openConversationId、消息关键词→msgId、文档标题→nodeId、
+ *   多维表名→baseId/tableId、手机号→账号）；`dws_skill` 是唯一的逃生舱，只给官方技能
+ *   正文当知识，不给任何命令执行通道。同名/同名群不要求人工确认：把候选列回对话，
+ *   由 AI 按部门/职务/工号自己挑（见 intents.ts 的场景→命令映射）。
+ * - L2 安全门禁（`decideExec` 纯函数 + `runGuarded` 管线，语义层唯一入口）：
+ *   · 分档由 dws schema 元数据决定（缓存 + 手写表兜底）：读直通 / 写两阶段 / 敏感档弹人工面板
  *   · 发送类（+dm / +messages-send* / +messages-reply / +broadcast / ding send-*）与转发类
- *     （+messages-forward*）强制两阶段——首次返回草稿回执不发送，对话内经用户确认后带 confirm
- *     token 重调才执行（项目铁律：审核在对话里）；转发与卡片更新无正文可加标签，豁免标签检查
- *   · 群发（chat +broadcast）草稿前先跑一次只读 dry-run 预检收件人：有任一收件人未唯一解析
- *     就整体拦下（不生成草稿、不做半批次发送）并报出候选；消歧后一次发全。
- *     群发的 --to 按设计就是姓名列表，故「中文姓名即拦」对它不适用，改由预检把关
-	 *   · 分档由 dws schema 元数据决定（本地缓存 + 手写表兜底）：读直通 / 写两阶段 / 敏感档
-	 *     （破坏性 + 对外发出内容）执行前弹人工审核面板；面板只写人话，不放 argv/ID；无界面会话直接拒绝
- *   · --dry-run 一律视为只读预演：不进两阶段门、不记防重发台账
- *   · 发送缺【AI发送】标签 → 拒执（正式通知经用户明确要求时传 formal=true 豁免）
- *   · 发送目标含中文姓名 → 拒执，强制先 dws_resolve_user 实时解析（禁凭记忆硬编码 ID）；
- *     未经本会话解析的 userId 放行但附软警告
- *   · 本会话相同（目标+内容）重复发送 → 拒执，提示改用只读查询验证（防「为验证重发」事故）
- *   · 查询类结果自动附当前系统时间（时间窗一律相对此刻，防沿用对话旧日期锚点）
- *   · 正文里的字面「反斜杠-n」自动归一为真换行（模型常把换行写成两个字符，dws 会
- *     吃成空格导致分行静默粘连）；文件/媒体消息发出后明确回报「本条不含正文」
- *     （--title 不显示给收件人，说明文字必须另发一条）
- * - dws_skill（逃生舱）：消息收发之外的复杂管理操作（表格/文档/日历/审批/组织/听记等）
- *   按需拉取官方技能正文（无参给技能索引）——技能文件不动，只是不再常驻系统提示词
- * - dws_resolve_user：包 aisearch person，单候选自动记入本会话已验证集，多候选列出并要求
- *   pick 参数确认，零候选给换维度/手机号反查的指引 *
- * 配置 ~/.pi/agent/dingtalk-bridge.json：requireAiTag（默认 true）/ blockedSkillPrefixes /
- * dwsPath / execTimeoutMs / maxOutputChars。/dws 查看状态与 forget/refresh 维护。
+ *     （+messages-forward*）强制两阶段——首次返回执行计划不发送，用户在对话里确认后带 confirm
+ *     重调才执行；转发、卡片更新、转 DING 无正文可加标签，豁免标签检查
+ *   · 群发（chat +broadcast）草稿前先跑只读 dry-run 预检收件人：有人未唯一解析就整体拦下
+ *   · 人工面板只写人话（动作/对象/正文/影响），不放 argv 与裸 ID；无界面会话直接拒绝
+ *   · 本会话相同（目标+内容）重复发送 → 拒执（防「为验证重发」）；撤回同理防重复
+ *   · 查询结果自动附当前时间锚点；正文里的字面「反斜杠-n」自动归一为真换行；
+ *     文件/媒体消息回报「本条不含正文」（说明文字必须另发一条）
+ *   · 上游把能力标成对 AI 关闭（schema availability 非 available）或命令路径根本不存在时，
+ *     直接说清原因，不让它伪装成内容错
+ * - L0 技能过滤：before_agent_start 把 dingtalk-* 从系统提示词的技能清单摘掉（省上下文），
+ *   需要时用 `dws_skill` 按需取回。
+ *
+ * 配置 ~/.pi/agent/dingtalk-bridge.json：requireAiTag / blockedSkillPrefixes / dwsPath /
+ * execTimeoutMs / maxOutputChars / dedupMinutes / skillsDir / remembered；/dws 查看状态与 forget/refresh。
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { loadJsonConfig, saveJsonConfig } from "./shared/config";
-import { askReview, fitItems, layoutList, reviewActions } from "./shared/review-panel";
+import { loadJsonConfig, saveJsonConfig } from "../shared/config";
+import { askReview, fitItems, layoutList, reviewActions } from "../shared/review-panel";
+import {
+	buildApproval,
+	buildCalendar,
+	buildDoc,
+	buildFile,
+	buildMessage,
+	buildTodo,
+	isoTime,
+	type Built,
+	type Resolved,
+	type ResolvedGroup,
+	type ResolvedMessage,
+	type ResolvedPerson,
+	// 参数 schema（单一真值源：既是工具签名，也是构建函数的入参类型）
+	ApprovalParams,
+	type ApprovalParamsT,
+	CalendarParams,
+	type CalendarParamsT,
+	DocParams,
+	type DocParamsT,
+	FileParams,
+	type FileParamsT,
+	MessageParams,
+	type MessageParamsT,
+	TodoParams,
+	type TodoParamsT,
+} from "./intents";
 
 /* ============================== 可调配置 ============================== */
 
@@ -51,8 +74,6 @@ const CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "dingtalk-bridge.jso
 const LEDGER_FILE = path.join(os.homedir(), ".pi", "agent", "dingtalk-bridge-sent.json");
 /** 待确认草稿有效期：超时需重新走确认（防拿昨天的回执发今天的消息） */
 const PENDING_TTL_MS = 10 * 60_000;
-/** dws schema 摘要单层输出预算（超出提示继续下钻） */
-const SCHEMA_MAX_CHARS = 12_000;
 /** dws_skill 单次返回的技能正文上限 */
 const SKILL_MAX_CHARS = 12_000;
 
@@ -92,6 +113,11 @@ function loadConfig(): BridgeConfig {
 
 /* ============================== 纯函数（策略层，测试直引） ============================== */
 
+/** 把已有消息转 DING（无正文，标签规则不适用；两版写法：schema 的 cli_path 与技能文档的本地命令） */
+const DING_BY_MESSAGE_PREFIXES: string[][] = [
+	["ding", "+send-by-message"],
+	["ding", "message", "send-by-message"],
+];
 /** 发送类命令前缀（argv 前几项匹配即命中）：命中即走两阶段 + 标签 + 防重发全套校验 */
 const SEND_PREFIXES: string[][] = [
 	["chat", "+dm"], // 按姓名/ID 发单聊
@@ -107,9 +133,10 @@ const SEND_PREFIXES: string[][] = [
 	["chat", "+messages-combine-forward"], // 合并转发多条消息
 	["chat", "+messages-update-card"], // 流式更新已发出的卡片
 	["chat", "+broadcast"], // 按姓名群发同一条单聊（姓名目标，走预检）
-	["ding", "+send-personal"], // 本人身份发 DING
-	["ding", "message", "send-by-message"], // 转原消息为 DING
-	["ding", "message", "send-personal"], // 新写内容发 DING
+	["ding", "+send-personal"], // 本人身份发 DING（schema 的 cli_path）
+	["ding", "message", "send-personal"], // 同上，dws 官方技能文档记的本地命令写法
+	["ding", "message", "send"], // 机器人身份发 DING
+	...DING_BY_MESSAGE_PREFIXES, // 把已有消息转 DING
 ];
 /** 撤回类命令：破坏性但可再发；同样要过两阶段确认 + 防重复撤回 */
 const RECALL_PREFIXES: string[][] = [
@@ -122,10 +149,9 @@ const RECALL_PREFIXES: string[][] = [
 const BROADCAST_PREFIXES: string[][] = [["chat", "+broadcast"]];
 /** 群发预检未过时的消歧指引（实测：--to 里姓名与 userId 可混用） */
 const BROADCAST_FIX_GUIDE =
-	"处理方法：① 多候选——把重名的名字**直接换成**候选里的 userId，其余名字照旧（同一条命令里姓名与 userId 可混用，实测）：--to \"苗文硕,016113645862842894\"。" +
-	"注意：把重名名字与 userId 并列（--to \"李娜,016113645862842894\"）不解决歧义，重名那个 token 仍会被跳过。" +
-	"② 查无此人——核对姓名用字，或用完整手机号反查：dws_exec [\"contact\", \"user\", \"search-mobile\", \"--mobile\", \"<手机号>\"]。" +
-	"③ 用户明确表示只发已解析的这批时，删掉未解析的名字重发（本轮一条都没发，不会重复）。";
+	"处理方法：① 多候选——把重名的名字直接换成候选里的 userId，其余名字照旧（姓名与 userId 可混用）。" +
+	"② 查无此人——核对姓名用字，或直接把这个人的完整手机号当收件人（插件会反查）。" +
+	"③ 只发已解析的那批时，删掉未解析的名字重发（本轮一条都没发，不会重复）。";
 /** 撤回目标 flag */
 const RECALL_ID_FLAGS = new Set(["--msg-id", "--message-id", "--msg-ids", "--message-ids"]);
 /** 查询类命令前缀：结果前自动附当前系统时间 */
@@ -137,12 +163,13 @@ const QUERY_PREFIXES: string[][] = [
 ];
 /** 发送目标取值 flag（含中文姓名即拒执） */
 const TARGET_FLAGS = new Set(["--to", "--user", "--users"]);
-/** 转发/卡片更新：无正文也无 --ai-tag，标签规则不适用（仍走两阶段与防重发） */
+/** 无正文可加标签的命令：转发/合并转发、卡片更新、把已有消息转 DING（标签规则不适用，仍走两阶段与防重发） */
 const TAG_EXEMPT_PREFIXES: string[][] = [
 	["chat", "+messages-forward"],
 	["chat", "+messages-forward-topic"],
 	["chat", "+messages-combine-forward"],
 	["chat", "+messages-update-card"],
+	...DING_BY_MESSAGE_PREFIXES,
 ];
 /** 群目标 flag：值可能是中文群名（同名群/改群名都会发错）——同样要求解析成 openConversationId */
 const GROUP_FLAGS = new Set(["--group", "--chat-id", "--dest-conversation-id"]);
@@ -170,6 +197,12 @@ export interface CmdMeta {
 	risk: string;
 	confirmation: string;
 	availability: string;
+	/** schema 的 cli_path：可执行的命令写法（argv 前几项），canonical_path 不能当命令执行 */
+	cliPath: string;
+	/** schema 的 canonical_path：工具身份名，不能当命令执行 */
+	canonicalPath: string;
+	/** availability 非 available 时上游给的说明（interface_reason） */
+	reason: string;
 }
 
 /** 命令元数据缓存（按 cli_path；schema 调用 ~2.5s，只对首次出现的新命令付一次） */
@@ -203,12 +236,74 @@ export function presumedRead(args: string[]): boolean {
 	return ws.some((w) => READ_WORDS.has(w)) && !ws.some((w) => WRITE_WORDS.has(w));
 }
 
+/** canonical 形态（如 ding.shortcut_send_by_message）→ 产品 id + 尾段；非 canonical 返回 null */
+export function parseCanonicalPath(p: string): { product: string; tail: string } | null {
+	const m = /^([a-z0-9]+)\.([a-z0-9_]+)$/i.exec(p.trim());
+	return m ? { product: m[1]!, tail: m[2]! } : null;
+}
+
+/** 路径归一化：只留小写字母数字——用于跨写法比对（ding +send-by-message ↔ ding message send-by-message） */
+const pathKey = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** 去首段（产品 id）后的命令词，归一化；canonical/点分写法先剥首段 */
+function pathTailKey(path: string): string {
+	const t = path.trim();
+	if (!/\s/.test(t) && t.includes(".")) return pathKey(t.slice(t.indexOf(".") + 1));
+	return pathKey(t.split(/\s+/).slice(1).join(""));
+}
+
+/**
+ * 在产品的工具表里按「归一化后互相包含」找唯一命中的工具（返回下标，未命中 -1）。
+ * schema 的 cli_path 与技能文档/本地命令树里的写法只差分隔符与组名（+send-by-message vs message send-by-message），
+ * 完全字面匹配找不到，故用归一化包含关系；完全相等优先，多个候选并列时宁可不猜。
+ */
+export function matchToolByPath(tools: Array<{ canonical_path?: string; cli_path?: string }>, query: string): number {
+	const q = pathTailKey(query);
+	if (!q) return -1;
+	let best = -1;
+	let bestScore = 0;
+	let second = 0;
+	tools.forEach((t, i) => {
+		let score = 0;
+		for (const c of [t.cli_path, t.canonical_path]) {
+			if (typeof c !== "string" || !c) continue;
+			const k = pathTailKey(c);
+			if (!k) continue;
+			if (k === q) score = Math.max(score, 1000 + q.length);
+			else if (k.includes(q) || q.includes(k)) score = Math.max(score, Math.min(k.length, q.length));
+		}
+		if (score > bestScore) {
+			second = bestScore;
+			bestScore = score;
+			best = i;
+		} else if (score > second) second = score;
+	});
+	return bestScore >= 4 && bestScore > second ? best : -1;
+}
+
+/** 上游把某条 shortcut 命令标成不可用时，它的等价旧写法（同一命令的本地命令路径） */
+export function localAliases(cliPath: string): string[] {
+	const toks = cliPath.trim().split(/\s+/);
+	const [prod, ...rest] = toks;
+	if (!prod || rest.length !== 1) return [];
+	const seg = rest[0]!;
+	return seg.startsWith("+") ? [`${prod} message ${seg.slice(1)}`] : [];
+}
+
 /** 从 `dws schema --compact` 输出取安全语义（紧凑输出是带尾逗号的非严格 JSON，用正则取顶层字段） */
 export function parseCmdMeta(text: string): CmdMeta | null {
 	const pick = (k: string): string | undefined => new RegExp(`"${k}"\\s*:\\s*"([^"]*)"`).exec(text)?.[1];
 	const effect = pick("effect");
 	if (!effect) return null;
-	return { effect, risk: pick("risk") ?? "", confirmation: pick("confirmation") ?? "", availability: pick("availability") ?? "" };
+	return {
+		effect,
+		risk: pick("risk") ?? "",
+		confirmation: pick("confirmation") ?? "",
+		availability: pick("availability") ?? "",
+		cliPath: pick("cli_path") ?? "",
+		canonicalPath: pick("canonical_path") ?? "",
+		reason: pick("interface_reason") ?? "",
+	};
 }
 
 /** 命令参数表（schema 的 parameters 键 = flag 名去横线的下划线形式，如 open-dingtalk-id） */
@@ -291,6 +386,10 @@ const ACTION_LABELS: Array<[string[], string]> = [
 	[["chat", "+chat-transfer-owner"], "转让群主"],
 	[["chat", "+chat-quit"], "退出群聊"],
 	[["ding", "+send-personal"], "发DING"],
+	[["ding", "message", "send-personal"], "发DING"],
+	[["ding", "+send-by-message"], "转DING提醒"],
+	[["ding", "message", "send-by-message"], "转DING提醒"],
+	[["ding", "message", "send"], "发DING"],
 	[["mail", "message", "send"], "发送邮件"],
 	[["oa", "approval", "create-instance"], "发起审批"],
 	[["oa", "approval", "approve"], "同意审批"],
@@ -319,6 +418,10 @@ const IMPACT_HINTS: Array<[string[], string]> = [
 	[["chat", "+chat-transfer-owner"], "⚠ 群主权限移交，不可自动恢复"],
 	[["chat", "+chat-create"], "会立即建群并通知被拉进来的成员"],
 	[["ding", "+send-personal"], "强打扰对方；短信/电话类型会产生费用"],
+	[["ding", "message", "send-personal"], "强打扰对方；短信/电话类型会产生费用"],
+	[["ding", "+send-by-message"], "把该消息转成 DING 强提醒收件人；短信/电话类型会产生费用"],
+	[["ding", "message", "send-by-message"], "把该消息转成 DING 强提醒收件人；短信/电话类型会产生费用"],
+	[["ding", "message", "send"], "强打扰对方；短信/电话类型会产生费用"],
 	[["mail", "message", "send"], "对方邮箱会立即收到"],
 	[["oa", "approval", "create-instance"], "审批流开启后无法撤回（除非自行撤销）"],
 	[["calendar", "event", "create"], "会给参会人发邀请通知"],
@@ -424,7 +527,9 @@ function flagValues(args: string[], flags: Set<string>): string[] {
 
 /** DING 提醒方式（app 免费应用内 / sms 短信 / call 电话——后者产生真实费用与打扰） */
 export function dingChannel(args: string[]): string | undefined {
-	if (!(args[0] === "ding" && (args[1] === "+send-personal" || (args[1] === "message" && args[2] === "send-personal")))) return undefined;
+	const dingSendSub = args[1] === "message" ? args[2] : args[1];
+	const isDingSend = args[0] === "ding" && (dingSendSub === "+send-personal" || dingSendSub === "+send-by-message" || dingSendSub === "send-personal" || dingSendSub === "send-by-message");
+	if (!isDingSend) return undefined;
 	for (let i = 0; i < args.length; i++) {
 		const a = args[i]!;
 		if (a.startsWith("--type=")) return a.slice(7);
@@ -619,8 +724,17 @@ function sendSignature(args: string[]): string {
 
 export type ExecDecision =
 	| { action: "run" }
-	| { action: "block"; reason: string }
+	| { action: "block"; reason: string; kind?: "unavailable" | "formal" | "unknown-path" }
 	| { action: "pending"; token: string; preview: string };
+
+/**
+ * --formal 不是命令参数（旧版提示曾引导模型往参数里加它）：出现即拦下，避免模型原地打转。
+ */
+export function formalFlagError(args: string[]): string | null {
+	const hit = args.find((a) => a === "--formal" || a.startsWith("--formal="));
+	if (!hit) return null;
+	return `没有 ${hit} 这个参数：AI 发送的角标由插件自动带上，直接去掉它重调即可。`;
+}
 
 /**
  * 发送/查询策略判定（纯函数）。args 为完整 dws 子命令 argv（不含 dws 本身、不含自动附加 flag）。
@@ -648,11 +762,25 @@ export function decideExec(
 ): ExecDecision {
 	// 只读预演：直接放行（否则 Agent 拿不到发送前的解析结果，且预演本就不会发消息）
 	if (isDryRun(args)) return { action: "run" };
+	const formalIssue = formalFlagError(args);
+	if (formalIssue) return { action: "block", kind: "formal", reason: formalIssue };
 
 	const tier = opts.tier ?? tierFromTables(args);
 	const why = opts.why ?? "写操作";
+	const meta = opts.meta ?? null;
 	// 只读：直通（无副作用，不弹窗也不草稿）
 	if (tier === "read") return { action: "run" };
+
+	// 上游把这能力对 AI 关了（schema availability）：先说清这件事，别让它伪装成内容错误
+	if (meta?.availability && meta.availability !== "available") {
+		return {
+			action: "block",
+			kind: "unavailable",
+			reason:
+				`该能力已被上游对 AI 关闭（dws schema 的 availability=${meta.availability}）${meta.reason ? `：${meta.reason}` : ""}\n\n` +
+				"桥不代为绕过这道闸门。需要这个操作时：换成上游仍开放的等价命令，或请用户本人在钉钉客户端手动做。",
+		};
+	}
 
 	// 撤回：同样两阶段 + 防重复撤回（msgId 决定撤回哪条，错一个字符就撤错消息）
 	const recallIds = flagValues(args, RECALL_ID_FLAGS);
@@ -684,9 +812,9 @@ export function decideExec(
 		if (cfg.requireAiTag && !labelOk && !opts.formal && !matchPrefix(args, TAG_EXEMPT_PREFIXES)) {
 			return {
 				action: "block",
+				kind: "formal",
 				reason:
-					"发送内容缺【AI发送】标记，已拦截。请在消息正文开头加上【AI发送】后重试；" +
-					"若这是用户明确要求的正式通知，以 formal=true 重新调用。",
+					"发送内容缺【AI发送】标记，已拦截。请在消息正文开头加上【AI发送】后重试。",
 			};
 		}
 		// 群发目标本就是姓名（dws 内部逐个解析），改由 dry-run 预检把关
@@ -695,8 +823,8 @@ export function decideExec(
 			return {
 				action: "block",
 				reason:
-					`发送目标「${cjkTarget}」是姓名而非 userId，已拦截。严禁凭记忆硬编码 ID——` +
-					"请先用 dws_resolve_user 实时解析，多候选时与用户确认后再发。",
+					`发送目标「${cjkTarget}」是姓名而非账号 ID，已拦截（姓名必须先解析成账号）。` +
+					"业务工具会自动做这一步，出现本提示说明插件解析缺口，请把这条操作回报用户。",
 			};
 		}
 		const cjkGroup = flagPairs(args, GROUP_FLAGS).find((p) => hasCJK(p.value));
@@ -704,8 +832,8 @@ export function decideExec(
 			return {
 				action: "block",
 				reason:
-					`发送目标群「${cjkGroup.value}」是群名而非 openConversationId，已拦截（同名群、改群名都会发错）。` +
-					`请先解析成稳定 ID：dws_exec ["chat", "+chat-search", "--query", "<群名>"]，再用 ${cjkGroup.flag} <openConversationId> 发送。`,
+					`发送目标群「${cjkGroup.value}」是群名而非会话 ID，已拦截（同名群、改群名都会发错）。` +
+					"业务工具会自动解析群名，出现本提示说明插件解析缺口，请把这条操作回报用户。",
 			};
 		}
 	}
@@ -715,8 +843,8 @@ export function decideExec(
 		return {
 			action: "block",
 			reason:
-				"本会话或近期已发送过相同目标与内容的消息（台账防重发），已拦截。发送命令绝不为验证而重发——" +
-				"请改用只读查询确认：dws_exec [\"chat\", \"+search-msg\", \"--sender\", \"<自己姓名>\", ...]。",
+				"本会话或近期已发送过相同目标与内容的消息（防重发台账），已拦截。绝不为验证而重发——" +
+				"要核对请用只读查询（如 dingtalk_msg action=\"read\", sender=\"me\"）。",
 		};
 	}
 
@@ -766,7 +894,7 @@ export function formatDraft(
 	const label = (f: string): string => (f.startsWith("(全局)") ? f : `--${f}`);
 	const unused = (schemaFlags ?? []).filter((f) => !used.has(f));
 	const lines = [
-		`📋 执行计划（未执行）。确认执行：带 confirm="${token}" 整个 argv 原样重调 dws_exec；草稿 ${ttlMin} 分钟有效，过期即作废（重发需重新生成草稿并重新确认）。`,
+		`📋 执行计划（未执行）。确认执行：带 confirm="${token}" 用同一个工具、同一组业务参数重调；草稿 ${ttlMin} 分钟有效，过期即作废（重发需重新生成草稿并重新确认）。`,
 		"",
 		`动作与对象：${[review.verb, review.object].filter(Boolean).join("  ") || "（见下）"}`,
 		...(review.content.length ? ["内容：", ...review.content.map((l) => `  ${l}`)] : []),
@@ -1226,9 +1354,9 @@ export function formatDriveRefs(refs: { spaceId: string; fileId: string; type: s
 			return `- ${r.fileId}（type=${r.type}）：仅数字 dentryId、缺 spaceId，不能用 +messages-resource-download 下载；spaceId 在正文的 yunpan 链接里，或让对方重发。`;
 		}
 		if (r.type === "folder") {
-			return `- 文件夹 spaceId=${r.spaceId} fileId=${r.fileId}：用 dws_fetch 直接拿整个文件夹（或 drive pull --space-id --remote-folder <绝对路径>）`;
+			return `- 文件夹 spaceId=${r.spaceId} fileId=${r.fileId}：用 dingtalk_file（action="fetch", link="<消息原文>"）镜像到本地`;
 		}
-		return `- 文件 spaceId=${r.spaceId} fileId=${r.fileId}：用 dws_fetch 直接下载（或 drive download --space-id ${r.spaceId} --node ${r.fileId}）`;
+		return `- 文件 spaceId=${r.spaceId} fileId=${r.fileId}：用 dingtalk_file（action="fetch", link="<消息原文>"）下载`;
 	});
 	return `\n\n🔗 钉盘/云盘分享资源（这类消息用 +messages-resource-download 会报 TABLE_NOT_FOUND，需走 drive）：\n${lines.join("\n")}`;
 }
@@ -1252,45 +1380,6 @@ function parsePeopleLike(v: unknown, pred: (o: Record<string, unknown>) => boole
 		seen.add(k);
 		return true;
 	});
-}
-
-/** dws schema --compact 输出整层摘要：产品层列产品一句话，产品详情层列工具一行一个，叶子层原样 */
-export function formatSchemaOutput(raw: string, maxChars: number): string {
-	const truncate = (s: string, why: string) =>
-		s.length <= maxChars ? s : `${s.slice(0, maxChars)}\n\n……（输出过长已截断：${why}，请传更具体的 path 逐层下钻）`;
-	let doc: Record<string, unknown>;
-	try {
-		doc = JSON.parse(raw);
-	} catch {
-		return truncate(raw, "非 JSON");
-	}
-	const line = (parts: (string | undefined)[]) => parts.filter(Boolean).join("｜");
-	// 产品总览层：{ level: "products", products/groups: [...] }
-	const products = (doc.products ?? doc.groups ?? doc.items) as unknown;
-	if (doc.level === "products" && Array.isArray(products)) {
-		const lines = products.map((p) => {
-			const o = p as Record<string, unknown>;
-			return line([String(o.id ?? o.name ?? "?"), (o.agent_summary ?? o.description) as string]);
-		});
-		return truncate(`共 ${products.length} 个产品。下钻：dws_schema path=\"<产品id>\"；查参数：dws_schema path=\"<canonical_path>\"\n\n${lines.join("\n")}`, "产品过多");
-	}
-	// 产品/分组层：{ product: { tools: [...] } } 或 { tools: [...] }
-	const tools = (doc.tools ?? (doc.product as Record<string, unknown> | undefined)?.tools ?? (doc.group as Record<string, unknown> | undefined)?.tools) as unknown;
-	if (Array.isArray(tools)) {
-		const list = tools as Record<string, unknown>[];
-		const lines = list.map((t) =>
-			line([
-				String(t.canonical_path ?? t.cli_path ?? t.id ?? "?"),
-				(t.agent_summary ?? t.description) as string,
-				t.effect ? `[${t.effect}${t.risk ? `/${t.risk}` : ""}]` : undefined,
-			]),
-		);
-		return truncate(
-			`共 ${list.length} 个工具。查参数：dws_schema path=\"<canonical_path>\"\n\n${lines.join("\n")}`,
-			"工具过多",
-		);
-	}
-	return truncate(raw, "已到叶子或结构未识别");
 }
 
 /** 自动附加 --format json 与 -y（调用方未显式给出时；--dry-run 与 --yes 互斥，预览时不加 -y） */
@@ -1353,6 +1442,53 @@ interface RunResult {
 	stdout: string;
 	stderr: string;
 	timedOut: boolean;
+}
+
+/** 本地命令树探测：dws <路径> --help（只读、不触服务调用）——判断某个 CLI 路径是否真实存在 */
+async function cliPathExists(cfg: BridgeConfig, cliPath: string): Promise<boolean> {
+	const toks = cliPath.trim().split(/\s+/).filter(Boolean);
+	if (!toks.length) return false;
+	try {
+		const r = await runDws(cfg, [...toks, "--help"]);
+		const out = (r.stdout || r.stderr).trim();
+		if (r.timedOut || !out) return false;
+		return !/"category"\s*:\s*"validation"/.test(out) && !/unknown command/i.test(out);
+	} catch {
+		return false;
+	}
+}
+
+/** 产品的工具表（canonical_path / cli_path 对照）——schema 路径容错与报错时的映射表都用它 */
+async function productTools(cfg: BridgeConfig, product: string): Promise<Array<Record<string, unknown>>> {
+	try {
+		const r = await runDws(cfg, ["schema", product, "--compact", "--format", "json"]);
+		if (r.timedOut || r.code !== 0) return [];
+		const doc = JSON.parse(r.stdout) as Record<string, unknown>;
+		const tools = (doc.tools ?? (doc.product as Record<string, unknown> | undefined)?.tools) as unknown;
+		return Array.isArray(tools) ? (tools as Array<Record<string, unknown>>) : [];
+	} catch {
+		return [];
+	}
+}
+
+
+/**
+ * 把「像路径的」写法解析成可执行的 cli_path：先 schema 直查（canonical 与 cli_path 都认），
+ * 再拿同产品的工具表归一（技能文档的旧写法与 schema 的 cli_path 只差分隔符与组名）。
+ */
+async function resolveCliPath(cfg: BridgeConfig, pathSpec: string): Promise<{ cliPath: string; canonical: string } | null> {
+	const direct = await runDws(cfg, ["schema", pathSpec, "--compact", "--format", "json"]);
+	if (direct.code === 0) {
+		const meta = parseCmdMeta(direct.stdout || direct.stderr);
+		if (meta?.cliPath) return { cliPath: meta.cliPath, canonical: meta.canonicalPath };
+	}
+	const product = (parseCanonicalPath(pathSpec)?.product ?? pathSpec.split(/[\s.]+/)[0] ?? "").trim();
+	const tools = product ? await productTools(cfg, product) : [];
+	const idx = tools.length ? matchToolByPath(tools, pathSpec) : -1;
+	if (idx < 0) return null;
+	const hit = tools[idx]!;
+	const cliPath = String(hit.cli_path ?? "");
+	return cliPath ? { cliPath, canonical: String(hit.canonical_path ?? "") } : null;
 }
 
 function runDws(cfg: BridgeConfig, args: string[], opts?: { cwd?: string }): Promise<RunResult> {
@@ -1576,12 +1712,19 @@ async function commandSchema(cfg: BridgeConfig, args: string[]): Promise<CmdSche
 }
 
 /** 分档：明显只读的直接放行，其余问元数据（取不到就当写入，宁多一次确认不放过写操作） */
-async function classifyCommand(cfg: BridgeConfig, args: string[]): Promise<{ tier: Tier; why: string; meta: CmdMeta | null; schema: CmdSchema | null }> {
-	if (presumedRead(args)) return { tier: "read", why: "只读", meta: null, schema: null };
+async function classifyCommand(
+	cfg: BridgeConfig,
+	args: string[],
+): Promise<{ tier: Tier; why: string; meta: CmdMeta | null; schema: CmdSchema | null; unknownPath: boolean }> {
+	if (presumedRead(args)) return { tier: "read", why: "只读", meta: null, schema: null, unknownPath: false };
 	const schema = await commandSchema(cfg, args);
 	const meta = schema?.meta ?? null;
 	const { tier, why } = tierOf(args, meta);
-	return { tier, why: meta ? why : `${why}`, meta, schema };
+	if (meta) return { tier, why, meta, schema, unknownPath: false };
+	// 不在 schema 身份集里的路径（技能文档记的本地命令写法）与根本不存在的路径要分开：
+	// 后者不能伪装成发送类，否则会在标签/防重发一堆与命令无关的校验上报错
+	if (!(await cliPathExists(cfg, cliPathOf(args)))) return { tier, why, meta, schema, unknownPath: true };
+	return { tier, why: `${why}（不在 dws 的 schema 身份集里：参数表与可用性元数据未知）`, meta, schema, unknownPath: false };
 }
 
 /** 「记住这类操作」按 cli_path 记（稳定、可解释，比正则好维护） */
@@ -1624,32 +1767,61 @@ export function parseConversationInfo(text: string): { title: string; singleChat
 	}
 }
 
-/** 审阅前把裸 userId 换成"姓名（部门）"——弹窗里人只认得出名字，认不出 ID（查不到就退回原值） */
+/** 消息上下文（会话名 + 摘要）：撤回与转 DING 的面板都要说清“动的是哪条” */
+async function messageContext(
+	cfg: BridgeConfig,
+	msgIds: string[],
+): Promise<{ where: string; digest: ReturnType<typeof parseMessageDigest> }> {
+	try {
+		const r = await runDws(cfg, ["chat", "+messages-mget", "--msg-ids", msgIds.join(","), "--format", "json"]);
+		const digest = r.code === 0 ? parseMessageDigest(r.stdout) : [];
+		const cid = digest[0]?.conversationId;
+		let where = "该会话";
+		if (cid) {
+			const c = await runDws(cfg, ["chat", "conversation-info", "--group", cid, "--format", "json"]);
+			const info = c.code === 0 ? parseConversationInfo(c.stdout) : null;
+			if (info?.title) where = `${info.title}${info.singleChat ? " 的单聊" : `（${info.memberCount} 人群）`}`;
+		}
+		return { where, digest };
+	} catch {
+		return { where: "该会话", digest: [] };
+	}
+}
+
+/** 弹窗富化走哪条路：转 DING 与撤回都带消息 ID，但面板要说的对象不一样 */
+export function reviewKind(args: string[]): "ding" | "recall" | "send" {
+	if (matchPrefix(args, DING_BY_MESSAGE_PREFIXES)) return "ding";
+	if (matchPrefix(args, RECALL_PREFIXES)) return "recall";
+	return "send";
+}
+
+/** 审阅前把裸 userId 换成"姓名（部门）"——弹窗里人只认得出名字，认不出 ID（一个都查不到时保留原来的「N 个账号」，不摆裸 ID） */
 async function enrichReviewTargets(cfg: BridgeConfig, args: string[], review: PendingDraft["review"]): Promise<PendingDraft["review"]> {
-	// 撤回：把"撤的是哪条"写进面板（会话名做主角，时间/条数做次要行，正文进内容区）
-	const recallIds = flagValues(args, RECALL_ID_FLAGS);
-	if (recallIds.length) {
-		try {
-			const r = await runDws(cfg, ["chat", "+messages-mget", "--msg-ids", recallIds.join(","), "--format", "json"]);
-			const digest = r.code === 0 ? parseMessageDigest(r.stdout) : [];
-			const cid = digest[0]?.conversationId;
-			let where = "该会话";
-			if (cid) {
-				const c = await runDws(cfg, ["chat", "conversation-info", "--group", cid, "--format", "json"]);
-				const info = c.code === 0 ? parseConversationInfo(c.stdout) : null;
-				if (info?.title) where = `${info.title}${info.singleChat ? " 的单聊" : `（${info.memberCount} 人群）`}`;
-			}
-			if (digest.length) {
-				const when = digest[0]!.createTime ? digest[0]!.createTime.slice(5, 16) : "";
-				return {
-					...review,
-					verb: "撤回消息",
-					object: `撤回对象：${where}${digest.length > 1 ? ` 等 ${digest.length} 条` : ""}${when ? `（${when}）` : ""}`,
-					content: digest.map((d) => d.preview || "（图片/文件等无文字消息）"),
-				};
-			}
-		} catch {
-			/* 查询失败就退回原审阅内容 */
+	const msgIds = flagValues(args, RECALL_ID_FLAGS);
+	const kind = reviewKind(args);
+	// 转 DING：面板要写清“把哪条消息转成了 DING”，对象区不能是消息 ID
+	if (msgIds.length && kind === "ding") {
+		const { where, digest } = await messageContext(cfg, msgIds);
+		if (digest.length) {
+			const when = digest[0]!.createTime ? digest[0]!.createTime.slice(5, 16) : "";
+			return {
+				...review,
+				object: `转 DING：${where}${digest.length > 1 ? ` 等 ${digest.length} 条` : ""}${when ? `（${when}）` : ""}的这条消息`,
+				content: digest.map((d) => d.preview || "（图片/文件等无文字消息）"),
+			};
+		}
+	}
+	// 撤回：把“撤的是哪条”写进面板（会话名做主角，时间/条数做次要行，正文进内容区）
+	if (msgIds.length && kind === "recall") {
+		const { where, digest } = await messageContext(cfg, msgIds);
+		if (digest.length) {
+			const when = digest[0]!.createTime ? digest[0]!.createTime.slice(5, 16) : "";
+			return {
+				...review,
+				verb: "撤回消息",
+				object: `撤回对象：${where}${digest.length > 1 ? ` 等 ${digest.length} 条` : ""}${when ? `（${when}）` : ""}`,
+				content: digest.map((d) => d.preview || "（图片/文件等无文字消息）"),
+			};
 		}
 	}
 	// 发送：把裸 userId 换成"姓名（部门）"，让主角行直接写人名
@@ -1664,11 +1836,14 @@ async function enrichReviewTargets(cfg: BridgeConfig, args: string[], review: Pe
 	if (!ids.length) return review;
 	const orgs = await orgInfoOf(cfg, ids);
 	const base = ids.map((id) => orgs.get(id)?.name ?? id);
+	// 一个名字都查不到（例如收件人填的是 openDingTalkId）：保留原来的「N 个账号」写法，不把裸 ID 摆进面板
+	if (!base.some((n, i) => n !== ids[i])) return review;
 	// 部门只在重名时才补（无歧义的名字不占宽度）
 	const dup = new Set(base.filter((n, i) => base.indexOf(n) !== i));
 	const names = ids.map((id, i) => {
 		const o = orgs.get(id);
 		const n = base[i]!;
+		if (n === id) return "未解析出姓名的账号";
 		const dept = o?.depts[0] ? (o.depts[0].split("-").pop() ?? o.depts[0]) : "";
 		const short = dept.length > 8 ? `${dept.slice(0, 8)}…` : dept;
 		return short && dup.has(n) ? `${n}（${short}）` : n;
@@ -1759,7 +1934,7 @@ async function broadcastProbeReport(cfg: BridgeConfig, args: string[], note: str
 			for (const l of await personLines(cfg, p.cands)) bad.push(`  ${l}`);
 		} else if (p.kind === "none") {
 			badCount++;
-			bad.push(`- 「${n}」查无此人（核对用字，或用手机号反查：dws_exec ["contact", "user", "search-mobile", "--mobile", "<手机号>"]）`);
+			bad.push(`- 「${n}」查无此人（核对用字，或直接把完整手机号当收件人）`);
 		} else {
 			badCount++;
 			bad.push(`- 「${n}」无法确认（解析请求未返回可读结果）`);
@@ -1844,16 +2019,14 @@ export default function (pi: ExtensionAPI) {
 		}
 		const guidelines = (opts.promptGuidelines ??= []);
 		const g1 =
-			"钉钉操作（消息/日历/文档/待办/审批/表格等）已由 dingtalk-bridge 接管：dws_schema 查命令用法（无参看产品概览、逐层下钻）、dws_exec 执行（args 数组直传免转义）、dws_resolve_user 按姓名解析 userId（候选带部门/工号，重名看部门分辨）；无需加载 dingtalk-* 技能。";
+			"钉钉操作一律用 dingtalk_* 业务工具：命令与账号 ID 由插件解析，AI 没有直接执行 dws 命令的通道。";
 		const g2 =
-			"dws_exec 读直通、写两阶段（首次只回执行计划，带 confirm 重调执行）；破坏性与对外发送类在执行前弹窗请用户本人确认（无界面会话直接拒绝）。缺【AI发送】标签 / 中文姓名目标 / 同内容重发会被拦。";
+			"写操作首次只回执行计划：用户在对话里确认后，带 confirm（同一个工具、同一组业务参数）重调才执行；破坏性与对外发送类还会弹人工确认，无界面会话直接拒绝。";
 		const g3 =
-			"消息收发之外的复杂钉钉操作（表格/文档/日历/审批/组织/听记等）先 dws_skill 拉取对应官方技能正文再照做——技能已移出系统提示词，需要时按需加载。";
+			"同名或同名群会返回候选（带部门/职务/工号与账号 ID）：由 AI 自己挑定后，把该项换成候选里的 ID 重调——不要重复猜姓名，也不必转问用户。";
 		const g4 =
-			"发钉钉消息：多行正文用真换行（写在字符串里就是换行，勿写两个字面反斜杠-n）；文件/图片消息不含正文（--title 不显示给收件人），说明文字必须另发一条文本——文件与说明分开发。";
-		const g5 =
-			"读消息遇到钉盘/云盘分享（正文带 yunpan 链接、resourceId 形如 238322429838&type=file）时，不要用 +messages-resource-download（会报 TABLE_NOT_FOUND），用 dws_fetch 直接拿到本地路径；若是「[文件夹] 名字」形式则钉钉未提供引用，只能请对方打包 zip 重发。";
-		if (!guidelines.includes(g1)) guidelines.push(g1, g2, g3, g4, g5);
+			"业务工具覆盖不到的长尾钉钉操作，用 dws_skill 读官方文档判断可行性，再把结论回报用户。";
+		if (!guidelines.includes(g1)) guidelines.push(g1, g2, g3, g4);
 	});
 
 	pi.on("session_start", () => {
@@ -1864,111 +2037,200 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// L1：schema 活内省（分层下钻）
-	pi.registerTool({
-		name: "dws_schema",
-		label: "查钉钉命令",
-		description:
-			"查询钉钉 dws CLI 的实时命令 schema（随 CLI 版本更新，永不漂移）。无参返回产品概览（29 个产品线）；" +
-			"path 传产品 id（如 todo/chat/sheet）返回该产品工具清单；path 传工具 canonical_path（如 todo.add_task）返回参数 schema。" +
-			"不确定命令用法时先查这里，不要凭记忆拼 dws 命令。",
-		promptSnippet: "钉钉命令查询：dws_schema(path?) → 产品概览/工具清单/参数 schema",
-		parameters: Type.Object({
-			path: Type.Optional(Type.String({ description: "产品 id（如 chat）或工具 canonical_path（如 chat.send_dm）；缺省返回产品概览" })),
-		}),
-		async execute(_id, params) {
-			const args = ["schema", ...(params.path ? [params.path] : []), "--compact", "--format", "json"];
-			const r = await runDws(cfg, args);
-			if (r.timedOut) return text(`dws schema 超时（${cfg.execTimeoutMs / 1000}s）`, { kind: "error" });
-			if (r.code !== 0) return text(`dws schema 失败：${r.stderr.trim() || r.stdout.trim()}`, { kind: "error" });
-			return text(formatSchemaOutput(r.stdout.trim(), SCHEMA_MAX_CHARS));
-		},
-	});
+/** 消息里分享的钉盘/云盘资源落地（文件直下、文件夹递归镜像）；dingtalk_file action="fetch" 用 */
+const fetchDriveShare = async (params: { link?: string; spaceId?: string; nodeId?: string; outDir?: string }, ctx: ExtensionContext) => {
+	const cwd = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+	const refs = params.link ? parseDriveRefs(params.link) : [];
+	const spaceId = params.spaceId?.trim() || refs.find((r) => r.spaceId)?.spaceId || "";
+	const nodeId = params.nodeId?.trim() || refs[0]?.fileId || "";
+	if (!nodeId) {
+		const hint = isFolderMessage(params.link ?? "")
+			? "这是「[文件夹] 名字」形式的分享——钉钉不提供引用，无法下载，请让对方打包 zip 或逐个文件重发。"
+			: "请传 link（消息原文/链接）或 spaceId + nodeId。";
+		return text(`🚫 ${hint}`, { kind: "error" });
+	}
+	const rel = params.outDir?.trim() || ".tmp/dingtalk-fetch";
+	const abs = path.isAbsolute(rel) ? rel : path.join(cwd, rel);
+	if (!abs.startsWith(cwd)) return text(`🚫 outDir 必须在工作目录内：${cwd}`, { kind: "error" });
+	fs.mkdirSync(abs, { recursive: true });
 
-	// L1+L2：受控执行（argv 直传 + 安全拦截）
-	pi.registerTool({
+	// 元信息：判文件/文件夹（数字 dentryId 需配合 spaceId）
+	const infoArgs = ["drive", "+info", "--node", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--format", "json"];
+	const info = await runDws(cfg, infoArgs);
+	let kind = refs[0]?.type ?? "";
+	let name = "";
+	const infoText = info.stdout || "";
+	if (/"type"\s*:\s*"FOLDER"/.test(infoText) || /"isFolder"\s*:\s*true/.test(infoText)) kind = "folder";
+	if (kind !== "folder" && /"type"\s*:\s*"(FILE|DOC)"/.test(infoText)) kind = "file";
+	const nm = /"name"\s*:\s*"([^"]+)"/.exec(infoText);
+	if (nm) name = nm[1]!;
+
+	if (kind === "folder") {
+		const pullArgs = ["drive", "pull", "--remote-folder", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--local-folder", abs, "--if-exists", "skip", "--yes", "--format", "json"];
+		let r = await runDws(cfg, pullArgs);
+		let pullNote = "";
+		if (r.code !== 0 && isLinkPublishFailure(r.stderr + r.stdout)) {
+			const redirected = await runDwsRedirected(cfg, pullArgs, cwd, false);
+			if (redirected) {
+				r = redirected.result;
+				pullNote = `\n\n（本机工作目录所在磁盘不支持硬链接，已自动改在系统临时区镜像并搬回：${redirected.copied} 个文件）`;
+			}
+		}
+		if (r.code !== 0) return text(`文件夹镜像失败（exit ${r.code}）：${(r.stderr || r.stdout).trim().slice(0, 400)}`, { kind: "error" });
+		const files: string[] = [];
+		const walk = (dir: string) => {
+			for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+				const p = path.join(dir, e.name);
+				if (e.isDirectory()) walk(p);
+				else files.push(p);
+			}
+		};
+		try {
+			walk(abs);
+		} catch { /* 目录不存在则视为空 */ }
+		const list = files.length ? files.map((f) => `  ${f}`).join("\n") : "  （文件夹为空）";
+		return text(`✓ 文件夹已镜像${name ? `「${name}」` : ""}到 ${abs}（${files.length} 个文件）：\n${list}\n\n（可直接用 read 工具读这些绝对路径）${pullNote}`, {
+			kind: "ok",
+			localDir: abs,
+			files,
+		});
+	}
+
+	const dlArgs = ["drive", "download", "--node", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--output", abs, "--format", "json"];
+	let r = await runDws(cfg, dlArgs);
+	let dlNote = "";
+	if (r.code !== 0 && isLinkPublishFailure(r.stderr + r.stdout)) {
+		// `--output` 这里是绝对路径，重定向执行器按 baseDir 解析后原样返回
+		const redirected = await runDwsRedirected(cfg, dlArgs, cwd, true);
+		if (redirected) {
+			r = redirected.result;
+			dlNote = "（本机工作目录所在磁盘不支持硬链接，已自动改在系统临时区下载并搬回）";
+		}
+	}
+	if (r.code !== 0) {
+		return text(`下载失败（exit ${r.code}）：${(r.stderr || r.stdout).trim().slice(0, 400)}\n如消息是「[文件夹] 名字」形式，钉钉不提供引用，只能让对方重发。`, { kind: "error" });
+	}
+	const saved = /"savedPath"\s*:\s*"([^"]+)"/.exec(r.stdout)?.[1] ?? name ?? nodeId;
+	const size = /"sizeBytes"\s*:\s*(\d+)/.exec(r.stdout)?.[1];
+	const localPath = path.isAbsolute(saved) ? saved : path.join(abs, path.basename(saved));
+	return text(`✓ 已下载${name ? `「${name}」` : ""}：${localPath}${size ? `（${Math.round(Number(size) / 1024)} KB）` : ""}\n\n（可直接用 read 工具读此绝对路径）${dlNote}`, {
+		kind: "ok",
+		localPath,
+	});
+	};
+
+	const execTool = {
 		name: "dws_exec",
-		label: "执行钉钉命令",
-		promptSnippet: "钉钉命令执行：dws_exec(args[, confirm][, formal]) → 命令输出（写操作两阶段确认）",
-		description:
-			"执行钉钉 dws CLI 命令。args 为完整子命令的 argv 数组（不含 dws 本身），如 [\"chat\", \"+dm\", \"--to\", \"<userId>\", \"--content\", \"【AI发送】…\"]；" +
-			"数组直传不过 shell，内容含空格/引号/换行都安全。自动附加 --format json 与 --yes；写/敏感命令在生成草稿前按 schema 参数表校验 flag，未知 flag 直接拒绝（同类命令参数名不一定相同，先 dws_schema 查）。" +
-			"群发正文可写按人替换的占位符 {{变量}}，此时须带 --vars '<JSON 对象>'（每人一份变量表，key 与 --to 逐字一致；正文只有一个占位符时值可简写为字符串）或 --vars-file <工作目录内相对路径.json>；插件会改为逐人单聊发送（dws +broadcast 只支持所有人同一内容），每人正文不同。" +
-			"读操作直通；写操作两阶段：首次只回执行计划（不执行），带 confirm 重调即执行。" +
-			"破坏性与对外发出内容（发送/群发/转发/撤回/删除等）在执行前弹窗请用户本人确认，无界面会话直接拒绝。" +
-			"发送缺【AI发送】标签、目标为中文姓名、同内容重复发送都会被拒；--dry-run 只读预演。",
-		parameters: Type.Object({
-			args: Type.Array(Type.String(), { description: "dws 子命令 argv 数组（不含 dws 本身），如 [\"todo\", \"task\", \"list\"]", minItems: 1 }),
-			confirm: Type.Optional(Type.String({ description: "两阶段确认的草稿 token（首次发送调用的回执里给出）；仅在用户于对话中明确同意草稿后携带" })),
-			formal: Type.Optional(Type.Boolean({ description: "用户明确要求的正式通知时传 true，豁免【AI发送】标签检查" })),
-		}),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			// 字面 反斜杠-n 先归一：模型常把换行写成两个字符，dws 会吃成空格导致静默粘连
+		async execute(
+			_id: string,
+			params: { args: string[]; confirm?: string; view?: { receivers?: string[]; note?: string } },
+			_signal: unknown,
+			_onUpdate: unknown,
+			ctx: ExtensionContext,
+		) {
+			const view = params.view;
 			const norm = normalizeContent(params.args);
-			// 逐人个性化 flag 由插件消费：剥离后再进 dws argv（否则会被 unknown flag 校验拦下）
-			const { args, varsRaw, varsFile } = stripVarsFlags(norm.args);
-			// 文件存在性预检：路径笔误不必真去捅 dws（--file 限工作目录内相对路径）
-			const baseDir = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-			for (const f of flagValues(args, new Set(["--file", "--file-path"]))) {
+			const stripped = stripVarsFlags(norm.args);
+			const { varsRaw, varsFile } = stripped;
+			let args = stripped.args;
+			let pathNote = "";
+			if (args[0]?.includes(".")) {
+				const written = args[0];
+				const resolved = await resolveCliPath(cfg, written);
+				if (!resolved) {
+					stats.blocked++;
+					return text(
+						`🚫 「${written}」不是插件认识的操作，请把这条操作回报用户。`,
+						{ kind: "blocked" }
+					);
+				}
+				args = [...resolved.cliPath.split(" "), ...args.slice(1)];
+				pathNote = `（命令路径「${written}」不是可执行的写法，已换成 dws 的 cli_path「${resolved.cliPath}」执行）`;
+			}
+			const formalIssue = formalFlagError(args);
+			if (formalIssue) {
+				stats.blocked++;
+				return text(`🚫 ${formalIssue}`, { kind: "blocked" });
+			}
+			const baseDir = ctx?.cwd ?? process.cwd();
+			for (const f of flagValues(args, /* @__PURE__ */ new Set(["--file", "--file-path"]))) {
 				const abs = path.isAbsolute(f) ? f : path.join(baseDir, f);
 				if (!fs.existsSync(abs)) {
 					return text(`🚫 待发文件不存在：${f}（--file 需为工作目录内相对路径；当前目录 ${baseDir}）`, { kind: "blocked" });
 				}
 			}
-			const { tier, why, meta, schema } = await classifyCommand(cfg, args);
-			// 草稿前 flag 校验：unknown flag 不生成草稿、不弹窗——dws 草稿阶段不验参数，带 confirm 才炸（假信号）
+			const { tier, why, meta, schema, unknownPath } = await classifyCommand(cfg, args);
+			if (unknownPath) {
+				stats.blocked++;
+				return text(
+					`🚫 插件不认识这个操作（${cliPathOf(args)}）：不在当前覆盖范围内，请把这条操作回报用户。`,
+					{ kind: "blocked" }
+				);
+			}
 			if (!params.confirm) {
-				// 读直通不校验（无后果，dws 自拦）；写/敏感档用刚拿到的参数表拦
 				const bad = tier === "read" ? [] : unknownFlags(args, schema?.params ?? []);
 				if (bad.length) {
 					stats.blocked++;
 					return text(
-						`🚫 flag 与参数表不符（未生成草稿、未执行）：${bad.join("、")}\n\n本命令可用参数：${schema?.params.map((p) => `--${p}`).join("、") || "（未取到）"}\n\n先用 dws_schema 查正确参数再重调；同类命令参数名不一定相同（如群发用 --to/--content，单发用 --open-dingtalk-id/--markdown）。`,
-						{ kind: "blocked" },
+						`🚫 flag 与参数表不符（未生成草稿、未执行）：${bad.join("、")}
+
+本命令可用参数：${schema?.params.map((p) => `--${p}`).join("、") || "（未取到）"}
+
+这是插件覆盖范围内的参数映射问题：请把该操作回报用户，不要自行改参数。`,
+						{ kind: "blocked" }
 					);
 				}
 			}
-			// 先偷看草稿（decideExec 确认时会把它删掉）：确认路径需要知道分档与审核内容
-			const peek = params.confirm ? state.pending.get(params.confirm) : undefined;
-			// 逐人个性化准备：正文含占位符 → 只能走广播逐人发送（dws +broadcast 只支持同一内容）
+			const peek = params.confirm ? state.pending.get(params.confirm) : void 0;
 			const placeholders = extractPlaceholders(flagValues(args, CONTENT_FLAGS).at(-1) ?? "");
-			let varsMap: VarsMap | undefined;
+			let varsMap;
 			if (placeholders.length) {
 				if (!matchPrefix(args, BROADCAST_PREFIXES)) {
 					stats.blocked++;
 					return text(`🚫 正文里的 {{${placeholders[0]}}} 是按人替换的占位符，目前只在群发（chat +broadcast）下生效；其他命令请直接把正文写好。`, { kind: "blocked" });
 				}
 				const input = readVarsInput(baseDir, varsRaw, varsFile);
-				const parsed = input.error
-					? ({ error: input.error } as const)
-					: input.raw === undefined
-						? undefined
-						: parseVarsMap(input.raw, placeholders);
+				const parsed = input.error ? { error: input.error } : input.raw === void 0 ? void 0 : parseVarsMap(input.raw, placeholders);
 				if (parsed && "error" in parsed) {
 					stats.blocked++;
-					return text(`🚫 ${parsed.error}\n\n${VARS_GUIDE}`, { kind: "blocked" });
+					return text(`🚫 ${parsed.error}
+
+${VARS_GUIDE}`, { kind: "blocked" });
 				}
 				if (parsed) varsMap = parsed.map;
 				else if (!isDryRun(args)) {
 					stats.blocked++;
-					return text(`🚫 正文里有占位符 ${placeholders.map((p) => `{{${p}}}`).join("、")}，但没有给变量表。\n\n${VARS_GUIDE}`, { kind: "blocked" });
+					return text(`🚫 正文里有占位符 ${placeholders.map((p) => `{{${p}}}`).join("、")}，但没有给变量表。
+
+${VARS_GUIDE}`, { kind: "blocked" });
 				}
 			}
-			const decision = decideExec(args, { confirm: params.confirm, formal: params.formal, tier, meta, why, flags: schema?.params }, state, cfg, Date.now());
+			const decision = decideExec(args, { confirm: params.confirm, tier, meta, why, flags: schema?.params, reviewExtra: view ? { recipients: view.receivers, note: view.note } : void 0 }, state, cfg, Date.now());
 			const dryRun = isDryRun(args);
 			if (decision.action === "block") {
 				stats.blocked++;
-				return text(`🚫 ${decision.reason}`, { kind: "blocked" });
+				let extra = "";
+				if (decision.kind === "unavailable" && meta?.cliPath) {
+					for (const alias of localAliases(meta.cliPath)) {
+						if (await cliPathExists(cfg, alias)) {
+							extra = `
+
+另：本地命令树里仍有同一命令的写法「${alias}」，可用它重调（仍走两阶段与执行前确认）。`;
+							break;
+						}
+					}
+				}
+				return text(`${pathNote ? `${pathNote}
+
+` : ""}🚫 ${decision.reason}${extra}`, { kind: "blocked" });
 			}
 			if (decision.action === "pending") {
-				// 群发：草稿前先跑只读预检（与真实发送同一条解析链）——有人未唯一解析就整体拦下，
-				// 避免「半批次已发才发现某人被跳过」；Agent 消歧后一次发全
 				let broadcastTable = "";
 				if (matchPrefix(args, BROADCAST_PREFIXES)) {
 					const pre = await runDws(cfg, buildArgv([...args, "--dry-run"]));
 					if (pre.timedOut || pre.code !== 0) {
 						state.pending.delete(decision.token);
 						stats.blocked++;
-						// dws 会把「一个都没解析出来」压成一句笼统报错（exit 3、无计划），逐名自探补回明细
 						const note = pre.timedOut ? "预检超时" : /没有任何人收到消息/.test(pre.stdout) ? "没有一位收件人解析成功" : "dws 未返回可发送计划";
 						return text(await broadcastProbeReport(cfg, args, note), { kind: "blocked" });
 					}
@@ -1978,40 +2240,55 @@ export default function (pi: ExtensionAPI) {
 						stats.blocked++;
 						const skippedLines = (await unresolvedLines(cfg, plan.skipped)).join("\n") || "（dws 未返回可解析的收件人）";
 						return text(
-							`🚫 群发预检未通过：收件人未全部唯一解析，未生成草稿、未发送任何消息。\n\n${formatBroadcastPreflight(plan)}\n\n未能唯一解析：\n${skippedLines}\n\n${BROADCAST_FIX_GUIDE}`,
-							{ kind: "blocked" },
+							`🚫 群发预检未通过：收件人未全部唯一解析，未生成草稿、未发送任何消息。
+
+${formatBroadcastPreflight(plan)}
+
+未能唯一解析：
+${skippedLines}
+
+${BROADCAST_FIX_GUIDE}`,
+							{ kind: "blocked" }
 						);
 					}
 					const dupNotes = await dupNameNotes(cfg, plan);
-					// 逐人个性化：变量表必须覆盖每个人与每个占位符；草稿里展示渲染样例
 					let sampleLines: string[] = [];
 					if (varsMap) {
-						const problems = validateVars(plan.resolved.map((r) => r.recipient), placeholders, varsMap);
+						const problems = validateVars(plan.resolved.map((r2) => r2.recipient), placeholders, varsMap);
 						if (problems.length) {
 							state.pending.delete(decision.token);
 							stats.blocked++;
-							return text(`🚫 变量表不齐（未生成草稿、未发送任何消息）：\n${problems.map((p) => `- ${p}`).join("\n")}\n\n${VARS_GUIDE}`, { kind: "blocked" });
+							return text(`🚫 变量表不齐（未生成草稿、未发送任何消息）：
+${problems.map((p) => `- ${p}`).join("\n")}
+
+${VARS_GUIDE}`, { kind: "blocked" });
 						}
 						const content = flagValues(args, CONTENT_FLAGS).at(-1) ?? "";
-						sampleLines = plan.resolved.slice(0, 3).map((r) => `- ${r.recipient} → ${renderVars(content, varsMap![r.recipient] ?? {}).replace(/\s*\n\s*/g, " ⏎ ").slice(0, 70)}`);
+						sampleLines = plan.resolved.slice(0, 3).map((r2) => `- ${r2.recipient} → ${renderVars(content, varsMap[r2.recipient] ?? {}).replace(/\s*\n\s*/g, " ⏎ ").slice(0, 70)}`);
 					}
-					// 把预检得到的真实收件人塞进审核内容（弹窗时才能看到"发给谁"）
 					const draft = state.pending.get(decision.token);
 					if (draft) {
-						draft.review = buildReview(args, meta, why, { recipients: plan.resolved.map((r) => r.recipient) });
+						draft.review = buildReview(args, meta, why, { recipients: plan.resolved.map((r2) => r2.recipient) });
 						if (varsMap) {
 							draft.vars = varsMap;
 							draft.plan = plan;
 						}
 					}
-					broadcastTable = varsMap
-						? `\n\n（逐人个性化：共 ${plan.resolved.length} 条单聊，正文按变量表逐人渲染）\n${sampleLines.join("\n")}${plan.resolved.length > sampleLines.length ? `\n…（其余 ${plan.resolved.length - sampleLines.length} 人同理）` : ""}${dupNotes.length ? `\n${dupNotes.join("\n")}` : ""}`
-						: `\n\n${formatBroadcastPreflight(plan)}${dupNotes.length ? `\n${dupNotes.join("\n")}` : ""}\n（预检已通过：以上每人各收到一条单聊）`;
+					broadcastTable = varsMap ? `
+
+（逐人个性化：共 ${plan.resolved.length} 条单聊，正文按变量表逐人渲染）
+${sampleLines.join("\n")}${plan.resolved.length > sampleLines.length ? `
+…（其余 ${plan.resolved.length - sampleLines.length} 人同理）` : ""}${dupNotes.length ? `
+${dupNotes.join("\n")}` : ""}` : `
+
+${formatBroadcastPreflight(plan)}${dupNotes.length ? `
+${dupNotes.join("\n")}` : ""}
+（预检已通过：以上每人各收到一条单聊）`;
 				}
 				const notes = [
 					norm.fixed ? `正文里的 ${norm.fixed} 处字面反斜杠-n 已转为真换行` : "",
 					norm.hardBreaks ? `${norm.hardBreaks} 处换行已补 markdown 行尾双空格（钉钉单换行会拼成一行）` : "",
-					hasMultilineText(args) ? "纯文本 --text 的多行在钉钉会拼成一行，建议改用 --markdown" : "",
+					hasMultilineText(args) ? "纯文本 --text 的多行在钉钉会拼成一行，建议改用 --markdown" : ""
 				].filter(Boolean);
 				const fixedNote = notes.length ? `
 
@@ -2019,16 +2296,17 @@ export default function (pi: ExtensionAPI) {
 				return text(
 					`📋 执行计划（未执行）。带 confirm="${decision.token}" 重调即可执行：
 
-${decision.preview}${broadcastTable}${fixedNote}`,
-					{ kind: "pending", token: decision.token },
+${pathNote ? `${pathNote}
+
+` : ""}${decision.preview}${broadcastTable}${fixedNote}`,
+					{ kind: "pending", token: decision.token }
 				);
 			}
-			// ③ 人工审核：敏感档（破坏性 / 会对外发出内容）在真正执行前弹窗让本人拍板——不靠提示词自觉
 			if (peek?.tier === "sensitive" && !isRemembered(cfg, args)) {
 				const outcome = await askReview(ctx, {
-					...(await enrichReviewTargets(cfg, args, peek.review)),
+					...await enrichReviewTargets(cfg, args, peek.review),
 					actions: reviewActions(peek.canRemember),
-					rememberNote: rememberedKey(args),
+					rememberNote: rememberedKey(args)
 				});
 				if (outcome.kind === "no-ui") {
 					stats.blocked++;
@@ -2043,40 +2321,43 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 					ctx.ui.notify(`dingtalk-bridge：已记住「${rememberedKey(args)}」，以后这类操作不再弹窗（可用 /dws forget 取消）`, "info");
 				}
 			}
-			// 逐人个性化：确认后按草稿里的名单逐个渲染发送（dws +broadcast 只支持同一内容）
 			if (peek?.vars && peek.plan && matchPrefix(args, BROADCAST_PREFIXES)) {
 				const res = await sendPersonalized(cfg, args, peek.plan, peek.vars, state);
 				saveLedger(cfg, state);
 				stats.sent += res.sent.length;
-				const failLines = res.failed.length ? `\n\n失败 ${res.failed.length} 人（未发出，可修好后重发这些人）：\n${res.failed.map((f) => `- ${f.name}：${f.why}`).join("\n")}` : "";
-				const skipLines = res.skipped.length ? `\n\n已发过、本次跳过 ${res.skipped.length} 人：${res.skipped.join("、")}（同一人同一正文有固定幂等键）` : "";
+				const failLines = res.failed.length ? `
+
+失败 ${res.failed.length} 人（未发出，可修好后重发这些人）：
+${res.failed.map((f) => `- ${f.name}：${f.why}`).join("\n")}` : "";
+				const skipLines = res.skipped.length ? `
+
+已发过、本次跳过 ${res.skipped.length} 人：${res.skipped.join("、")}（同一人同一正文有固定幂等键）` : "";
 				return text(
 					`✓ 逐人发送完成（共 ${peek.plan.resolved.length} 人）：成功 ${res.sent.length} 人${failLines}${skipLines}`,
-					{ kind: "ok", sent: res.sent, skipped: res.skipped, failed: res.failed.map((f) => f.name) },
+					{ kind: "ok", sent: res.sent, skipped: res.skipped, failed: res.failed.map((f) => f.name) }
 				);
 			}
 			let r = await runDws(cfg, buildArgv(args));
-			// exFAT/网络盘不支持硬链接：dws 落盘发布必然失败 → 换到系统临时区重跑一次再搬回
 			let redirectNote = "";
 			if (r.code !== 0 && isDownloadCommand(args) && isLinkPublishFailure(r.stderr + r.stdout)) {
 				const redirected = await runDwsRedirected(cfg, buildArgv(args), baseDir, wantsOverwrite(args));
 				if (redirected) {
 					r = redirected.result;
-					redirectNote = `\n\n（本机工作目录所在磁盘不支持硬链接，已自动改在系统临时区下载并搬回：${redirected.copied} 个文件${redirected.skipped.length ? `，${redirected.skipped.length} 个因已存在未覆盖` : ""}）`;
+					redirectNote = `
+
+（本机工作目录所在磁盘不支持硬链接，已自动改在系统临时区下载并搬回：${redirected.copied} 个文件${redirected.skipped.length ? `，${redirected.skipped.length} 个因已存在未覆盖` : ""}）`;
 				}
 			}
-			if (r.timedOut) return text(`dws 执行超时（${cfg.execTimeoutMs / 1000}s），命令可能未生效——如涉及发送，先用只读查询确认，绝不要直接重跑`, { kind: "error" });
+			if (r.timedOut) return text(`dws 执行超时（${cfg.execTimeoutMs / 1e3}s），命令可能未生效——如涉及发送，先用只读查询确认，绝不要直接重跑`, { kind: "error" });
 			let out = r.stdout.trim();
 			const errTail = r.stderr.trim();
 			if (r.code !== 0) {
-				// 群发 dry-run 也会因“一个都没解析出来”而 exit 3：同样逐名自探，别把笼统报错丢给模型
 				if (dryRun && matchPrefix(args, BROADCAST_PREFIXES)) {
 					return text(await broadcastProbeReport(cfg, args, "没有一位收件人解析成功"), { kind: "blocked" });
 				}
 				return text(`dws 失败（exit ${r.code}）：${errTail || out}`, { kind: "error" });
 			}
 			if (dryRun && matchPrefix(args, BROADCAST_PREFIXES)) {
-				// 主动预检：把 dws 的 JSON 整理成「将发给谁 / 未唯一解析」两栏，重名直接给候选+部门
 				const plan = parseBroadcastPreflight(out);
 				const body = [formatBroadcastPreflight(plan)];
 				if (placeholders.length && varsMap) {
@@ -2084,27 +2365,31 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 					body.push(
 						"",
 						`逐人个性化（${placeholders.map((p) => `{{${p}}}`).join("、")}）渲染样例：`,
-						...plan.resolved.slice(0, 3).map((r) => `- ${r.recipient} → ${renderVars(content, varsMap![r.recipient] ?? {}).replace(/\s*\n\s*/g, " ⏎ ").slice(0, 70)}`),
-						`（共 ${plan.resolved.length} 条单聊，每人正文不同）`,
+						...plan.resolved.slice(0, 3).map((r2) => `- ${r2.recipient} → ${renderVars(content, varsMap[r2.recipient] ?? {}).replace(/\s*\n\s*/g, " ⏎ ").slice(0, 70)}`),
+						`（共 ${plan.resolved.length} 条单聊，每人正文不同）`
 					);
 				} else if (placeholders.length) {
 					body.push("", `⚠️ 正文含占位符 ${placeholders.map((p) => `{{${p}}}`).join("、")}，正式发送必须带变量表：${VARS_GUIDE}`);
 				}
 				if (plan.skipped.length) {
-					body.push("", "未能唯一解析：", ...(await unresolvedLines(cfg, plan.skipped)), "", BROADCAST_FIX_GUIDE);
+					body.push("", "未能唯一解析：", ...await unresolvedLines(cfg, plan.skipped), "", BROADCAST_FIX_GUIDE);
 				} else if (plan.resolved.length) {
 					body.push("", "（预检通过：以上每人各收到一条单聊；确认后去掉 --dry-run 正式发送）");
 				} else {
 					body.push("", "（dws 未返回可解析的收件人——检查 --to 是否填了名字）");
 				}
-				return text(`🧪 群发预演（未发送任何消息）\n\n${body.join("\n")}`, { kind: "ok", resolved: plan.resolved, skipped: plan.skipped });
+				return text(`🧪 群发预演（未发送任何消息）
+
+${body.join("\n")}`, { kind: "ok", resolved: plan.resolved, skipped: plan.skipped });
 			}
 			if (!dryRun && matchPrefix(args, RECALL_PREFIXES)) {
 				const ids = flagValues(args, RECALL_ID_FLAGS);
 				state.sent.set(`recall:${ids.join(",")}`, { at: Date.now(), snippet: args.join(" ").slice(0, 80) });
 				saveLedger(cfg, state);
 				stats.sent++;
-				out += `\n\n（已记录撤回：${ids.join("、")}——同一消息不会重复撤回）`;
+				out += `
+
+（已记录撤回：${ids.join("、")}——同一消息不会重复撤回）`;
 			} else if (!dryRun && matchPrefix(args, SEND_PREFIXES)) {
 				state.sent.set(sendSignature(args), { at: Date.now(), snippet: args.join(" ").slice(0, 80) });
 				saveLedger(cfg, state);
@@ -2112,245 +2397,72 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 				const sentNotes = [
 					norm.fixed ? `正文里的 ${norm.fixed} 处字面反斜杠-n 已转为真换行` : "",
 					norm.hardBreaks ? `${norm.hardBreaks} 处换行已补 markdown 行尾双空格（钉钉单换行会拼成一行）` : "",
-					hasMultilineText(args) ? "纯文本 --text 的多行在钉钉会拼成一行——本次可能已粘连，需要多行请改用 --markdown" : "",
+					hasMultilineText(args) ? "纯文本 --text 的多行在钉钉会拼成一行——本次可能已粘连，需要多行请改用 --markdown" : ""
 				].filter(Boolean);
 				if (sentNotes.length) out += `
 
 （${sentNotes.join("；")}）`;
 				const unverified = flagValues(args, TARGET_FLAGS).filter((t) => !state.resolved.has(t) && !hasCJK(t));
 				if (unverified.length) {
-					out += `\n\n⚠️ 提醒：目标 ${unverified.join("、")} 未在本会话经 dws_resolve_user 验证——若 ID 来自记忆而非实时查询，请用 +search-msg 核对收件人。`;
+					out += `
+
+⚠️ 提醒：目标 ${unverified.join("、")} 未经本会话实时解析（可能来自记忆），发送前请核对收件人。`;
 				}
 				const media = mediaKind(args);
 				if (media) {
-					out +=
-						`\n\n⚠️ 本条是${media === "file" ? "文件" : "媒体"}消息，已发出但**不含任何说明正文**（--title 只作文件卡标题，不在消息里显示）。` +
-						`如用户需要说明文字，请现在另发一条文本消息（--text/--markdown 或 +dm --content）；不要以为说明已随本条发出。`;
+					out += `
+
+⚠️ 本条是${media === "file" ? "文件" : "媒体"}消息，已发出但**不含任何说明正文**（--title 只作文件卡标题，不在消息里显示）。如用户需要说明文字，请现在另发一条文本消息（--text/--markdown 或 +dm --content）；不要以为说明已随本条发出。`;
 				}
 				const unverifiedGroup = flagPairs(args, GROUP_FLAGS).filter((p) => !state.resolvedGroups.has(p.value));
 				if (unverifiedGroup.length) {
-					out += `\n\n⚠️ 提醒：目标群 ${unverifiedGroup.map((p) => p.value).join("、")} 未经 dws_resolve_group 解析——若 cid 来自记忆，请先解析核对。`;
+					out += `
+
+⚠️ 提醒：目标群 ${unverifiedGroup.map((p) => p.value).join("、")} 未经本会话实时解析，发送前请核对。`;
 				}
 				const taskId = /"openTaskId"\s*:\s*"([^"]+)"/.exec(out)?.[1];
 				if (taskId) {
-					out += `\n\nopenTaskId：${taskId}（查发送状态：dws_exec [\"chat\", \"+messages-query-send-status\", \"--task-id\", \"${taskId}\"]；转 DING 也用它）`;
+					out += `
+
+openTaskId：${taskId}（要用它时可交给 dingtalk_msg action="sendStatus"）`;
 				}
-				// 只读核验入口：给出可复制命令，叉住「输出看不清就重跑发送」的冲动
 				const self = await whoAmI(cfg);
-				if (self && (args[1] === "+dm" || (args.includes("--as") && args[args.indexOf("--as") + 1] === "user"))) {
-					out += `\n\n核验（只读，可反复执行）：dws_exec [\"chat\", \"+search-msg\", \"--sender\", \"${self.name}\", \"--limit\", \"3\", \"--order\", \"desc\"]`;
+				if (self && (args[1] === "+dm" || args.includes("--as") && args[args.indexOf("--as") + 1] === "user")) {
+					out += `
+
+核验（只读）：dingtalk_msg action="read" sender="me" limit=3`;
 				}
 			}
 			if (dryRun) out += "\n\n（--dry-run 预演：未发送任何消息，也未记入防重发台账）";
-			out = annotateQuery(args, out, new Date());
-			// 只读结果：云盘分享引用结构化成可直接下载的指引；[文件夹] 消息给出明确结论
+			out = annotateQuery(args, out, /* @__PURE__ */ new Date());
 			if (!matchPrefix(args, SEND_PREFIXES) && !matchPrefix(args, RECALL_PREFIXES)) {
 				out += formatDriveRefs(parseDriveRefs(out));
 				out += formatFieldSpellingNote(out);
 				if (isFolderMessage(out)) {
-					out +=
-						"\n\n⚠️ 上述含「[文件夹] xxx」的消息：钉钉不提供任何可下载引用（实测：无 resourceRefs、无 id、无 mediaId，连 download-media 也无从下手），插件无法读取。" +
-						"请让对方打包成 zip 或逐个文件重发——不要反复尝试下载。";
+					out += "\n\n⚠️ 上述含「[文件夹] xxx」的消息：钉钉不提供任何可下载引用（实测：无 resourceRefs、无 id、无 mediaId，连 download-media 也无从下手），插件无法读取。请让对方打包成 zip 或逐个文件重发——不要反复尝试下载。";
 				}
 			}
 			if (redirectNote) out = `${out}${redirectNote}`;
+			if (pathNote) out = `${pathNote}
+
+${out}`;
 			return text(truncateOut(out, cfg.maxOutputChars) || "（无输出）", { kind: "ok" });
-		},
-	});
+		}
+	};
+	/** 语义层复用同一条受控管线（换行归一 → 分档 → 参数自检 → 两阶段 → 人工面板 → 台账 → 结果注解） */
+	const runGuarded = (
+		args: string[],
+		opts: { confirm?: string; view?: { receivers?: string[]; note?: string } },
+		ctx: ExtensionContext,
+	) => execTool.execute("semantic", { args, confirm: opts.confirm, view: opts.view } as never, undefined, undefined, ctx);
 
-	// L2：人员解析（强制实时查证，多候选必须确认）
-	pi.registerTool({
-		name: "dws_resolve_user",
-		label: "解析钉钉人员",
-		description:
-			"按姓名实时解析钉钉 userId（发消息前的强制步骤）。候选带部门路径/职务/工号（无部门且无工号 = 家长或外部联系人账号，已标注）；" +
-			"单候选自动确认；多候选返回列表，按部门分辨后带 pick=<userId> 再调一次；零候选可换更精确的值重试，或改用完整手机号反查：dws_exec [\"contact\", \"user\", \"search-mobile\", \"--mobile\", \"<手机号>\"]。",
-		promptSnippet: "解析钉钉人员：dws_resolve_user(姓名[, pick=userId]) → userId",
-		parameters: Type.Object({
-			name: Type.String({ description: "完整姓名（按原文保真，不截断不改写）" }),
-			pick: Type.Optional(Type.String({ description: "多候选时用户选定人选的 userId（须出现在候选列表中）" })),
-		}),
-		async execute(_id, params) {
-			const r = await runDws(cfg, ["aisearch", "person", "--query", params.name, "--dimension", "name", "--format", "json"]);
-			if (r.timedOut) return text("人员搜索超时", { kind: "error" });
-			if (r.code !== 0) return text(`人员搜索失败：${r.stderr.trim() || r.stdout.trim()}`, { kind: "error" });
-			const people = parsePeople(r.stdout);
-			if (params.pick) {
-				const hit = people.find((p) => p.userId === params.pick);
-				if (!hit) {
-					const lines = await personLines(cfg, people);
-					return text(
-						`pick 的 userId「${params.pick}」不在「${params.name}」的候选列表中，未确认。候选：\n${lines.join("\n") || "（空）"}`,
-						{ kind: "error" },
-					);
-				}
-				state.resolved.add(hit.userId);
-				const [line] = await personLines(cfg, [hit]);
-				return text(`✓ 已确认：${(line ?? hit.name).replace(/^- /, "")}（带此 userId 调用）`, { kind: "ok", userId: hit.userId });
-			}
-			if (people.length === 0) {
-				return text(
-					`未找到「${params.name}」。可检查姓名用字，或用完整手机号反查：dws_exec ["contact", "user", "search-mobile", "--mobile", "<手机号>"]`,
-					{ kind: "error" },
-				);
-			}
-			if (people.length > 1) {
-				const lines = await personLines(cfg, people);
-				return text(
-					`「${params.name}」有 ${people.length} 个候选，看部门/职务分辨后带 pick=<userId> 重新调用：\n${lines.join("\n")}`,
-					{ kind: "ambiguous", candidates: people },
-				);
-			}
-			const p = people[0]!;
-			state.resolved.add(p.userId);
-			stats.resolved++;
-			const [line] = await personLines(cfg, [p]);
-			return text(`✓ ${(line ?? p.name).replace(/^- /, "")}`, { kind: "ok", userId: p.userId });
-		},
-	});
-
-	// 群解析（发群前的推荐步骤；与 dws_resolve_user 对称：同名群/改群名都会发错）
-	pi.registerTool({
-		name: "dws_resolve_group",
-		label: "解析钉钉群",
-		description:
-			"按群名解析 openConversationId（发群消息前的推荐步骤；同名群、改群名都会发错）。单候选自动确认；" +
-			"多候选返回列表，与用户确认后用 pick=<openConversationId> 再调一次；零候选可换关键词重试。",
-		promptSnippet: "解析钉钉群：dws_resolve_group(群名[, pick=openConversationId]) → openConversationId",
-		parameters: Type.Object({
-			name: Type.String({ description: "群名或关键词（按原文保真，不截断不改写）" }),
-			pick: Type.Optional(Type.String({ description: "多候选时选定的 openConversationId（须出现在候选列表中）" })),
-		}),
-		async execute(_id, params) {
-			const r = await runDws(cfg, ["chat", "+chat-search", "--query", params.name, "--limit", "10", "--format", "json"]);
-			if (r.timedOut) return text("群搜索超时", { kind: "error" });
-			if (r.code !== 0) return text(`群搜索失败：${r.stderr.trim() || r.stdout.trim()}`, { kind: "error" });
-			const groups = parseGroups(r.stdout);
-			if (params.pick) {
-				const hit = groups.find((g) => g.cid === params.pick);
-				if (!hit) return text(`pick 的 openConversationId「${params.pick}」不在「${params.name}」的候选列表中，未确认。`, { kind: "error" });
-				state.resolvedGroups.add(hit.cid);
-				return text(`✓ 已确认：${hit.name || "（无名）"}（openConversationId: ${hit.cid}）`, { kind: "ok", cid: hit.cid });
-			}
-			if (groups.length === 0) {
-				return text(`未找到群「${params.name}」——可换更短的关键词重试（如只取群名中段）。`, { kind: "error" });
-			}
-			if (groups.length > 1) {
-				const list = groups.map((g) => `- ${g.name || "（无名）"}${g.extra ? `（${g.extra}）` : ""}：${g.cid}`).join("\n");
-				return text(`「${params.name}」有 ${groups.length} 个候选，与用户确认后用 pick=<openConversationId> 重新调用：\n${list}`, { kind: "ambiguous", candidates: groups });
-			}
-			const g = groups[0]!;
-			state.resolvedGroups.add(g.cid);
-			return text(`✓ ${g.name || params.name}（openConversationId: ${g.cid}）${g.extra ? `｜${g.extra}` : ""}`, { kind: "ok", cid: g.cid });
-		},
-	});
-
-	// 钉盘/云盘资源落地（消息里分享的文件/文件夹：文件直接下载，文件夹整目录镜像）
-	pi.registerTool({
-		name: "dws_fetch",
-		label: "下载钉盘资源",
-		description:
-			"下载消息里分享的钉盘/云盘文件或整个文件夹。这类分享（正文带 yunpan 链接、resourceId 形如 238322429838&type=file）用 +messages-resource-download 会失败，必须走 drive。" +
-			"传 link（消息正文原文/链接）或 spaceId+nodeId；文件夹会递归镜像到本地并列回文件清单（绝对路径，可直接用 read 工具读）。" +
-			"⚠️ 若消息是「[文件夹] 名字」形式（无任何链接），钉钉未提供引用，下载不了——请让对方打包 zip 重发。",
-		promptSnippet: "下载钉盘资源：dws_fetch(link 或 spaceId+nodeId[, outDir]) → 本地路径",
-		parameters: Type.Object({
-			link: Type.Optional(Type.String({ description: "消息正文原文或链接（含 spaceId/fileId/type 的 yunpan 链接）" })),
-			spaceId: Type.Optional(Type.String({ description: "钉盘空间 ID（纯数字）" })),
-			nodeId: Type.Optional(Type.String({ description: "节点 fileId（数字 dentryId 或 32 位 dentryUuid）" })),
-			outDir: Type.Optional(Type.String({ description: "输出目录（工作目录内相对路径），缺省 .tmp/dingtalk-fetch" })),
-		}),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const cwd = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-			const refs = params.link ? parseDriveRefs(params.link) : [];
-			const spaceId = params.spaceId?.trim() || refs.find((r) => r.spaceId)?.spaceId || "";
-			const nodeId = params.nodeId?.trim() || refs[0]?.fileId || "";
-			if (!nodeId) {
-				const hint = isFolderMessage(params.link ?? "")
-					? "这是「[文件夹] 名字」形式的分享——钉钉不提供引用，无法下载，请让对方打包 zip 或逐个文件重发。"
-					: "请传 link（消息原文/链接）或 spaceId + nodeId。";
-				return text(`🚫 ${hint}`, { kind: "error" });
-			}
-			const rel = params.outDir?.trim() || ".tmp/dingtalk-fetch";
-			const abs = path.isAbsolute(rel) ? rel : path.join(cwd, rel);
-			if (!abs.startsWith(cwd)) return text(`🚫 outDir 必须在工作目录内：${cwd}`, { kind: "error" });
-			fs.mkdirSync(abs, { recursive: true });
-
-			// 元信息：判文件/文件夹（数字 dentryId 需配合 spaceId）
-			const infoArgs = ["drive", "+info", "--node", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--format", "json"];
-			const info = await runDws(cfg, infoArgs);
-			let kind = refs[0]?.type ?? "";
-			let name = "";
-			const infoText = info.stdout || "";
-			if (/"type"\s*:\s*"FOLDER"/.test(infoText) || /"isFolder"\s*:\s*true/.test(infoText)) kind = "folder";
-			if (kind !== "folder" && /"type"\s*:\s*"(FILE|DOC)"/.test(infoText)) kind = "file";
-			const nm = /"name"\s*:\s*"([^"]+)"/.exec(infoText);
-			if (nm) name = nm[1]!;
-
-			if (kind === "folder") {
-				const pullArgs = ["drive", "pull", "--remote-folder", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--local-folder", abs, "--if-exists", "skip", "--yes", "--format", "json"];
-				let r = await runDws(cfg, pullArgs);
-				let pullNote = "";
-				if (r.code !== 0 && isLinkPublishFailure(r.stderr + r.stdout)) {
-					const redirected = await runDwsRedirected(cfg, pullArgs, cwd, false);
-					if (redirected) {
-						r = redirected.result;
-						pullNote = `\n\n（本机工作目录所在磁盘不支持硬链接，已自动改在系统临时区镜像并搬回：${redirected.copied} 个文件）`;
-					}
-				}
-				if (r.code !== 0) return text(`文件夹镜像失败（exit ${r.code}）：${(r.stderr || r.stdout).trim().slice(0, 400)}`, { kind: "error" });
-				const files: string[] = [];
-				const walk = (dir: string) => {
-					for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-						const p = path.join(dir, e.name);
-						if (e.isDirectory()) walk(p);
-						else files.push(p);
-					}
-				};
-				try {
-					walk(abs);
-				} catch { /* 目录不存在则视为空 */ }
-				const list = files.length ? files.map((f) => `  ${f}`).join("\n") : "  （文件夹为空）";
-				return text(`✓ 文件夹已镜像${name ? `「${name}」` : ""}到 ${abs}（${files.length} 个文件）：\n${list}\n\n（可直接用 read 工具读这些绝对路径）${pullNote}`, {
-					kind: "ok",
-					localDir: abs,
-					files,
-				});
-			}
-
-			const dlArgs = ["drive", "download", "--node", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--output", abs, "--format", "json"];
-			let r = await runDws(cfg, dlArgs);
-			let dlNote = "";
-			if (r.code !== 0 && isLinkPublishFailure(r.stderr + r.stdout)) {
-				// `--output` 这里是绝对路径，重定向执行器按 baseDir 解析后原样返回
-				const redirected = await runDwsRedirected(cfg, dlArgs, cwd, true);
-				if (redirected) {
-					r = redirected.result;
-					dlNote = "（本机工作目录所在磁盘不支持硬链接，已自动改在系统临时区下载并搬回）";
-				}
-			}
-			if (r.code !== 0) {
-				return text(`下载失败（exit ${r.code}）：${(r.stderr || r.stdout).trim().slice(0, 400)}\n如消息是「[文件夹] 名字」形式，钉钉不提供引用，只能让对方重发。`, { kind: "error" });
-			}
-			const saved = /"savedPath"\s*:\s*"([^"]+)"/.exec(r.stdout)?.[1] ?? name ?? nodeId;
-			const size = /"sizeBytes"\s*:\s*(\d+)/.exec(r.stdout)?.[1];
-			const localPath = path.isAbsolute(saved) ? saved : path.join(abs, path.basename(saved));
-			return text(`✓ 已下载${name ? `「${name}」` : ""}：${localPath}${size ? `（${Math.round(Number(size) / 1024)} KB）` : ""}\n\n（可直接用 read 工具读此绝对路径）${dlNote}`, {
-				kind: "ok",
-				localPath,
-			});
-		},
-	});
-
-	// 逃生舱：消息收发之外的复杂操作（表格/文档/日历/审批/组织等）按需拉官方技能正文
+	// 唯一逃生舱：只给知识（官方技能正文），不给执行通道
 	pi.registerTool({
 		name: "dws_skill",
 		label: "读钉钉技能文档",
 		description:
-			"按需读取钉钉官方技能文档（dws postinstall 安装的 dingtalk-* 技能；插件默认把它们移出系统提示词以省上下文，这里是按需拿回的正道）。" +
-			"无 topic 时列出全部技能及一句话说明；传 topic（短名如 chat/sheet/todo，或全名 dingtalk-chat）返回该技能完整正文。" +
-			"复杂钉钉操作（表格/文档/日历/审批/组织/听记等）先拉取对应技能再照做——里面有完整命令路由与踩坑。",
-		promptSnippet: "钉钉技能文档：dws_skill([topic]) → 技能索引 / 技能正文",
+			"查钉钉官方技能文档（dingtalk-* 技能）：无 topic 时列出全部技能及一句话说明，传 topic（短名如 sheet/todo，或全名 dingtalk-chat）返回该技能正文。",
+		promptSnippet: "查钉钉技能文档：dws_skill([topic]) → 技能索引 / 技能正文",
 		parameters: Type.Object({
 			topic: Type.Optional(Type.String({ description: "技能短名（如 chat、sheet、todo）或全名（dingtalk-chat）；缺省列出全部技能" })),
 		}),
@@ -2390,6 +2502,500 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 			} catch (e) {
 				return text(`读取技能失败：${(e as Error).message}`, { kind: "error" });
 			}
+		},
+	});
+
+	// ============================================================
+	// L3 语义层：AI 只说业务话，命令/flag/ID 全由这里包办（场景→dws 的映射在 intents.ts）
+	// ============================================================
+
+	/** 在嵌套 JSON 里按 key（大小写不敏感）找第一个非空标量 */
+	const findScalar = (data: unknown, keys: string[]): string | undefined => {
+		let hit: string | undefined;
+		const walk = (v: unknown): void => {
+			if (hit !== undefined) return;
+			if (Array.isArray(v)) return v.forEach(walk);
+			if (!v || typeof v !== "object") return;
+			for (const [k, vv] of Object.entries(v as Record<string, unknown>)) {
+				if (typeof vv === "string" || typeof vv === "number") {
+					if (keys.some((q) => q.toLowerCase() === k.toLowerCase())) {
+						hit = String(vv);
+						return;
+					}
+				} else walk(vv);
+			}
+		};
+		walk(data);
+		return hit;
+	};
+
+	/** 某个 token 像稳定 ID（无中文且够长）还是像姓名 */
+	const isIdLike = (s: string): boolean => !hasCJK(s) && /^[0-9A-Za-z_+-]{6,}$/.test(s.trim());
+
+	/** 调 dws 并解析 JSON（失败 / 非 JSON 返回 null） */
+	const callJson = async (args: string[]): Promise<unknown | null> => {
+		try {
+			const r = await runDws(cfg, [...args, "--format", "json"]);
+			if (r.code !== 0 || r.timedOut) return null;
+			const raw = r.stdout.trim() || r.stderr.trim();
+			const i = raw.indexOf("{");
+			return i >= 0 ? (JSON.parse(raw.slice(i)) as unknown) : null;
+		} catch {
+			return null;
+		}
+	};
+
+	/** 人员解析：姓名走 aisearch；已是稳定 ID 时只补姓名用于面板展示 */
+const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] } | { error: string } | { choice: string }> => {
+		const ok: ResolvedPerson[] = [];
+		for (const token of [...new Set(tokens.map((t) => t.trim()).filter(Boolean))]) {
+			// 完整手机号：通讯录反查（唯一命中才放行）
+			if (/^1[3-9]\d{9}$/.test(token)) {
+				const data = await callJson(["contact", "user", "search-mobile", "--mobile", token]);
+				const uid = data ? findScalar(data, ["userId"]) : undefined;
+				if (!uid) return { error: `手机号 ${token} 没反查到账号` };
+				const orgs = await orgInfoOf(cfg, [uid]);
+				ok.push({ token, userId: uid, name: orgs.get(uid)?.name || undefined });
+				continue;
+			}
+			if (!isIdLike(token)) {
+				const data = await callJson(["aisearch", "person", "--query", token, "--dimension", "name"]);
+				const hits = data ? parsePeople(JSON.stringify(data)) : [];
+				if (!hits.length) return { error: `没找到「${token}」：核对用字，或直接给这个人的完整手机号` };
+				if (hits.length > 1) {
+					const lines = await personLines(cfg, hits);
+					return {
+						choice: `「${token}」有 ${hits.length} 个同名：按部门/职务/工号挑定，把该项收件人换成箭头后的 ID 后重调（其余收件人照旧）：\n${lines.join("\n")}`,
+					};
+				}
+				const hit = hits[0]!;
+				ok.push({ token, userId: hit.userId, openId: hit.openId, name: hit.name || token });
+				continue;
+			}
+			// 已是 ID：补姓名（面板要写人名，不写 ID）
+			const orgs = await orgInfoOf(cfg, [token]);
+			ok.push({ token, userId: token, name: orgs.get(token)?.name || undefined });
+		}
+		return { ok };
+	};
+
+	/** 已知姓名时补 openDingTalkId（DING 必须用它）；顺带把 userId 换成 openId */
+	const withOpenIds = async (people: ResolvedPerson[]): Promise<{ ok: ResolvedPerson[] } | { error: string }> => {
+		const out: ResolvedPerson[] = [];
+		for (const p of people) {
+			if (p.openId) {
+				out.push(p);
+				continue;
+			}
+			let name = p.name;
+			if (!name) {
+				const orgs = await orgInfoOf(cfg, [p.userId]);
+				name = orgs.get(p.userId)?.name;
+			}
+			if (!name) return { error: `没查到 ${p.token} 对应的姓名，无法取 DING 所需的 openDingTalkId` };
+			const hits = parsePeople(JSON.stringify(await callJson(["aisearch", "person", "--query", name, "--dimension", "name"])));
+			const hit = hits.find((h) => h.userId === p.userId) ?? hits.find((h) => h.openId);
+			if (!hit?.openId) return { error: `没取到「${name}」的 openDingTalkId，DING 发不出去` };
+			out.push({ ...p, name, openId: hit.openId });
+		}
+		return { ok: out };
+	};
+
+	/** 在列表里按名称找对象并取其目标字段（如 知识库名 → workspaceId、表名 → tableId） */
+	const findByField = (data: unknown, nameKeys: string[], wantKeys: string[], value: string): string | undefined => {
+		let hit: string | undefined;
+		const walk = (v: unknown): void => {
+			if (hit) return;
+			if (Array.isArray(v)) return v.forEach(walk);
+			if (!v || typeof v !== "object") return;
+			const o = v as Record<string, unknown>;
+			const name = nameKeys.map((k) => o[k]).find((x) => typeof x === "string");
+			if (typeof name === "string" && name.trim() === value.trim()) {
+				const want = wantKeys.map((k) => o[k]).find((x) => typeof x === "string" && x);
+				if (typeof want === "string") {
+					hit = want;
+					return;
+				}
+			}
+			Object.values(o).forEach(walk);
+		};
+		walk(data);
+		return hit;
+	};
+
+	/** 会话解析：群名 → openConversationId（同名群强制让用户选） */
+	const resolveGroup = async (token: string): Promise<{ ok: ResolvedGroup } | { error: string }> => {
+		if (isIdLike(token) && token.startsWith("cid")) return { ok: { token, cid: token } };
+		const data = await callJson(["chat", "+chat-search", "--query", token]);
+		const list = data ? parseGroups(JSON.stringify(data)) : [];
+		const hits = list.filter((g) => ci(g, "title") === token || ci(g, "openConversationId"));
+		const named = hits.filter((g) => pickStr(ci(g, "title")) === token);
+		const cands = named.length ? named : hits;
+		if (!cands.length) return { error: `没找到群「${token}」（可先用逃生舱 chat +chat-search 核对群名）` };
+		if (cands.length > 1) {
+			const lines = cands.map((g) => `· ${pickStr(ci(g, "title"))}（${pickStr(ci(g, "openConversationId"))}）`);
+			return { error: `群名「${token}」匹配到 ${cands.length} 个会话，请让用户确认：\n${lines.join("\n")}\n（确认后把 group 改成对应的 openConversationId）` };
+		}
+		const g = cands[0]!;
+		const cid = pickStr(ci(g, "openConversationId"));
+		if (!cid) return { error: `群「${token}」没解析出会话 ID` };
+		return { ok: { token, cid, title: pickStr(ci(g, "title")) || token } };
+	};
+
+	/** 消息定位：直接给 messageId 时补会话；否则按会话+发送人+关键词搜一条 */
+	const resolveMessage = async (p: { messageId?: string; inGroup?: string; group?: string; keyword?: string; sender?: string; days?: number }): Promise<{ ok: ResolvedMessage } | { error: string }> => {
+		let cid: string | undefined;
+		let groupTitle: string | undefined;
+		const gToken = p.inGroup ?? p.group;
+		if (gToken) {
+			const g = await resolveGroup(gToken);
+			if (!("ok" in g)) return g;
+			cid = g.ok.cid;
+			groupTitle = g.ok.title;
+		}
+		if (p.messageId) {
+			const data = await callJson(["chat", "+messages-mget", "--msg-ids", p.messageId]);
+			const [d] = parseMessageDigest(JSON.stringify(data ?? {}));
+			if (!d?.conversationId) return { error: `没查到消息 ${p.messageId}（可能不在你可见的会话里）` };
+			return { ok: { msgId: p.messageId, conversationId: cid ?? d.conversationId, preview: d.preview, time: d.createTime } };
+		}
+		if (!cid) return { error: "要找消息的话，需要给 inGroup（消息在哪个会话）+ keyword（消息里的关键词）" };
+		const args = ["chat", "+search-msg", "--chat-id", cid, "--limit", "5", "--order", "desc", "--days", String(Math.max(1, Math.min(p.days ?? 7, 30)))];
+		if (p.sender) args.push("--sender-query", p.sender);
+		if (p.keyword) args.push("--query", p.keyword);
+		const data = await callJson(args);
+		const msgId = data ? findScalar(data, ["openMessageId", "msgId", "messageId"]) : undefined;
+		if (!msgId) return { error: `在「${groupTitle ?? cid}」里没找到符合条件的消息——把关键词说得更准，或用逃生舱 chat +search-msg 自己查一条` };
+		const conv = data ? findScalar(data, ["openConversationId", "conversationId"]) : undefined;
+		return { ok: { msgId, conversationId: conv ?? cid } };
+	};
+
+	/** 搜索结果里挑真正的文档（docType=folder 的是文件夹，别把它当初文档） */
+	const pickDocNode = (data: unknown): string | undefined => {
+		let folder: string | undefined;
+		let hit: string | undefined;
+		const walk = (v: unknown): void => {
+			if (hit) return;
+			if (Array.isArray(v)) return v.forEach(walk);
+			if (!v || typeof v !== "object") return;
+			const o = v as Record<string, unknown>;
+			const id = [o.nodeId, o.dentryUuid, o.docId].find((x) => typeof x === "string" && x);
+			if (typeof id === "string") {
+				const kind = String(o.docType ?? o.type ?? o.nodeType ?? "");
+				if (kind === "folder") folder ??= id;
+				else {
+					hit = id;
+					return;
+				}
+			}
+			Object.values(o).forEach(walk);
+		};
+		walk(data);
+		return hit ?? folder;
+	};
+
+	/** 文档/表格定位：链接与 ID 直接用，标题先搜 */
+	const resolveDocNode = async (token: string): Promise<{ ok: string } | { error: string }> => {
+		if (/^https?:\/\//.test(token) || isIdLike(token)) return { ok: token };
+		const data = await callJson(["doc", "+search", "--query", token, "--limit", "10"]);
+		const node = data ? pickDocNode(data) : undefined;
+		if (!node) return { error: `没搜到名为「${token}」的文档/表格（可按链接或节点 ID 直接给）` };
+		return { ok: node };
+	};
+
+	/** 钉盘节点/文件夹定位：名称、链接或 ID → 稳定 ID */
+	const resolveDriveNode = async (token: string): Promise<{ ok: string } | { error: string }> => {
+		if (/^https?:\/\//.test(token)) {
+			const info = await callJson(["drive", "info", "--node", token]);
+			const id = info ? findScalar(info, ["nodeId", "dentryUuid", "dentryId"]) : undefined;
+			if (!id) return { error: `没解析出链接里的节点 ID：${token}` };
+			return { ok: id };
+		}
+		if (isIdLike(token)) return { ok: token };
+		const data = await callJson(["drive", "+search", "--query", token, "--limit", "10"]);
+		const id = data ? findScalar(data, ["nodeId", "dentryUuid"]) : undefined;
+		if (!id) return { error: `钉盘里没找到「${token}」` };
+		return { ok: id };
+	};
+
+	/** 已解析结果 → 带上本次调用的时间锚点（时间窗类参数一律相对它算） */
+	const withExtras = (base: Resolved, msg: ResolvedMessage | undefined): Resolved => ({ ...base, ...(msg ? { message: msg } : {}), ids: { ...base.ids, now: new Date().toISOString() } });
+
+	/** 注册一个语义工具：解析 → 生成 argv → 走同一条受控管线 */
+	const registerSemanticTool = <P>(def: {
+		name: string;
+		label: string;
+		description: string;
+		params: unknown;
+		resolve: (p: P) => Promise<Resolved | { error: string } | { choice: string }>;
+		build: (p: P, r: Resolved) => Built;
+		/** 不走命令管线、直接实现的动作（如纯下载）；返回 null 表示交给常规流程 */
+		direct?: (p: P, ctx: ExtensionContext) => Promise<ReturnType<typeof text> | null>;
+	}) => {
+		pi.registerTool({
+			name: def.name,
+			label: def.label,
+			description: def.description,
+			promptSnippet: `${def.label}：${def.name}(action, …) → 结果`,
+			parameters: def.params as never,
+			async execute(
+			_id: string,
+			params: { args: string[]; confirm?: string; view?: { receivers?: string[]; note?: string } },
+			_signal: unknown,
+			_onUpdate: unknown,
+			ctx: ExtensionContext,
+		) {
+				const p = params as P;
+				if (def.direct) {
+					const out = await def.direct(p, ctx);
+					if (out) return out;
+				}
+				const resolved = await def.resolve(p);
+				// 同名/同名群：不做人工确认，直接把候选交给 AI 挑（挑定后换成候选 ID 重调）
+				if ("choice" in resolved) return text((resolved as { choice: string }).choice, { kind: "choice" });
+				if ("error" in resolved && typeof (resolved as { error: unknown }).error === "string") {
+					stats.blocked++;
+					return text(`🚫 ${(resolved as { error: string }).error}`, { kind: "blocked" });
+				}
+				const r = resolved as Resolved;
+				// 解析得到的账号登记为「本会话已验证」，发送类就不会再报「未经解析」
+				for (const x of r.people ?? []) if (x.userId) state.resolved.add(x.userId);
+				if (r.group?.cid) state.resolvedGroups.add(r.group.cid);
+				if (r.message?.conversationId) state.resolvedGroups.add(r.message.conversationId);
+				const built = def.build(p, r);
+				if ("error" in built) {
+					stats.blocked++;
+					return text(`🚫 ${built.error}`, { kind: "blocked" });
+				}
+				return runGuarded(
+					built.args,
+					{
+						confirm: (p as { confirm?: string }).confirm,
+						view: { receivers: r.people?.map((x) => x.name ?? x.token), note: [built.note, r.group?.title ? `目标会话：${r.group.title}` : ""].filter(Boolean).join("；") || undefined },
+					},
+					ctx,
+				);
+			},
+		});
+	};
+
+	registerSemanticTool({
+		name: "dingtalk_msg",
+		label: "收发钉钉消息",
+		description:
+			"钉钉消息：单聊/群消息/多人单聊/引用回复/转发/转 DING/撤回/查消息。收件人写姓名或账号 ID，会话写群名或会话 ID。" +
+			"发文件时本条不含说明正文，说明要另发一条文本。",
+		params: MessageParams,
+		async resolve(p: MessageParamsT) {
+			const r: Resolved = {};
+			if (p.action === "read" && p.sender && /^(me|我|自己|本人)$/i.test(p.sender.trim())) {
+				const self = await whoAmI(cfg);
+				if (self?.name) r.ids = { ...r.ids, selfName: self.name };
+			}
+			if (["send", "broadcast", "ding"].includes(p.action) && p.to?.length) {
+				const people = await resolvePeople(p.to);
+				if (!("ok" in people)) return people;
+				if (p.action === "ding") {
+					const withIds = await withOpenIds(people.ok);
+					if (!("ok" in withIds)) return withIds;
+					r.people = withIds.ok;
+				} else r.people = people.ok;
+			}
+			if (p.group) {
+				const g = await resolveGroup(p.group);
+				if (!("ok" in g)) return g;
+				r.group = g.ok;
+			}
+			if (p.destGroup) {
+				const g = await resolveGroup(p.destGroup);
+				if (!("ok" in g)) return g;
+				r.destGroup = g.ok;
+			}
+			if (["reply", "forward", "ding", "recall"].includes(p.action) || (p.action === "read" && p.inGroup)) {
+				if (p.action === "read") {
+					const g = await resolveGroup(p.inGroup!);
+					if (!("ok" in g)) return g;
+					return { ...r, inGroup: g.ok, ids: { now: new Date().toISOString() } };
+				}
+				const m = await resolveMessage(p);
+				if (!("ok" in m)) return m;
+				return { ...r, message: m.ok, ids: { now: new Date().toISOString() } };
+			}
+			return withExtras(r, undefined);
+		},
+		build(p: MessageParamsT, r: Resolved) {
+			return buildMessage(p, r);
+		},
+	});
+
+	registerSemanticTool({
+		name: "dingtalk_todo",
+		label: "管理钉钉待办",
+		description: "钉钉待办：列表/新建/改期改标题/标记完成/删除/搜索。执行人写姓名，截止时间写「明天 09:30」这类自然写法。",
+		params: TodoParams,
+		async resolve(p: TodoParamsT) {
+			const r: Resolved = { ids: { now: new Date().toISOString() } };
+			if (p.executors?.length) {
+				const people = await resolvePeople(p.executors);
+				if (!("ok" in people)) return people;
+				r.people = people.ok;
+			} else if (p.action === "create") {
+				// 不指定执行人 = 派给自己：先把本人 userId 查出来（dws 不认 "me"）
+				const self = await whoAmI(cfg);
+				if (self?.userId) r.ids = { ...r.ids, selfUserId: self.userId };
+			}
+			if (p.taskId && isIdLike(p.taskId)) r.ids = { ...r.ids, taskId: p.taskId };
+			else if (["update", "complete", "delete"].includes(p.action)) {
+				const title = p.taskId ?? p.title;
+				if (!title) return { error: `${p.action} 需要 taskId，或给 title 让插件先按标题找` };
+				const data = await callJson(["todo", "+search", "--query", title]);
+				const id = data ? findScalar(data, ["taskId", "todoTaskId", "id"]) : undefined;
+				if (!id) return { error: `没找到名为「${title}」的待办` };
+				r.ids = { ...r.ids, taskId: id };
+			}
+			return r;
+		},
+		build(p: TodoParamsT, r: Resolved) {
+			return buildTodo(p, r);
+		},
+	});
+
+	registerSemanticTool({
+		name: "dingtalk_calendar",
+		label: "安排钉钉日程",
+		description: "钉钉日程：查/建/改/取消/加参会人/查空闲会议室。参会人写姓名；地点只是文字，订会议室用 rooms。",
+		params: CalendarParams,
+		async resolve(p: CalendarParamsT) {
+			const r: Resolved = { ids: { now: new Date().toISOString() } };
+			if (p.attendees?.length) {
+				const people = await resolvePeople(p.attendees);
+				if (!("ok" in people)) return people;
+				r.people = people.ok;
+			}
+			if (p.eventId) r.ids = { ...r.ids, eventId: p.eventId };
+			if (p.rooms?.length) {
+				const args = ["calendar", "room", "search", "--limit", "20"];
+				const s = p.start ? isoTime(p.start) : undefined;
+				const e = p.end ? isoTime(p.end, { end: true }) : undefined;
+				if (s && typeof s !== "string") return { error: s.error };
+				if (e && typeof e !== "string") return { error: e.error };
+				if (typeof s === "string") args.push("--start", s);
+				if (typeof e === "string") args.push("--end", e);
+				const ids: string[] = [];
+				for (const name of p.rooms) {
+					const data = await callJson([...args, "--room-name", name]);
+					const id = data ? findScalar(data, ["roomId"]) : undefined;
+					if (!id) return { error: `没搜到空闲会议室「${name}」（换个名字或时段再试）` };
+					ids.push(id);
+				}
+				r.ids = { ...r.ids, roomIds: ids.join(",") };
+			}
+			return r;
+		},
+		build(p: CalendarParamsT, r: Resolved) {
+			return buildCalendar(p, r);
+		},
+	});
+
+	registerSemanticTool({
+		name: "dingtalk_approval",
+		label: "处理钉钉审批",
+		description: "钉钉审批：看待我审批/我发起的/详情/同意/拒绝/转交/撤销/查模板/发起。发起前先用 forms 拿模板与字段名。",
+		params: ApprovalParams,
+		async resolve(p: ApprovalParamsT) {
+			const r: Resolved = { ids: { now: new Date().toISOString() } };
+			if (p.to) {
+				const people = await resolvePeople([p.to]);
+				if (!("ok" in people)) return people;
+				r.people = people.ok;
+			}
+			if (["approve", "reject", "transfer", "detail", "revoke"].includes(p.action) && !p.instanceId) return { error: `${p.action} 需要 instanceId（可先 action=listPending 查一条）` };
+			if (p.instanceId) r.ids = { ...r.ids, instanceId: p.instanceId };
+			if (["approve", "reject", "transfer"].includes(p.action) && p.instanceId) {
+				const data = await callJson(["oa", "approval", "tasks", "--instance-id", p.instanceId]);
+				const taskId = data ? findScalar(data, ["taskId"]) : undefined;
+				if (taskId) r.ids = { ...r.ids, taskId };
+			}
+			return r;
+		},
+		build(p: ApprovalParamsT, r: Resolved) {
+			return buildApproval(p, r);
+		},
+	});
+
+	registerSemanticTool({
+		name: "dingtalk_file",
+		label: "管理钉盘文件",
+		description: "钉盘文件：列目录/搜/看信息/上传/下载/新建文件夹/移动/重命名/删除/落地消息里的分享链接。位置写文件夹名、链接或 ID。",
+		params: FileParams,
+		// 分享落地是纯下载，不走两阶段：直接交给落地实现
+		direct: async (p: FileParamsT, ctx: ExtensionContext) =>
+			p.action === "fetch" ? fetchDriveShare({ link: p.link, spaceId: p.spaceId, nodeId: p.nodeId, outDir: p.out }, ctx) : null,
+		async resolve(p: FileParamsT) {
+			const r: Resolved = { ids: { now: new Date().toISOString() } };
+			const ids: Record<string, string> = { ...r.ids };
+			if (p.node) {
+				const n = await resolveDriveNode(p.node);
+				if (!("ok" in n)) return n;
+				ids.node = n.ok;
+			}
+			if (p.folder) {
+				const f = await resolveDriveNode(p.folder);
+				if (!("ok" in f)) return f;
+				ids.folder = f.ok;
+			}
+			if (p.dest) {
+				const d = await resolveDriveNode(p.dest);
+				if (!("ok" in d)) return d;
+				ids.dest = d.ok;
+			}
+			if (p.file) {
+				const abs = path.isAbsolute(p.file) ? p.file : path.join(process.cwd(), p.file);
+				if (!fs.existsSync(abs)) return { error: `待上传的文件不存在：${p.file}（给工作目录内的相对路径）` };
+			}
+			r.ids = ids;
+			return r;
+		},
+		build(p: FileParamsT, r: Resolved) {
+			return buildFile(p, r);
+		},
+	});
+
+	registerSemanticTool({
+		name: "dingtalk_doc",
+		label: "编辑钉钉文档表格",
+		description: "钉钉文档/知识库/表格/多维表：读/搜/新建/追加/覆盖或精确替换/表格区域读写/多维表记录增删改查。文档与表格可用标题、链接或 ID 指定。",
+		params: DocParams,
+		async resolve(p: DocParamsT) {
+			const r: Resolved = { ids: { now: new Date().toISOString() } };
+			const ids: Record<string, string> = { ...r.ids };
+			if (p.doc) {
+				const d = await resolveDocNode(p.doc);
+				if (!("ok" in d)) return d;
+				ids.doc = d.ok;
+			}
+			if (p.action === "wikiList" && p.workspace) {
+				const data = await callJson(["wiki", "space", "list", "--type", "orgWikiSpace"]);
+				const ws = isIdLike(p.workspace) ? p.workspace : data ? findByField(data, ["name", "spaceName", "title", "workspaceName"], ["workspaceId"], p.workspace) : undefined;
+				if (!ws) return { error: `没找到知识库「${p.workspace}」（可先用逃生舱 wiki +space-list 看清单）` };
+				ids.workspace = ws;
+			}
+			if (["tableQuery", "tableAdd", "tableUpdate", "tableDelete"].includes(p.action)) {
+				if (!p.base || !p.table) return { error: `${p.action} 需要 base（多维表名）+ table（数据表名）` };
+				const data = await callJson(["aitable", "base", "search", "--query", p.base]);
+				const baseId = isIdLike(p.base) ? p.base : data ? findScalar(data, ["baseId"]) : undefined;
+				if (!baseId) return { error: `没找到多维表「${p.base}」` };
+				const info = await callJson(["aitable", "base", "get", "--base-id", baseId]);
+				const tableId = isIdLike(p.table) ? p.table : info ? findByField(info, ["tableName", "name", "title"], ["tableId"], p.table) ?? findScalar(info, ["tableId"]) : undefined;
+				ids.baseId = baseId;
+				if (tableId) ids.tableId = tableId;
+				else return { error: `多维表「${p.base}」里没找到数据表「${p.table}」` };
+			}
+			r.ids = ids;
+			return r;
+		},
+		build(p: DocParamsT, r: Resolved) {
+			return buildDoc(p, r);
 		},
 	});
 

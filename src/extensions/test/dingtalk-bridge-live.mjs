@@ -1,31 +1,30 @@
 #!/usr/bin/env node
 /**
- * dingtalk-bridge 真实联调脚本（手动执行，不自动跑——会打真实 dws 进程与钉钉网络）
+ * dingtalk-bridge 联调（真实 dws 进程 + 钉钉网络；发送/写入只走到「执行计划」即停，绝不 confirm）
  *
- * 覆盖：L0 技能过滤、schema 三层下钻、人员解析、发送拦截链、只读执行。
- * 安全：发送只走到「草稿待确认」即停，绝不 confirm，不发送任何真实消息。
+ * 覆盖：L0 技能过滤、语义层六域（消息/待办/日程/审批/文件/文档表格）、门禁行为
+ * （草稿两阶段、错 confirm、同内容防重发、无界面敏感档 fail-closed、群发逐人个性化）、
+ * 逃生舱 dws_skill（索引 + 正文）。
  *
  * 用法：node src/extensions/test/dingtalk-bridge-live.mjs [姓名]
- *   姓名缺省取「严天宇」；如需验证人员解析，传真实姓名。
+ * 默认姓名 = 严天宇（本机组织内的人）。需要本机已安装 dws 且已登录。
  */
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { build } from "esbuild";
+import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..", "..", "..");
-const OUT = join(HERE, ".tmp-dingtalk-live-bundle.mjs");
-const { build } = createRequire(join(ROOT, "src", "package.json"))("esbuild");
+const OUT = join(HERE, ".tmp-dingtalk-live.mjs");
 
 await build({
-	entryPoints: [join(ROOT, "src", "extensions", "dingtalk-bridge.ts")],
+	entryPoints: [join(ROOT, "src", "extensions", "dingtalk-bridge", "index.ts")],
 	bundle: true,
 	platform: "node",
 	format: "esm",
 	outfile: OUT,
 	external: ["@earendil-works/*", "typebox"],
 	logLevel: "silent",
-	absWorkingDir: join(ROOT, "src"),
 });
 const mod = await import(pathToFileURL(OUT).href);
 
@@ -41,10 +40,11 @@ mod.default({
 console.log(`注册工具：${Object.keys(tools).join("、")}`);
 
 const call = (name, params) => tools[name].execute("live", params, undefined, undefined, {});
-const show = (label, r, max = 800) => {
+const show = (label, r, max = 500) => {
 	const t = r.content.map((c) => c.text).join("\n");
 	console.log(`\n===== ${label} =====`);
 	console.log(t.length > max ? `${t.slice(0, max)}\n……（截断，全长 ${t.length} 字符）` : t);
+	return t;
 };
 
 // L0：技能过滤 + 指引注入
@@ -52,61 +52,39 @@ const opts = { skills: [{ name: "dingtalk-chat" }, { name: "dingtalk-todo" }, { 
 beforeAgentStart({ systemPromptOptions: opts }, {});
 console.log(`\n===== L0 技能过滤 =====\n剩余技能：${opts.skills.map((s) => s.name).join("、") || "（空）"}｜指引 ${opts.promptGuidelines.length} 条`);
 
-// L1：schema 三层下钻
-await show("schema 产品概览", await call("dws_schema", {}), 1000);
-await show("schema 产品工具清单（todo）", await call("dws_schema", { path: "todo" }), 600);
-await show("schema 叶子参数（todo.get_user_todos_in_current_org）", await call("dws_schema", { path: "todo.get_user_todos_in_current_org" }), 500);
-
-// L1：真实只读执行
-await show("只读执行 todo task list", await call("dws_exec", { args: ["todo", "task", "list"] }), 400);
-
-// L2：人员解析
 const name = process.argv[2] ?? "严天宇";
-const resolved = await call("dws_resolve_user", { name });
-await show(`人员解析 ${name}`, resolved);
-const uid = resolved.details?.userId ?? "u001";
 
-// 逃生舱：技能索引 + 按需正文
-await show("逃生舱：技能索引", await call("dws_skill", {}), 700);
-await show("逃生舱：取 dingtalk-todo 正文", await call("dws_skill", { topic: "todo" }), 400);
+// 语义层：消息（只到草稿，绝不 confirm 发送——正文故意不写【AI发送】，角标由插件带）
+const stamp = new Date().toISOString().slice(11, 19);
+const draftArgs = { action: "send", to: [name], content: `语义层联调草稿 ${stamp}` };
+const d1 = await call("dingtalk_msg", draftArgs);
+show("消息：发单聊 → 执行计划（正文无需 AI 标记）", d1);
+show("消息：错误 confirm → 拒绝", await call("dingtalk_msg", { ...draftArgs, confirm: "deadbeef00" }), 200);
+show("消息：不带 confirm 重调 → 仍是同一份草稿（未执行）", await call("dingtalk_msg", draftArgs), 160);
+// 敏感档 + 无界面会话必须 fail-closed：用「取消日程」（destructive 永不可记住）且给不存在的 ID，即使门禁失效也不会伤到真实数据
+const cancelArgs = { action: "cancel", eventId: "联调不存在的日程" };
+const c1 = await call("dingtalk_calendar", cancelArgs);
+show("日程：取消 → 执行计划", c1, 200);
+if (c1.details?.token) show("日程：带正确 confirm → 无界面会话必须拒绝执行", await call("dingtalk_calendar", { ...cancelArgs, confirm: c1.details.token }), 200);
+show("消息：查消息（sender=me，不必知道命令名）", await call("dingtalk_msg", { action: "read", sender: "me", days: 7, limit: 2 }), 260);
+show("消息：同名候选交 AI 挑（不弹人工确认）", await call("dingtalk_msg", { action: "send", to: ["李娜"], content: "x" }), 400);
 
-// 字面反斜杠-n 归一：dry-run 发送（不真发）看载荷里的换行
-const BS = String.fromCharCode(92);
-const literalArgs = ["chat", "+messages-send", "--as", "user", "--user", uid, "--markdown", `【AI发送】归一化验证${BS}n第二行${BS}n第三行`, "--dry-run"];
-const normDraft = await call("dws_exec", { args: literalArgs });
-await show("字面反斜杠-n 自动归一（草稿回执）", normDraft, 500);
-if (normDraft.details?.token) await show("confirm 执行（--dry-run，不真发）", await call("dws_exec", { args: literalArgs, confirm: normDraft.details.token }), 700);
+// 语义层：待办 / 日程 / 审批 / 文件 / 文档表格
+show("待办：列表", await call("dingtalk_todo", { action: "list" }), 260);
+show("待办：建（姓名 + 明天 09:30 + 较高）", await call("dingtalk_todo", { action: "create", title: "联调草稿", executors: [name], due: "明天 09:30", priority: "较高" }), 420);
+show("日程：查今天", await call("dingtalk_calendar", { action: "list" }), 260);
+show("日程：建（参会人姓名）", await call("dingtalk_calendar", { action: "create", title: "联调日程", start: "明天 14:00", end: "明天 15:00", attendees: [name] }), 420);
+show("审批：待我审批", await call("dingtalk_approval", { action: "listPending", days: 7 }), 260);
+show("审批：查模板", await call("dingtalk_approval", { action: "forms", keyword: "报销" }), 220);
+show("文件：列我的文件", await call("dingtalk_file", { action: "list" }), 220);
+show("文件：落地「[文件夹] xxx」这类无引用分享", await call("dingtalk_file", { action: "fetch", link: "[文件夹] 联调" }), 220);
+show("文档：按标题搜", await call("dingtalk_doc", { action: "search", query: "教研" }), 260);
 
-// L2：发送拦截链（不真发）
-await show("发送缺【AI发送】标签", await call("dws_exec", { args: ["chat", "+dm", "--to", "u001", "--content", "明天下午三点教研会"] }));
-await show("发送目标为中文姓名", await call("dws_exec", { args: ["chat", "+dm", "--to", name, "--content", "【AI发送】测试"] }));
-const draft = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】联调草稿"];
-await show("合规发送 → 草稿待确认", await call("dws_exec", { args: draft }));
-await show("错误 confirm token", await call("dws_exec", { args: draft, confirm: "deadbeef00" }));
+// 群发逐人个性化（正文占位符 + 每人一份变量表）：只到草稿
+show("消息：群发逐人个性化草稿", await call("dingtalk_msg", { action: "broadcast", to: [name], content: "【{{称呼}}】联调个性化", vars: { [name]: { 称呼: "草稿" } } }), 500);
 
-// 群发（+broadcast）：草稿前自动预检收件人（只读 dry-run，永不 confirm）
-const bcBad = ["chat", "+broadcast", "--to", `${name},这个人肯定不存在`, "--content", "【AI发送】联调群发预检"];
-await show("群发预检：含未解析收件人 → 整体拦下并给候选", await call("dws_exec", { args: bcBad }));
-const bcOkTo = resolved.details?.userId ?? resolved.details?.candidates?.[0]?.userId ?? uid;
-const bcOk = ["chat", "+broadcast", "--to", bcOkTo, "--content", "【AI发送】联调群发草稿"];
-await show("群发预检：全部唯一解析 → 草稿带收件人表", await call("dws_exec", { args: bcOk }));
-await show("群发 --dry-run 主动预演：两栏解析表", await call("dws_exec", { args: [...bcOk, "--dry-run"] }));
-await show("群发 --dry-run 预演（重名时给候选+部门）", await call("dws_exec", { args: [`chat`, `+broadcast`, `--to`, name, `--content`, `【AI发送】重名预演`, "--dry-run"] }));
-await show("并列无效：重名名字必须被替换（与 userId 并列仍跳过）", await call("dws_exec", { args: [`chat`, `+broadcast`, `--to`, `${name},${bcOkTo}`, `--content`, `【AI发送】并列测试`, "--dry-run"] }));
+// 逃生舱：只有知识，没有执行通道
+show("逃生舱：技能索引", await call("dws_skill", {}), 300);
+show("逃生舱：取 dingtalk-todo 正文", await call("dws_skill", { topic: "todo" }), 200);
 
-// 转发/回复/卡片更新同样进确认门（都不 confirm，不会真发）
-await show("引用回复缺【AI发送】→ 拦", await call("dws_exec", { args: ["chat", "+messages-reply", "--group", "cidX", "--content", "已收到"] }));
-await show("转发 → 草稿（无正文，豁免标签检查）", await call("dws_exec", { args: ["chat", "+messages-forward", "--msg-id", "msgX", "--src-conversation-id", "cidX", "--dest-conversation-id", "cidY"] }));
-await show("转发目标群写中文名 → 拦", await call("dws_exec", { args: ["chat", "+messages-forward", "--msg-id", "msgX", "--dest-conversation-id", "教研室群"] }));
-
-// 走一遍「确认」：无界面会话（联调 ctx 没有 UI）必须 fail-closed 拒绝，绝不执行
-const dismissArgs = { args: ["chat", "+chat-dismiss", "--group", "cidX"] };
-const d1 = await call("dws_exec", dismissArgs);
-await show("无界面会话下确认敏感操作 → 拒绝执行（fail-closed）", await call("dws_exec", { ...dismissArgs, confirm: d1.details?.token }));
-
-// 分档（元数据驱动）：破坏性操作必须被拦成草稿——以前是直接 --yes 执行的窟窿。
-// 目标用不存在的 cid，即使门禁失效也只会报错，不会真解散任何群。
-await show("破坏性操作（解散群）→ 草稿待确认", await call("dws_exec", { args: ["chat", "+chat-dismiss", "--group", "cidX"] }));
-await show("普通写入（标已读）→ 草稿（不弹窗）", await call("dws_exec", { args: ["chat", "+conversation-mark-read", "--group", "cidX"] }));
-
-console.log("\n联调结束：未发送任何真实消息。");
+console.log("\n联调结束：未发送任何真实消息、未创建任何真实待办/日程。");

@@ -35,7 +35,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `crash-log.ts` — 崩溃黑匣子：崩溃堆栈同步落盘 `~/.pi/agent/pi-crash.log`，`/crash-log` 报告最近一条崩溃与取证路径（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `mimo-omni.ts` — 媒体兼容层（过渡件）：`mimo_transcribe` 解析音频/视频（逐字稿或按需求解析）+ `mimo_speak` 文字合成语音，`/mimo-config` 面板配置（见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `dingtalk-bridge.ts` — 钉钉受控桥接：屏蔽 dingtalk-* 技能注入，`dws_schema` 活内省 + `dws_exec` 受控执行（发送两阶段确认/标签强制/防重发）+ `dws_resolve_user` 人员解析（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `dingtalk-bridge/` — 钉钉受控桥接：业务语义工具（消息/待办/日程/审批/文件/文档表格，AI 不碰 dws 命令）+ 唯一逃生舱 `dws_skill`（只给知识）+ 两阶段确认/人工面板/防重发（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `model-config/` — 模型管理插件：`/model-config` 面板集中设置各插件用途使用的模型（策略槽 MAX/FAST/LITE/BASE/BATCH 可重指，AUTO/FREE 固定语义），见下 | `~/.pi/agent/extensions/` |
 | `patches/` | 两个 pi 补丁：ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
@@ -390,7 +390,7 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 
 **回归测试**：`node src/extensions/test/mimo-omni.test.mjs [音频] [视频]`（离线 18 项：类型判定、内容块构造、fps/分辨率透传、超大与格式错误拦截）；加 `MIMO_LIVE=1` 则额外用真实文件打一次 API 验证音频与视频两条路径。
 
-## 钉钉受控桥接（src/extensions/dingtalk-bridge.ts）
+## 钉钉受控桥接（src/extensions/dingtalk-bridge/）
 
 替代 dingtalk-* 技能的插件方案：技能是「冻结说明书 + 凭记忆拼命令」，对高风险操作（发消息）已被事故史证明不可靠；插件把机械可判的铁律变成工具层硬拦截。
 
@@ -425,7 +425,7 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
   - **读**：直通（`list/get/search/info/query…` 类词快速判定，命中写词则一律按写处理）。
   - **写**：首次只回草稿/计划（不执行），AI 把计划展示给用户、经明确同意后带 `confirm` 重调才执行。
   - **敏感档**（破坏性 + 会对外发出内容：发送/群发/转发/撤回/邀请/删除/清空/审批发起…）：在**真正执行的最后一瞬弹人工审核面板**——面板只写人话（要做什么 / 对谁 / 内容预览 / 影响与可逆性），**不放 argv、JSON、ID**；选项为「允许一次 / 当前工作区不再询问 / 拒绝」（destructive 不开放记住），Esc=拒绝。`当前工作区不再询问` 按命令路径记，可用 `/dws forget` 查看或清除。**无界面会话（print/RPC）直接拒绝敏感档**，绝不因为弹不出窗就放行。（面板复用 `shared/review-panel.ts`；与 perm-gate 的复核面板同一套串行链，避免并行工具批里浮层打架。）
-配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars` / `dedupMinutes` / `skillsDir` / `remembered`）；`/dws` 查看状态，`/dws forget <命令|all>` 清除「当前工作区不再询问」，`/dws refresh` 清空命令元数据缓存。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 A~AB 场景，不真实起 dws 进程）；真实联调 `node src/extensions/test/dingtalk-bridge-live.mjs [姓名]`（发送只走到草稿/预检即停，永不 confirm）。
+配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars` / `dedupMinutes` / `skillsDir` / `remembered`）；`/dws` 查看状态，`/dws forget <命令|all>` 清除「当前工作区不再询问」，`/dws refresh` 清空命令元数据缓存。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 A~AH 场景，不真实起 dws 进程）、`node src/extensions/test/dingtalk-intents.test.mjs`（语义层映射纯函数 A~G 场景）；真实联调 `node src/extensions/test/dingtalk-bridge-live.mjs [姓名]`（发送只走到草稿/预检即停，永不 confirm）。
 
 ## pi-ai usage 缺失防护补丁（patches/apply-pi-ai-usage-guard.mjs）
 
