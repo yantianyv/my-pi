@@ -56,6 +56,11 @@
 - 格式：音频 wav/mp3/m4a/flac/ogg/aac/opus，视频 mp4/mov/avi/wmv（fps 0.1~10、media_resolution `default`/`max`）；本地文件走 base64（>45MB 提前拦截，官方上限 50MB）、公网 URL 直传。
 - 解析链带模型降级 + 空正文重试（便宜档 flash 实测约半数只回思考不回正文，会自动降级到 pro/v2.5）；播放走系统自带播放器（Win PowerShell SoundPlayer / afplay / paplay），零依赖。
 
+## time.ts
+
+- 工具 `now()`（无参）；无命令、无状态 key。
+- 机制：`context` 事件给 user 消息贴 `[YYYY-MM-DD HH:mm]` 前缀（带年，本地时区）——只改发往模型的副本，会话记录/UI 不动；详见 extensions-core.md 的 time 段（含缓存影响与边界）。
+
 ## qr.ts
 
 - 工具 `qr_encode` / `qr_decode`；命令 `/qr`；状态 key `qr`。

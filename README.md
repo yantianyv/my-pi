@@ -29,6 +29,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `explore-agent.ts` — `explore` 只读探索子代理：并行派子代理、成果渐进落盘（`.pi/explore/report.md`）、断点续跑与上下文压缩（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `time.ts` — 时间感知：`context` 渲染层给每条 user 消息贴 `[YYYY-MM-DD HH:mm]` 常量前缀（会话记录/UI 不动、缓存友好）+ `now` 工具按需查绝对当前时间 | `~/.pi/agent/extensions/` |
 | `extensions/` | `qr.ts` — 二维码：`qr_encode` 编码（显示到 UI + PNG 落盘）+ `qr_decode` 解码 + `/qr` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `img-slim.ts` — 图片请求体预算：新图按类型瘦身（照片→JPEG、图形→优先 PNG、动图 WebP 转静态）+ 每轮请求前按总量预算省略最旧历史图片（防 DeepSeek 等上游 48MiB 请求体 413）（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `crash-log.ts` — 崩溃黑匣子：崩溃堆栈同步落盘 `~/.pi/agent/pi-crash.log`，`/crash-log` 报告最近一条崩溃与取证路径（见下） | `~/.pi/agent/extensions/` |

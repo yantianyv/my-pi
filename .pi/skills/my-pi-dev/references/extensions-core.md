@@ -86,6 +86,10 @@
 
 工具 `clipboard_get`（可截断）/ `clipboard_set`（空串清空）/ 命令 `/clipboard`（无参查看、`clear`/`off` 清空），状态 key `clipboard`。跨平台零依赖：Windows PowerShell `Get/Set-Clipboard`、macOS `pbpaste/pbcopy`、Linux `xclip` 退 `xsel`；统一临时文件中转（`os.tmpdir()/pi-clipboard-<pid>-<ts>-<rand>.txt`，用后即删）以规避 PS5.1 管道 UTF-16LE 乱码与 shell 转义；读时 CRLF→LF 归一化；写入前读旧内容摘要报告「已覆盖」。
 
+## time.ts
+
+时间感知：`context` 事件给每条 user 消息的**发往模型的副本**贴 `[YYYY-MM-DD HH:mm]` 常量前缀（带年），会话记录/UI/其他扩展看到的上下文均不动。核心事实：AgentMessage 自带 `timestamp`（ms，常量），零对齐零读盘；toolResult 是独立 role 天然不误伤；前缀是常量 → provider 前缀缓存照常命中；`/reload` 后首轮对长历史一次性全 miss（部署时机选在会话初期可避开）。只贴非空文本（string 或首个 text 块），已带前缀（`/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] /`）跳过防重贴；纯图/空串不贴。工具 `now()`：本地时间+星期+时区+ISO，需要绝对「现在」时按需调。无状态 key（behind-the-scenes，不进 STATUS_STYLE 也不报警）。
+
 ## crash-log.ts
 
 崩溃黑匣子：`prependListener` 抢在 pi 的 `uncaughtException` 处理器（同步 exit）之前把堆栈同步落盘 `~/.pi/agent/pi-crash.log`（含 unhandledRejection 与 exit 码；滚动上限 2MB、保留尾部 1MB），崩溃条目与会话文件按时间配对；命令 `/crash-log` 报告最近一条崩溃与取证路径（`clear` 清空日志与 ack）。
