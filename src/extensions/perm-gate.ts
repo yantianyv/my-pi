@@ -30,12 +30,13 @@
  *     "deny": ["\\brm\\s+-rf\\s+/(\\s|$)"],        // 硬拒绝正则（命中即拒，不询问）
  *     "watch": ["\\bdws\\s+chat\\s+send\\b"],      // 关注项正则（只提高审核严格度）
  *     "remembered": [{ "pattern": "...", "intent": "...", ... }],  // 已记住的操作
- *     "aiReview": true, "aiTimeoutMs": 15000, "sudoExec": true, "model": null,
+ *     "aiReview": true, "aiTimeoutMs": 15000, "sudoExec": true, "model": "auto",
  *   }
- *   旧配置（blacklist/whitelist）自动迁移：blacklist → watch，whitelist → remembered。
+ *   model 键是本插件的本地模型设置（auto = 交给 model-config；或 provider/modelId 本地固定），
+ *   由 shared/model-setting 维护；配置只认当前字段，历史字段（blacklist/whitelist）不再读取。
  *
  * 命令：/perm-gate 查看状态；on|off 开关；reload 重读配置；sudo on|off；prune 清理过期记忆；
- *       model 打开官方模型选择面板（shared/model-selector），model <provider>/<id>|auto 直接设置。
+ *       model [provider/id|auto] 直接设置，无参打开模型选择浮层（shared/model-select）。
  * AI 审核进度经官方 setStatus 通道推「perm-gate」状态（含最长耗时与超时降级说明），由 hud 行 1 显示。
  */
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -51,8 +52,8 @@ import { spawn } from "node:child_process";
 import { Type } from "typebox";
 import { loadJsonConfig, saveJsonConfig } from "./shared/config";
 import { choiceKey, createBoxRenderer, dividerScrollNote, editInput, keyHintRow, renderChoiceList, renderScrollingInput, scrollByPage, wrapIndented } from "./shared/ui";
-import { pickAuxModel, type AnyModel } from "./shared/model-pick";
-import { pickModelViaSelector } from "./shared/model-selector";
+import { openLocalModelPicker, resolveSettingArg, type AnyModel } from "./shared/model-select";
+import { LOCAL_AUTO, createModelSetting, type ModelSetting } from "./shared/model-setting";
 import { splitShellSegments } from "./shared/shell-split";
 
 // ---------------------------------------------------------------------------
@@ -62,8 +63,18 @@ import { splitShellSegments } from "./shared/shell-split";
 /** 配置文件路径（~/.pi/agent/perm-gate.json） */
 const CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "perm-gate.json");
 
-/** AI 审核优先选用的模型（provider/modelId）；不可用时自动选最便宜已认证模型 */
-const PREFERRED_MODELS: Array<[string, string]> = [["deepseek", "deepseek-flash"]];
+/**
+ * AI 审核模型设置（用途 `perm-gate.review`，默认策略 LITE）：
+ * 本地值 auto = 交给 model-config；或本地固定 provider/modelId（存同一配置文件的 model 键）
+ */
+const reviewModelSetting: ModelSetting = createModelSetting({
+	purpose: "perm-gate.review",
+	plugin: "perm-gate",
+	label: "命令审核",
+	file: CONFIG_FILE,
+	key: "model",
+	defaultStrategy: "LITE",
+});
 
 /** 喂给 AI 审核的命令最大字符数（超出截断） */
 const AI_CMD_MAX_CHARS = 4_000;
@@ -93,8 +104,6 @@ interface PermGateConfig {
 	aiTimeoutMs: number;
 	/** sudo 授权通道（sudo_exec 工具）开关；关 = sudo 命令退回名单审核流程 */
 	sudoExec: boolean;
-	/** AI 审核模型覆盖项（"provider/modelId"；null = 自动：优先列表 + 最便宜已认证兜底） */
-	model: string | null;
 }
 
 /** 默认硬拒绝：无需商量的破坏性操作（用户可在配置里增删） */
@@ -121,7 +130,6 @@ const DEFAULT_CONFIG: PermGateConfig = {
 	aiReview: true,
 	aiTimeoutMs: 15_000,
 	sudoExec: true,
-	model: null,
 };
 
 /** AI 审核结论 */
@@ -140,18 +148,14 @@ interface Verdict {
 // 配置读写
 // ---------------------------------------------------------------------------
 
-/** 配置校验：新旧格式都接受（新：deny/watch/remembered；旧：blacklist/whitelist），迁移在 loadConfig 里做 */
+/** 配置校验：只认当前字段（enabled/deny/watch/remembered/aiReview/aiTimeoutMs/sudoExec），缺字段/多余字段放行 */
 function isConfig(v: unknown): v is PermGateConfig {
-	const c = v as Partial<PermGateConfig> & { blacklist?: unknown; whitelist?: unknown } | null;
+	const c = v as Partial<PermGateConfig> | null;
 	const okList = (x: unknown) => x === undefined || (Array.isArray(x) && x.every((s) => typeof s === "string"));
 	const okRules = (x: unknown) =>
 		x === undefined ||
 		(Array.isArray(x) &&
-			x.every(
-				(r) =>
-					typeof r === "string" ||
-					(typeof r === "object" && r !== null && typeof (r as { pattern?: unknown }).pattern === "string"),
-			));
+			x.every((r) => typeof r === "object" && r !== null && typeof (r as { pattern?: unknown }).pattern === "string"));
 	return (
 		!!c &&
 		typeof c === "object" &&
@@ -159,36 +163,27 @@ function isConfig(v: unknown): v is PermGateConfig {
 		okList(c.deny) &&
 		okList(c.watch) &&
 		okRules(c.remembered) &&
-		// 旧格式字段
-		okList(c.blacklist) &&
-		okRules(c.whitelist) &&
 		typeof c.aiReview === "boolean" &&
 		typeof c.aiTimeoutMs === "number" &&
-		// model / sudoExec 为后加字段：旧配置缺失时容错（model 缺省 null = 自动，sudoExec 缺省 true）
-		(c.model === undefined || c.model === null || typeof c.model === "string") &&
 		(c.sudoExec === undefined || typeof c.sudoExec === "boolean")
 	);
 }
 
-/** 旧格式兼容：string[] 或带字段的对象 → RememberedRule[]（缺字段补默认，非法项跳过） */
+/** 已记住规则列表：缺时间/计数补默认，缺 pattern 的非法项跳过（条目由面板与 AI 落库写入） */
 function toRememberedRules(list: unknown, now = Date.now()): RememberedRule[] {
 	if (!Array.isArray(list)) return [];
 	const out: RememberedRule[] = [];
 	for (const item of list) {
-		if (typeof item === "string") {
-			if (item) out.push({ pattern: item, intent: item, addedAt: now, lastHit: now, hits: 0 });
-		} else if (item && typeof item === "object") {
-			const r = item as Partial<RememberedRule>;
-			if (typeof r.pattern === "string" && r.pattern) {
-				out.push({
-					pattern: r.pattern,
-					intent: typeof r.intent === "string" && r.intent ? r.intent : r.pattern,
-					addedAt: typeof r.addedAt === "number" ? r.addedAt : now,
-					lastHit: typeof r.lastHit === "number" ? r.lastHit : now,
-					hits: typeof r.hits === "number" ? r.hits : 0,
-				});
-			}
-		}
+		if (!item || typeof item !== "object") continue;
+		const r = item as Partial<RememberedRule>;
+		if (typeof r.pattern !== "string" || !r.pattern) continue;
+		out.push({
+			pattern: r.pattern,
+			intent: typeof r.intent === "string" && r.intent ? r.intent : r.pattern,
+			addedAt: typeof r.addedAt === "number" ? r.addedAt : now,
+			lastHit: typeof r.lastHit === "number" ? r.lastHit : now,
+			hits: typeof r.hits === "number" ? r.hits : 0,
+		});
 	}
 	return out;
 }
@@ -201,20 +196,15 @@ function loadConfig(): { cfg: PermGateConfig; isNew: boolean } {
 	} catch {
 		/* 忽略 */
 	}
-	const raw = loadJsonConfig(CONFIG_FILE, structuredClone(DEFAULT_CONFIG), isConfig) as PermGateConfig & {
-		blacklist?: unknown;
-		whitelist?: unknown;
-	};
+	const raw = loadJsonConfig(CONFIG_FILE, structuredClone(DEFAULT_CONFIG), isConfig) as PermGateConfig;
 	const cfg: PermGateConfig = {
 		enabled: raw.enabled,
-		// 新字段缺失（旧配置）→ 默认；旧 blacklist/whitelist → watch/remembered
 		deny: Array.isArray(raw.deny) ? raw.deny : structuredClone(DEFAULT_DENY),
-		watch: Array.isArray(raw.watch) ? raw.watch : Array.isArray(raw.blacklist) ? (raw.blacklist as string[]) : structuredClone(DEFAULT_WATCH),
-		remembered: toRememberedRules(Array.isArray(raw.remembered) ? raw.remembered : raw.whitelist),
+		watch: Array.isArray(raw.watch) ? raw.watch : structuredClone(DEFAULT_WATCH),
+		remembered: toRememberedRules(raw.remembered),
 		aiReview: raw.aiReview,
 		aiTimeoutMs: raw.aiTimeoutMs,
 		sudoExec: raw.sudoExec ?? true,
-		model: raw.model ?? null,
 	};
 	return { cfg, isNew };
 }
@@ -752,7 +742,8 @@ export default function (pi: ExtensionAPI) {
 	let panelChain: Promise<unknown> = Promise.resolve();
 
 	function saveConfig(): void {
-		saveJsonConfig(CONFIG_FILE, cfg);
+		// 模型设置（同文件的 model 键）由 shared/model-setting 维护，写回时原样带上，避免被 cfg 覆盖掉
+		saveJsonConfig(CONFIG_FILE, { ...cfg, model: reviewModelSetting.getLocal() });
 	}
 
 	// 记忆保鲜：命中时刷新规则内存元数据，落盘 throttle（避免高频 bash 调用频繁写配置）
@@ -803,17 +794,9 @@ export default function (pi: ExtensionAPI) {
 		return out;
 	}
 
-	/**
-	 * 解析 AI 审核模型（仿 pi-btw 覆盖项语义）：
-	 * 配置了覆盖模型且可用（存在 + 已认证）→ 用覆盖模型；否则回落自动（优先列表 + 最便宜兜底）。
-	 */
+	/** 解析 AI 审核模型（本地设置 → 中心设置 → 默认策略 LITE → AUTO，见 shared/model-setting） */
 	function resolveReviewModel(ctx: ExtensionContext): AnyModel | undefined {
-		if (cfg.model) {
-			const slash = cfg.model.indexOf("/");
-			const m = ctx.modelRegistry.find(cfg.model.slice(0, slash), cfg.model.slice(slash + 1));
-			if (m && ctx.modelRegistry.hasConfiguredAuth(m)) return m;
-		}
-		return pickAuxModel(ctx, PREFERRED_MODELS);
+		return reviewModelSetting.resolve(ctx).model;
 	}
 
 	/**
@@ -1211,33 +1194,36 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (sub === "model" || sub.startsWith("model ")) {
 				const arg = args.trim().slice(5).trim();
-				// 带参数：直接设置（仿 pi-btw 的 /btw:model，无面板）
 				if (arg) {
-					if (arg.toLowerCase() === "auto" || arg.toLowerCase() === "clear") {
-						cfg.model = null;
-					} else {
-						const slash = arg.indexOf("/");
-						const m = slash > 0 ? ctx.modelRegistry.find(arg.slice(0, slash), arg.slice(slash + 1)) : undefined;
-						if (!m) {
-							ctx.ui.notify(`perm-gate：找不到模型 ${arg}（格式 provider/modelId）`, "error");
-							return;
-						}
-						cfg.model = `${m.provider}/${m.id}`;
+					const r = resolveSettingArg(ctx, arg);
+					if ("error" in r) {
+						ctx.ui.notify(
+							`perm-gate：${r.error}。用法：/perm-gate model <provider>/<modelId> ｜ auto`,
+							"error",
+						);
+						return;
 					}
-					saveConfig();
-					ctx.ui.notify(`perm-gate 审核模型：${cfg.model ?? "自动（优先列表 + 最便宜兜底）"}（已持久化）`, "info");
+					reviewModelSetting.setLocal(r.value);
+					ctx.ui.notify(
+						`perm-gate 审核模型：${r.value === LOCAL_AUTO ? "auto（由 model-config 管理）" : r.value}（已持久化）`,
+						"info",
+					);
 					return;
 				}
-				// 无参数：官方模型选择面板（shared/model-selector 复用 ModelSelectorComponent，与内置 /model 同组件）
 				if (!ctx.hasUI) {
 					ctx.ui.notify("用法：/perm-gate model <provider>/<modelId> ｜ /perm-gate model auto", "info");
 					return;
 				}
-				const picked = await pickModelViaSelector(ctx);
+				const picked = await openLocalModelPicker(ctx, {
+					current: reviewModelSetting.getLocal(),
+					title: "选择 perm-gate 审核模型",
+				});
 				if (!picked) return; // Esc 取消
-				cfg.model = `${picked.provider}/${picked.id}`;
-				saveConfig();
-				ctx.ui.notify(`perm-gate 审核模型：${cfg.model}（已持久化；/perm-gate model auto 恢复自动）`, "info");
+				reviewModelSetting.setLocal(picked);
+				ctx.ui.notify(
+					`perm-gate 审核模型：${picked === LOCAL_AUTO ? "auto（由 model-config 管理）" : picked}（已持久化）`,
+					"info",
+				);
 				return;
 			}
 			const invalid: string[] = [];
@@ -1250,7 +1236,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(
 				[
 					`perm-gate ${cfg.enabled ? "✅ 开启" : "❌ 关闭"}（AI 审核 ${cfg.aiReview ? "开" : "关"}）`,
-					`审核模型：${cfg.model ?? "自动（优先列表 + 最便宜兜底）"}`,
+					`审核模型：${reviewModelSetting.getLocal() === LOCAL_AUTO ? "auto（由 model-config 管理）" : reviewModelSetting.getLocal()}`,
 					`sudo 授权通道：${cfg.sudoExec ? "开（密码即授权，仅当次有效）" : "关"}`,
 					`已记住的操作 ${cfg.remembered.length} 条${expired ? `（${expired} 条超过 ${REMEMBER_EXPIRE_DAYS} 天未命中（仍生效），/perm-gate prune 清理）` : ""} ／ 关注项 ${cfg.watch.length} 条（只提高审核严格度） ／ 硬拒绝 ${cfg.deny.length} 条`,
 					invalid.length ? `⚠️ 无效正则 ${invalid.length} 条：${invalid.slice(0, 3).join("、")}${invalid.length > 3 ? ` 等 ${invalid.length} 条` : ""}（编辑 ${CONFIG_FILE} 修复）` : "",
