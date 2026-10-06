@@ -1,12 +1,12 @@
 /**
- * webdav-kb / commands.ts — /kb-config 配置命令 + /kb-sync 手动同步
+ * webdav-kb / commands.ts — /kb-config 配置命令 + /kb sync 的同步实现（供主命令调用）
  *
  * /kb-config：所有配置修改统一走 TUI 单页表单面板（KbConfigOverlay：WebDAV 地址 /
  *   用户名 / 密码 / 代理 / 镜像目录 / vault 口令 / 测试连通 / 立即同步 / 只读模式，
  *   改动即存）。不带任何子命令（0.5 决策：面板已全覆盖全部配置项，子命令与面板
  *   重复，全部移除；非 TUI 环境仅打印当前配置摘要与 TUI 面板提示）。
  *
- * /kb-sync：手动增量同步（session_start 已自动后台同步，此处用于首次/异常后手动触发）
+ * /kb sync：手动增量同步（session_start 已自动后台同步，此处用于首次/异常后手动触发）
  */
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { setStatusWithTTL } from "../shared/status";
@@ -62,34 +62,32 @@ export function registerKbCommands(pi: ExtensionAPI): void {
 		},
 	});
 
-	// ---------- /kb-sync ----------
-	pi.registerCommand("kb-sync", {
-		description: "手动增量同步知识库镜像（启动时已自动同步，此命令用于手动触发）",
-		async handler(_args, ctx) {
-			const cfg = loadConfig(agentConfigDir());
-			if (!isConfigured(cfg)) {
-				ctx.ui.notify("知识库未配置：请先运行 /kb-config 设置 WebDAV 地址与账号。", "warning");
-				return;
-			}
-			const mirrorDir = cfg.mirrorDir?.trim() || defaultMirrorDir(agentConfigDir());
-			const push = (t: string, ttl: number) => setStatusWithTTL(ctx, "kb-sync", t, ttl);
-			try {
-				push("🔄 同步中", 30_000);
-				const stats = await syncAll(cfg, mirrorDir, {
-					onProgress: (label) => push(`🔄 ${label}`, 30_000),
-					lockWaitMs: SYNC_LOCK_WAIT_MS,
-				});
-				const summary = formatSyncSummary(stats);
-				const notes = formatSyncNotes(stats);
-				push(`✓ ${summary}`, 8_000);
-				ctx.ui.notify([`同步完成：${summary}`, ...notes].join("\n"), stats.errors.length ? "warning" : "info");
-			} catch (e) {
-				const msg = describeSyncError(e);
-				push(`⚠ 同步失败：${msg}`, 10_000);
-				ctx.ui.notify(`同步失败：${msg}`, "error");
-			}
-		},
-	});
+}
+
+/** 手动增量同步（/kb sync 子命令）：session_start 已自动后台同步，这里用于首次/异常后手动触发 */
+export async function syncFromCommand(ctx: ExtensionCommandContext): Promise<void> {
+	const cfg = loadConfig(agentConfigDir());
+	if (!isConfigured(cfg)) {
+		ctx.ui.notify("知识库未配置：请先运行 /kb-config 设置 WebDAV 地址与账号。", "warning");
+		return;
+	}
+	const mirrorDir = cfg.mirrorDir?.trim() || defaultMirrorDir(agentConfigDir());
+	const push = (t: string, ttl: number) => setStatusWithTTL(ctx, "kb-sync", t, ttl);
+	try {
+		push("🔄 同步中", 30_000);
+		const stats = await syncAll(cfg, mirrorDir, {
+			onProgress: (label) => push(`🔄 ${label}`, 30_000),
+			lockWaitMs: SYNC_LOCK_WAIT_MS,
+		});
+		const summary = formatSyncSummary(stats);
+		const notes = formatSyncNotes(stats);
+		push(`✓ ${summary}`, 8_000);
+		ctx.ui.notify([`同步完成：${summary}`, ...notes].join("\n"), stats.errors.length ? "warning" : "info");
+	} catch (e) {
+		const msg = describeSyncError(e);
+		push(`⚠ 同步失败：${msg}`, 10_000);
+		ctx.ui.notify(`同步失败：${msg}`, "error");
+	}
 }
 
 // ---------------------------------------------------------------------------

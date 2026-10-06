@@ -32,7 +32,7 @@
  * - dws_resolve_user：包 aisearch person，单候选自动记入本会话已验证集，多候选列出并要求
  *   pick 参数确认，零候选给换维度/手机号反查的指引 *
  * 配置 ~/.pi/agent/dingtalk-bridge.json：requireAiTag（默认 true）/ blockedSkillPrefixes /
- * dwsPath / execTimeoutMs / maxOutputChars。/dws-bridge 查看状态。
+ * dwsPath / execTimeoutMs / maxOutputChars。/dws 查看状态与 forget/refresh 维护。
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -2040,7 +2040,7 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 				}
 				if (outcome.kind === "remembered") {
 					rememberCommand(cfg, args);
-					ctx.ui.notify(`dingtalk-bridge：已记住「${rememberedKey(args)}」，以后这类操作不再弹窗（可用 /dws-bridge forget 取消）`, "info");
+					ctx.ui.notify(`dingtalk-bridge：已记住「${rememberedKey(args)}」，以后这类操作不再弹窗（可用 /dws forget 取消）`, "info");
 				}
 			}
 			// 逐人个性化：确认后按草稿里的名单逐个渲染发送（dws +broadcast 只支持同一内容）
@@ -2393,14 +2393,14 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 		},
 	});
 
-	pi.registerCommand("dws-bridge", {
-		description: "dingtalk-bridge 状态（配置/本会话统计/技能屏蔽/已记住的命令）",
+	pi.registerCommand("dws", {
+		description: "钉钉桥：状态（配置/统计/技能屏蔽/已记住）｜ forget <命令|all> ｜ refresh",
 		handler: async (cmdArgs, ctx) => {
 			const arg = (cmdArgs ?? "").trim();
 			if (arg.startsWith("forget")) {
 				const what = arg.slice(6).trim();
 				if (!what) {
-					if (ctx.hasUI) ctx.ui.notify(`已记住（以后不再弹窗）：\n${cfg.remembered.map((r) => `· ${r}`).join("\n") || "（空）"}\n用法：/dws-bridge forget <命令> 或 /dws-bridge forget all`, "info");
+					if (ctx.hasUI) ctx.ui.notify(`已记住（以后不再弹窗）：\n${cfg.remembered.map((r) => `· ${r}`).join("\n") || "（空）"}\n用法：/dws forget <命令> 或 /dws forget all`, "info");
 					return;
 				}
 				cfg.remembered = what === "all" ? [] : cfg.remembered.filter((r) => r !== what);

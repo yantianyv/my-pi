@@ -26,7 +26,7 @@ export const DEFAULT_PROTOCOL = `# 知识库使用守则（webdav-kb）
 3. 命中 → kb_read 读全文（长文件用 offset 续读），取最相关内容
 4. 过程中产生值得沉淀的知识 → kb_write / kb_append（见下）
 5. 没把握的路径 → kb_list 看现有目录结构
-6. 同步状态不确定时 → kb_status（冲突/积压），必要时提醒用户 /kb-sync
+6. 同步状态不确定时 → kb_status（冲突/积压），必要时提醒用户 /kb sync
 
 ## 三、触发时机（什么时候值得写）
 - 解决了一个可复用的坑：写「现象 → 原因 → 解决 → 验证」，带日期与上下文
@@ -114,7 +114,7 @@ export const DEFAULT_PROTOCOL = `# 知识库使用守则（webdav-kb）
 ## 十、人类命令（AI 可引导用户使用）
 - /kb <词>      面板/文本检索 + 插入引用
 - /kb-config    配置 WebDAV、vault 口令、连通测试
-- /kb-sync      手动同步
+- /kb sync      手动同步
 
 ## 十一、历史版本区（/.history/）
 - 所有文件的改动（覆盖/追加）与删除自动留档：副本存 /.history/，目录结构与根一致，文件名加 _yymmddhhmmss 后缀；同秒重名叠加 _hash 后缀，_hash 也重名说明是同一份内容，跳过

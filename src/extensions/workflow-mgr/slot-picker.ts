@@ -10,7 +10,7 @@
  * 键位：↑↓/j/k 移动（循环）、Enter/空格确认、Esc/Ctrl+C = 暂不启用、数字键 1-9 直选。
  * 组件只产出 SlotPick 意图，写绑定 / 收集新槽名 / 派发恢复命令都由 events.ts 负责。
  *
- * 渲染与 /workflow-config 菜单同款（createBoxRenderer 圆角 + borderMuted 暗色 +
+ * 渲染与 /wf-config 菜单同款（createBoxRenderer 圆角 + borderMuted 暗色 +
  * ▶ 选中前缀），宽度自适应 pi-tui visibleWidth（中文=2、块元素=1）。
  */
 import type { Theme } from "@earendil-works/pi-coding-agent";

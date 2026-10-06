@@ -14,6 +14,7 @@ import { matchesKey, Text, type TUI } from "@earendil-works/pi-tui";
 import { createBoxRenderer, editInput, renderScrollingInput } from "../shared/ui";
 import { loadConfig, defaultMirrorDir, agentConfigDir } from "./store";
 import { getIndex, type SearchResult } from "./search";
+import { syncFromCommand } from "./commands";
 import { vaultReadNote, isUnlocked } from "./crypto";
 
 /** 列表一次最多展示的结果数 */
@@ -204,7 +205,7 @@ export class KbOverlay {
 			// 区分「库是空的/没同步」与「只是这次没搜到」，否则用户无法判断下一步
 			const idxEmpty = getIndex(this.mirrorDir).size === 0;
 			const hint = idxEmpty
-				? "知识库为空（尚未同步或同步失败）：先跑 /kb-sync，或用 /kb-config 检查配置"
+				? "知识库为空（尚未同步或同步失败）：先跑 /kb sync，或用 /kb-config 检查配置"
 				: !isUnlocked()
 					? "无匹配结果；vault 加密区未解锁，其中的笔记不在检索范围内（/kb-config 输口令解锁）"
 					: "无匹配结果，试试更短的关键词或换个说法（Esc 返回）";
@@ -281,8 +282,13 @@ function insertReference(ctx: ExtensionCommandContext, path: string, title: stri
 
 export function registerKbPanel(pi: ExtensionAPI): void {
 	pi.registerCommand("kb", {
-		description: "知识库面板：搜索笔记 → 预览 → 插入引用（/kb <查询词> 非 TUI 文本结果）",
+		description: "知识库：无参开面板（搜索→预览→插入）；sync 手动同步；<查询词> 非 TUI 检索",
 		async handler(args, ctx) {
+			// /kb sync：动作子命令（与 /kb-config 面板、工具共用同一套同步实现）
+			if (args.trim().toLowerCase() === "sync") {
+				await syncFromCommand(ctx);
+				return;
+			}
 			const cfg = loadConfig(agentConfigDir());
 			if (!cfg.baseUrl) {
 				ctx.ui.notify("知识库未配置：请先运行 /kb-config 设置 WebDAV 地址与账号。", "warning");
@@ -324,7 +330,7 @@ export function registerKbPanel(pi: ExtensionAPI): void {
 				const idxEmpty = getIndex(mirrorDir).size === 0;
 				ctx.ui.notify(
 					idxEmpty
-						? "知识库为空（尚未同步或同步失败）：先跑 /kb-sync；还没配置则用 /kb-config 设置 WebDAV。"
+						? "知识库为空（尚未同步或同步失败）：先跑 /kb sync；还没配置则用 /kb-config 设置 WebDAV。"
 						: `知识库未找到与「${query}」相关的内容。可试试更短的关键词或换个说法，或用 kb_list 浏览目录。`,
 					"info",
 				);

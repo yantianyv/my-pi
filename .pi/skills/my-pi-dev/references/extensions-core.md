@@ -73,7 +73,7 @@
 
 ## status-beacon.ts
 
-- 命令 `/beacon`：无参开模型选择面板、`auto`、`provider/modelId`、`status`/`presence`（报告在场门控判定）。配置 `~/.pi/agent/status-beacon.json`：`model`（本地模型设置，用途 `beacon.phrase`，默认策略 BATCH）、`presenceGate`、`activeIdleMs`、`awayIdleMs`、`dedupeMs`；模型键经 shared/model-setting 读改写（历史上的 `fs.writeFileSync({model})` 会清掉门控阈值，已修）。
+- 命令 `/beacon`（`status`/`presence` 报告在场门控判定；无参打印用法）+ `/beacon-config`（概括模型：无参开选择浮层、`auto`、`provider/modelId`）。配置 `~/.pi/agent/status-beacon.json`：`model`（本地模型设置，用途 `beacon.phrase`，默认策略 BATCH）、`presenceGate`、`activeIdleMs`、`awayIdleMs`、`dedupeMs`；模型键经 shared/model-setting 读改写（历史上的 `fs.writeFileSync({model})` 会清掉门控阈值，已修）。
 - 执行中标题进度（`agent_start` → settled）：spinner + 活动段 + 目录名，活动段与 Working 行/HUD 同一套词（工具名 / 思考中 / 输出中 / 块间隙只显目录）；提醒期间让位、应答后恢复。
 - 接管执行中 Working 行（独占 `setWorkingMessage`），按「在等什么」分层：等人工（`ui_prompt` 阻塞；ask/perm-gate 经 `__PI_STATUS_BEACON_API__.wait` 登记具体文本，如「等你：回答问卷「方案确认」」）> 等工具/子代理完成 > 思考中 > 正在{短语}… / 正在输出…。**「思考中」只覆盖思考块流出的那段时间**（`message_update` 的 thinking_start → thinking_end），带廉价 AI 概括的动作短语 `思考中：重构 HUD…`（`message_end` 触发异步概括，模型按用途 `beacon.phrase` 解析，仿 perm-gate 的 `completeSimple` 路线）；无短语只显「思考中…」。思考结束后的内容生成与块间隙显「正在输出…」，不冒充思考中。行首那支转圈是 pi 指示器自带、Working 行不自带 spinner；折叠思考标签交回 pi 默认静态 `Thinking...`（其动画已并入本扩展）。
 - 状态 key（`STATUS_STYLE` 中登记）：`task-alert`（完成闪烁帧）/`task-alert-error`/`task-alert-wait`（等待人工）/`task-alert-run`（思考中/当前工具；run 开局重置防残留，块间隙与收尾不显）。key 沿用 task-alert* 旧名（前身即 task-alert）。

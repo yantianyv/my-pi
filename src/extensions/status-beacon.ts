@@ -695,7 +695,7 @@ export default function (pi: ExtensionAPI) {
 
 	// /beacon 命令：概括模型选择（无参官方面板 / auto / provider/id）+ status 查看在场门控
 	pi.registerCommand("beacon", {
-		description: "提示音与概括模型：无参开模型面板；status 看在场门控",
+		description: "提示音在场门控状态（status / presence）｜ 概括模型用 /beacon-config",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (arg === "status" || arg === "presence") {
@@ -720,13 +720,18 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-			if (!arg && !ctx.hasUI) {
-				ctx.ui.notify(
-					"用法：/beacon（面板选模型）｜ /beacon auto ｜ /beacon <provider>/<modelId> ｜ /beacon status",
-					"info",
-				);
-				return;
-			}
+			ctx.ui.notify(
+				"用法：/beacon status 查看提示音在场门控 ｜ /beacon-config 设置概括模型",
+				"info",
+			);
+		},
+	});
+
+	/* ---------- /beacon-config：概括模型（本地设置：auto = 交给 model-config，或具体 provider/modelId） ---------- */
+	pi.registerCommand("beacon-config", {
+		description: "概括模型：无参开选择浮层；auto（由 model-config 管理）/ provider/modelId",
+		handler: async (args: string, ctx: ExtensionContext) => {
+			const arg = args.trim();
 			if (arg) {
 				const r = resolveSettingArg(ctx, arg);
 				if ("error" in r) {
@@ -735,6 +740,13 @@ export default function (pi: ExtensionAPI) {
 				}
 				stepModelSetting.setLocal(r.value);
 			} else {
+				if (!ctx.hasUI) {
+					ctx.ui.notify(
+						`当前概括模型：${stepModelSetting.getLocal()}。用法：/beacon-config auto ｜ /beacon-config provider/modelId`,
+						"info",
+					);
+					return;
+				}
 				const picked = await openLocalModelPicker(ctx, {
 					current: stepModelSetting.getLocal(),
 					title: "选择概括模型",

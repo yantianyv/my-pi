@@ -87,7 +87,7 @@ try {
 
 	// ---- 命令注册 ----
 	check("注册 /kb-config", typeof cmd("kb-config")?.handler === "function");
-	check("注册 /kb-sync", typeof cmd("kb-sync")?.handler === "function");
+	check("注册 /kb（含 sync 子命令）", typeof cmd("kb")?.handler === "function");
 
 	// ---- 非 TUI 文本面板 ----
 	const captures = {};
@@ -110,18 +110,18 @@ try {
 	await cmd("kb-config").handler("foobar", makeCtx(cap5));
 	check("任意参数忽略并提示 TUI 面板", cap5.notify?.text.includes("TUI") && cap5.notify?.text.includes("/kb-config"), cap5.notify?.text.slice(0, 60));
 
-	// ---- /kb-sync 手动同步（配置直接写入，模拟面板已保存） ----
+	// ---- /kb sync 手动同步（配置直接写入，模拟面板已保存） ----
 	writeFileSync(cfgFile, JSON.stringify({ baseUrl: dav.baseUrl, username: "test-user", password: "test-pass", mirrorDir }), "utf8");
 	dav.seed("/notes/synced.md", "---\ntitle: 同步测试\ntags: []\n---\n内容\n");
 	const cap4 = {};
-	await cmd("kb-sync").handler("", makeCtx(cap4));
-	check("/kb-sync 下载文件", existsSync(join(mirrorDir, "notes", "synced.md")));
+	await cmd("kb").handler("sync", makeCtx(cap4));
+	check("/kb sync 下载文件", existsSync(join(mirrorDir, "notes", "synced.md")));
 
-	// ---- 未配置 /kb-sync ----
+	// ---- 未配置 /kb sync ----
 	writeFileSync(cfgFile, "{}", "utf8");
 	const cap6 = {};
-	await cmd("kb-sync").handler("", makeCtx(cap6));
-	check("未配置 /kb-sync 引导", cap6.notify?.text.includes("/kb-config"), cap6.notify?.text.slice(0, 50));
+	await cmd("kb").handler("sync", makeCtx(cap6));
+	check("未配置 /kb sync 引导", cap6.notify?.text.includes("/kb-config"), cap6.notify?.text.slice(0, 50));
 } finally {
 	delete process.env.KB_CONFIG_DIR;
 	dav.close();

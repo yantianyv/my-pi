@@ -128,6 +128,8 @@ export default async function (pi: ExtensionAPI) {
 	}
 	try {
 		gitMod = await import("./hud-git");
+		// hud-git 的两个本地模型设置入口（/git-config）；子模块缺失时该命令自然不存在
+		gitMod.registerGitModelConfigCommand(pi);
 	} catch {
 		console.warn("[hud] 子模块 hud-git.ts 缺失：git 状态将隐藏");
 	}

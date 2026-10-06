@@ -9,7 +9,7 @@
 | `hud-spark.ts` | 速率柱状纯函数：`sparklineCells` / `sparkBarsCells`（逐格字符 + 值 + 该轮输出 token，供调用方逐格上色）、`sparkline`（单行 8 档）、`sparklineBars`（两行 16 档）、`brailleLine`（盲文 2×4 备用）、分档与加权 `rateBand` / `outputFade` / `RATE_BAND_EDGES` / `BRIGHT_LOG_K` / `FADE_MAX` / `FADE_STEP`、`SPARK_WIDTH=24`、`SPARK_BASELINE`、`RATE_REF_DECAY=0.995`。**自身不分色**，0 档与冷启动占位都是最低档 ▁ |
 | `hud-balance.ts` | 供应商余额适配器注册表 `BALANCE_ADAPTERS` |
 | `hud-cost.ts` | usage 汇总 / 定价 / 按量付费文本 / 实时汇率 / EMA 与本轮速率 / Z.AI 积分轨 |
-| `hud-git.ts` | git 状态解析（porcelain + 路径 unquote + numstat）、Visual Git 面板、stage/discard/commit/sync、AI 提交信息与冲突消解 |
+| `hud-git.ts` | git 状态解析（porcelain + 路径 unquote + numstat）、Visual Git 面板、stage/discard/commit/sync、AI 提交信息与冲突消解、`/git-config`（两个本地模型设置入口：commit / conflict） |
 | `test/` | 6 个回归：`sparkline`（宽度/档位/ref）、`token-rate`（速率口径）、`unquote`（八进制与引号解码 + 真实仓库操作，需 PATH 有 git）、`zai-credits`（积分差分/meteredRateText/adapter）、`price-keys`（Go/Kimi 模型 id → 定价键路由）、`kimi-balance`（Kimi 余量字段解析：remaining 回推 / 加油包停用 / 额度耗尽） |
 
 三行三列（中右之间 dim 竖线，三行共用栏宽）：

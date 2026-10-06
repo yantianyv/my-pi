@@ -6,7 +6,7 @@
  *   「槽位 ≥2 或有其他活跃会话已绑定」决定：自动绑定唯一槽（零行为变化）
  *   或请用户拍板——TUI 直接弹选择框（promptSlotChoice，确定性流程），
  *   非 TUI 退化为 before_agent_start 注入选择指引（AI 询问用户后 bind）；
- *   弹窗第二项「从 resume 中加载」放弃本会话、转官方恢复流程（/wf-resume 命令），
+ *   弹窗第二项「从 resume 中加载」放弃本会话、转官方恢复流程（/wf resume 命令），
  *   恢复后按被恢复会话自己的绑定加载其工作流空间；
  * - hud:state-change：hud 开启/关闭时重算展示方式（hud 接管底部行 vs 自绘面板）；
  * - session_shutdown：注销 hud 底部行 + 移除 process 级监听器（跨 session/reload 防泄漏）；
@@ -115,11 +115,11 @@ export function registerEvents(pi: ExtensionAPI) {
 						return;
 					}
 					if (choice.kind === "resume") {
-						// 放弃本会话、恢复历史会话：转 /wf-resume 命令（switchSession 只在
+						// 放弃本会话、恢复历史会话：转 /wf resume 命令（switchSession 只在
 						// 命令上下文可用，事件处理器拿不到；sendUserMessage 会派发自注册命令）。
 						// 不写本会话绑定——恢复后由被恢复会话自己的绑定决定工作流空间。
 						hideWidget(ctx);
-						pi.sendUserMessage("/wf-resume", { expandPromptTemplates: true });
+						pi.sendUserMessage("/wf resume", { expandPromptTemplates: true });
 						return;
 					}
 					binding = choice.slot;

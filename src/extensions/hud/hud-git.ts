@@ -19,11 +19,12 @@
  *   - 文件列表右侧通过 `git diff --numstat` 显示 +/-/binary 预览，不占用额外空间。
  *   - 操作失败时通过 `ctx.ui.notify` 反馈，成功后面板自动刷新并回调 `onRefresh` 更新 HUD。
  */
-import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth, visibleWidth, parseKey } from "@earendil-works/pi-tui";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { editInput } from "../shared/ui";
-import { createModelSetting, type ModelSetting } from "../shared/model-setting";
+import { openLocalModelPicker, resolveSettingArg } from "../shared/model-select";
+import { LOCAL_AUTO, createModelSetting, type ModelSetting } from "../shared/model-setting";
 import type { AnyModel } from "../shared/model-util";
 import type { Message } from "@earendil-works/pi-ai";
 import { execFile } from "child_process";
@@ -432,6 +433,64 @@ export async function gitMergeAbort(cwd: string): Promise<void> {
 // ---------------------------------------------------------------------------
 // AI 自动填写提交信息
 // ---------------------------------------------------------------------------
+
+/**
+ * 注册 `/git-config`：hud-git 两个本地模型设置（提交信息 / 冲突消解）的入口。
+ * 无参 → 选用途再开选择浮层；带参 `/git-config commit|conflict <auto|provider/modelId>` 直设。
+ * 与 /model-config 的分工：这里改的是插件侧本地设置，中心策略槽在 /model-config。
+ */
+export function registerGitModelConfigCommand(pi: ExtensionAPI): void {
+	const pick = async (ctx: ExtensionContext): Promise<void> => {
+		const which = await ctx.ui.select("配置哪一项的模型？", ["提交信息生成（LITE）", "冲突消解（FAST）"]);
+		if (!which) return; // Esc 取消
+		const setting = which.startsWith("提交") ? commitModelSetting : conflictModelSetting;
+		const picked = await openLocalModelPicker(ctx, {
+			current: setting.getLocal(),
+			title: which.startsWith("提交") ? "选择提交信息模型" : "选择冲突消解模型",
+		});
+		if (!picked) return;
+		setting.setLocal(picked);
+		ctx.ui.notify(
+			`${setting.decl.label}模型：${picked === LOCAL_AUTO ? "auto（由 model-config 管理）" : picked}（已持久化）`,
+			"info",
+		);
+	};
+
+	pi.registerCommand("git-config", {
+		description: "Git 面板的 AI 模型：无参开选择浮层；commit|conflict <auto|provider/modelId> 直设",
+		handler: async (args: string, ctx: ExtensionContext) => {
+			const [key, ...rest] = args.trim().split(/\s+/);
+			const value = rest.join(" ").trim();
+			if (!key) {
+				if (!ctx.hasUI) {
+					ctx.ui.notify(
+						`提交信息：${commitModelSetting.getLocal()}｜冲突消解：${conflictModelSetting.getLocal()}。用法：/git-config commit|conflict <auto|provider/modelId>`,
+						"info",
+					);
+					return;
+				}
+				await pick(ctx);
+				return;
+			}
+			const setting =
+				key === "commit" ? commitModelSetting : key === "conflict" ? conflictModelSetting : undefined;
+			if (!setting) {
+				ctx.ui.notify("用法：/git-config（选用途）｜ /git-config commit|conflict <auto|provider/modelId>", "warning");
+				return;
+			}
+			const r = resolveSettingArg(ctx, value);
+			if ("error" in r) {
+				ctx.ui.notify(`hud-git：${r.error}`, "error");
+				return;
+			}
+			setting.setLocal(r.value);
+			ctx.ui.notify(
+				`${setting.decl.label}模型：${r.value === LOCAL_AUTO ? "auto（由 model-config 管理）" : r.value}（已持久化）`,
+				"info",
+			);
+		},
+	});
+}
 
 /** 提交信息模型：本地设置 → 中心设置 → 默认策略 LITE → AUTO（shared/model-setting） */
 function pickCommitModel(ctx: ExtensionContext): AnyModel | undefined {

@@ -1,11 +1,11 @@
 /**
- * workflow-mgr 命令注册层：/workflow-config（人用查看入口）+ /wf-resume（恢复会话入口）。
+ * workflow-mgr 命令注册层：`/wf`（主命令：状态/恢复会话）+ `/wf-config`（配置面板）。
  *
- * 0.4 拍板：人无需管理工作流（管理是 AI 的事），/workflow-config 只留无参入口——
+ * 0.4 拍板：人无需管理工作流（管理是 AI 的事），/wf-config 只留无参入口——
  * TUI 弹功能浮窗（显示详细信息/常驻面板开关），非 TUI 打印文本面板。
  * 子命令（toggle/done/start/block）已全部删除。
  *
- * /wf-resume：打开 pi 官方会话选择器（SessionSelectorComponent 全屏浮层），
+ * /wf resume：打开 pi 官方会话选择器（SessionSelectorComponent 全屏浮层），
  * 选定后经命令上下文 switchSession 切换。工作流选择弹窗「从 resume 中加载」
  * 经 pi.sendUserMessage 派发到本命令（事件处理器拿不到 switchSession 所在的
  * 命令上下文）；也可手动输入重试恢复。恢复后 pi 重发 session_start，
@@ -20,8 +20,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { getStore } from "./store";
 import { textPanel, WfmgMenuPanelComponent } from "./panel";
+import { summaryLine } from "./brief";
 
-/** 注册 /workflow-config 命令 */
+/** 注册 /wf 与 /wf-config 命令 */
 export function registerCommand(pi: ExtensionAPI) {
 	const workflowConfigHandler = async (args: string, ctx: ExtensionContext) => {
 		const s = getStore(ctx);
@@ -57,11 +58,10 @@ export function registerCommand(pi: ExtensionAPI) {
 		console.log(textPanel(state, derived).join("\n"));
 	};
 
-	const wfmgDesc =
-		"人机协作任务面板：无参开功能浮窗（详细信息 / 常驻面板开关）";
-	pi.registerCommand("workflow-config", { description: wfmgDesc, handler: workflowConfigHandler });
+	const wfmgDesc = "人机协作任务面板：无参开功能浮窗（详细信息 / 常驻面板开关）";
+	pi.registerCommand("wf-config", { description: wfmgDesc, handler: workflowConfigHandler });
 
-	/* ---------- /wf-resume：官方会话选择器 + switchSession 恢复（工作流弹窗「从 resume 中加载」入口） ---------- */
+	/* ---------- /wf resume：官方会话选择器 + switchSession 恢复（工作流弹窗「从 resume 中加载」入口） ---------- */
 	const resumeHandler = async (_args: string, ctx: ExtensionCommandContext) => {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify("恢复会话需要在交互界面（TUI）中使用", "info");
@@ -91,13 +91,41 @@ export function registerCommand(pi: ExtensionAPI) {
 			picked = undefined; // 选择器基础设施异常：按取消处理
 		}
 		if (!picked) {
-			ctx.ui.notify("已取消恢复会话。本会话尚未选择工作流：可让 AI 用 wf_workflow bind 指定，或再次输入 /wf-resume 重试", "info");
+			ctx.ui.notify("已取消恢复会话。本会话尚未选择工作流：可让 AI 用 wf_workflow bind 指定，或再次输入 /wf resume 重试", "info");
 			return;
 		}
 		await ctx.switchSession(picked);
 	};
-	pi.registerCommand("wf-resume", {
-		description: "恢复历史会话（官方选择器，等价 /resume）",
-		handler: resumeHandler,
+	/* ---------- /wf：主命令（状态 / resume 子命令） ---------- */
+	const wfHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		const sub = args.trim().toLowerCase();
+		if (sub === "resume") {
+			await resumeHandler(args, ctx);
+			return;
+		}
+		if (sub) {
+			ctx.ui.notify("用法：/wf（状态）｜ /wf resume（恢复历史会话）｜ /wf-config（功能浮窗）", "warning");
+			return;
+		}
+		const s = getStore(ctx);
+		if (s.blocked) {
+			ctx.ui.notify(
+				s.blocked === "none"
+					? "本会话已明确不使用工作流（如需启用，让 AI 执行 wf_workflow action=bind）"
+					: "本会话暂未启用工作流（是否使用由 AI 依任务判断；也可让 AI 用 wf_workflow bind 指定）",
+				"info",
+			);
+			return;
+		}
+		const state = s.getState();
+		const derived = s.getDerived();
+		ctx.ui.notify(
+			`${summaryLine(state, derived)}\n用法：/wf resume 恢复历史会话 ｜ /wf-config 功能浮窗（详细信息 / 常驻面板开关）`,
+			"info",
+		);
+	};
+	pi.registerCommand("wf", {
+		description: "工作流：状态与 resume（恢复历史会话）｜ 配置用 /wf-config",
+		handler: wfHandler,
 	});
 }

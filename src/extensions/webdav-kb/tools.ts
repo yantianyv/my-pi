@@ -69,7 +69,7 @@ function mirrorOf(): string {
 function notConfiguredHint(): string | null {
 	const cfg = loadConfig(agentConfigDir());
 	if (!isConfigured(cfg)) {
-		return "知识库未配置：请先运行 /kb-config 设置 WebDAV 地址与账号，然后 /kb-sync 完成首次同步。";
+		return "知识库未配置：请先运行 /kb-config 设置 WebDAV 地址与账号，然后 /kb sync 完成首次同步。";
 	}
 	return null;
 }
@@ -348,7 +348,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			const filtered = base ? all.filter((f) => f.path.startsWith(base + "/")) : all;
 			if (filtered.length === 0) {
 				return text(
-					`${base || "/"} 下暂无内容${base ? "" : "（首次使用请先 /kb-sync 同步远端）"}。`,
+					`${base || "/"} 下暂无内容${base ? "" : "（首次使用请先 /kb sync 同步远端）"}。`,
 					{ count: 0 },
 				);
 			}
@@ -739,7 +739,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		label: "查同步状态",
 		description:
 			"查看知识库同步状态（本地账本，无需网络）：上次同步时间、冲突文件数（.conflict- 副本）、"
-			+ "待上传积压、LFS 缓存情况。据此判断是否需要提醒用户运行 /kb-sync 或解决冲突。",
+			+ "待上传积压、LFS 缓存情况。据此判断是否需要提醒用户运行 /kb sync 或解决冲突。",
 		promptSnippet: "同步状态：kb_status() → 摘要",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {

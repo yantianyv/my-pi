@@ -61,7 +61,7 @@ const LOCK_HEARTBEAT_STALE_MS = 45_000;
 const LOCK_POLL_MS = 2_000;
 /** 旧格式锁（升级前遗留、无心跳字段）超过该时长仍视为残留 */
 const LOCK_STALE_MS = 30 * 60_000;
-/** 手动同步（kb_sync 工具 / /kb-sync 命令）锁被占时的默认等待上限：大导入/长同步期间后到者先排队而非立刻失败 */
+/** 手动同步（kb_sync 工具 / /kb sync 命令）锁被占时的默认等待上限：大导入/长同步期间后到者先排队而非立刻失败 */
 export const SYNC_LOCK_WAIT_MS = 120_000;
 
 interface SyncJournal {

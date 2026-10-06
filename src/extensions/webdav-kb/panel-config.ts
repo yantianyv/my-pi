@@ -101,7 +101,7 @@ interface Action {
 
 const ACTIONS: Action[] = [
 	{ key: "test", label: "① 测试连通", desc: "用当前凭据请求一次，验证地址/账号/密码是否正确", visible: () => true },
-	{ key: "sync", label: "② 立即同步", desc: "立即做一次增量同步（同 /kb-sync）：只传有差异的文件，无差异则不动", visible: () => true },
+	{ key: "sync", label: "② 立即同步", desc: "立即做一次增量同步（同 /kb sync）：只传有差异的文件，无差异则不动", visible: () => true },
 	{
 		key: "vault-change",
 		label: "③ 修改 vault 口令",

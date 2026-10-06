@@ -4,11 +4,11 @@
  *
  * 目的：抓「Box is not defined」这类 import 漏写、布局拆行、宽度溢出等问题
  * （真实踩过的坑）。覆盖三态渲染 + 核心工具流程：
- * - 场景 A：示例工作流（中文任务名）→ 常驻 widget + /workflow-config 完整面板
+ * - 场景 A：示例工作流（中文任务名）→ 常驻 widget + /wf-config 完整面板
  * - 场景 B：空工作流 → 面板不崩溃、显示「无任务」引导
  * - 场景 C：全部任务 done → 面板显示完成态
  * - 流程：wf_start → wf_done 自动推进 → state.json 落盘可复查
- * - 开关：/workflow-config toggle → widget 移除 + config.json 持久化
+ * - 开关：/wf-config toggle → widget 移除 + config.json 持久化
  *
  * 原理：node 无法直接 import 无扩展名相对路径（"../shared/config"），故先用
  * esbuild（src/node_modules 构建依赖）把扩展 bundle 成单文件 ESM 再 import；
@@ -176,25 +176,25 @@ async function scenarioA() {
 		check("分工行含 你:/AI:", lines.some((l) => l.includes("你:")) && lines.some((l) => l.includes("AI:")));
 	}
 
-	// /workflow-config 统一功能菜单（TUI 浮窗，字符边框）
+	// /wf-config 统一功能菜单（TUI 浮窗，字符边框）
 	const caps2 = {};
 	const ctx2 = makeCtx(dir, caps2);
 	let menuComp = null;
-	await pi.commands["workflow-config"].handler("", ctx2);
+	await pi.commands["wf-config"].handler("", ctx2);
 	if (caps2.custom) menuComp = caps2.custom(null, themeMock, {}, () => {});
 	const menuLines = menuComp?.render(100);
-	check("/workflow-config 菜单浮窗渲染", !!menuLines);
+	check("/wf-config 菜单浮窗渲染", !!menuLines);
 	if (menuLines) {
 		check("浮窗有边框（╭╮╰╯）", menuLines[0].includes("╭") && menuLines[0].includes("╮") && menuLines[menuLines.length - 1].includes("╰") && menuLines[menuLines.length - 1].includes("╯"));
 		check("菜单收纳 2 项功能", menuLines.some((l) => l.includes("显示详细信息")) && menuLines.some((l) => l.includes("常驻面板")));
 		const over = menuLines.map((l) => visibleWidth(l)).filter((w) => w > 100);
 		check("菜单行宽 ≤ 100", over.length === 0);
 	}
-	check("未注册别名 /wfmg（只需 /workflow-config）", !pi.commands.wfmg);
+	check("未注册别名 /wfmg（只需 /wf-config）", !pi.commands.wfmg);
 	// 子命令已删除（0.4 拍板：只留无参）——任意子命令参数一律走无参浮窗逻辑，不产生状态变更
 	const caps3 = {};
 	const ctx3 = makeCtx(dir, caps3);
-	await pi.commands["workflow-config"].handler("done 0.1", ctx3);
+	await pi.commands["wf-config"].handler("done 0.1", ctx3);
 	check("子命令已删除：done 参数走无参浮窗（不弹子命令逻辑）", caps3.custom !== undefined);
 	const stPath = join(dir, ".pi", "workflow", "state.json");
 	const stAfter = existsSync(stPath) ? JSON.parse(readFile(stPath)) : null;
@@ -338,9 +338,9 @@ async function scenarioE() {
 	rmSync(dir, { recursive: true, force: true });
 }
 
-/* ============================== 场景 F：/workflow-config 统一菜单交互 ============================== */
+/* ============================== 场景 F：/wf-config 统一菜单交互 ============================== */
 async function scenarioF() {
-	console.log("\n场景 F：/workflow-config 统一菜单交互（详细信息→开关→Esc）");
+	console.log("\n场景 F：/wf-config 统一菜单交互（详细信息→开关→Esc）");
 	const mod = await importBundle();
 	const pi = makePi();
 	mod.default(pi);
@@ -348,8 +348,8 @@ async function scenarioF() {
 	const caps = {};
 	const ctx = makeCtx(dir, caps);
 	await fireEvent(pi, ctx, "session_start"); // 真实生命周期：session_start 先行（自动绑定 default 槽）
-	await pi.commands["workflow-config"].handler("", ctx);
-	check("无参数 /workflow-config 打开统一菜单", !!caps.custom);
+	await pi.commands["wf-config"].handler("", ctx);
+	check("无参数 /wf-config 打开统一菜单", !!caps.custom);
 	let closed = false;
 	const comp = caps.custom(null, themeMock, {}, () => { closed = true; });
 
@@ -375,9 +375,9 @@ async function scenarioF() {
 	rmSync(dir, { recursive: true, force: true });
 }
 
-/* ============================== 场景 G：/workflow-config 非 TUI 文本回落 ============================== */
+/* ============================== 场景 G：/wf-config 非 TUI 文本回落 ============================== */
 async function scenarioG() {
-	console.log("\n场景 G：/workflow-config 非 TUI 文本面板");
+	console.log("\n场景 G：/wf-config 非 TUI 文本面板");
 	const mod = await importBundle();
 	const pi = makePi();
 	mod.default(pi);
@@ -386,7 +386,7 @@ async function scenarioG() {
 	const ctx = makeCtx(dir, caps);
 	ctx.mode = "print";
 	await fireEvent(pi, ctx, "session_start");
-	await pi.commands["workflow-config"].handler("", ctx);
+	await pi.commands["wf-config"].handler("", ctx);
 	check("非 TUI 不弹浮窗", caps.custom === undefined);
 	rmSync(dir, { recursive: true, force: true });
 }
@@ -1071,7 +1071,7 @@ async function scenarioR() {
 	const inject9b = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx9);
 	check("自行 bind 后恢复注入", inject9b.systemPrompt?.includes("【工作流】"));
 
-	// 9b. 选择「从 resume 中加载」→ 不写本会话绑定、派发 /wf-resume 命令（内部入口）
+	// 9b. 选择「从 resume 中加载」→ 不写本会话绑定、派发 /wf resume 命令（内部入口）
 	const dirR = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
 	const betaR = join(dirR, ".pi", "workflow", "slots", "beta");
 	mkdirSync(betaR, { recursive: true });
@@ -1084,8 +1084,8 @@ async function scenarioR() {
 	const ctxR = makeCtx(dirR, capsR);
 	capsR.customKeys = ["2"]; // 数字直选第 2 项 = 从 resume 中加载会话
 	await fireEvent(pi, ctxR, "session_start");
-	check("选择 resume 后派发 /wf-resume 命令（expandPromptTemplates）",
-		pi.sent.some((m) => m.content === "/wf-resume" && m.options?.expandPromptTemplates === true));
+	check("选择 resume 后派发 /wf resume 命令（expandPromptTemplates）",
+		pi.sent.some((m) => m.content === "/wf resume" && m.options?.expandPromptTemplates === true));
 	const boundR = existsSync(join(dirR, ".pi", "workflow", "bindings.json"))
 		? JSON.parse(readFile(join(dirR, ".pi", "workflow", "bindings.json")))
 		: { sessions: {} };
@@ -1106,12 +1106,12 @@ async function scenarioR() {
 	check("resume：工作流作用于绑定槽（贝塔任务）", rR.details?.kind !== "error" && rR.content[0].text.includes("贝塔任务"));
 
 	// 9d. /wf-resume 命令注册 + 非 TUI 回落
-	check("注册了 /wf-resume 命令", !!pi.commands["wf-resume"]);
+	check("注册了 /wf 主命令（resume 子命令入口）", !!pi.commands["wf"]);
 	const capsNR = {};
 	const ctxNR = makeCtx(dirR, capsNR);
 	ctxNR.mode = "print";
-	await pi.commands["wf-resume"].handler("", ctxNR);
-	check("/wf-resume 非 TUI 回落提示", capsNR.notify?.text.includes("交互界面"));
+	await pi.commands["wf"].handler("resume", ctxNR);
+	check("/wf resume 非 TUI 回落提示", capsNR.notify?.text.includes("交互界面"));
 
 	// 10. bind auto（非 TUI 路径：AI 用 ask 问卷问到「暂不启用」后落盘）
 	await wf.execute("11", { action: "bind", slot: "auto" }, undefined, undefined, ctx9);

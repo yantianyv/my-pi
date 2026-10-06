@@ -1,12 +1,12 @@
 /**
- * workflow-mgr 展示层：常驻 widget + /workflow-config 统一功能菜单浮窗 + 非 TUI 文本回落
+ * workflow-mgr 展示层：常驻 widget + /wf-config 统一功能菜单浮窗 + 非 TUI 文本回落
  *
  * - renderWidget：belowEditor 常驻面板（字符边框 + selectedBg 背景 + 进度条右对齐
  *   + 分工两行 + 阻塞警告 + 里程碑三态），宽度自适应用 pi-tui visibleWidth
  *   （中文=2、块元素=1），窗口 resize 按宽度变化才重建；
  * - updateWidget：把 store 当前状态推到 ctx.ui（widget + setStatus 摘要一行），
  *   面板开关（config.json showPanel）为 false 时移除 widget；非 TUI 自动跳过；
- * - WfmgMenuPanelComponent：/workflow-config 的轻量功能浮窗（overlay），只收两个高频功能：
+ * - WfmgMenuPanelComponent：/wf-config 的轻量功能浮窗（overlay），只收两个高频功能：
  *   显示详细信息（进度总览）/ 常驻面板开关。↑↓ 选择、Enter 执行、Esc 关闭，overview 任意键返回菜单；
  * - configText / textPanel：非 TUI 模式的文本回落。
  *
@@ -240,12 +240,12 @@ export function updateWidget(ctx: ExtensionContext, store: WorkflowStore) {
 	}
 }
 
-/* ============================== /workflow-config 轻量功能浮窗 ============================== */
+/* ============================== /wf-config 轻量功能浮窗 ============================== */
 
 type MenuMode = "menu" | "overview";
 
 /**
- * /workflow-config 轻量功能浮窗（overlay，字符边框）：只收两个高频功能。
+ * /wf-config 轻量功能浮窗（overlay，字符边框）：只收两个高频功能。
  * - menu：↑↓ 选择、Enter 执行、Esc 关闭；
  * - overview：当前任务+分工+进度+里程碑（任意键返回菜单）。
  * 操作即时生效（commit + updateWidget）并持久化；持有 tui 引用，变更后 requestRender。
@@ -294,7 +294,7 @@ export class WfmgMenuPanelComponent {
 		cfg.showPanel = !cfg.showPanel;
 		this.store.commitPanelConfig();
 		updateWidget(this.ctx, this.store);
-		this.ctx.ui.notify(`常驻面板已${cfg.showPanel ? "开启" : "关闭"}（再次打开 /workflow-config 可切换）`, "info");
+		this.ctx.ui.notify(`常驻面板已${cfg.showPanel ? "开启" : "关闭"}（再次打开 /wf-config 可切换）`, "info");
 	}
 
 	handleInput(data: string): void {
@@ -393,7 +393,7 @@ export class WfmgMenuPanelComponent {
 	}
 }
 
-/** 非 TUI 模式 /workflow-config 的文本面板 */
+/** 非 TUI 模式 /wf-config 的文本面板 */
 export function textPanel(state: WorkflowState, derived: Derived): string[] {
 	const lines: string[] = [summaryLine(state, derived), ""];
 	if (derived.all.length === 0) {
