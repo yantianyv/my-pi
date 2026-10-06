@@ -4,20 +4,15 @@
  * 职责：
  * - 可调配置常量集中定义（超时/轮数/字数/浮层尺寸等）
  * - BTW_SYSTEM_PROMPT：btw 助手系统提示词（固定指令在前，利于 provider 端 prompt 缓存命中）
- * - btw 模型设置持久化（~/.pi/agent/btw-config.json）与解析：auto = 已认证可用模型中最便宜的，
- *   按价格顺序故障转移；auto-not-free = 忽略免费模型；固定 provider/modelId 不可用时静默回退 auto
+ * - btw 模型设置（~/.pi/agent/btw-config.json 的 model 键）：auto = 交给 model-config 按用途
+ *   `btw.chat` 设置解析（默认策略 FAST）；也可本地固定一个 provider/modelId（谁在不在都照用）
  *
  * 注意：本模块不注册任何 pi API，仅导出常量/状态/纯函数，由本目录其它模块与入口驱动。
  */
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import {
-	AnyModel,
-	findConfiguredModel,
-	listAvailableModels,
-} from "../shared/model-select";
-import { isModelConfig, loadJsonConfig, saveJsonConfig } from "../shared/config";
+import { createModelSetting, type ModelSetting, type ResolvedModel } from "../shared/model-setting";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -52,9 +47,7 @@ export const BTW_MAX_QUESTION_LINES = 4;
 /** 输入框最多多少个字符 */
 export const BTW_MAX_INPUT_LENGTH = 300;
 
-/** btw 默认模型设置：auto = 已认证可用模型中最便宜的，按价格顺序故障转移；auto-not-free = 忽略免费模型 */
-export const BTW_DEFAULT_MODEL = "auto";
-/** btw 模型设置持久化文件（agent 目录下，/btw-config 修改后写入，/reload 重载扩展后恢复） */
+/** btw 模型设置持久化文件（agent 目录下） */
 const BTW_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "btw-config.json");
 
 /** btw 助手的系统提示词（固定指令在前，利于 provider 端 prompt 缓存命中） */
@@ -88,53 +81,21 @@ export const BTW_SYSTEM_PROMPT = [
 // btw 模型设置
 // ---------------------------------------------------------------------------
 
-/** 当前 btw 模型设置：'auto'（默认）/ 'auto-not-free'（忽略免费模型）或 'provider/modelId'；/btw-config 修改并持久化 */
-export let btwModelSetting: string = loadBtwModelSetting();
-
-/** 读取持久化的 btw 模型设置；文件缺失/损坏/内容非法时返回默认 auto（复用 shared/config 通用工具） */
-function loadBtwModelSetting(): string {
-	return loadJsonConfig<{ model: string }>(BTW_CONFIG_FILE, { model: BTW_DEFAULT_MODEL }, isModelConfig).model;
-}
-
-/** 持久化 btw 模型设置到 ~/.pi/agent/btw-config.json；写失败静默（仅本次会话生效，reload 后回默认） */
-function saveBtwModelSetting(value: string): void {
-	saveJsonConfig(BTW_CONFIG_FILE, { model: value });
-}
-
-/** 设置 btw 模型并持久化（/btw-config 所有设置入口统一走这里，避免漏存） */
-export function setBtwModelSetting(value: string): void {
-	btwModelSetting = value;
-	saveBtwModelSetting(value);
-}
-
-export interface BtwModelPlan {
-	mode: "auto" | "fixed";
-	/** 当前要使用的模型；没有已认证可用模型时为 undefined */
-	model: AnyModel | undefined;
-	/** auto 模式：返回下一个更贵的模型（故障转移链），耗尽返回 undefined；fixed 模式恒为 undefined */
-	failover: (() => AnyModel | undefined) | undefined;
-}
-
 /**
- * 解析当前 btw 模型设置：auto = 最便宜可用模型，auto-not-free = 最便宜的非免费
- * 模型（忽略价格 ≤ 0 的免费模型），均含按价格升序的故障转移链；固定模型不可用
- * （认证被移除等）时静默回退 auto，保证问答尽量可用。
+ * btw 的模型设置（用途 `btw.chat`，默认策略 FAST）：
+ * 本地值 auto = 交给 model-config；或本地固定 provider/modelId。
+ * 解析链与故障转移见 shared/model-setting。
  */
-export function resolveBtwModel(ctx: ExtensionCommandContext): BtwModelPlan {
-	if (btwModelSetting !== "auto" && btwModelSetting !== "auto-not-free") {
-		const fixed = findConfiguredModel(ctx, btwModelSetting);
-		if (fixed) return { mode: "fixed", model: fixed, failover: undefined };
-		btwModelSetting = BTW_DEFAULT_MODEL;
-	}
-	const excludeFree = btwModelSetting === "auto-not-free";
-	let sorted = listAvailableModels(ctx, { excludeFree });
-	// auto-not-free 但当前没有非免费模型：回退到全部可用模型，避免完全不可用
-	if (sorted.length === 0 && excludeFree) sorted = listAvailableModels(ctx);
-	if (sorted.length === 0) return { mode: "auto", model: undefined, failover: undefined };
-	let idx = 0;
-	return {
-		mode: "auto",
-		model: sorted[0],
-		failover: () => sorted[++idx],
-	};
+export const btwModelSetting: ModelSetting = createModelSetting({
+	purpose: "btw.chat",
+	plugin: "btw",
+	label: "侧栏问答",
+	file: BTW_CONFIG_FILE,
+	key: "model",
+	defaultStrategy: "FAST",
+});
+
+/** 解析当前 btw 模型（每次提问都重新解析：面板改完立即生效，无需 /reload） */
+export function resolveBtwModel(ctx: ExtensionCommandContext): ResolvedModel {
+	return btwModelSetting.resolve(ctx);
 }

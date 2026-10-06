@@ -13,7 +13,7 @@
  *       等人工（ui_prompt 阻塞：ask 问卷/perm-gate 复核，文本可由扩展经 __PI_STATUS_BEACON_API__ 登记）
  *       > 等工具/子代理完成 > 思考中（**只覆盖思考块流出的那段时间**：thinking_start → thinking_end，
  *       带廉价 AI 概括的当前动作短语 `思考中：重构 HUD…`，message_end 触发后台异步概括、
- *       仿 perm-gate 审核的 pickAuxModel 路线；拿不到短语只显「思考中…」）
+ *       仿 perm-gate 审核的辅助模型路线；拿不到短语只显「思考中…」）
  *       > 正在{短语}… / 正在输出…（思考已结束的内容生成与块间隙）；run 开局重置，防上一 run 文案残留
  *   任务完成（agent_settled 正常结束）→ task_complete.wav + ✅ 标题/状态栏闪烁
  *   出错终止（末条 assistant stopReason="error"）→ error.wav + ❌ 闪烁
@@ -44,8 +44,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Message } from "@earendil-works/pi-ai";
-import { pickAuxModel, type AnyModel } from "./shared/model-pick";
-import { pickModelViaSelector } from "./shared/model-selector";
+import { openLocalModelPicker, resolveSettingArg, type AnyModel } from "./shared/model-select";
+import { LOCAL_AUTO, createModelSetting, type ModelSetting } from "./shared/model-setting";
 import {
 	claimSoundSlot,
 	computeActive,
@@ -149,17 +149,18 @@ const STEP_PHRASE_TIMEOUT_MS = 15_000;
 const STEP_PHRASE_MIN_INTERVAL_MS = 12_000;
 const STEP_PHRASE_MAX_CHARS_INPUT = 1500;
 
-/** 概括模型覆盖项配置（/beacon model 写入；缺省 = 自动：最便宜已认证模型） */
+/** 配置文件（同时存放概括模型设置 model 与在场门控阈值） */
 const BEACON_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "status-beacon.json");
 
-function loadBeaconModel(): string | undefined {
-	try {
-		const j = JSON.parse(fs.readFileSync(BEACON_CONFIG_FILE, "utf8")) as { model?: string };
-		return typeof j.model === "string" && j.model.trim() ? j.model : undefined;
-	} catch {
-		return undefined;
-	}
-}
+/** 动作短语概括模型（用途 `beacon.phrase`，默认策略 BATCH；本地值 auto = 交给 model-config） */
+const stepModelSetting: ModelSetting = createModelSetting({
+	purpose: "beacon.phrase",
+	plugin: "status-beacon",
+	label: "动作短语概括",
+	file: BEACON_CONFIG_FILE,
+	key: "model",
+	defaultStrategy: "BATCH",
+});
 
 /** 在场门控配置（status-beacon.json 可覆盖；presenceGate:false 则完全按单实例行为发声） */
 interface PresenceConfig {
@@ -288,17 +289,12 @@ export default function (pi: ExtensionAPI) {
 	let writing = false; // 正文块流式中（思考之外的内容块生成）
 	let stepInFlight = false;
 	let stepLastAt = 0;
-	let beaconModel = loadBeaconModel(); // 概括模型覆盖项（provider/id）；undefined = 自动最便宜
+	// 概括模型每次解析时从设置里现读（面板/命令改完立即生效）
 	let presenceCfg = loadPresenceConfig(); // 提示音在场门控（session_start 重读，便于手改配置后重启会话生效）
 
-	/** 概括用模型：手动覆盖优先（不可用时静默退自动），自动 = 最便宜已认证模型 */
+	/** 概括用模型：本地设置 → 中心设置 → 默认策略 BATCH → AUTO，见 shared/model-setting */
 	function resolveStepModel(ctx: ExtensionContext): AnyModel | undefined {
-		if (beaconModel) {
-			const slash = beaconModel.indexOf("/");
-			const m = slash > 0 ? ctx.modelRegistry.find(beaconModel.slice(0, slash), beaconModel.slice(slash + 1)) : undefined;
-			if (m && ctx.modelRegistry.hasConfiguredAuth(m)) return m;
-		}
-		return pickAuxModel(ctx, []);
+		return stepModelSetting.resolve(ctx).model;
 	}
 
 	/**
@@ -724,31 +720,33 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-			if (arg === "auto") {
-				beaconModel = undefined;
-			} else if (arg) {
-				const slash = arg.indexOf("/");
-				const m = slash > 0 ? ctx.modelRegistry.find(arg.slice(0, slash), arg.slice(slash + 1)) : undefined;
-				if (!m) {
-					ctx.ui.notify(`status-beacon：找不到模型 ${arg}（格式 provider/modelId）`, "error");
+			if (!arg && !ctx.hasUI) {
+				ctx.ui.notify(
+					"用法：/beacon（面板选模型）｜ /beacon auto ｜ /beacon <provider>/<modelId> ｜ /beacon status",
+					"info",
+				);
+				return;
+			}
+			if (arg) {
+				const r = resolveSettingArg(ctx, arg);
+				if ("error" in r) {
+					ctx.ui.notify(`status-beacon：${r.error}（格式 provider/modelId）`, "error");
 					return;
 				}
-				beaconModel = `${m.provider}/${m.id}`;
+				stepModelSetting.setLocal(r.value);
 			} else {
-				if (!ctx.hasUI) {
-					ctx.ui.notify("用法：/beacon（面板选模型）｜ /beacon auto ｜ /beacon <provider>/<modelId> ｜ /beacon status", "info");
-					return;
-				}
-				const picked = await pickModelViaSelector(ctx);
+				const picked = await openLocalModelPicker(ctx, {
+					current: stepModelSetting.getLocal(),
+					title: "选择概括模型",
+				});
 				if (!picked) return; // Esc 取消
-				beaconModel = `${picked.provider}/${picked.id}`;
+				stepModelSetting.setLocal(picked);
 			}
-			try {
-				fs.writeFileSync(BEACON_CONFIG_FILE, JSON.stringify({ model: beaconModel }, null, "\t"));
-			} catch {
-				/* 持久化失败不阻断 */
-			}
-			ctx.ui.notify(`status-beacon 概括模型：${beaconModel ?? "自动（最便宜已认证兜底）"}（已持久化）`, "info");
+			const now = stepModelSetting.getLocal();
+			ctx.ui.notify(
+				`status-beacon 概括模型：${now === LOCAL_AUTO ? "auto（由 model-config 管理）" : now}（已持久化）`,
+				"info",
+			);
 		},
 	});
 

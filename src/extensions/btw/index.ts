@@ -31,10 +31,11 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
 import { registerModelConfigCommand } from "../shared/model-select";
+import { SOURCE_LABEL } from "../shared/model-setting";
+import { modelRef } from "../shared/model-util";
 import {
 	resolveBtwModel,
 	btwModelSetting,
-	setBtwModelSetting,
 	BTW_TIMEOUT_MS,
 	BTW_OVERLAY_WIDTH,
 	BTW_OVERLAY_MIN_WIDTH,
@@ -81,11 +82,8 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("没有可用的已认证模型，无法启动 btw（请先配置 provider 认证）", "error");
 				return;
 			}
-			const autoHint =
-				btwModelSetting === "auto-not-free"
-					? "（auto-not-free，最便宜非免费模型，按价格顺序故障转移）"
-					: "（auto，最便宜可用，按价格顺序故障转移）";
-			ctx.ui.notify(`btw 使用模型：${plan.model.provider}/${plan.model.id}${plan.mode === "auto" ? autoHint : ""}`, "info");
+			const autoHint = `${SOURCE_LABEL[plan.source]}：${plan.label}`;
+			ctx.ui.notify(`btw 使用模型：${modelRef(plan.model)}（${autoHint}）`, "info");
 			if (activeBtw) {
 				ctx.ui.notify("已有 btw 面板打开，先按 Esc 关闭再提问", "warning");
 				return;
@@ -109,7 +107,7 @@ export default function (pi: ExtensionAPI) {
 					overlayRef?.fail("没有可用的已认证模型");
 					return;
 				}
-				overlayRef?.setModel(`${p.model.provider}/${p.model.id}`); // 标题栏显示实际使用模型
+				overlayRef?.setModel(modelRef(p.model)); // 标题栏显示实际使用模型
 				overlayRef?.startQuestion(question);
 				void runBtwTurn(ctx, p.model, thread, question, controller.signal, overlayRef!, (answer) => {
 					thread.push({ role: "user", content: [{ type: "text", text: question }], timestamp: Date.now() } as Message);
@@ -166,14 +164,13 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ---- /btw-config：配置 btw 问答使用的模型（交互与 /explore-config 共用 shared 工厂） ----
+	// ---- /btw-config：配置 btw 问答使用的模型（交互走 shared/model-select 工厂） ----
 	registerModelConfigCommand(pi, {
 		command: "btw-config",
 		description:
-			"配置 btw 使用的模型：auto（默认，最便宜可用模型）、auto-not-free（忽略免费模型）或 provider/modelId；不带参数进入交互选择（含搜索）",
+			"配置 btw 使用的模型：auto（由 model-config 管理）或 provider/modelId；不带参数进入交互选择（含搜索）",
 		displayName: "btw 模型",
-		getSetting: () => btwModelSetting,
-		setSetting: setBtwModelSetting,
+		setting: btwModelSetting,
 	});
 
 	// 会话切换/关闭时中止后台流、清掉未发送的转交内容

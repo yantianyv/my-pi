@@ -15,7 +15,7 @@
  *   - git 输出路径默认按 core.quotePath 做 C-style 转义（中文/空格等特殊字符被引号+八进制
  *     包裹），解析时统一经 `gitUnquotePath` 解码后才用于显示与操作，否则删除/暂存会因假路径失败。
  *   - 面板使用 `ctx.ui.custom()` 的 overlay 渲染，内置 commit message 输入行。
- *   - AI 生成走 `completeSimple` 单次调用（自动选最便宜已认证模型），不占用主会话上下文。
+ *   - AI 生成走 `completeSimple` 单次调用（模型按用途取，见下），不占用主会话上下文。
  *   - 文件列表右侧通过 `git diff --numstat` 显示 +/-/binary 预览，不占用额外空间。
  *   - 操作失败时通过 `ctx.ui.notify` 反馈，成功后面板自动刷新并回调 `onRefresh` 更新 HUD。
  */
@@ -23,12 +23,15 @@ import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-cod
 import { matchesKey, Key, truncateToWidth, visibleWidth, parseKey } from "@earendil-works/pi-tui";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { editInput } from "../shared/ui";
-import { pickAuxModel, type AnyModel } from "../shared/model-pick";
+import { createModelSetting, type ModelSetting } from "../shared/model-setting";
+import type { AnyModel } from "../shared/model-util";
 import type { Message } from "@earendil-works/pi-ai";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { rm, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import * as path from "node:path";
+import * as os from "node:os";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,8 +48,28 @@ const COMMIT_MAX_DISPLAY_LINES = 6;
 
 // ---- AI 自动填写提交信息 ----
 
-/** 优先选用的 AI 模型（provider/modelId）；不可用时自动选最便宜已认证模型 */
-const COMMIT_AI_MODELS: Array<[string, string]> = [["deepseek", "deepseek-flash"]];
+/** 模型设置文件（提交信息与冲突消解各一个键；auto = 交给 model-config） */
+const HUD_GIT_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "hud-git.json");
+
+/** 提交信息生成模型（用途 `hud-git.commit`，默认策略 LITE） */
+const commitModelSetting: ModelSetting = createModelSetting({
+	purpose: "hud-git.commit",
+	plugin: "hud-git",
+	label: "提交信息生成",
+	file: HUD_GIT_CONFIG_FILE,
+	key: "commit",
+	defaultStrategy: "LITE",
+});
+
+/** 合并冲突消解模型（用途 `hud-git.conflict`，默认策略 FAST：要读代码给方案，错了代价高） */
+const conflictModelSetting: ModelSetting = createModelSetting({
+	purpose: "hud-git.conflict",
+	plugin: "hud-git",
+	label: "冲突消解",
+	file: HUD_GIT_CONFIG_FILE,
+	key: "conflict",
+	defaultStrategy: "FAST",
+});
 /** 喂给模型的暂存区 diff 最大字符数（超出截断） */
 const COMMIT_DIFF_MAX_CHARS = 4_000;
 /** AI 生成提交信息超时 */
@@ -410,9 +433,14 @@ export async function gitMergeAbort(cwd: string): Promise<void> {
 // AI 自动填写提交信息
 // ---------------------------------------------------------------------------
 
-/** 选模型走共享逻辑（shared/model-pick）：优先列表 + 最便宜已认证兜底，perm-gate 同款 */
+/** 提交信息模型：本地设置 → 中心设置 → 默认策略 LITE → AUTO（shared/model-setting） */
 function pickCommitModel(ctx: ExtensionContext): AnyModel | undefined {
-	return pickAuxModel(ctx, COMMIT_AI_MODELS);
+	return commitModelSetting.resolve(ctx).model;
+}
+
+/** 冲突消解模型：本地设置 → 中心设置 → 默认策略 FAST → AUTO */
+function pickConflictModel(ctx: ExtensionContext): AnyModel | undefined {
+	return conflictModelSetting.resolve(ctx).model;
 }
 
 /** 由 AI 根据暂存区改动（git diff --cached）生成提交信息。 */
@@ -480,7 +508,7 @@ async function resolveConflictFileWithAI(ctx: ExtensionContext, cwd: string, pat
 		throw new Error(`${path} 过大（${content.length} 字符），请手动解决`);
 	}
 
-	const model = pickCommitModel(ctx);
+	const model = pickConflictModel(ctx);
 	if (!model) throw new Error("找不到已认证的可用模型");
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (!auth.ok) throw new Error(`认证失败：${auth.error}`);

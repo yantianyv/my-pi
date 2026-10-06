@@ -15,7 +15,19 @@ import { createBashTool, createReadOnlyTools } from "@earendil-works/pi-coding-a
 import { runAgentLoop, type AgentLoopConfig, type AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { convertToLlm, createPiStreamFn, systemMessage } from "../shared/agent";
+import { createModelSetting, type ModelSetting } from "../shared/model-setting";
 import type { TaskDef } from "./types";
+
+/**
+ * 审计子代理模型（用途 `audit`，默认策略 AUTO = 跟随当前会话模型）：
+ * 审计与主会话同源上下文更可比；可在 /model-config 里改指别的策略或具体模型。
+ */
+const auditModelSetting: ModelSetting = createModelSetting({
+	purpose: "audit",
+	plugin: "workflow-mgr",
+	label: "完成信号审计",
+	defaultStrategy: "AUTO",
+});
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyModel = Model<any>;
@@ -75,7 +87,7 @@ function parseVerdict(text: string): AuditVerdict {
  * 审计是增强而非门禁，基础设施故障不应卡死工作流推进。
  */
 export async function auditCompletion(ctx: ExtensionContext, task: TaskDef): Promise<AuditVerdict> {
-	const model = ctx.model as AnyModel | undefined;
+	const model = auditModelSetting.resolve(ctx).model ?? (ctx.model as AnyModel | undefined);
 	if (!model) return { pass: true, reason: "（审计跳过：无可用模型）" };
 
 	const tools = [...createReadOnlyTools(ctx.cwd), createBashTool(ctx.cwd)];

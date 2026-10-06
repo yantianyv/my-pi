@@ -50,14 +50,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Type } from "typebox";
-import {
-	type AnyModel,
-	findConfiguredModel,
-	listAvailableModels,
-	registerModelConfigCommand,
-} from "./shared/model-select";
+import { registerModelConfigCommand, type AnyModel } from "./shared/model-select";
+import { createModelSetting, type ModelSetting } from "./shared/model-setting";
+import { modelHasVision } from "./shared/model-util";
 import { convertToLlm, createPiStreamFn, systemMessage } from "./shared/agent";
-import { isModelConfig, loadJsonConfig, saveJsonConfig } from "./shared/config";
 import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
 import { EXPLORE_API_VERSION, publishExploreApi } from "./shared/explore-api";
 
@@ -65,10 +61,8 @@ import { EXPLORE_API_VERSION, publishExploreApi } from "./shared/explore-api";
 // 可调配置
 // ---------------------------------------------------------------------------
 
-/** explore 模型设置持久化文件 */
+/** explore 模型设置持久化文件（键 model：auto = 交给 model-config，或本地固定 provider/modelId） */
 const EXPLORE_MODEL_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "explore-model.json");
-/** 默认设置：auto = 最便宜可用模型 */
-const EXPLORE_DEFAULT_MODEL = "auto";
 
 /** 单次最多并行派出的子代理数 */
 const MAX_TASKS = 32;
@@ -90,34 +84,19 @@ const RETRYABLE_RE =
 // 子模型选择
 // ---------------------------------------------------------------------------
 
-let exploreModelSetting: string = loadExploreModelSetting();
+/** 子代理模型设置（用途 `explore.subagent`，默认策略 BATCH） */
+const exploreModelSetting: ModelSetting = createModelSetting({
+	purpose: "explore.subagent",
+	plugin: "explore",
+	label: "子代理",
+	file: EXPLORE_MODEL_CONFIG_FILE,
+	key: "model",
+	defaultStrategy: "BATCH",
+});
 
-function loadExploreModelSetting(): string {
-	return loadJsonConfig<{ model: string }>(EXPLORE_MODEL_CONFIG_FILE, { model: EXPLORE_DEFAULT_MODEL }, isModelConfig).model;
-}
-
-function saveExploreModelSetting(value: string): void {
-	saveJsonConfig(EXPLORE_MODEL_CONFIG_FILE, { model: value });
-}
-
-function setExploreModelSetting(value: string): void {
-	exploreModelSetting = value;
-	saveExploreModelSetting(value);
-}
-
-function cheapestAvailable(ctx: ExtensionContext, opts?: { excludeFree?: boolean }): AnyModel | undefined {
-	return listAvailableModels(ctx, opts)[0];
-}
-
+/** 解析当前子代理模型（每轮调用前重新解析，面板改完立即生效） */
 function pickExploreModel(ctx: ExtensionContext): AnyModel | undefined {
-	if (exploreModelSetting === "auto") return cheapestAvailable(ctx);
-	if (exploreModelSetting === "auto-not-free") return cheapestAvailable(ctx, { excludeFree: true });
-	return findConfiguredModel(ctx, exploreModelSetting) ?? cheapestAvailable(ctx);
-}
-
-/** 模型是否具备读图能力（input 声明含 "image"） */
-function modelHasVision(model: AnyModel | undefined): boolean {
-	return !!model?.input?.includes("image");
+	return exploreModelSetting.resolve(ctx).model;
 }
 
 /** 当前子模型（按设置解析后）是否支持读图 */
@@ -849,10 +828,9 @@ export default function (pi: ExtensionAPI) {
 	registerModelConfigCommand(pi, {
 		command: "explore-config",
 		description:
-			"配置 explore 子模型：auto（默认，最便宜可用模型）、auto-not-free（忽略免费模型）或 provider/modelId；不带参数进入交互选择（含搜索）",
+			"配置 explore 子模型：auto（由 model-config 管理）或 provider/modelId；不带参数进入交互选择（含搜索）",
 		displayName: "explore 子模型",
-		getSetting: () => exploreModelSetting,
-		setSetting: setExploreModelSetting,
+		setting: exploreModelSetting,
 		// 设置变更后立即按新模型重注册视觉标注
 		onSettingChanged: (ctx) => registerExploreTool(pi, detectExploreVision(ctx)),
 	});

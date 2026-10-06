@@ -6,7 +6,7 @@
 - **内容规范就是它存在的理由**（写进子代理提示词）：写每行前过两问——不写它 AI 会做错事吗？换一年、换个项目还成立吗？信息按「多常被需要」分四处：每轮用 → `AGENTS.md`；相关才用 → `.pi/skills/<前缀>-<领域>/`（`description` 写明何时用）；在办（进度/待办/当前批次）→ 该工作目录 `STATUS.md`；跨项目经验 → 知识库。禁止：子目录 `AGENTS.md`、进度与待办、变更史、插件已经强制的规则（如钉钉发送纪律）、README 里能读到的、代码原文。产物必含 `## 关于 AGENTS.md 自身`（四条元规则，常量 `SELF_SECTION`）。
 - **目录对齐**（提示词层面的引导，不是校验器）：判据「同类只住一处，一处只放一类」——脚本进 `tools/`、共享基准数据进 `data/`、再生品进 `output/`、临时进 `.tmp/`、旧批次进归档；同名不同义的目录（`工具/` vs `tools/`）归并、缺失的机制目录顺手创建；本项目约定写进 `AGENTS.md` 一小段。不强制固定目录树。
 - **迁移**：发现子目录 `AGENTS.md` → 内容分流（长期→skill、在办→`STATUS.md`、通用→根）后**删除源文件**，并在总结里附「哪个文件 → 去了哪里」映射表；`CLAUDE.md` 合并后删除。
-- 流程：检查目录 → 无文件则 create，有则询问「合并更新 / 完全重写 / 取消」→ 后台 `runAgentLoop`（当前会话模型，主会话零污染、期间可继续对话；同时只允许一个，会话结束自动中止）→ 审计子代理复核 → 结构检查（有问题带问题再审计一轮，最多两轮）。
+- 流程：检查目录 → 无文件则 create，有则询问「合并更新 / 完全重写 / 取消」→ 后台 `runAgentLoop`（模型按用途 `init` 取，默认策略 AUTO = 当前会话模型，可在 `/model-config` 改指；主会话零污染、期间可继续对话；同时只允许一个，会话结束自动中止）→ 审计子代理复核 → 结构检查（有问题带问题再审计一轮，最多两轮）。
 - 上下文预算（与 explore 共用 `shared/context-budget`）：预算 = 模型窗口 × 0.55；每请求前 `transformContext` 剪超预算的旧工具结果（read/grep/find/ls/bash → explore → 其他，write/edit 不剪，最近 10 条不动）；仍超限则把过程记录压成要点后重启继续（`compactInitNotes`，最多 2 次，失败回退记录尾部），状态行显「⚙ 初始化 · 压缩上下文 n/2」。
 - 子代理工具：read/ls/grep/find + write/edit + bash + 可选 `explore`（`getExploreApi()?.createSubagentTool(ctx, { alwaysFresh: true })`，缺席静默降级为自读）。
 - 约束：**不设轮数与墙钟上限**；`NO_PROGRESS_TURNS = 8`（连续 8 轮既没写文件也没派 explore → 注入收尾指令，只提醒不硬停）；「没写完不许停」——打算停下但文件没被写过（mtime `> mtimeBefore + 1`）或末句是意图陈述 → 顶回去做完（最多两次），最终如实报「未完成」。
@@ -23,7 +23,7 @@
 
 ## explore-agent.ts
 
-- 工具 `explore`（一个任务 = 一个只读子代理，read/ls/grep/find），命令 `/explore-config`（子模型，走 shared/model-select 工厂），配置 `~/.pi/agent/explore-model.json`，状态 key `explore`。
+- 工具 `explore`（一个任务 = 一个只读子代理，read/ls/grep/find），命令 `/explore-config`（子模型，走 shared/model-select 工厂），配置 `~/.pi/agent/explore-model.json` 的 `model` 键（用途 `explore.subagent`，默认策略 BATCH），状态 key `explore`。
 - 落盘：`.pi/explore/report.md` 边跑边重写；单任务 `.pi/explore/tasks/<key>.{partial.md,md,json}`，`key` = 规范化任务文本（trim + 连续空白压单空格）的 SHA1 前 12 位。每轮工具调用与正文进展都原子写（tmp+rename）partial + json（含正文与最近 40 条检索轨迹）并刷新报告 → 进程被杀也留证据。
 - 断点续跑：`<key>.md` 已完成则直接复用（不花 token）；`fresh: true` 强制现跑；有 partial 时读作起点续跑（要求在其基础上继续、不重复已验证检索、过时结论可复核）；成功写 md + `status: done` 并删 partial；失败/中断保留 partial（json 标 `failed`/`interrupted`）且结果附 partial 相对路径。
 - 上下文兜底：单任务最多 40 轮；超限时压缩过程记录后继续（≤2 次）；轮数用尽/无正文 → 用过程记录整理成报告。最多 32 个任务、自适应并发上限 8、可重试错误指数退避（单任务最多重试 2 次）、单任务超时 15min。
@@ -32,7 +32,7 @@
 ## btw（`btw/`，产物 `btw.ts`）
 
 - 文件：`config.ts`（常量/系统提示词/模型设置）、`messages.ts`（消息清洗）、`render.ts`（转发 shared/markdown）、`overlay.ts`、`run.ts`（后台流式问答）、`index.ts`。
-- 命令 `/btw`（多轮追问；`Enter` 追问、`m` 转正、`/btw-config` 选模型），状态 key `btw-transfer`。
+- 命令 `/btw`（多轮追问；`Enter` 追问、`m` 转正、`/btw-config` 选模型），状态 key `btw-transfer`；模型设置用途 `btw.chat`（默认策略 FAST），存 `btw-config.json` 的 `model` 键。
 - 实现：pi-agent-core `runAgentLoop` + `createReadOnlyTools(ctx.cwd)`，认证走 `createPiStreamFn`；最多 6 轮，上下文清洗后 ≤60 条、含面板历史 ≤80 条，工具结果截断 1500 字符；空回答重试一次，失败/空回答按价格顺序故障转移。`/btw` 不写主会话历史；`m` 转正是**暂存 pendingTransfer**，由下一条 interactive 输入经 input transform 附在末尾发送（不是立即 sendUserMessage）。
 - 历史：曾用官方 pi-btw 替代，2026-09-07 因多轮追问/上下文携带 bug 回退自研（评估见 `src/vendor/README.md` 回退记录）。
 
@@ -59,8 +59,8 @@
 - `remembered` 意图缓存：命中即放行，带人类可读 intent，30 天未命中自动清理（`/perm-gate prune` 手动清）；**逐段判定，每个子命令段都要命中才放行**（防「git status && rm -rf x」被前半段连带放行）。
 - AI 审核：输出 `{action, reason, impact[], pattern}`，`pattern` 用 `<*>` 占位可变参数、落库前校验能命中当前命令否则退结构化兜底；`allow` 自动记住意图（通知写人话意图，不暴露正则），`reject` 拒绝；AI 不可用（超时/无模型/网络错/输出无法解析）降级人工确认，文案说明是降级而非任务失败；allow/reject 结论有会话级缓存，`completeSimple` 单次调用不占主会话上下文。
 - 人工确认面板 ReviewPanel（自有实现；**选项行渲染改用 `shared/ui.ts` 的 `renderChoiceList`**，与钉钉审核面板同一份代码）：顶部人话信息区（一句解读/影响面/命中原因），命令全文折行可滚、不展示正则原文；默认高亮「允许一次」，选项 = 允许一次 / 允许并永久记住这类操作（旁标将被记住的意图）/ 拒绝，Esc = 拒绝不执行。滚动提示、折行、按键语义、滚动位置已抽到 shared（见 hud-and-shared.md）。
-- 配置 `~/.pi/agent/perm-gate.json`：`enabled`、`deny`、`watch`、`remembered`、`aiReview`、`aiTimeoutMs`、`sudoExec`、`model`；旧配置自动迁移（blacklist → watch、whitelist → remembered）；首次运行写默认配置。
-- 命令 `/perm-gate`：`on/off`、`sudo on|off`、`reload`、`prune`、`model [provider/id|auto]`（无参开官方模型选择面板，未覆盖时回落 shared/model-pick 自动选）。
+- 配置 `~/.pi/agent/perm-gate.json`：`enabled`、`deny`、`watch`、`remembered`、`aiReview`、`aiTimeoutMs`、`sudoExec`、`model`（本地模型设置，用途 `perm-gate.review`，默认策略 LITE）；`saveConfig` 写回时原样带上 `model` 键（该键由 shared/model-setting 维护）；首次运行写默认配置。历史字段（blacklist/whitelist）不再读取——不写迁移代码，旧值自然遗弃。
+- 命令 `/perm-gate`：`on/off`、`sudo on|off`、`reload`、`prune`、`model [provider/id|auto]`（无参开 shared/model-select 的选择浮层）；`auto` 时按用途解析（本地 → 中心 → 默认策略 LITE → AUTO）。
 - sudo 专用授权通道：bash 里的段首 `sudo` 被拦截、引导改用 `sudo_exec` 工具；整屏授权面板（命令全文折行可滚 + 掩码密码框，错误原地重试 3 次，Esc 拒绝），扩展内 `spawn sudo -kS` 喂密执行（`-k` 不缓存 + 收尾 `sudo -k` 双保险，每次调用必重新授权）；密码只经扩展内存进 sudo stdin，不进会话/结果/磁盘；NOPASSWD 账户退化为确认弹窗（仍逐次授权）；requiretty / 无 sudo 明确报错请用户手动执行。
 - 状态 key `perm-gate`（审核中）；人工确认与 sudo 等待经 `globalThis.__PI_STATUS_BEACON_API__.wait(text)` 交给 status-beacon 的 Working 行。
 
@@ -73,9 +73,9 @@
 
 ## status-beacon.ts
 
-- 命令 `/beacon`：无参开模型选择面板、`auto`、`provider/modelId`、`status`/`presence`（报告在场门控判定）。配置 `~/.pi/agent/status-beacon.json`：`model`、`presenceGate`、`activeIdleMs`、`awayIdleMs`、`dedupeMs`。选模型走 shared/model-pick 或 shared/model-selector。
+- 命令 `/beacon`：无参开模型选择面板、`auto`、`provider/modelId`、`status`/`presence`（报告在场门控判定）。配置 `~/.pi/agent/status-beacon.json`：`model`（本地模型设置，用途 `beacon.phrase`，默认策略 BATCH）、`presenceGate`、`activeIdleMs`、`awayIdleMs`、`dedupeMs`；模型键经 shared/model-setting 读改写（历史上的 `fs.writeFileSync({model})` 会清掉门控阈值，已修）。
 - 执行中标题进度（`agent_start` → settled）：spinner + 活动段 + 目录名，活动段与 Working 行/HUD 同一套词（工具名 / 思考中 / 输出中 / 块间隙只显目录）；提醒期间让位、应答后恢复。
-- 接管执行中 Working 行（独占 `setWorkingMessage`），按「在等什么」分层：等人工（`ui_prompt` 阻塞；ask/perm-gate 经 `__PI_STATUS_BEACON_API__.wait` 登记具体文本，如「等你：回答问卷「方案确认」」）> 等工具/子代理完成 > 思考中 > 正在{短语}… / 正在输出…。**「思考中」只覆盖思考块流出的那段时间**（`message_update` 的 thinking_start → thinking_end），带廉价 AI 概括的动作短语 `思考中：重构 HUD…`（`message_end` 触发异步概括，`pickAuxModel` 选最便宜已认证模型，仿 perm-gate 的 `completeSimple` 路线）；无短语只显「思考中…」。思考结束后的内容生成与块间隙显「正在输出…」，不冒充思考中。行首那支转圈是 pi 指示器自带、Working 行不自带 spinner；折叠思考标签交回 pi 默认静态 `Thinking...`（其动画已并入本扩展）。
+- 接管执行中 Working 行（独占 `setWorkingMessage`），按「在等什么」分层：等人工（`ui_prompt` 阻塞；ask/perm-gate 经 `__PI_STATUS_BEACON_API__.wait` 登记具体文本，如「等你：回答问卷「方案确认」」）> 等工具/子代理完成 > 思考中 > 正在{短语}… / 正在输出…。**「思考中」只覆盖思考块流出的那段时间**（`message_update` 的 thinking_start → thinking_end），带廉价 AI 概括的动作短语 `思考中：重构 HUD…`（`message_end` 触发异步概括，模型按用途 `beacon.phrase` 解析，仿 perm-gate 的 `completeSimple` 路线）；无短语只显「思考中…」。思考结束后的内容生成与块间隙显「正在输出…」，不冒充思考中。行首那支转圈是 pi 指示器自带、Working 行不自带 spinner；折叠思考标签交回 pi 默认静态 `Thinking...`（其动画已并入本扩展）。
 - 状态 key（`STATUS_STYLE` 中登记）：`task-alert`（完成闪烁帧）/`task-alert-error`/`task-alert-wait`（等待人工）/`task-alert-run`（思考中/当前工具；run 开局重置防残留，块间隙与收尾不显）。key 沿用 task-alert* 旧名（前身即 task-alert）。
 - 五音效（`~/.pi/agent/sounds/`，由 install.js 部署 static/sounds）：`task_complete`（正常结束）/`error`（stopReason=error）/`attention`（阻塞等人工）/`idle_prompt`（完成提醒后 60s 无操作，且人真的离开时才补）/`subagent_complete`（工具名 ∈ {explore, subagent, Task} 成功）。超时自动撤销提醒 600s。
 - 提示音经 `shared/presence` 在场门控：系统空闲 <20s 或任一实例 20s 内有输入 → 只闪不出声；`claimSoundSlot` 全局去重（窗口 2.5s）只响第一声。
@@ -103,3 +103,13 @@
 - `tool_result` / `input`：给新进上下文的图片瘦身——照片 ≤900KB、图形 ≤1.6MB（base64）、最长边 2000px、PNG 优先退 JPEG，动图 WebP 强制转静态 PNG（上游 400 拒收，且历史重发会让后续每轮都失败），<300KB 且非动图不碰。
 - `context`：每轮请求前按 `REQ_BUDGET_B64 = 32MB` 总量预算从最旧开始把图片换成占位文本（非破坏性：只改本次请求，会话记录不动；`context` 事件的 messages 本是 pi 的 structuredClone 副本，加处理器不额外增加拷贝成本）；`WARN_AT_B64 = 24MB` 起推状态行 `🖼 xMB · 已省略N张旧图`（key `img-slim`），`TIGHT_AT_B64 = 40MB` 时新图按半预算温和降级；首次省略额外 notify 一次（说明原图仍在会话记录、需要时可重新 read）。
 - 命令 `/img-slim`（无参报告、`on/off`）。
+
+## model-config（`model-config/`，产物 `model-config.ts`）
+
+- 职责：模型管理插件。`/model-config` 打开管理面板（`panel.ts`），全部操作在面板内；非交互环境退化为 `renderTextSummary` 文本摘要。
+- 策略槽 7 个：`AUTO`（跟随当前会话模型）/`FREE`（免费池 + 故障转移）语义固定、只能被选不能改；`MAX/FAST/LITE/BASE/BATCH` 可重指到具体模型（映射为空 = 默认跟随会话）。
+- 用途行按插件分组，显示「本地设置 · 中心设置 · 实际解析到的模型」；动作 = 由中心按策略 / 由中心指定具体模型 / 清除中心设置 / 取消本地固定（写回 auto，带确认页）。
+- 存储：`~/.pi/agent/model-config.json`（`{version, strategies, purposes}`，原子写）；用途清单从 `globalThis.__PI_MODEL_DECLS__` 读（各插件加载时经 shared/model-setting 推入，无加载顺序问题）。
+- 能力约束：用途声明 `requiresVision` 时，选模型列表只列 `input` 含 `image` 的模型。
+- 改完立即生效：插件每次 resolve 都重读中心文件与本插件文件（mtime 缓存），无需 `/reload`。
+- 默认策略：`btw.chat` / `hud-git.conflict` = FAST；`explore.subagent` / `perm-gate.review` / `hud-git.commit` = LITE；`beacon.phrase` = BATCH；`init` / `audit` = AUTO。

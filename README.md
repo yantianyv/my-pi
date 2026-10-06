@@ -20,7 +20,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 |------|------|----------|
 | `themes/` | `matrix.json` — 黑客帝国风格荧光绿主题 | `~/.pi/agent/themes/` |
 | `extensions/` | `hud/`（源码多文件：`index.ts` + `hud-core.ts` + `hud-balance.ts` + `hud-cost.ts` + `hud-git.ts`；build.js 合并为单文件 `hud.ts` 产物）— 3 行 HUD 状态栏，见下 | `~/.pi/agent/extensions/` |
-| `extensions/` | `btw/` — `/btw` 旁支问答：侧栏浮层多轮追问、`m` 转正附带、`/btw-config` 模型 auto 最便宜故障转移（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `btw/` — `/btw` 旁支问答：侧栏浮层多轮追问、`m` 转正附带、`/btw-config` 选择本插件模型或 auto（交给 model-config；见「模型管理」） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`）（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `context-init.ts` — `/init` 生成/维护项目唯一的 `AGENTS.md`：内容两问 + 信息四去向（`AGENTS.md` / skill / `STATUS.md` / 知识库）+ 目录对齐 + 审计复核（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `ask/` — 整屏问卷：`ask` 工具批量提问（七题型、最多 12 题）+ `/answer` 续答已搁置问卷；必答未完成时连按两次 Enter 可跳过未答直接提交 | `~/.pi/agent/extensions/` |
@@ -36,6 +36,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `mimo-omni.ts` — 媒体兼容层（过渡件）：`mimo_transcribe` 解析音频/视频（逐字稿或按需求解析）+ `mimo_speak` 文字合成语音，`/mimo-config` 面板配置（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `dingtalk-bridge.ts` — 钉钉受控桥接：屏蔽 dingtalk-* 技能注入，`dws_schema` 活内省 + `dws_exec` 受控执行（发送两阶段确认/标签强制/防重发）+ `dws_resolve_user` 人员解析（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `model-config/` — 模型管理插件：`/model-config` 面板集中设置各插件用途使用的模型（策略槽 MAX/FAST/LITE/BASE/BATCH 可重指，AUTO/FREE 固定语义），见下 | `~/.pi/agent/extensions/` |
 | `patches/` | 两个 pi 补丁：ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装） | `~/.pi/agent/skills/` |
@@ -77,6 +78,19 @@ pi 内置供应商无火山引擎（volcengine/ark/doubao），模板通过 pi �
 - **配置 key**：设环境变量 `VOLCENGINE_CODING_API_KEY`（Coding Plan 专属 key，前缀 `sk-sp-`），或在 pi 里 `/login volcengine-coding` 输入。
 - **模型**：`ark-code-latest`（auto 选优）+ 常用具体模型（doubao-seed-2.1-pro / doubao-seed-evolving / doubao-seed-2.0-code / deepseek-v4-pro / deepseek-v4-1-flash / kimi-k2.7-code / glm-5.3 / glm-5.3-flash / minimax-m3），列表随官方更新可自行增删。
 - **额度**：订阅制（5h 滑动窗口 + 周 + 月三级），额度在火山控制台「开通管理」页查看（Coding Plan 无 key 直查余额接口）。
+
+## 模型管理（src/extensions/model-config/）
+
+各插件要用模型的地方（btw 问答、explore 子代理、perm-gate 命令审核、status-beacon 动作短语、hud-git 提交信息与冲突消解、/init 子代理、完成信号审计）统一走两层设置：
+
+- **插件侧**（各自配置文件里的 `model` 键，值只有两种）：`auto` = 交给 model-config 管理；或一个具体 `provider/modelId`（本地固定，管理插件在不在都照用）。各插件的模型命令（`/btw-config`、`/explore-config`、`/perm-gate model`、`/beacon`）都打开同一个可搜索选择浮层。
+- **管理侧**（`~/.pi/agent/model-config.json`，`/model-config` 面板，全部操作都在面板里）：每个用途可设为某个策略或某个具体模型。
+- **策略**：`AUTO`（跟随当前会话模型）与 `FREE`（只在免费模型里选，主选失败自动换下一个）语义固定、只能被选不能改；`MAX`（顶级配置）/ `FAST`（又快又好）/ `LITE`（高速廉价）/ `BASE`（便宜通用）/ `BATCH`（便宜大碗）可由用户重指到具体模型，**一处修改、所有引用该槽的用途一起生效**。
+- **解析链**：本地固定模型 → 中心设置 → 插件注册时声明的默认策略 → AUTO；管理插件缺席时仍读 `model-config.json`，因此已做的设置不受影响。任何解析结果都带**故障转移链**（其余可用模型按价格升序）。
+- **默认策略**：`btw.chat` / `hud-git.conflict` = FAST；`explore.subagent` / `perm-gate.review` / `hud-git.commit` = LITE；`beacon.phrase` = BATCH；`init` / `audit` = AUTO。
+- **能力约束**：声明需要读图的用途（面板里会标注「需读图」）在选模型时**只列出**具备读图能力的模型。
+- **本地设置文件**：`btw-config.json` 的 `model`、`explore-model.json` 的 `model`、`status-beacon.json` 的 `model`、`perm-gate.json` 的 `model`、`hud-git.json` 的 `commit` / `conflict`（提交信息与冲突消解各一个键）。
+- 面板改完立即生效（插件每次解析都重读设置），无需 `/reload`；管理插件缺席时 `/model-config` 不可用，但设置照常生效。
 
 ## 3 行 HUD（src/extensions/hud/）
 
@@ -196,7 +210,7 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 - **`/btw <问题>`**：打开浮层立即提问；面板内可多轮追问（Enter 输入，最多 6 轮），上下文 = 主会话（含压缩结果）+ 面板内历次问答；流式显示回答，`Esc` 关闭并中止，`↑↓` 滚动查看
 - **`m` 转正**：面板内按 `m` 把全部问答打包暂存，随下一条交互消息附带发送（输入框只见自己文本 + 「📎 已附带」提示，不立即发出，可控可撤）
 - **只读工具**：始终携带 read / ls / grep / find（无 bash）——「xx 函数在哪定义」类问题可直接查证代码，只读不写
-- **`/btw-config`**：模型选择——默认 auto = 已认证可用模型中最便宜的，按价格顺序故障转移（调用失败自动换下一个更贵的重试）；另有 auto-not-free 与任意 provider/modelId 可选，支持关键词搜索；持久化到 `~/.pi/agent/btw-config.json`
+- **`/btw-config`**：模型选择——`auto`（交给 model-config，默认策略 FAST）或任意 `provider/modelId`（本地固定），支持关键词搜索；持久化到 `~/.pi/agent/btw-config.json` 的 `model` 键；问答按价格升序故障转移（失败自动换下一个重试）。详见「模型管理」
 
 实现：问答跑 pi-agent-core 官方 agentLoop（与 /init 子代理同构），认证走 `ctx.modelRegistry.getApiKeyAndHeaders()`；消息序列全量降级清洗（toolResult 降 user、剥 tool_use/thinking、合并同角色、保证 user 结尾），兼容 OpenAI/Anthropic 两类端点；浮层走 `ctx.ui.custom` overlay 模式。曾收录官方 pi-btw 替代（2026-08-22），实测多轮追问/上下文携带有 bug 于 2026-09-07 回退自研版（出处与借鉴评估见 `src/vendor/README.md` 回退记录）。
 
@@ -259,8 +273,8 @@ Claude Code 风格 `/btw` 临时旁支问答（by the way）：主任务进行�
 bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合命令先拆段**（`shared/shell-split.ts`：按 `&&`/`||`/`;`/`|`/换行拆分，`$()`/反引号子 shell 递归拆出，引号/转义保护）→ **硬拒绝 deny**（命中即拒、不询问，默认覆盖 `rm -rf /`、`mkfs`、`dd` 写块设备、`curl|sh`、`chmod -R 777 /`）→ **已记住的操作 remembered**（**逐段判定：每个子命令段都要命中才放行**，防「git status && rm -rf x」被前半段连带放行）→ **关注项 watch**（命中不打断，只是把命令标记给 AI 要求从严：宁可确认一次也别放过）→ **AI 审核**（未命中名单的命令交给辅助小模型；AI 不可用——超时/无模型/网络错误/输出无法解析——降级为人工确认，文案说明是降级而非任务失败）。
 
 - **人工确认面板**（`perm-gate` 自有 `ReviewPanel`；**选项渲染复用 `shared/ui.ts` 的 `renderChoiceList`**，与钉钉审核面板同一套竖排样式）：**默认高亮「允许一次」**，三选项——允许一次 / 允许并永久记住这类操作（旁标将被记住的操作意图）/ 拒绝，`Esc` = 拒绝（不执行）；`↑↓` 选择、`Enter` 确认、`1-3` 直选。面板顶部是**人话信息区**（不随滚动消失）：AI 一句话解读 + 影响面（写/删/联网/凭证等）+ 命中原因（「命中关注项」等分类标签，**不展示正则原文**）；命令全文折行展示不截断，超出可视区 PgUp/PgDn 滚动，滚动余量在分隔行指示；并行工具批里多个待确认命令经 Promise 链串行弹面板。无可泛化规则时只剩两项（允许一次 / 拒绝）。
-- **allow 自动记住意图**（意图缓存，避免常用无害命令反复烧审核 token）：AI 每次 `allow` 都会把「这类操作」写进 `remembered`——规则优先生效 AI 提炼的语义正则（用 `<*>` 占位可变参数，落库前校验必须能命中当前命令，否则退结构化兜底 `^命令\s+子命令`，多段命令退整串精确匹配）；护栏：硬拒绝/关注项永远优先、去重、不覆盖已有规则；每次记住都发通知且**展示人话意图而非正则**（如「已记住「查看 git 提交历史」，以后同类命令直接放行」）；**保鲜机制**：记忆规则带 `addedAt`/`lastHit`/`hits`，命中时刷新，超 30 天未命中在启动/记住时自动清理，`/perm-gate prune` 手动清理（**过期≠失效：清理前仍生效**，状态行会写明）；旧配置（`blacklist`/`whitelist`）自动迁移为 `watch`/`remembered`。
-- **AI 审核**：选模型仿 pi-btw 覆盖项语义——`/perm-gate model` 打开**官方模型选择面板**（`shared/model-selector.ts` 直接复用 pi 导出的 `ModelSelectorComponent`，与内置 `/model` 同组件：搜索/scoped 切换/目录刷新；`ModelRegistry.runtime` 直通组件所需的 ModelRuntime），`/perm-gate model <provider>/<id>|auto` 直接设置；未覆盖时走共享模块 `shared/model-pick.ts` 自动选（与 hud-git 的 AI 提交信息同款「优先列表 + 最便宜已认证兜底」，优先 `deepseek/deepseek-v4-flash`），覆盖模型不可用/未认证时自动回落；`completeSimple` 单次调用不占主会话上下文；进度经官方 `setStatus("perm-gate", …)` 通道推送（hud 行 1 动态区，未登记 key 默认灰字）；allow/reject 结论会话级缓存（同一精确命令不重复审核），review 不缓存（每次由人决定）；
+- **allow 自动记住意图**（意图缓存，避免常用无害命令反复烧审核 token）：AI 每次 `allow` 都会把「这类操作」写进 `remembered`——规则优先生效 AI 提炼的语义正则（用 `<*>` 占位可变参数，落库前校验必须能命中当前命令，否则退结构化兜底 `^命令\s+子命令`，多段命令退整串精确匹配）；护栏：硬拒绝/关注项永远优先、去重、不覆盖已有规则；每次记住都发通知且**展示人话意图而非正则**（如「已记住「查看 git 提交历史」，以后同类命令直接放行」）；**保鲜机制**：记忆规则带 `addedAt`/`lastHit`/`hits`，命中时刷新，超 30 天未命中在启动/记住时自动清理，`/perm-gate prune` 手动清理（**过期≠失效：清理前仍生效**，状态行会写明）。
+- **AI 审核**：选模型走统一模型设置——`/perm-gate model` 打开模型选择浮层（`auto` 或具体 `provider/modelId`），`/perm-gate model <provider>/<id>|auto` 直接设置；`auto` 时由 model-config 按用途 `perm-gate.review` 解析（默认策略 LITE），可解析到会话模型/策略槽/具体模型，失败按价格升序换候选；`completeSimple` 单次调用不占主会话上下文；进度经官方 `setStatus("perm-gate", …)` 通道推送（hud 行 1 动态区，未登记 key 默认灰字）；allow/reject 结论会话级缓存（同一精确命令不重复审核），review 不缓存（每次由人决定）；
 - **sudo 授权通道（密码即授权，仅当次有效）**：AI 在 bash 里直接写 `sudo` 会被拦截打回并引导改用 `sudo_exec` 工具（`command` 不带 sudo 前缀，整条以 root 执行）；调用时弹整屏授权面板——命令全文折行展示（PgUp/PgDn 滚动）+ 掩码密码框（提示写明「密码仅用于本次执行，每次提权都需重新输入」），Enter 授权 / Esc 拒绝，密码错误原地重试共 3 次；扩展内 `sudo -kS` 从 stdin 喂密执行，`-k` 使凭据不被缓存（收尾再补 `sudo -k` 双保险），**每次调用必重新弹窗授权**；密码只经扩展内存，不进会话历史/工具结果/磁盘；NOPASSWD 免密账户退化为确认弹窗（仍逐次授权）；`requiretty` 或未装 sudo 时明确报错请用户手动执行；`/perm-gate sudo on|off` 开关（配置项 `sudoExec`，默认开）；
 - **配置**：`~/.pi/agent/perm-gate.json`（首次运行自动写默认配置；手动编辑，无管理面板）——`enabled` 总开关、`deny` 硬拒绝正则列表、`watch` 关注项正则列表、`remembered` 已记住的操作（`{pattern, intent, addedAt, lastHit, hits}`）、`aiReview`（false = 未命中名单一律转人工确认）、`aiTimeoutMs`、`sudoExec`、`model`；无效正则跳过并在 `/perm-gate` 状态里提示（附配置路径）；
 - **命令**：`/perm-gate` 查看状态（开关/审核模型/sudo 通道/已记住条数含过期提示/关注项与硬拒绝条数/无效正则/配置路径）、`/perm-gate on|off` 开关（持久化）、`/perm-gate sudo on|off` sudo 通道开关（持久化）、`/perm-gate reload` 重读配置、`/perm-gate model` 选审核模型（`<provider>/<id>|auto` 直接设置）、`/perm-gate prune` 清理过期记忆。
@@ -275,7 +289,7 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 
 **上下文与轮数兜底**：上下文超限（各家措辞都识别）→ 把过程记录压缩成要点后继续跑（每任务最多 2 次）；轮数用尽或没有正文产出 → 用过程记录整理出报告。超时/网络中断/进程被杀时，返回结果里会带上「中断前已确认的部分」，半成品留在磁盘上等下次续跑。
 
-`/explore-config` 选择子模型（默认 auto = 最便宜可用模型，可指定 provider/modelId）。
+`/explore-config` 选择子模型（`auto` = 交给 model-config，默认策略 BATCH；或指定 `provider/modelId`）。
 
 **与 `/init` 的联动**：`/init` 的子代理会探测本插件挂载的 `__PI_EXPLORE_API__` 契约（`shared/explore-api.ts`）——探索工具在场时子代理可自己派探索子代理并行摸底（大仓库先摸目录/命令/架构/约定，再用 read 抽查），状态栏显「⚙ 初始化 · 探索 n/m」；此时一律现跑、不复用历史成果，其他情况（未装/被禁用）自动退回自读模式。
 
@@ -448,7 +462,7 @@ node static/patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
 | `tree-selector.js` | 9 | `/tree`（标签提示 + 消息前缀） |
 | `config-selector.js` | 8 | `/config` 节名（全局资源/技能/主题…） |
 | `login-dialog.js` | 7 | 登录对话框 |
-| `model-selector.js` | 4 | `/model` |
+| `model-selector.js` | 4 | `/model`（本仓库扩展现统一用自绘选择浮层，不再依赖该组件） |
 | `footer.js` | 4 | `no-model` / `thinking off` / `(订阅)` / `(自动)` |
 | `trust-selector.js` | 1 | 项目信任 |
 

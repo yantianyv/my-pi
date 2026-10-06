@@ -29,6 +29,7 @@ import { convertToLlm, createPiStreamFn, systemMessage } from "./shared/agent";
 import { CONTEXT_OVERFLOW_RE, pruneOldToolResults } from "./shared/context-budget";
 import { getExploreApi } from "./shared/explore-api";
 import { CONTEXT_FILE, checkContextArtifacts, findContextFiles } from "./shared/context-files";
+import { createModelSetting, type ModelSetting } from "./shared/model-setting";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -621,6 +622,18 @@ async function runInitAgent(
 // 插件入口
 // ---------------------------------------------------------------------------
 
+/**
+ * /init 子代理模型（用途 `init`，默认策略 AUTO = 跟随当前会话模型）：
+ * 默认跟随会话是为了与主会话共享同一模型能力与上下文口径；
+ * 需要更省钱或更强时可在 /model-config 里把该用途指到别的策略或具体模型。
+ */
+const initModelSetting: ModelSetting = createModelSetting({
+	purpose: "init",
+	plugin: "context-init",
+	label: "/init 子代理",
+	defaultStrategy: "AUTO",
+});
+
 export default function (pi: ExtensionAPI) {
 	// 同时只允许一个后台 init；会话关闭时中止
 	let initAbort: AbortController | null = null;
@@ -630,7 +643,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("已有后台 init 进行中（/init cancel 可中止）", "warning");
 			return;
 		}
-		const model = ctx.model as AnyModel | undefined;
+		const model = initModelSetting.resolve(ctx).model ?? (ctx.model as AnyModel | undefined);
 		if (!model) {
 			ctx.ui.notify("当前没有可用模型，无法启动后台 init", "error");
 			return;

@@ -30,7 +30,7 @@
 - 并发隔离动机：多 pi 会话同项目跑不同任务时共享单工作流会互相干扰（wf_switch 乱推进、内存缓存写盘互相覆盖）。
 - `session_start` 绑定判定：单槽/无槽自动绑定（零行为变化）；多槽或侦测到其他活跃会话已绑定（借 pair-guard 注册表心跳零耦合判活，缺席按 24h 内绑定视为活跃）→ TUI 弹自绘选择浮窗（`slot-picker.ts`：「通用」组 =「暂不启用」默认高亮 / Esc 同此 /「从 resume 中加载」，与「工作流（N）」槽位列表分区 + ▶ 高亮 + 数字键直选）；选 resume 放弃本会话、转 `/wf-resume`（官方 `SessionSelectorComponent` → `switchSession`；恢复后按被恢复会话自己的绑定加载其工作流空间，不写本会话绑定）；非 TUI 退化为注入选择指引让 AI 用 ask 问，最终 `wf_workflow action=bind` 落地。`session_start` 开头强制重读绑定缓存（resume/new/fork 换会话即恢复对应工作流空间）。
 - 展示：常驻 widget（belowEditor）+ `/workflow-config` 浮窗 + 非 TUI 文本回落（`compactLines` 单一渲染源）；hud 在场且开启时改由 `__PI_HUD_API__` 渲染在 footer 最底部（见 `hud-and-shared.md`）。
-- 审计：`config.json` 开 `auditOnComplete` 后，`wf_switch` 完成推进前派全新上下文的只读 + bash 子代理核验 `doneSignal`，不通过则打回（`kind=evidence` 证据不足 / `format` 审计输出无法解析，失败提示附任务交付物 + 完成信号）；审计自身故障放行（增强不是门禁）。
+- 审计：`config.json` 开 `auditOnComplete` 后，`wf_switch` 完成推进前派全新上下文的只读 + bash 子代理核验 `doneSignal`，不通过则打回（`kind=evidence` 证据不足 / `format` 审计输出无法解析，失败提示附任务交付物 + 完成信号）；审计自身故障放行（增强不是门禁）；审计模型按用途 `audit` 解析（默认策略 AUTO = 当前会话模型，可在 `/model-config` 改指）。
 - 测试：`test/render.test.mjs`（16 场景 A~R，含 `__PI_HUD_API__` 注册/通知/注销）、`test/stale-ctx.test.mjs`。
 
 ## dingtalk-bridge.ts（钉钉 dws CLI 受控桥接）
