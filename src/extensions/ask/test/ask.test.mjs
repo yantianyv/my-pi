@@ -1060,6 +1060,62 @@ async function main() {
 		rmSync(dir, { recursive: true, force: true });
 	}
 
+	// ---- 场景 U：连按两次 Enter 跳过必答强制提交 + 人称词提醒 ----
+	console.log("场景 U：连按两次 Enter 强制提交 / 人称词提醒");
+	{
+		const dir = mkdtempSync(join(tmpdir(), "ask-u-"));
+		const pi = makePi();
+		mod.default(pi);
+		const captures = makeCaptures();
+		const ctx = makeCtx(dir, captures);
+		await pi.events.session_start({}, ctx);
+		const tool = pi.tools.find((t) => t.name === "ask");
+		const execP = tool.execute(
+			"tc-u",
+			{
+				id: "u-survey",
+				title: "强制提交测试",
+				questions: [
+					{ id: "q1", type: "text", question: "你更倾向哪个方案？（必答）" },
+					{ id: "q2", type: "text", question: "第二题（必答）" },
+				],
+			},
+			null,
+			null,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		const comp = openCaptured(captures);
+		const pageText = () => comp.render(TERM_COLS).map((l) => l.trim()).join("\n");
+
+		check("U: 必答未完成时状态行提示连按两次", pageText().includes("题必答未完成 · 连按两次 Enter 跳过"));
+		comp.handleInput(K.enter);
+		check("U: 首次 Enter 仍被必答校验拦下", captures.customs.length === 1);
+		check("U: 拦下提示带「再按 Enter 跳过」", pageText().includes("再按 Enter 跳过"));
+
+		// 中间夹了其他按键就不再是连按（防误触）
+		comp.handleInput(K.up);
+		comp.handleInput(K.enter);
+		check("U: 中间有其他按键时下一次 Enter 只是普通提交（仍被拦）", captures.customs.length === 1);
+
+		// 超过 1 秒窗口 → armed 自动复原、连按提示被撤（再按 Enter 只是普通提交）
+		await new Promise((r) => setTimeout(r, 1100));
+		check("U: 超时后连按提示自动撤掉", !pageText().includes("再按 Enter 跳过"));
+		comp.handleInput(K.enter);
+		check("U: 超时后 Enter 不再强制提交（仍被拦）", captures.customs.length === 1);
+
+		// 紧接着再按一次 Enter → 跳过校验直接提交
+		comp.handleInput(K.enter);
+		const result = await execP;
+		check("U: 连按两次 Enter 跳过必答直接提交", result.details?.status === "submitted");
+		const text = result.content?.[0]?.text ?? "";
+		check("U: 两道未作答必答题都标（跳过）", (text.match(/（跳过）/g) ?? []).length === 2, text.slice(0, 160));
+		check("U: 回执附人称词提醒", text.includes("人称词") && text.includes("1. 题题干"), text.slice(-200));
+		check("U: 问卷文件已删除", !existsSync(join(dir, ".pi", "questionnaires", "u-survey.json")));
+		check("U: 待答状态已清除", captures.statuses.ask === undefined);
+		rmSync(dir, { recursive: true, force: true });
+	}
+
 	console.log(failures === 0 ? "\n全部通过 ✓" : `\n${failures} 项失败 ✗`);
 	process.exit(failures === 0 ? 0 : 1);
 }

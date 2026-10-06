@@ -22,6 +22,8 @@
  * 键位（? 键可随时查看本表）：
  * - 空格：选择题选中（单选/判断选中后自动前进到下一行；多选切换勾选，受 max 限制）
  * - Enter：提交问卷（必答未完成时跳到第一题未完成项并提示）；多行文本聚焦时 Shift+Enter 换行
+ * - 强制提交：被必答校验拦下后 1 秒内再按一次 Enter 即跳过未答直接提交（连按两次，不依赖终端；
+ *   超时未按则自动复原并撤掉那条提示，中间夹其他按键同样解除）
  * - Esc：搁置（草稿写回文件，随时 /answer 继续）
  * - 判断题快捷 y/n；选择题数字键 1-9 直选；评分 ←→ 调档或数字键直选
  * - Ctrl+↑/↓ 上/下一题；PgUp/PgDn 按屏翻页；多行文本内 ↑↓ 行间移动（边界处才跳出本题）
@@ -69,6 +71,8 @@ export interface PageHooks {
 
 const OTHER_LABEL = "其他（自由输入）";
 const MAX_TEXT_LENGTH = 4000;
+/** 连按两次 Enter 强制提交的窗口：首次被拦下后这段时间内再按一次才生效（超时复原并撤提示） */
+const FORCE_SUBMIT_WINDOW_MS = 1000;
 const MULTILINE_WINDOW = 4;
 /** 说明题正文折叠阈值（超过则默认只显示前 N 行，x 键展开） */
 const NOTE_FOLD_LINES = 20;
@@ -138,6 +142,12 @@ export class QuestionnairePage {
 	private mode: "form" | "help" | "review" = "form";
 	/** 删除二次确认已就绪 */
 	private deleteArmed = false;
+	/** 强制提交已就绪：首次 Enter 被必答校验拦下后置位，FORCE_SUBMIT_WINDOW_MS 内再按一次 Enter 生效 */
+	private forceArmed = false;
+	/** 窗口计时器：到点自动复原 armed 并撤掉那条提示（盯着看几秒再按不算连按） */
+	private forceTimer: ReturnType<typeof setTimeout> | undefined;
+	/** armed 时的提示文本：超时复原时只撤这一条（提示可能已被别的消息替换） */
+	private forceHint = "";
 	/** 说明题正文展开态 */
 	private expandNotes = false;
 	/** 是否已按焦点自动滚动（首帧保持滚到顶部：说明题从头读，不被下方焦点行拽走） */
@@ -324,15 +334,24 @@ export class QuestionnairePage {
 		return null;
 	}
 
-	private trySubmit(): void {
+	/** 提交：先按普通 Enter 校验；被拦下后再按一次 Enter（force）即跳过未答直接提交 */
+	private trySubmit(force = false): void {
 		const bad = this.firstInvalid();
-		if (!bad) {
+		if (!bad || force) {
 			this.done({ action: "submit", answers: this.collect() });
 			return;
 		}
 		const idx = answerableQuestions(this.qn).indexOf(bad.q);
 		const total = answerableQuestions(this.qn).length;
-		this.hint = `第 ${idx + 1}/${total} 题：${bad.reason}${bad.q.required !== false ? "（必答）" : "（已填内容需合法，清空可跳过）"}`;
+		this.hint = `第 ${idx + 1}/${total} 题：${bad.reason}${bad.q.required !== false ? "（必答）" : "（已填内容需合法，清空可跳过）"} · 再按 Enter 跳过`;
+		this.forceArmed = true;
+		this.forceHint = this.hint;
+		clearTimeout(this.forceTimer);
+		this.forceTimer = setTimeout(() => {
+			this.forceArmed = false;
+			if (this.hint === this.forceHint) this.hint = "";
+			this.tui.requestRender();
+		}, FORCE_SUBMIT_WINDOW_MS);
 		this.flash = "";
 		const rows = this.buildRows();
 		const at = rows.findIndex((r) => r.qid === bad.q.id);
@@ -448,6 +467,9 @@ export class QuestionnairePage {
 		const typing = row?.kind === "input" || row?.kind === "other";
 		const wasArmed = this.deleteArmed;
 		this.deleteArmed = false;
+		const forceArmed = this.forceArmed;
+		this.forceArmed = false;
+		clearTimeout(this.forceTimer);
 		this.flash = "";
 
 		if (matchesKey(data, Key.escape)) {
@@ -522,7 +544,7 @@ export class QuestionnairePage {
 
 		// 纯说明问卷（无任何可交互行）：只需提交 / 删除 / 帮助
 		if (!row || !q || !st) {
-			if (matchesKey(data, Key.enter)) this.trySubmit();
+			if (matchesKey(data, Key.enter)) this.trySubmit(forceArmed);
 			return;
 		}
 
@@ -530,7 +552,7 @@ export class QuestionnairePage {
 		if (row.kind === "input" || row.kind === "other") {
 			const multiline = row.kind === "input" && q.type === "text" && q.multiline === true;
 			if (matchesKey(data, Key.enter)) {
-				this.trySubmit();
+				this.trySubmit(forceArmed);
 				return;
 			}
 			if (multiline && matchesKey(data, "shift+enter")) {
@@ -578,7 +600,7 @@ export class QuestionnairePage {
 				}
 				this.tui.requestRender();
 			} else if (matchesKey(data, Key.enter)) {
-				this.trySubmit();
+				this.trySubmit(forceArmed);
 			}
 			return;
 		}
@@ -610,7 +632,7 @@ export class QuestionnairePage {
 				return;
 			}
 			if (matchesKey(data, Key.enter)) {
-				this.trySubmit();
+				this.trySubmit(forceArmed);
 				return;
 			}
 			// 判断题 y/n 快捷
@@ -808,6 +830,7 @@ export class QuestionnairePage {
 					["y / n", "判断题快捷作答"],
 					["← →", "评分调档"],
 					["Enter", "提交（必答未完成会跳到该题）"],
+					["Enter ×2", "1 秒内连按两次，跳过未完成的必答项直接提交"],
 					["Shift+Enter", "多行简答内换行"],
 				],
 			],
@@ -890,7 +913,10 @@ export class QuestionnairePage {
 		// 每行补满全宽：overlay 合成只替换组件宽度内的列，右侧留白会透出下层内容
 		const padLine = (s: string): string => {
 			const w = visibleWidth(s);
-			return w >= W ? truncateToWidth(s, W) : s + " ".repeat(W - w);
+			if (w <= W) return s + " ".repeat(W - w);
+			const t = truncateToWidth(s, W); // 可能比 W 短 1 列（省略号）——补足到恰好 W
+			const tw = visibleWidth(t);
+			return tw < W ? t + " ".repeat(W - tw) : t;
 		};
 
 		if (this.mode === "help") return this.renderHelp(W, H).map(padLine);
@@ -983,7 +1009,7 @@ export class QuestionnairePage {
 		const bits: string[] = [];
 		if (this.hint) bits.push(th.fg("warning", `⚠ ${this.hint}`));
 		else if (this.flash) bits.push(th.fg("success", `✓ ${this.flash}`));
-		else if (missing > 0) bits.push(th.fg("dim", `还有 ${missing} 题必答未完成`));
+		else if (missing > 0) bits.push(th.fg("dim", `还有 ${missing} 题必答未完成 · 连按两次 Enter 跳过`));
 		else if (answerable.length === 0) bits.push(th.fg("dim", "纯说明问卷 · Enter 确认"));
 		else bits.push(th.fg("success", "✓ 全部必答已完成，Enter 提交"));
 		if (focusedQ && focusedQ.type !== "note") {
@@ -1024,7 +1050,7 @@ export class QuestionnairePage {
 		if (below > 0) scrollBits.push(`▼${below}`);
 		const statusWithScroll =
 			scrollBits.length > 0
-				? `${statusLine}${th.fg("dim", `  ${scrollBits.join(" ")}（滚轮 / PgUp/PgDn 滚动）`)}`
+				? `${statusLine}${th.fg("dim", `  ${scrollBits.join(" ")}（滚轮/PgUp/PgDn）`)}`
 				: statusLine;
 
 		const lines = [...header, ...visible.map((c) => c.text)];
@@ -1034,7 +1060,9 @@ export class QuestionnairePage {
 	}
 
 	invalidate(): void {}
-	dispose(): void {}
+	dispose(): void {
+		clearTimeout(this.forceTimer);
+	}
 }
 
 /**

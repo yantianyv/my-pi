@@ -212,6 +212,39 @@ export function answerableQuestions(qn: Questionnaire): Question[] {
 	return qn.questions.filter((q) => q.type !== "note");
 }
 
+/** 问卷文案里的人称词命中（「你/我/您/咱们」：问卷里指向不明，应省略或改用「AI」「用户」） */
+export interface PersonWordHit {
+	/** 出现位置（如「3. 题题干」） */
+	where: string;
+	/** 命中处上下文片段 */
+	snippet: string;
+}
+
+export function findPersonWords(qn: Questionnaire): PersonWordHit[] {
+	const hits: PersonWordHit[] = [];
+	const scan = (where: string, text?: string): void => {
+		if (!text) return;
+		const re = /(你|您|咱们|我们|我)/g;
+		for (let m = re.exec(text); m; m = re.exec(text)) {
+			hits.push({ where, snippet: text.slice(Math.max(0, m.index - 6), m.index + 9).replace(/\s+/g, " ").trim() });
+		}
+	};
+	scan("标题", qn.title);
+	scan("问卷说明", qn.description);
+	scan("上下文", qn.context);
+	qn.questions.forEach((q, i) => {
+		const tag = `${i + 1}. ${q.type === "note" ? "说明" : "题"}`;
+		scan(`${tag}题干`, q.question);
+		scan(`${tag}描述`, q.description);
+		scan(`${tag}正文`, q.content);
+		q.options?.forEach((o, j) => {
+			scan(`${tag}选项 ${j + 1}`, o.label);
+			scan(`${tag}选项 ${j + 1}描述`, o.description);
+		});
+	});
+	return hits;
+}
+
 /** 必答完整性判定（提交校验用；选答题跳过不算未答，由调用方先判 required） */
 export function isAnswered(q: Question, v: AnswerValue | undefined): boolean {
 	if (q.type === "note") return true; // 说明题无需作答（不阻塞提交）

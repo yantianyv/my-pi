@@ -23,6 +23,7 @@ import { createQuestionnaire, initStore, listQuestionnaires, removeQuestionnaire
 import {
 	answeredProgress,
 	answerableQuestions,
+	findPersonWords,
 	flattenQuestions,
 	formatAnswersMessage,
 	NOTE_STYLES,
@@ -169,7 +170,8 @@ export function registerAskTool(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"需要用户从多个方案中抉择、或有多个问题要确认时，用 ask 工具创建问卷，而不是在正文里罗列问题让用户逐条回复。",
 			"需要用户审阅一段原文（待发草稿/方案/长说明）再给意见时，用 type=note 的说明题把原文放进问卷（content 装全文），后面跟 single/text 题收意见——用户在问卷里能直接看到内容，不必搁置问卷去对话里翻。",
-			"问卷整屏弹出后用户看不到你之前发的消息：问题若依赖上一条回复的内容（如「按上面的方案，选 A 还是 B」），必须附上上下文——用 includeLastMessage=true 自动带上你刚发的回复，或在 context 里手动摘要关键背景。不要假设用户记得聊天记录。",
+			"问卷整屏弹出后用户看不到 AI 在此之前发的消息：问题若依赖上一条回复的内容（如「按上面的方案，选 A 还是 B」），必须附上上下文——用 includeLastMessage=true 自动带上 AI 刚发的回复，或在 context 里手动摘要关键背景。不要假设用户记得聊天记录。",
+			"问卷文案（标题/说明/题干/选项/上下文）一律省略主语；必须指代时写「AI」「用户」，不写「你/我/您/咱们」——问卷里人称指向不明（「你」在对话中指用户，写进题面易读成 AI 在问谁）。",
 			"single/multi 必带 options 2~8 个，不要加「其他」（会自动追加）。",
 			"用户可能搁置问卷稍后回答：收到「已搁置」结果时不要追问，简要说明后结束本轮回复。",
 			"用户在问卷页 Ctrl+D 删除问卷后会得到 status=deleted 的工具结果：说明这些信息已不再需要，不要追问、不要重建同一份问卷；确实还需要时先向用户确认。",
@@ -194,7 +196,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			),
 			includeLastMessage: Type.Optional(
 				Type.Boolean({
-					description: "true 时自动把你上一条回复的文本附到问卷顶部（与 context 合并）",
+					description: "true 时自动把 AI 上一条回复的文本附到问卷顶部（与 context 合并）",
 				}),
 			),
 			questions: Type.Optional(
@@ -292,6 +294,12 @@ export function registerAskTool(pi: ExtensionAPI): void {
 			}
 
 			// TUI：整屏打开问卷页（排队链保证同批多份逐个打开）；登记 Working 行等待文本
+			const personNote = ((): string => {
+				const hits = findPersonWords(q);
+				if (!hits.length) return "";
+				const at = hits.slice(0, 3).map((h) => `${h.where}「${h.snippet}」`).join("、");
+				return `\n\n⚠️ 问卷文案里出现了人称词（${at}${hits.length > 3 ? ` 等 ${hits.length} 处` : ""}）：问卷一律省略主语，必须指代时写「AI」「用户」——下次创建时注意。`;
+			})();
 			const dims: TermDims = { w: 0, h: 0 };
 			setWorkingWait(`回答问卷「${q.title}」`);
 			let result: PageResult;
@@ -311,7 +319,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 				await refreshPendingStatus();
 				return {
 					content: [
-						{ type: "text", text: `${formatAnswersMessage(q, result.answers)}\n\n请根据用户的回答继续工作。` },
+						{ type: "text", text: `${formatAnswersMessage(q, result.answers)}\n\n请根据用户的回答继续工作。${personNote}` },
 					],
 					details: { ...details, status: "submitted", answered: answeredProgress(q, result.answers) },
 				};
@@ -327,7 +335,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 							type: "text",
 							text:
 								`用户删除了问卷「${q.title}」（问卷文件已删除）。这通常意味着这些问题已不再需要——` +
-								`请不要追问，也不要把同一份问卷重新创建一遍；若确实还需要这些信息，先向用户确认。`,
+								`请不要追问，也不要把同一份问卷重新创建一遍；若确实还需要这些信息，先向用户确认。${personNote}`,
 						},
 					],
 					details: { ...details, status: "deleted" },
@@ -346,7 +354,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 						text:
 							`用户暂时搁置了问卷「${q.title}」（已答 ${answeredProgress(q, result.answers)}/${total}，` +
 							`草稿已保存）。用户可随时通过 /answer 命令继续作答，答案会以用户消息送达。` +
-							`请简要告知用户这一点后结束本轮回复，不要追问这些问题。`,
+							`请简要告知用户这一点后结束本轮回复，不要追问这些问题。${personNote}`,
 					},
 				],
 				details: { ...details, status: "shelved", answered: answeredProgress(q, result.answers) },

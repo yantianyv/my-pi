@@ -44,7 +44,9 @@
 - 「问卷即文件」：`.pi/questionnaires/<id>.json`，手写 JSON 丢进目录也能被 `/answer` 扫描识别。创建即写文件并整屏弹出；Enter 提交（答案作工具结果返回）、Esc 搁置（写回 `status: draft`，`/answer` 续答）、用户删除或 AI `cancel` 即删文件。
 - 工具结果状态：`submitted` / `shelved` / `deleted` / `text-fallback`（非 TUI 降级：文件保留、AI 改在对话里逐题问）/ `cancelled`。**`/answer` 提交的答案经 `pi.sendUserMessage(followUp)` 送达；AI 建的问卷由用户直接 Enter 提交时答案先作为工具结果返回**。
 - 问卷级上下文：`context` 手动摘要或 `includeLastMessage=true` 自动附上一条回复文本（从 sessionManager 条目倒序提取、遇 user 消息即停、超长截尾 4000 字符），渲染为引用块（超 8 行折叠）；note 正文经 shared/markdown 渲染挂在「│ 」左边线下，超 20 行折叠；两者共享 `x` 展开键。
-- 键位：↑↓/Tab 移动（多行简答内 ↑↓ 走行间、到边界才跳题）、`Ctrl+↑/↓` 上/下题、PgUp/PgDn、滚轮滚动内容窗（不挪焦点；答案一览同样可滚）、空格选中、数字键 1-9 直选、`Ctrl+P` 答案一览（一览里 `C` 走官方 `copyToClipboard`）、`?` 键位表、`x` 折叠说明、`Ctrl+D` 或非输入行 `D` 两次确认删除。
+- 键位：↑↓/Tab 移动（多行简答内 ↑↓ 走行间、到边界才跳题）、`Ctrl+↑/↓` 上/下题、PgUp/PgDn、滚轮滚动内容窗（不挪焦点；答案一览同样可滚）、空格选中、数字键 1-9 直选、`Ctrl+P` 答案一览（一览里 `C` 走官方 `copyToClipboard`）、`?` 键位表、`x` 折叠说明、`Ctrl+D` 或非输入行 `D` 两次确认删除、被必答校验拦下后**再按一次 `Enter`（连按两次）跳过未答直接提交**（未答项在回执里标「（跳过）」）。
+- **强制提交为什么是连按两次 Enter**：普通终端把 `Ctrl+Enter` 与 `Enter` 发成同一个 `\r`，只有支持 kitty/modifyOtherKeys 的终端才发 `\x1b[13;5u`——依赖终端协议不可靠，故不再识别 `ctrl+enter`/`alt+enter`，只留「连按两次」（同 `deleteArmed` 的两连按模式）。`forceArmed` 有 **1 秒窗口**（`FORCE_SUBMIT_WINDOW_MS`）：首次 Enter 被拦下时置位并起 `setTimeout`，到点自动复原并撤掉那条提示（`dispose` 清定时器），`handleInput` 开头取走并清零——即窗口内且中间夹任何其他按键都会解除（防误触，有单测）；被拦下的提示行与状态行分别写「再按 Enter 跳过」「连按两次 Enter 跳过」。
+- **文案人称规范**：promptGuidelines 要求问卷文案（标题/说明/题干/选项/上下文）一律省略主语，必须指代时写「AI」「用户」（不写「你/我/您/咱们」）——整屏问卷里人称指向不明；创建时 `findPersonWords` 扫出命中项，随工具结果（提交/搁置/删除）回给 AI 提醒，不拦。
 - 整屏页 = overlay（width/maxHeight 100% + 左上锚点 + 每行补满全宽；pi 的 overlay 是逐行不透明合成，全屏即遮蔽聊天/HUD）；高度权威值由 `overlayOptions.visible` 回调每帧捕获（`tui.terminal.rows` 可能滞后）。首帧停在顶部不跟随焦点（长说明题从头读），按键后恢复跟随。已知限制：regular（内联）模式下全屏 overlay 与聊天共享原生滚动缓冲，滚轮上滑会看到残影（仅美观问题）；fullscreen 模式零污染。
 - 渲染细节：顶部进度条 ▰▰▱▱；长文本经 `wrapTextWithAnsi` 折行完整展示不截断、续行缩进对齐首行文本起点；滚动位置提示（▲▼ 行数）只在状态行右侧；`answerableQuestions()` 排除 note，是进度条/必答/回执的统一分母。
 

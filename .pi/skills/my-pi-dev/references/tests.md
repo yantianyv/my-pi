@@ -51,7 +51,7 @@ const mod = await import(pathToFileURL(bundle).href);
 | `test/mimo-omni.test.mjs` | 媒体内容块构造离线 18 项；`MIMO_LIVE=1` + 传音频/视频路径才真打 API |
 | `test/context-init.test.mjs` | /init 闭环的纯逻辑（不依赖 pi 包）：`estimateTokens` 口径、`pruneOldToolResults`（超预算才剪/按重读代价排序/write-edit 与近期不剪）、`checkContextArtifacts`（各上下文文件死指针、索引与 references 对应、frontmatter、空文件、无 skill 不误报）、`CONTEXT_OVERFLOW_RE` 命中与不误判 |
 | `test/crash-log.test.mjs` | 用 `PI_CRASH_LOG_FILE` 注入临时日志 + 打两份 bundle（同进程两实例 = 模拟 /reload）：启动头/process 监听器只挂一次；同一条崩溃只提醒一次（新建崩溃再提醒）、无 UI 不提醒也不写 ack、`/crash-log` 视图即标已看、`clear` 清日志与 ack |
-| `ask/test/ask.test.mjs` | A~T 场景 + 渲染不变量 |
+| `ask/test/ask.test.mjs` | A~U 场景 + 渲染不变量（U：连按两次 Enter 跳过必答直接提交 + 防误触 + 人称词提醒） |
 | `qr/test/qr.test.mjs` | A~L 共 12 场景（编码/半块渲染/PNG 往返/JPEG 往返/钳制/错误路径/`/qr` 命令） |
 | `hud/test/*` | 见 `hud-and-shared.md` |
 | `shared/test/shell-split.test.mjs` | 20 场景（顶层分隔符 / 引号转义 / 子 shell / 权限门关键样本 / heredoc） |

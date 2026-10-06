@@ -23,6 +23,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `btw/` — `/btw` 旁支问答：侧栏浮层多轮追问、`m` 转正附带、`/btw-config` 模型 auto 最便宜故障转移（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `claude-it.ts` — `/exit` 别名、无斜杠 `exit` 退出、Ctrl+C 取消当前 turn、双击 Ctrl+C 回退（`/rewind`）（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `context-init.ts` — `/init` 生成/维护项目唯一的 `AGENTS.md`：内容两问 + 信息四去向（`AGENTS.md` / skill / `STATUS.md` / 知识库）+ 目录对齐 + 审计复核（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `ask/` — 整屏问卷：`ask` 工具批量提问（七题型、最多 12 题）+ `/answer` 续答已搁置问卷；必答未完成时连按两次 Enter 可跳过未答直接提交 | `~/.pi/agent/extensions/` |
 | `extensions/` | `status-beacon.ts` — 全链路状态感知：执行中标题进度（spinner+工具活动）+ 五状态五音效 + 状态栏闪烁 + 提醒标题动画（见下；前身 task-alert） | `~/.pi/agent/extensions/` |
 | `extensions/` | `perm-gate.ts` — bash 命令权限门：硬拒绝 / 关注项 / 已记住的操作（意图缓存）+ AI 审核与人工确认面板（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
