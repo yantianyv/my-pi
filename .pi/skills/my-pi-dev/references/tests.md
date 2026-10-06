@@ -23,16 +23,16 @@ const mod = await import(pathToFileURL(bundle).href);
 
 产物 `.tmp-*` / `.dbg-*` 由 `.gitignore` 忽略、每次重生成。唯一例外：`qr/test/qr.test.mjs` 用 **jiti** 加载产物（产物内联的 qrcode 含动态 require，与 pi 运行时的加载方式一致）。
 
-## 前置：test/node_modules
+## 前置：src/extensions/node_modules
 
-集成类测试（ask / qr / workflow-mgr / `src/extensions/test/`）需要 `test/node_modules` 能解析到 pi 全局包（`@earendil-works/*`、`typebox`）。**仓库里没有任何脚本创建它**，是手工一次性设置、且被 gitignore：换机器需重建。
+集成类测试（ask / qr / workflow-mgr / `src/extensions/test/` 等）需要能解析到 pi 全局包（`@earendil-works/*`、`typebox`）。依赖统一放在 **`src/extensions/node_modules/`**（gitignore，不入库），所有子目录测试沿祖先向上解析到同一份。
 
-- Windows：`mklink /J "src\extensions\<test 目录>\test\node_modules" "<npm root -g 输出>"`
-- POSIX：`ln -s "$(npm root -g)" src/extensions/<name>/test/node_modules`
-- `hud/test/` 与 `shared/test/` 不需要（前者用 esbuild `alias` 把 pi / pi-ai 别名到内联的 `.tmp-pi-mock.mjs`，后者零外部依赖）
-- `webdav-kb/test/node_modules/` 是真实 npm 依赖树（跑 `npm install` 即可）
+重建（换机器 / pi 升级后）：`node src/extensions/test/relink-deps.mjs`（仓库根执行）。脚本把全局 `pi-coding-agent/node_modules` 树扁平搬运过来（第三方 + `@earendil-works/*` + pi 本体），优先 symbolic link / junction，不支持链接的文件系统（如 D:）回退为递归复制（约 270MB）。**各 test 子目录里不要再放 node_modules**——空壳会挡在解析路径上。
 
-缺 junction 时集成类测试会 `ERR_MODULE_NOT_FOUND`。
+- `hud/test/` 与 `shared/test/` 不需要（前者用 esbuild `alias` 把 pi / pi-ai 别名到内联的 `.tmp-pi-mock.mjs` 并需补齐用到的导出，后者零外部依赖）
+- `webdav-kb/test/node_modules/` 另有真实 npm 依赖树（跑 `npm install` 即可）
+
+缺依赖时集成类测试会 `ERR_MODULE_NOT_FOUND`。
 
 ## mock 方式
 
