@@ -57,17 +57,18 @@ await build(buildOpts(join(HUD_DIR, "hud-balance.ts"), BUNDLE_BALANCE));
 const cost = await import(pathToFileURL(BUNDLE_COST).href);
 const balance = await import(pathToFileURL(BUNDLE_BALANCE).href);
 
-// ---- 测试夹具：mock ctx（provider=zai-coding-cn + 一条 assistant 消息；costTotal 用于颜色断言） ----
-const mkMsg = (costTotal = 0) => ({
+// ---- 测试夹具：mock ctx（provider=zai-coding-cn + 一条 assistant 消息） ----
+// costTotal 是 pi 目录 USD 成本（只在未登记型号的回落路径上生效）；tokens 可覆盖 token 数
+const mkMsg = (costTotal = 0, tokens = {}, modelId = "glm-5.2") => ({
 	role: "assistant",
 	provider: "zai-coding-cn",
-	model: "glm-5.2",
+	model: modelId,
 	timestamp: Date.now(),
-	usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 0, cost: { total: costTotal } },
+	usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 0, ...tokens, cost: { total: costTotal } },
 });
-const mkCtx = (costTotal = 0) => ({
+const mkCtx = (costTotal = 0, tokens = {}, modelId) => ({
 	model: { provider: "zai-coding-cn" },
-	sessionManager: { getBranch: () => [{ type: "message", message: mkMsg(costTotal) }] },
+	sessionManager: { getBranch: () => [{ type: "message", message: mkMsg(costTotal, tokens, modelId) }] },
 });
 
 // ---- 场景 1：zai5hWindow 窗口选择 ----
@@ -148,12 +149,40 @@ check("积分速率高但零等效成本 → success（颜色与积分数字解�
 check("累计文本 = 🪙150", parts?.[1]?.text === "🪙150");
 check("累计染色 dim", parts?.[1]?.color === "dim");
 
-// 「贵不贵」按 pi 内置价格（usage.cost.total，USD 等效成本）染色：
-// turn_end 钩子经 recordTurnCosts 把 usd 增量推入 costEvents（真实链路），此处模拟之
-// → $1 消息 ÷ 2min = $0.5/min ≥ $0.02 → error
-cost.recordTurnCosts(mkCtx(1.0));
-const partsCostly = cost.meteredRateText(mkCtx(1.0), tb + 120_000);
-check("高等效成本染色 error（$0.5/min ≥ $0.02，与积分无关）", partsCostly?.[0]?.color === "error", JSON.stringify(partsCostly));
+// 「贵不贵」按成本信号染色：zai-coding-cn 的成本轨走国内官方人民币价（ZAI_PRICES 直算），
+// turn_end 钩子经 recordTurnCosts 把增量推入 costEvents（真实链路），此处模拟之。
+// 阈值仍是 ¥/min：< 0.01 绿 / < 0.1 橙 / ≥ 0.1 红
+cost.recordTurnCosts(mkCtx(1.0)); // 小 token 量（glm-5.2 100/50/10）→ ¥ 成本信号极低
+const partsCheap = cost.meteredRateText(mkCtx(1.0), tb + 120_000);
+check(
+	"小 token 量 → success（颜色由国内价信号决定，与积分数字无关）",
+	partsCheap?.[0]?.color === "success",
+	JSON.stringify(partsCheap),
+);
+
+// 大 token 量：glm-5.2 输出 200k → ¥5.6 ÷ 2min = ¥2.8/min ≥ ¥0.1 → error
+const bigTokens = { input: 1_000, output: 200_000, cacheRead: 0 };
+cost.resetCostTracking(mkCtx());
+cost.sampleZaiCredits(100, 5000, tb + 130_000);
+cost.sampleZaiCredits(250, 5000, tb + 190_000); // 2 分钟内 +150 → 75/min
+cost.recordTurnCosts(mkCtx(1.0, bigTokens));
+const partsCostly = cost.meteredRateText(mkCtx(1.0, bigTokens), tb + 250_000);
+check("高消耗（¥2.8/min ≥ ¥0.1）染色 error", partsCostly?.[0]?.color === "error", JSON.stringify(partsCostly));
+
+// 未登记型号（如别人家的模型混在同一会话）→ 回落 pi 目录 USD 价：
+// $1 ÷ 2min = $0.5/min，无论按 USD 阈值还是折 ¥ 都在红档
+cost.resetCostTracking(mkCtx());
+cost.sampleZaiCredits(100, 5000, tb + 260_000);
+cost.sampleZaiCredits(250, 5000, tb + 320_000);
+cost.recordTurnCosts(mkCtx(1.0, {}, "some-other-model"));
+const partsFallback = cost.meteredRateText(mkCtx(1.0, {}, "some-other-model"), tb + 380_000);
+check("未登记型号回落 USD 价 → error", partsFallback?.[0]?.color === "error", JSON.stringify(partsFallback));
+
+// 复位本场景的状态，后续断言依赖「累计 🪙150 + 窗口内无新样本、无成本事件」
+cost.resetCostTracking(mkCtx());
+cost.resetZaiCreditTracking();
+cost.sampleZaiCredits(100, 5000, tb);
+cost.sampleZaiCredits(250, 5000, tb + 60_000);
 
 // 零速率染色：事件滑出 10 分钟滚动窗口（cutoff = now-600s 需晚于事件 ts=tb+60s）+ 零等效成本 → success
 const low = cost.meteredRateText(mkCtx(), tb + 661_000);

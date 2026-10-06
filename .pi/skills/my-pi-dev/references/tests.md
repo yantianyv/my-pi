@@ -57,6 +57,7 @@ const mod = await import(pathToFileURL(bundle).href);
 | `hud/test/*` | 见 `hud-and-shared.md` |
 | `model-config/test/panel.test.mjs` | 面板主页/动作层/策略层渲染与键位：AUTO·FREE 标固定语义且 Enter 只给提示、用途行 Enter 出动作层、section 行不被选中、↑ 越界不越位、Esc 逐层退出、非交互 `renderTextSummary` 列出策略槽与全部用途 |
 | `shared/test/model-setting.test.mjs` | 两层模型设置的解析链：本地固定优先于中心、中心缺记录用注册默认策略、未映射槽回落会话模型、FREE 只在免费池取且带链、不可用回落 AUTO、本地键读改写保留同文件其它键、旧值 auto-not-free 归一化、用途声明去重（沙箱 HOME，不碰真实 `~/.pi/agent`） |
+| `shared/test/model-util.test.mjs` | 价格口径与筛选：目录 0 价的高速档不判免费（`COST_OVERRIDES`）、有效价参与排序、真 0 价仍免费、动态定价与无价排最后、`excludeFree` 不吃高速档 |
 | `shared/test/shell-split.test.mjs` | 20 场景（顶层分隔符 / 引号转义 / 子 shell / 权限门关键样本 / heredoc） |
 | `workflow-mgr/test/render.test.mjs` | 渲染 16 场景 A~R（R=多槽绑定），含 `__PI_HUD_API__` 注册/通知/注销 |
 | `workflow-mgr/test/stale-ctx.test.mjs` | session 替换后 getStore 不崩（固化 cwd）+ cwd 变化重建 |

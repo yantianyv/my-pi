@@ -45,10 +45,13 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(BUNDLE).href);
-const { goModelKey, kimiModelKey, GO_PRICES, KIMI_PRICES } = mod;
+const { goModelKey, kimiModelKey, zaiModelKey, GO_PRICES, KIMI_PRICES, ZAI_PRICES } = mod;
 rmSync(BUNDLE, { force: true });
 
-check("导出 goModelKey / kimiModelKey / GO_PRICES / KIMI_PRICES", typeof goModelKey === "function" && typeof kimiModelKey === "function" && !!GO_PRICES && !!KIMI_PRICES);
+check(
+	"导出 goModelKey / kimiModelKey / zaiModelKey / 三张价目表",
+	typeof goModelKey === "function" && typeof kimiModelKey === "function" && typeof zaiModelKey === "function" && !!GO_PRICES && !!KIMI_PRICES && !!ZAI_PRICES,
+);
 if (typeof goModelKey !== "function" || typeof kimiModelKey !== "function") process.exit(1);
 
 // ---- OpenCode Go ----
@@ -75,6 +78,30 @@ check("kimi-for-coding → K2.7 Code 档（K2.8 无公开价，按此估算）",
 check("k3 / k3-256k → K3 档", kimiModelKey("k3") === "kimi-k3" && kimiModelKey("k3-256k") === "kimi-k3");
 check("kimi-k2.7-code-highspeed 仍为高速版", kimiModelKey("kimi-k2.7-code-highspeed") === "kimi-k2.7-code-highspeed");
 check("未知 id 落 K2.7 Code 兜底", kimiModelKey("some-unknown-model") === "kimi-k2.7-code");
+
+// ---- Z.AI 国内（zai-coding-cn 通道）----
+check("glm-5.3-highspeed 优先于 glm-5.3", zaiModelKey("glm-5.3-highspeed") === "glm-5.3-highspeed", String(zaiModelKey("glm-5.3-highspeed")));
+check("glm-5.3-flash 优先于 glm-5.3", zaiModelKey("glm-5.3-flash") === "glm-5.3-flash", String(zaiModelKey("glm-5.3-flash")));
+check("glm-5.3 → glm-5.3", zaiModelKey("glm-5.3") === "glm-5.3");
+check("glm-5.2-highspeed 优先于 glm-5.2", zaiModelKey("glm-5.2-highspeed") === "glm-5.2-highspeed");
+check("glm-4.6v → glm-4.6v", zaiModelKey("glm-4.6v") === "glm-4.6v");
+check("未登记型号返回 null（回落 pi 目录价）", zaiModelKey("gpt-6-luna") === null);
+check(
+	"高速档不得为 0 价（0 会让 HUD 恒显示 0 成本）",
+	(ZAI_PRICES["glm-5.3-highspeed"]?.input ?? 0) > 0 && (ZAI_PRICES["glm-5.3-highspeed"]?.output ?? 0) > 0,
+);
+check(
+	"国内官方价口径：Flash 0.8/2.8、5.3 旗舰 8/28（元/百万 tokens）",
+	ZAI_PRICES["glm-5.3-flash"].input === 0.8 && ZAI_PRICES["glm-5.3-flash"].output === 2.8 && ZAI_PRICES["glm-5.3"].input === 8 && ZAI_PRICES["glm-5.3"].output === 28,
+);
+check(
+	"FlashX（highspeed）价为 Flash 的 2.5 倍",
+	ZAI_PRICES["glm-5.3-highspeed"].input === ZAI_PRICES["glm-5.3-flash"].input * 2.5 && ZAI_PRICES["glm-5.3-highspeed"].output === ZAI_PRICES["glm-5.3-flash"].output * 2.5,
+);
+check(
+	"glm-4.6v 有 32K 提示长度分档",
+	ZAI_PRICES["glm-4.6v"].highTier?.threshold === 32_768 && ZAI_PRICES["glm-4.6v"].highTier?.input === 2,
+);
 
 console.log(failures === 0 ? "\n全部通过 ✓" : `\n${failures} 项失败 ✗`);
 process.exit(failures === 0 ? 0 : 1);

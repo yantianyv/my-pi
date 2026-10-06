@@ -12,22 +12,40 @@ import type { Model } from "@earendil-works/pi-ai";
 export type AnyModel = Model<any>;
 
 /**
+ * 目录价缺失（写 0）但实为付费的模型：价格覆盖，只用于「是否免费」与价格排序。
+ * 按 0 价判免费会让 FREE 策略选中这些高速档，也会让 HUD 恒显示 0 成本。
+ * 单位与用途无关（只要非 0）；数值取对应高速档价（glm-5.3-highspeed 即国内 GLM-5.3-FlashX）。
+ */
+const COST_OVERRIDES: Record<string, { input: number; output: number }> = {
+	"glm-5.3-highspeed": { input: 0.375, output: 1.25 },
+	"glm-5.2-highspeed": { input: 0.375, output: 1.25 },
+};
+
+/** 有效价格（覆盖表优先，其次目录）；无价格信息返回 null */
+function effectiveCost(m: AnyModel): { input: number; output: number } | null {
+	const o = COST_OVERRIDES[m.id];
+	if (o) return o;
+	const c = m.cost;
+	if (!c) return null;
+	return { input: c.input ?? 0, output: c.output ?? 0 };
+}
+
+/**
  * 模型单价合计（input + output，$/M tokens）；动态定价模型用负数标记
  * （如 openrouter/auto 为 -1000000），视为价格未知排到最后，避免 auto 误选。
  */
 export function modelTotalCost(m: AnyModel): number {
-	const c = m.cost;
+	const c = effectiveCost(m);
 	if (!c) return Infinity;
-	const { input = 0, output = 0 } = c;
-	if (input < 0 || output < 0) return Infinity;
-	return input + output;
+	if (c.input < 0 || c.output < 0) return Infinity;
+	return c.input + c.output;
 }
 
 /** 是否免费模型（价格 ≤ 0；FREE 策略的候选池口径） */
 export function isFreeModel(m: AnyModel): boolean {
-	const c = m.cost;
+	const c = effectiveCost(m);
 	if (!c) return false;
-	return (c.input ?? 0) <= 0 && (c.output ?? 0) <= 0;
+	return c.input <= 0 && c.output <= 0;
 }
 
 /** 可用（已认证）模型按价格升序排列，同价按 id 字典序保证列表稳定；excludeFree 时忽略免费模型 */

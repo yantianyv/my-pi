@@ -34,14 +34,15 @@ hud 自己只推 `hud-bash` / `balance-error` / `model-switch` 三个 key，其�
 - `__PI_HUD_ACTIVE__`：扩展入口与 `installFooter()` 置 true，footer `dispose()` 与 `session_shutdown` 置 false；每次 install/dispose 同时 `process.emit("hud:state-change")`。
 - `__PI_HUD_API__`：`registerExtraRows(provider)`（provider 为 `(theme, width) => string[] | null`，返回注销函数）与 `notifyExtraRowsUpdate()`。**当前 workflow-mgr 已依赖**：hud 开启时它注册渲染函数，常驻面板内容改由 hud 在 footer 最底部渲染、自绘面板隐藏；hud 关闭或 showPanel 关时注销并恢复自绘（`workflow-mgr/panel.ts` 与 `events.ts` 监听 `hud:state-change`）。
 
-**余额与定价**：`BALANCE_ADAPTERS` 覆盖 11 个 provider——`deepseek`、`xiaomi`、`kimi-coding`、`moonshotai`、`moonshotai-cn`、`xiaomi-token-plan-cn`、`openrouter`、`volcengine-coding`、`sensenova`、`opencode-go`、`zai-coding-cn`；余额状态统一 `ok|warning|error`，可返回实时余额 / 控制台链接 / 多窗口 quota / `rateText`。成本口径：DeepSeek / Kimi / MiMo 按官方人民币定价直算（恒 ¥，不依赖汇率），OpenCode Go 按其 USD 定价直算，其余用 pi 原始 USD 成本并在显示时换算；Z.AI 走积分独立轨（数字是积分、颜色按 USD 等效成本）。**汇率三态**：实时（frankfurter → open.er-api 双源，1h 节流）→ 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`）→ 无（双源请求失败且无缓存时显示原始货币 USD，**不用固定近似值**）。余额刷新周期 5min。
+**余额与定价**：`BALANCE_ADAPTERS` 覆盖 11 个 provider——`deepseek`、`xiaomi`、`kimi-coding`、`moonshotai`、`moonshotai-cn`、`xiaomi-token-plan-cn`、`openrouter`、`volcengine-coding`、`sensenova`、`opencode-go`、`zai-coding-cn`；余额状态统一 `ok|warning|error`，可返回实时余额 / 控制台链接 / 多窗口 quota / `rateText`。成本口径：DeepSeek / Kimi / MiMo 按官方人民币定价直算（恒 ¥，不依赖汇率），OpenCode Go 按其 USD 定价直算，Z.AI 国内通道（`zai-coding-cn`）按国内官方人民币价直算（`ZAI_PRICES`，含高速档；未登记型号回落 pi 目录价），其余用 pi 原始 USD 成本并在显示时换算；Z.AI 走积分独立轨（数字是积分、颜色取人民币轨信号，无人民币事件时回落 USD × 汇率）。**汇率三态**：实时（frankfurter → open.er-api 双源，1h 节流）→ 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`）→ 无（双源请求失败且无缓存时显示原始货币 USD，**不用固定近似值**）。余额刷新周期 5min。
 
 **定价/余量数据的核对方法**（上游改价或改模型时走这三步）：
-1. pi 侧权威价目：`~/.pi/agent/models-store.json`（按 provider 分文件，每次会话自动刷新）——可直接对照 `hud-cost.ts` 的 `DEEPSEEK_PRICES` / `MIMO_PRICES` / `KIMI_PRICES` / `GO_PRICES`；
+1. pi 侧权威价目：`~/.pi/agent/models-store.json`（按 provider 分文件，每次会话自动刷新）——可直接对照 `hud-cost.ts` 的 `DEEPSEEK_PRICES` / `MIMO_PRICES` / `KIMI_PRICES` / `GO_PRICES` / `ZAI_PRICES`；
+   - pi 目录把部分型号的 `cost` 写成 0（已知：`glm-5.3-highspeed`、`glm-5.2-highspeed`）——判 0 为免费会让 FREE 策略选中它们，故 `shared/model-util.ts` 的 `COST_OVERRIDES` 兜住生效价（只影响「是否免费」与排序）；新增此类型号时同处登记；
 2. 现网接口实测：`/coding/v1/usages`（Kimi）、`/zen/go/v1/usage`（OpenCode Go）、`/user/balance`（DeepSeek）、`/api/v1/key`（OpenRouter）、`/api/monitor/usage/quota/limit`（Z.AI）、`/v1/models`（火山方舟 / SenseNova），curl 一遍看字段形状是否变；
 3. 官方定价页与模型列表：OpenCode Go 表、Kimi 开放平台定价、DeepSeek 定价、火山 Coding Plan 套餐概览。
 
-模型 id 映射改动后跑 `node src/extensions/hud/test/price-keys.test.mjs`（盯 Go 与 Kimi 的路由键）。
+模型 id 映射改动后跑 `node src/extensions/hud/test/price-keys.test.mjs`（盯 Go / Kimi / Z.AI 的路由键）与 `node src/extensions/shared/test/model-util.test.mjs`（盯 0 价高速档不被判免费）。
 
 **两套速率口径**：
 

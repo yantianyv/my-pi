@@ -829,6 +829,66 @@ function goCostUsd(u: AssistantMessage["usage"], modelId: string, ts: number): n
 	return ((miss * u.input + hit * u.cacheRead + out * u.output + write * u.cacheWrite) * peak) / 1_000_000;
 }
 
+// ---------------------------------------------------------------------------
+// Z.AI 国内（open.bigmodel.cn）官方人民币定价（元/百万 tokens）
+// 来源：https://docs.bigmodel.cn/cn/guide/start/pricing（缓存存储列官方标「限时免费」，不计）
+//   国际站 api.z.ai 的同款 GLM 是 USD 价目（pi 目录里 zai / zai-coding-cn 的 cost 即该口径），
+//   两站价差明显，故只给国内通道套本表；国际通道仍用 pi 目录价。
+//   高速档：pi 目录 id 为 glm-5.3-highspeed / glm-5.2-highspeed 且三项价格写 0；国内在售的对应
+//   型号是 GLM-5.3-FlashX（2/7），5.2 高速档国内未上架，按旗舰价 1/4 折算预留。
+// 用途：zai-coding-cn 的成本轨（颜色信号与累计）。该通道按订阅积分计费，积分只反映额度消耗，
+//   价格信号得用真实单价，否则高速档会恒显示 0 成本、恒绿灯。
+// ---------------------------------------------------------------------------
+
+interface ZaiPrice {
+	input: number; // 输入（缓存未命中）
+	cacheHit: number; // 缓存命中
+	output: number;
+	highTier?: {
+		// 官方分档按单次请求的提示长度（输入 + 缓存命中）判定
+		threshold: number;
+		input: number;
+		cacheHit: number;
+		output: number;
+	};
+}
+
+export const ZAI_PRICES: Record<string, ZaiPrice> = {
+	"glm-5.3": { input: 8, cacheHit: 2, output: 28 },
+	"glm-5.3-flash": { input: 0.8, cacheHit: 0.23, output: 2.8 },
+	"glm-5.3-highspeed": { input: 2, cacheHit: 0.57, output: 7 }, // 国内在售名：GLM-5.3-FlashX
+	"glm-5.2": { input: 8, cacheHit: 2, output: 28 },
+	"glm-5.2-highspeed": { input: 2, cacheHit: 0.57, output: 7 }, // 国内未上架，按旗舰 1/4 折算预留
+	"glm-4.6v": {
+		input: 1,
+		cacheHit: 0.2,
+		output: 3,
+		highTier: { threshold: 32_768, input: 2, cacheHit: 0.4, output: 6 },
+	},
+};
+
+/** 模型 id → ZAI_PRICES 键；未登记型号返回 null（调用方回落 pi 目录价） */
+export function zaiModelKey(id: string): string | null {
+	const s = id.toLowerCase();
+	if (s.includes("glm-5.3-highspeed") || s.includes("glm-5.3-flashx")) return "glm-5.3-highspeed";
+	if (s.includes("glm-5.3-flash")) return "glm-5.3-flash";
+	if (s.includes("glm-5.3")) return "glm-5.3";
+	if (s.includes("glm-5.2-highspeed") || s.includes("glm-5.2-flashx")) return "glm-5.2-highspeed";
+	if (s.includes("glm-5.2")) return "glm-5.2";
+	if (s.includes("glm-4.6v")) return "glm-4.6v";
+	return null;
+}
+
+/** Z.AI 国内单条消息成本（元）；未登记型号返回 null，由调用方回落 pi 目录价 */
+function zaiCostCny(u: AssistantMessage["usage"], modelId: string): number | null {
+	const key = zaiModelKey(modelId);
+	const p = key ? ZAI_PRICES[key] : undefined;
+	if (!p) return null;
+	const promptTokens = u.input + u.cacheRead;
+	const tier = p.highTier && promptTokens > p.highTier.threshold ? p.highTier : p;
+	return (tier.input * u.input + tier.cacheHit * u.cacheRead + tier.output * u.output) / 1_000_000;
+}
+
 /**
  * 单条 assistant 消息的消耗成本（原始货币，双轨）：
  * - DeepSeek / Kimi（含 Kimi For Coding）/ MiMo → { cny }：官方人民币定价直算，永不依赖汇率
@@ -846,6 +906,10 @@ function msgCost(m: AssistantMessage): MsgCost {
 		return { cny: kimiCostCny(m.usage, m.model) };
 	}
 	if (m.provider === "opencode-go") return { usd: goCostUsd(m.usage, m.model, m.timestamp) };
+	if (m.provider === "zai-coding-cn") {
+		const cny = zaiCostCny(m.usage, m.model);
+		if (cny !== null) return { cny };
+	}
 	return { usd: m.usage.cost.total };
 }
 
@@ -881,10 +945,14 @@ export function meteredRateText(ctx: ExtensionContext, now: number): RateTextPar
 			return [{ text: `${fmtNum(t.input + t.output + t.cacheRead)} tokens`, color: "dim" }];
 		}
 		const perMin = computeZaiCreditRate(now);
-		const usdPerMin = computeRate(now).usd ?? 0;
-		const rate = usdCnyRate;
+		const { cny: cnyPerMin, usd: usdPerMin } = computeRate(now);
+		// 价格信号优先用人民币轨（ZAI_PRICES 直算），无人民币事件时回落 USD × 汇率
 		const color =
-			rate !== null && rate > 0 ? rateColor(usdPerMin * rate, true) : rateColor(usdPerMin, false);
+			cnyPerMin !== null && cnyPerMin > 0
+				? rateColor(cnyPerMin, true)
+				: usdCnyRate !== null && usdCnyRate > 0
+					? rateColor((usdPerMin ?? 0) * usdCnyRate, true)
+					: rateColor(usdPerMin ?? 0, false);
 		return [
 			{ text: `${CREDIT_SYMBOL}${perMin.toFixed(2)}/min`, color },
 			{ text: `${CREDIT_SYMBOL}${fmtNum(zaiCreditSessionTotal)}`, color: "dim" },
