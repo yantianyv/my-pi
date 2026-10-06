@@ -195,7 +195,7 @@ export function registerTools(pi: ExtensionAPI) {
 			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）；动作一律作用于本会话绑定的工作流。" +
 			"新建优先用 import：先 write 一份草稿 json 再一次性导入（比逐条 add 省 token）；add 只用于后续增补调整。" +
 			"import 草稿结构：{\"mode\":\"human-ai\",\"stages\":[{\"id\":\"design\",\"name\":\"阶段名\",\"goal\":\"阶段目标\",\"tasks\":[{\"title\":\"任务标题\",\"desc\":\"目标\",\"humanTasks\":[],\"aiTasks\":[],\"deliverable\":\"\",\"doneSignal\":\"\",\"deps\":[\"0.1\"]}]}]}——id 缺省自动生成（0.1/1.2 式），deps 可引用本批未来 id；工作流非空时拒绝导入（先 archive/reset）。",
-		promptSnippet: "workflow: create/update the human-AI collaboration workflow definition",
+		promptSnippet: "工作流定义：wf_workflow(action, …) → 阶段→任务的增删改与一次性导入",
 		parameters: workflowParams,
 		async execute(_id, params: WorkflowParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
@@ -601,7 +601,7 @@ export function registerTools(pi: ExtensionAPI) {
 		description:
 			"工作流管理：获取当前阶段、当前任务（含人机分工、交付物、完成信号）、下一步、阻塞项、里程碑。" +
 			"会话开始时、每次用户汇报进展后、以及推进任务前都应调用。",
-		promptSnippet: "get workflow status and next action",
+		promptSnippet: "工作流状态：wf_status() → 当前阶段/任务分工/下一步/阻塞项/里程碑",
 		parameters: statusParams,
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
@@ -622,7 +622,7 @@ export function registerTools(pi: ExtensionAPI) {
 			"无参数：自动切到下一个满足依赖的待办（无当前任务则开始第一个；没有下一个则全部完成，可 wf_workflow archive 收尾）。" +
 			"taskId=X：显式切换（同时完成当前）；对 blocked 任务即解除阻塞并开始；complete=false = 搁置当前任务（回 todo）直接切换。" +
 			"调用前先按当前任务的「完成信号」验证其确实完成（检查交付物、运行验证命令等）。",
-		promptSnippet: "switch to the next workflow task (completing the current one)",
+		promptSnippet: "推进工作流：wf_switch([taskId][, complete]) → 完成当前任务并开始下一个",
 		parameters: switchParams,
 		async execute(_id, params: SwitchParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
@@ -755,7 +755,7 @@ export function registerTools(pi: ExtensionAPI) {
 		name: "wf_block",
 		label: "标记阻塞",
 		description: "把任务标记为阻塞并记录原因（如等待导师意见、等待数据）。解除时用 wf_switch 重新开始。",
-		promptSnippet: "mark a workflow task blocked",
+		promptSnippet: "标记阻塞：wf_block(reason[, taskId]) → 任务转 blocked 并记录原因",
 		parameters: blockParams,
 		async execute(_id, params: BlockParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
@@ -787,7 +787,7 @@ export function registerTools(pi: ExtensionAPI) {
 		description:
 			"把任务状态回退到 todo 或 doing（如发现误标完成、需要重做）。" +
 			"回退后若该任务被其他已完成任务依赖，会输出依赖警告清单（不自动回退下游，由你判断）。",
-		promptSnippet: "rollback a workflow task to todo or doing",
+		promptSnippet: "回退任务：wf_rollback(taskId, to) → 回到 todo/doing，并列出下游依赖警告",
 		parameters: rollbackParams,
 		async execute(_id, params: RollbackParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
@@ -839,7 +839,7 @@ export function registerTools(pi: ExtensionAPI) {
 			"记：用户拍板的选择、硬约束、需后续遵守的结论、会随时间变化的进度/状态。\n" +
 			"不记：琐碎细节、任务字段已覆盖的内容（分工/交付物/完成信号）。\n" +
 			"同主题更新：有 key 用同 key add 顶替，无 key 用 edit 改原记录——不留两条互相矛盾的记录。",
-		promptSnippet: "记录当前步骤产生、后续步骤需要知晓的信息",
+		promptSnippet: "记录信息：wf_note(action, …) → 后续步骤需要知晓的结论/状态（list/add/edit/remove）",
 		parameters: noteParams,
 		async execute(_id, params: NoteParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
@@ -945,7 +945,7 @@ export function registerTools(pi: ExtensionAPI) {
 		description:
 			"设置/更新/删除里程碑（名称/日期/完成态）。名称不存在则自动创建，如 开题、中期、答辩。" +
 			"remove=true 删除该里程碑；newName 给已存在的里程碑改名（保留日期/完成态）。",
-		promptSnippet: "set a workflow milestone date or status",
+		promptSnippet: "里程碑：wf_milestone(name[, date][, done][, remove][, newName]) → 新建/更新/改名/删除",
 		parameters: milestoneParams,
 		async execute(_id, params: MilestoneParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);

@@ -271,7 +271,7 @@ function normalizeNewlines(s: string): string {
 
 	// ---- /clipboard：用户自查剪贴板（/clipboard clear 清空） ----
 	pi.registerCommand("clipboard", {
-		description: "查看/清空剪贴板：/clipboard（显示当前剪贴板内容）、/clipboard clear（清空）",
+		description: "剪贴板：查看当前内容（clear 清空）",
 		handler: async (args, ctx) => {
 			const arg = (args ?? "").trim().toLowerCase();
 			if (arg === "clear" || arg === "off") {

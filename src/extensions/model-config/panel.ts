@@ -20,7 +20,6 @@ import { ModelSelectOverlay, listAvailableModels, modelHasVision } from "../shar
 import {
 	LOCAL_AUTO,
 	STRATEGIES,
-	STRATEGY_DESC,
 	STRATEGY_LABEL,
 	listPurposeDecls,
 	loadModelConfigState,

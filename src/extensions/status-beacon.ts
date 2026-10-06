@@ -695,7 +695,7 @@ export default function (pi: ExtensionAPI) {
 
 	// /beacon 命令：概括模型选择（无参官方面板 / auto / provider/id）+ status 查看在场门控
 	pi.registerCommand("beacon", {
-		description: "status-beacon：Working 行概括模型（无参选面板 / auto / provider/id）；/beacon status 查看提示音在场门控状态",
+		description: "提示音与概括模型：无参开模型面板；status 看在场门控",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (arg === "status" || arg === "presence") {

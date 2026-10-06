@@ -66,7 +66,7 @@ export function renderTextSummary(ctx: ExtensionContext): string {
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("model-config", {
 		description:
-			"模型配置面板：策略槽（AUTO/FREE 固定，MAX/FAST/LITE/BASE/BATCH 可重指）+ 各插件用途的模型设置",
+			"模型配置：策略槽与各插件用途的模型设置（无参开面板）",
 		handler: async (_args: string, ctx: ExtensionContext) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify(renderTextSummary(ctx), "info");

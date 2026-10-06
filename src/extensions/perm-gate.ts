@@ -1153,7 +1153,7 @@ export default function (pi: ExtensionAPI) {
 	// （名单编辑走配置文件，不提供管理面板）
 	pi.registerCommand("perm-gate", {
 		description:
-			"bash 命令权限门：查看状态 / on / off / sudo on|off / reload / model [provider/id|auto] / prune",
+			"bash 权限门：状态与开关（on|off / sudo / model / prune）",
 		handler: async (args, ctx) => {
 			const sub = args.trim().toLowerCase();
 			// 未知子命令不静默当「查状态」——拼错时给用法，避免用户以为已生效

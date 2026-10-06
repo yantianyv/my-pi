@@ -46,7 +46,7 @@ function configSummary(cfg: Cfg, unlocked: boolean): string {
 export function registerKbCommands(pi: ExtensionAPI): void {
 	// ---------- /kb-config ----------
 	pi.registerCommand("kb-config", {
-		description: "知识库（WebDAV）配置面板：地址/凭据/代理/vault 口令/连通测试/只读模式（TUI 交互，无子命令）",
+		description: "知识库配置面板：地址/凭据/代理/vault 口令/连通测试",
 		async handler(_args, ctx) {
 			const cfg = loadConfig(agentConfigDir());
 			// 所有配置修改均通过 TUI 面板完成；参数一律忽略（不再有子命令）

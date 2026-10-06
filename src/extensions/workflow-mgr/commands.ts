@@ -58,8 +58,7 @@ export function registerCommand(pi: ExtensionAPI) {
 	};
 
 	const wfmgDesc =
-		"人机协作任务面板：/workflow-config 打开轻量功能浮窗（显示详细信息/常驻面板开关，↑↓ 选择 Enter 执行 Esc 关闭）；" +
-		"非 TUI 环境打印文本面板。";
+		"人机协作任务面板：无参开功能浮窗（详细信息 / 常驻面板开关）";
 	pi.registerCommand("workflow-config", { description: wfmgDesc, handler: workflowConfigHandler });
 
 	/* ---------- /wf-resume：官方会话选择器 + switchSession 恢复（工作流弹窗「从 resume 中加载」入口） ---------- */
@@ -98,7 +97,7 @@ export function registerCommand(pi: ExtensionAPI) {
 		await ctx.switchSession(picked);
 	};
 	pi.registerCommand("wf-resume", {
-		description: "恢复历史会话（官方会话选择器，等价手动 /resume）；工作流选择弹窗「从 resume 中加载」的内部入口",
+		description: "恢复历史会话（官方选择器，等价 /resume）",
 		handler: resumeHandler,
 	});
 }

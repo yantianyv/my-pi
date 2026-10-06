@@ -168,7 +168,7 @@ export default function (pi: ExtensionAPI) {
 	registerModelConfigCommand(pi, {
 		command: "btw-config",
 		description:
-			"配置 btw 使用的模型：auto（由 model-config 管理）或 provider/modelId；不带参数进入交互选择（含搜索）",
+			"btw 模型：auto（由 model-config 管理）或 provider/modelId（无参开选择浮层）",
 		displayName: "btw 模型",
 		setting: btwModelSetting,
 	});

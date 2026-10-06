@@ -221,7 +221,7 @@ export default function (pi: ExtensionAPI) {
 	// ---- /web-tool-config：配置 web_fetch/web_search 被墙自动重试的代理地址；搜索差评管理在面板内（Del 删除选中项） ----
 	pi.registerCommand("web-tool-config", {
 		description:
-			"配置 web_fetch/web_search 被墙自动重试的代理：无参数打开设置面板输入 http:// 代理地址（面板内同时展示搜索差评列表，Tab 切换、Del 删除选中项）；`/web-tool-config <url>` 直接设置；`/web-tool-config off` 清除；`/web-tool-config show` 查看当前值",
+			"联网工具配置：代理与域名差评（无参开面板；<url> 直设、off 清除、show 查看）",
 		handler: async (args, ctx) => {
 			const arg = (args ?? "").trim();
 

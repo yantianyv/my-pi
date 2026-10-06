@@ -687,7 +687,7 @@ export default function (pi: ExtensionAPI) {
 
 	// /init：分析项目并生成/维护 AGENTS.md（后台独立上下文）
 	pi.registerCommand("init", {
-		description: "后台分析项目，生成或维护 AGENTS.md（细节进 skill、状态进 STATUS.md；/init cancel 中止）",
+		description: "后台生成/维护项目 AGENTS.md（cancel 中止）",
 		handler: async (args, ctx) => {
 			const arg = args?.trim() ?? "";
 			if (arg) {

@@ -828,7 +828,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("git", {
-		description: "打开可视化 Git 面板（stage / unstage / discard / commit / refresh）",
+		description: "可视化 Git 面板：stage/unstage/discard/commit/sync",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/git 仅在交互模式下可用", "warning");
