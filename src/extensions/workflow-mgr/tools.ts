@@ -190,7 +190,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_workflow（工作流定义管理） ---------- */
 	pi.registerTool({
 		name: "wf_workflow",
-		label: "工作流定义",
+		label: "维护工作流",
 		description:
 			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）；动作一律作用于本会话绑定的工作流。" +
 			"新建优先用 import：先 write 一份草稿 json 再一次性导入（比逐条 add 省 token）；add 只用于后续增补调整。" +
@@ -597,7 +597,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_status ---------- */
 	pi.registerTool({
 		name: "wf_status",
-		label: "工作流状态",
+		label: "查工作流状态",
 		description:
 			"工作流管理：获取当前阶段、当前任务（含人机分工、交付物、完成信号）、下一步、阻塞项、里程碑。" +
 			"会话开始时、每次用户汇报进展后、以及推进任务前都应调用。",
@@ -833,7 +833,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_note（AI 记录） ---------- */
 	pi.registerTool({
 		name: "wf_note",
-		label: "记录",
+		label: "记录信息",
 		description:
 			"AI 的记录工具：记录后续步骤需要知晓的信息。进入新步骤先 list 查看已有记录，不再需要的及时 remove。\n" +
 			"记：用户拍板的选择、硬约束、需后续遵守的结论、会随时间变化的进度/状态。\n" +
@@ -941,7 +941,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_milestone ---------- */
 	pi.registerTool({
 		name: "wf_milestone",
-		label: "里程碑设置",
+		label: "设置里程碑",
 		description:
 			"设置/更新/删除里程碑（名称/日期/完成态）。名称不存在则自动创建，如 开题、中期、答辩。" +
 			"remove=true 删除该里程碑；newName 给已存在的里程碑改名（保留日期/完成态）。",

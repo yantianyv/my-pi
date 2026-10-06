@@ -82,7 +82,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_help ----------
 	pi.registerTool({
 		name: "kb_help",
-		label: "知识库使用守则",
+		label: "读知识库守则",
 		description:
 			"知识库（WebDAV 云网盘）的使用守则：命名空间、写入规范、检索策略。"
 			+ "首次使用任何 kb_* 工具前必须先调用本工具读守则，之后按守则执行。"
@@ -319,7 +319,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_list ----------
 	pi.registerTool({
 		name: "kb_list",
-		label: "列出知识库",
+		label: "列出目录",
 		description:
 			`列出本地镜像目录（相对路径），便于浏览知识库结构、确认命名空间与已有笔记。`
 			+ `上限 ${LIST_MAX} 条。`,
@@ -372,13 +372,13 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			"把本地文件上传到知识库的 LFS 大文件区（/lfs/：任何类型文件，不随知识库同步、不参与检索）。"
 			+ "sourcePath 为相对当前工作目录的本地文件路径。已存在文件需 overwrite:true。"
 			+ "上传后返回远端路径，可用 kb_download 取回。",
-		promptSnippet: "上传到 LFS：kb_upload(远端路径, 本地路径[, overwrite]) → 已上传",
+		promptSnippet: "上传到 LFS：kb_upload(远端路径, 本地路径[, overwrite][, force]) → 已上传",
 		parameters: Type.Object({
 			path: Type.String({ description: "/lfs/ 下的目标路径，如 /lfs/screenshots/1.png" }),
 			sourcePath: Type.String({ description: "本地文件路径（相对当前工作目录）" }),
 			overwrite: Type.Optional(Type.Boolean()),
 			// force：文档隐藏，仅在 >1GB 拒绝警告中揭示（防滥用强制参数）
-			force: Type.Optional(Type.Boolean()),
+			force: Type.Optional(Type.Boolean({ description: "允许超过单文件 1GB 上限（默认拒绝）" })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
@@ -484,22 +484,22 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		description:
 			"列出 LFS 大文件区（/lfs/）的文件（路径/大小/时间）。基于元数据缓存（1 小时有效）；"
 			+ "跨设备刚上传的文件可能未同步，可加 force:true 强制从远端刷新。",
-		promptSnippet: "列 LFS：kb_lslfs([路径][, force]) → 文件列表",
+		promptSnippet: "列 LFS：kb_lslfs([路径][, refresh]) → 文件列表",
 		parameters: Type.Object({
 			path: Type.Optional(Type.String({ description: "要列的子目录，缺省为 /lfs/ 全部" })),
-			force: Type.Optional(Type.Boolean({ description: "强制从远端刷新（忽略 1 小时缓存）" })),
+			refresh: Type.Optional(Type.Boolean({ description: "强制从远端刷新（忽略 1 小时缓存）" })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const cfg = loadConfig(agentConfigDir());
 			const mirror = mirrorOf();
 			try {
-				const files = await getLfsFiles(cfg, mirror, { force: params.force, signal });
+				const files = await getLfsFiles(cfg, mirror, { force: params.refresh, signal });
 				const base = params.path ? params.path.replace(/\/+$/, "") : "";
 				const filtered = base ? files.filter((f) => f.path.startsWith(base + "/")) : files;
 				const shown = filtered.slice(0, LFS_LIST_MAX);
 				if (shown.length === 0) {
-					return text(`${base || "/lfs/"} 下暂无文件${params.force ? "（已强制刷新）" : ""}。`, { count: 0 });
+					return text(`${base || "/lfs/"} 下暂无文件${params.refresh ? "（已强制刷新）" : ""}。`, { count: 0 });
 				}
 				const lines = shown.map(
 					(f) => `${f.path}  ${formatSize(f.size)}${f.lastModified ? `  ${f.lastModified}` : ""}`,
@@ -521,13 +521,11 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			"把本地目录批量导入知识库（迁移场景）：递归扫描 sourceDir（相对工作目录）下的文本文件（后缀同 kb_write），"
 			+ "目标 = namespace + 原目录结构（md 自动生成 frontmatter，已有的保留；表格/数据格式原样导入不加工）；"
 			+ "非文本/超限文件跳过并列在结果中（大文件用 kb_upload）；vault 目标自动加密。",
-		promptSnippet: "批量导入：kb_import(源目录, 命名空间[, mode]) → 导入摘要",
+		promptSnippet: "批量导入：kb_import(源目录, 命名空间[, overwrite]) → 导入摘要",
 		parameters: Type.Object({
 			sourceDir: Type.String({ description: "本地目录路径（相对当前工作目录），如 knowledge/学校论文要求" }),
 			namespace: Type.String({ description: "目标命名空间：/notes /references /scratch /vault" }),
-			mode: Type.Optional(
-				Type.Union([Type.Literal("skip"), Type.Literal("overwrite")], { description: "同名已存在时：skip 跳过（默认）/ overwrite 覆盖" }),
-			),
+			overwrite: Type.Optional(Type.Boolean({ description: "同名已存在时 true = 覆盖（默认跳过）" })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
@@ -544,7 +542,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
 				return err(`源目录不存在或不是目录：${params.sourceDir}（相对工作目录 ${ctx.cwd}）`, {});
 			}
-			const mode = params.mode ?? "skip";
+			const overwrite = params.overwrite === true;
 			const cfg = loadConfig(agentConfigDir());
 			const mirror = mirrorOf();
 			// 递归收集文本文件
@@ -600,7 +598,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 						const target = `${ns}/${f.rel}`;
 						// 查重：已存在且 skip → 跳过
 						const exists = vaultReadNote(mirror, target) !== null;
-						if (exists && mode === "skip") {
+						if (exists && !overwrite) {
 							stats.skipped++;
 							continue;
 						}
@@ -738,7 +736,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_status（同步状态可见性，pull 式轻量） ----------
 	pi.registerTool({
 		name: "kb_status",
-		label: "知识库同步状态",
+		label: "查同步状态",
 		description:
 			"查看知识库同步状态（本地账本，无需网络）：上次同步时间、冲突文件数（.conflict- 副本）、"
 			+ "待上传积压、LFS 缓存情况。据此判断是否需要提醒用户运行 /kb-sync 或解决冲突。",
@@ -792,7 +790,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_sync（AI 触发手动同步：首次配置后 / 离线写入补传 / 迁移与守则更新后同步远端） ----------
 	pi.registerTool({
 		name: "kb_sync",
-		label: "手动同步知识库",
+		label: "同步知识库",
 		description:
 			"手动增量同步知识库（远端与本地镜像对齐，同步方向随配置自适应）。"
 			+ "通常无需主动调用（会话启动已自动同步）；用于：首次配置后、手动刷新镜像、"

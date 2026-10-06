@@ -64,7 +64,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 - **提示词瘦身（所有插件 + 本文档）**：注入给模型的文本（工具 description / promptSnippet / promptGuidelines / 系统提示词 / 注入消息）只写模型需要且别处没有的信息——不解释实现、不复述参数名已表达的内容、不写变更史与自我说明；同一事实只写一处；成段子系统细节下沉到 skill 的 `references/`，所有插件注释不记变更史。改完逐句自问「删掉它会损失什么」，答不上来就删。
 - **命令与工具的对外约定**（新增/改名时照此，改动后跑 `scratch/audit-*.mjs` 类的清单脚本自查）：
   - 命令：**配置类一律 `<插件>-config`，无参开面板、带参只接受"值"直设**（`/mimo-config voice <音色>`）；开关与维护类子命令（`on|off`、`prune`、`clear`）允许留在主命令里；`description` ≤ 45 字符、一句话写用途（必要时附子命令清单），完整用法由命令自身在无参/误用时打印；一个插件只用一个前缀词根，且与工具前缀一致（`wf_*` ↔ `/wf-*`）。
-  - 工具：名称 snake_case，多工具插件加 `<插件>_` 前缀（`kb_search`），语义唯一的全局主工具可不带前缀（`ask`、`now`）；参数 camelCase，同义参数固定叫法（`overwrite` 覆盖 / `refresh` 强制刷新 / `confirm` 破坏性确认 / `out` 输出文件 / `outDir` 输出目录 / `sourcePath`·`destPath` 本地源与目标 / `maxChars` 截断上限）；`label` 用动宾短语（实体型工具如 `ask` 可用名词）。
+  - 工具：名称 snake_case，多工具插件加 `<插件>_` 前缀（`kb_search`），语义唯一的全局主工具可不带前缀（`ask`、`now`）；参数 camelCase，同义参数固定叫法（`overwrite` 允许覆盖 / `refresh` 强制刷新缓存 / `force` 突破硬限制 / `confirm` 破坏性确认 / `out` 输出文件 / `outDir` 输出目录 / `sourcePath`·`destPath` 本地源与目标 / `maxChars`·`fps`·`pngWidth` 带单位后缀）；`label` 一律动宾短语（`向用户提问`、`查钉钉命令`），不用名词。
   - 模型可见文本：`promptSnippet` 统一 `中文用途：工具名(签名) → 返回物`；`description` 写"做什么 + 关键约束"，用法细节不进；失败**返回 `isError: true` 的人话结果**（含原因与下一步），不 throw（仅编程错误可抛）；工具结果统一带 `details`。
 - 提交信息：中文 conventional commits（`feat:` / `fix:` / `refactor:` / `chore:` / `docs:`，scope 写扩展名或模块名），单行主题，必要时附正文要点。
 

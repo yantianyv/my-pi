@@ -244,8 +244,8 @@ try {
 	// 再次导入（同名跳过）
 	r = await tool("kb_import").execute("24", { sourceDir: importDir, namespace: "/references" }, undefined, undefined, ctx);
 	check("kb_import 同名跳过", r.content[0].text.includes("0 成功") && r.content[0].text.includes("3 跳过"), r.content[0].text.slice(0, 80));
-	// mode=overwrite 覆盖
-	r = await tool("kb_import").execute("25", { sourceDir: importDir, namespace: "/references", mode: "overwrite" }, undefined, undefined, ctx);
+	// overwrite=true 覆盖
+	r = await tool("kb_import").execute("25", { sourceDir: importDir, namespace: "/references", overwrite: true }, undefined, undefined, ctx);
 	check("kb_import overwrite 覆盖", r.content[0].text.includes("3 成功"), r.content[0].text.slice(0, 80));
 
 	// ---- kb_delete ----

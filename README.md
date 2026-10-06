@@ -321,7 +321,7 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 为 AI 提供二维码的编码与解码能力，并把 AI 生成的二维码直接显示在用户界面：
 
 - **`qr_encode(text, ecc?, save?, pngWidth?)`**：把文本（URL、Wi-Fi 配置、名片、任意文字）编码成二维码并**直接显示在用户界面**——图形终端（kitty/iTerm2 图形协议）显示 PNG 真图；普通终端用 Unicode 半块字符（▀）显式黑白 ANSI 绘制（暗模块=黑、亮模块=白、含 4 模块静区，逐字符着色不依赖终端主题背景），1 cell 宽 × 半行高的模块近似正方形，**可直接扫码**。默认纠错级别 M（L/M/Q/H 可调），默认落盘 PNG（`os.tmpdir()/pi-qr-<时间戳>.png`，边长默认 512px，128~2048 钳制），路径随结果返回。
-- **`qr_decode(image)`**：从图片解码二维码——支持本地文件路径或 http(s) URL，PNG/JPEG（qrcode/jsqr/pngjs/jpeg-js 纯 JS 解码，由 build.js 内联进产物），自动尝试正反色、小图最近邻放大；返回码内文本与版本/尺寸元信息。
+- **`qr_decode(path)`**：从图片解码二维码——支持本地文件路径或 http(s) URL，PNG/JPEG（qrcode/jsqr/pngjs/jpeg-js 纯 JS 解码，由 build.js 内联进产物），自动尝试正反色、小图最近邻放大；返回码内文本与版本/尺寸元信息。
 - **`/qr <文本>`**：用户侧快速生成二维码并显示，按任意键关闭。
 - **会话回放安全**：details 只存原文（不存矩阵/PNG，会话文件不膨胀）；渲染时从原文同步重新编码，历史会话重新打开时二维码照样渲染。
 - 状态推送 `qr` 走 shared/status 联动 hud（行 1 动态区 accent 色）；回归测试 `node src/extensions/qr/test/qr.test.mjs`（esbuild bundle + jiti 加载，12 场景）。

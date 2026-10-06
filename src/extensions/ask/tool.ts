@@ -163,11 +163,11 @@ interface AskDetails {
 export function registerAskTool(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "ask",
-		label: "问卷",
+		label: "向用户提问",
 		description:
 			"创建问卷向用户批量提问，整屏弹出，用户提交后答案作为本工具结果返回；一次只创建一份。" +
 			"或 action=cancel + id 作废待答问卷（问卷即文件，删除即撤回）。",
-		promptSnippet: "创建问卷向用户批量提问（单选/多选/简答/判断/评分/数字/说明），或作废待答问卷",
+		promptSnippet: "批量提问：ask(questions, …) → 答案（整屏问卷；action=cancel 作废）",
 		promptGuidelines: [
 			"需要用户从多个方案中抉择、或有多个问题要确认时，用 ask 工具创建问卷，而不是在正文里罗列问题让用户逐条回复。",
 			"需要用户审阅一段原文（待发草稿/方案/长说明）再给意见时，用 type=note 的说明题把原文放进问卷（content 装全文），后面跟 single/text 题收意见——用户在问卷里能直接看到内容，不必搁置问卷去对话里翻。",

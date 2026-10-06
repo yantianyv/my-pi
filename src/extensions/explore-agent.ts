@@ -226,7 +226,7 @@ function buildExploreToolDefinition(
 			"适合：了解陌生模块结构、定位功能实现、梳理调用链——比主 agent 逐文件 read 更省上下文、更快、更便宜。" +
 			"子代理不能修改文件。探索过程会边跑边写 .pi/explore/report.md（单任务成果在 .pi/explore/tasks/），" +
 			"可随时重读；中断过的任务再次调用会带着已有发现续跑，不受重复消耗。",
-		promptSnippet: "explore: 派只读子代理并行探索代码库并返回报告（省主上下文）",
+		promptSnippet: "探索代码库：explore(tasks[, fresh]) → 结构化报告（并行只读子代理）",
 		promptGuidelines: [
 			"需要了解陌生代码结构或定位实现时，优先用 explore 派子代理，而不是自己逐文件 read；拿到报告后再对关键文件精读。",
 			"explore 的任务描述要具体可回答，推荐格式：【目标】要查清的问题【范围】相关目录或关键词【期望产出】如『按目录分组的文件清单+行号』。",

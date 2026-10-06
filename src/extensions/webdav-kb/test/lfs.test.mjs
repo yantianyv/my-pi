@@ -3,7 +3,7 @@
  * webdav-kb / lfs 功能集成测试（esbuild bundle + mock pi + mock DAV + 临时工作目录）
  *
  * 覆盖：kb_upload（上传/已存在守卫/非 /lfs/ 拒绝/force 参数）、kb_download
- * （下载/目标已存在守卫/404 引导）、kb_lslfs（列表/缓存/force 刷新）、隔离
+ * （下载/目标已存在守卫/404 引导）、kb_lslfs（列表/缓存/refresh 刷新）、隔离
  * （kb_read 引导、kb_list 过滤、kb_search namespace 提示）、md 50MB 上限、
  * syncAll 对 /lfs/ 只刷元数据不下载、本地 lfs 文件不参与上传、search 不索引 /lfs/。
  *
@@ -146,8 +146,8 @@ try {
 	dav.seed("/lfs/other.txt", "other");
 	r = await tool("kb_lslfs").execute("14", {}, undefined, undefined, ctx);
 	check("缓存内看不到新文件", !r.content[0].text.includes("other.txt"), r.content[0].text.slice(0, 60));
-	r = await tool("kb_lslfs").execute("15", { force: true }, undefined, undefined, ctx);
-	check("force 刷新看到新文件", r.content[0].text.includes("other.txt"), r.content[0].text.slice(0, 60));
+	r = await tool("kb_lslfs").execute("15", { refresh: true }, undefined, undefined, ctx);
+	check("refresh 刷新看到新文件", r.content[0].text.includes("other.txt"), r.content[0].text.slice(0, 60));
 
 	// ---- 隔离：md 工具看不到 lfs ----
 	r = await tool("kb_read").execute("16", { path: "/lfs/screenshots/1.png" }, undefined, undefined, ctx);

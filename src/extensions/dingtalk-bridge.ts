@@ -1866,7 +1866,7 @@ export default function (pi: ExtensionAPI) {
 	// L1：schema 活内省（分层下钻）
 	pi.registerTool({
 		name: "dws_schema",
-		label: "钉钉命令查询",
+		label: "查钉钉命令",
 		description:
 			"查询钉钉 dws CLI 的实时命令 schema（随 CLI 版本更新，永不漂移）。无参返回产品概览（29 个产品线）；" +
 			"path 传产品 id（如 todo/chat/sheet）返回该产品工具清单；path 传工具 canonical_path（如 todo.add_task）返回参数 schema。" +
@@ -1887,7 +1887,8 @@ export default function (pi: ExtensionAPI) {
 	// L1+L2：受控执行（argv 直传 + 安全拦截）
 	pi.registerTool({
 		name: "dws_exec",
-		label: "钉钉执行",
+		label: "执行钉钉命令",
+		promptSnippet: "钉钉命令执行：dws_exec(args[, confirm][, formal]) → 命令输出（写操作两阶段确认）",
 		description:
 			"执行钉钉 dws CLI 命令。args 为完整子命令的 argv 数组（不含 dws 本身），如 [\"chat\", \"+dm\", \"--to\", \"<userId>\", \"--content\", \"【AI发送】…\"]；" +
 			"数组直传不过 shell，内容含空格/引号/换行都安全。自动附加 --format json 与 --yes；写/敏感命令在生成草稿前按 schema 参数表校验 flag，未知 flag 直接拒绝（同类命令参数名不一定相同，先 dws_schema 查）。" +
@@ -2160,7 +2161,7 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 	// L2：人员解析（强制实时查证，多候选必须确认）
 	pi.registerTool({
 		name: "dws_resolve_user",
-		label: "钉钉人员解析",
+		label: "解析钉钉人员",
 		description:
 			"按姓名实时解析钉钉 userId（发消息前的强制步骤）。候选带部门路径/职务/工号（无部门且无工号 = 家长或外部联系人账号，已标注）；" +
 			"单候选自动确认；多候选返回列表，按部门分辨后带 pick=<userId> 再调一次；零候选可换更精确的值重试，或改用完整手机号反查：dws_exec [\"contact\", \"user\", \"search-mobile\", \"--mobile\", \"<手机号>\"]。",
@@ -2211,7 +2212,7 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 	// 群解析（发群前的推荐步骤；与 dws_resolve_user 对称：同名群/改群名都会发错）
 	pi.registerTool({
 		name: "dws_resolve_group",
-		label: "钉钉群解析",
+		label: "解析钉钉群",
 		description:
 			"按群名解析 openConversationId（发群消息前的推荐步骤；同名群、改群名都会发错）。单候选自动确认；" +
 			"多候选返回列表，与用户确认后用 pick=<openConversationId> 再调一次；零候选可换关键词重试。",
@@ -2247,7 +2248,7 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 	// 钉盘/云盘资源落地（消息里分享的文件/文件夹：文件直接下载，文件夹整目录镜像）
 	pi.registerTool({
 		name: "dws_fetch",
-		label: "钉盘资源下载",
+		label: "下载钉盘资源",
 		description:
 			"下载消息里分享的钉盘/云盘文件或整个文件夹。这类分享（正文带 yunpan 链接、resourceId 形如 238322429838&type=file）用 +messages-resource-download 会失败，必须走 drive。" +
 			"传 link（消息正文原文/链接）或 spaceId+nodeId；文件夹会递归镜像到本地并列回文件清单（绝对路径，可直接用 read 工具读）。" +
@@ -2344,7 +2345,7 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 	// 逃生舱：消息收发之外的复杂操作（表格/文档/日历/审批/组织等）按需拉官方技能正文
 	pi.registerTool({
 		name: "dws_skill",
-		label: "钉钉技能文档",
+		label: "读钉钉技能文档",
 		description:
 			"按需读取钉钉官方技能文档（dws postinstall 安装的 dingtalk-* 技能；插件默认把它们移出系统提示词以省上下文，这里是按需拿回的正道）。" +
 			"无 topic 时列出全部技能及一句话说明；传 topic（短名如 chat/sheet/todo，或全名 dingtalk-chat）返回该技能完整正文。" +

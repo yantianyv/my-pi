@@ -167,7 +167,7 @@ async function main() {
 	// ---- 场景 C：PNG 往返解码 ----
 	console.log("场景 C：qr_decode PNG 往返");
 	{
-		const r = await dec.execute("t2", { image: globalThis.__qrPngPath }, undefined, undefined, ctx);
+		const r = await dec.execute("t2", { path: globalThis.__qrPngPath }, undefined, undefined, ctx);
 		check("C: 解码文本与原文一致", r.details?.text === TEXT);
 		check("C: 结果含图片尺寸", /图片 \d+×\d+px/.test(r.content[0].text));
 		check("C: 结果含二维码版本", /二维码版本 \d+/.test(r.content[0].text));
@@ -200,7 +200,7 @@ async function main() {
 		const jpg = jpeg.encode({ data: png.data, width: png.width, height: png.height }, 90);
 		const jpgPath = join(tmpdir(), `pi-qr-test-${Date.now()}.jpg`);
 		writeFileSync(jpgPath, jpg.data);
-		const r = await dec.execute("t6", { image: jpgPath }, undefined, undefined, ctx);
+		const r = await dec.execute("t6", { path: jpgPath }, undefined, undefined, ctx);
 		check("F: JPEG 解码文本一致", r.details?.text === TEXT);
 		rmSync(jpgPath, { force: true });
 	}
@@ -210,7 +210,7 @@ async function main() {
 	{
 		const txtPath = join(tmpdir(), `pi-qr-test-${Date.now()}.txt`);
 		writeFileSync(txtPath, "not an image");
-		const r = await dec.execute("t7", { image: txtPath }, undefined, undefined, ctx);
+		const r = await dec.execute("t7", { path: txtPath }, undefined, undefined, ctx);
 		check("G: 报错含「仅支持 PNG」", r.content[0].text.includes("仅支持 PNG"));
 		check("G: 状态推送解码失败", captures.statuses["qr"].includes("失败"));
 		rmSync(txtPath, { force: true });
@@ -230,7 +230,7 @@ async function main() {
 		}
 		const p = join(tmpdir(), `pi-qr-test-blank-${Date.now()}.png`);
 		writeFileSync(p, PNG.sync.write(png));
-		const r = await dec.execute("t8", { image: p }, undefined, undefined, ctx);
+		const r = await dec.execute("t8", { path: p }, undefined, undefined, ctx);
 		check("H: 报错含「未找到二维码」", r.content[0].text.includes("未找到二维码"));
 		rmSync(p, { force: true });
 	}

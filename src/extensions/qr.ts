@@ -371,7 +371,7 @@ export default function (pi: ExtensionAPI) {
 		label: "解码二维码",
 		description:
 			"从图片解码二维码：本地路径或 http(s) URL，PNG/JPEG（自动尝试正反色）。返回码内文本与版本/尺寸元信息。",
-		promptSnippet: "解码二维码：qr_decode(image) → 码内文本",
+		promptSnippet: "解码二维码：qr_decode(path) → 码内文本",
 		renderCall: (args, theme) => {
 			const a = args as { image?: string };
 			const s = a.image ?? "";
@@ -402,7 +402,7 @@ export default function (pi: ExtensionAPI) {
 			);
 		},
 		parameters: Type.Object({
-			image: Type.String({ description: "二维码图片：本地文件路径（推荐 PNG）或 http(s) URL" }),
+			path: Type.String({ description: "二维码图片：本地文件路径（推荐 PNG）或 http(s) URL" }),
 		}),
 
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
@@ -410,7 +410,7 @@ export default function (pi: ExtensionAPI) {
 			const push = (text: string, ttlMs: number) => setStatusWithTTL(ctx, "qr", text, ttlMs);
 			push("🔳 解码中", 30_000);
 			try {
-				const bytes = await readImageBytes(params.image, signal);
+				const bytes = await readImageBytes(params.path, signal);
 				let rgba: { width: number; height: number; data: Uint8Array };
 				if (isPng(bytes)) {
 					const png = PNG.sync.read(bytes);
@@ -424,7 +424,7 @@ export default function (pi: ExtensionAPI) {
 				const decoded = decodeQrRgba(rgba);
 				push("✓ 已解码", 6_000);
 				const details: QrDecodeDetails = {
-					source: params.image,
+					source: params.path,
 					text: decoded.text,
 					version: decoded.version,
 					width: rgba.width,
@@ -448,7 +448,7 @@ export default function (pi: ExtensionAPI) {
 							text: `解码二维码失败：${msg}\n请确认路径/URL 可访问、图片为清晰完整的 PNG/JPEG（含留白、单张二维码），必要时裁剪后重试。`,
 						},
 					],
-					details: { error: msg, source: params.image },
+					details: { error: msg, source: params.path },
 					isError: true,
 				};
 			}
