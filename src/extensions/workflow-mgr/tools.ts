@@ -129,7 +129,8 @@ function taskDetail(
 	);
 }
 
-const err = (text: string) => ({ content: [{ type: "text" as const, text }], details: { kind: "error" as const } });
+/** 失败结果：带 isError，pi 侧模型与 UI 才识别为失败（与 shared/tool-result 同一口径） */
+const err = (text: string) => ({ content: [{ type: "text" as const, text }], details: { kind: "error" as const }, isError: true as const });
 
 /**
  * 绑定守卫：会话未绑定（undecided）/ 暂不启用（auto，由 AI 判断）/ 明确不用（none）时

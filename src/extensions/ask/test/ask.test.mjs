@@ -350,13 +350,15 @@ async function main() {
 		const ctx = makeCtx(dir, captures);
 		await pi.events.session_start({}, ctx);
 		const tool = pi.tools.find((t) => t.name === "ask");
-		let errMsg = "";
-		try {
-			await tool.execute("tc3", { title: "坏问卷", questions: [{ type: "single", question: "没选项" }] }, null, null, ctx);
-		} catch (e) {
-			errMsg = e.message;
-		}
-		check("F: single 缺 options 抛错", errMsg.includes("options"));
+		const badRes = await tool.execute(
+			"tc3",
+			{ title: "坏问卷", questions: [{ type: "single", question: "没选项" }] },
+			null,
+			null,
+			ctx,
+		);
+		check("F: single 缺 options 返回失败结果", badRes.isError === true, JSON.stringify(badRes.details));
+		check("F: 失败文案含原因", badRes.content[0].text.includes("options"));
 		check("F: 不打开 UI", captures.customs.length === 0);
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -386,30 +388,15 @@ async function main() {
 		check("G: 文件已删除", !existsSync(file));
 		check("G: 待答状态已清除", captures.statuses.ask === undefined);
 		check("G: 不打开 UI", captures.customs.length === 1);
-		// cancel 不存在的问卷 → 报错且列出提示
-		let errMsg = "";
-		try {
-			await tool.execute("tc6", { action: "cancel", id: "no-such" }, null, null, ctx);
-		} catch (e) {
-			errMsg = e.message;
-		}
-		check("G: 作废不存在的问卷报错", errMsg.includes("no-such"));
-		// cancel 缺 id → 报错
-		errMsg = "";
-		try {
-			await tool.execute("tc7", { action: "cancel" }, null, null, ctx);
-		} catch (e) {
-			errMsg = e.message;
-		}
-		check("G: cancel 缺 id 报错", errMsg.includes("id"));
-		// create 缺 questions → 报错（title 缺省已改为自动取第一题问句，不再报错，见场景 J）
-		errMsg = "";
-		try {
-			await tool.execute("tc8", { id: "x" }, null, null, ctx);
-		} catch (e) {
-			errMsg = e.message;
-		}
-		check("G: create 缺 questions 报错", errMsg.includes("questions"));
+		// cancel 不存在的问卷 → 失败结果且列出提示（失败一律 isError，不抛异常）
+		const noSuch = await tool.execute("tc6", { action: "cancel", id: "no-such" }, null, null, ctx);
+		check("G: 作废不存在的问卷返回失败", noSuch.isError === true && noSuch.content[0].text.includes("no-such"));
+		// cancel 缺 id → 失败
+		const noId = await tool.execute("tc7", { action: "cancel" }, null, null, ctx);
+		check("G: cancel 缺 id 返回失败", noId.isError === true && noId.content[0].text.includes("id"));
+		// create 缺 questions → 失败（title 缺省已改为自动取第一题问句，不再失败，见场景 J）
+		const noQs = await tool.execute("tc8", { id: "x" }, null, null, ctx);
+		check("G: create 缺 questions 返回失败", noQs.isError === true && noQs.content[0].text.includes("questions"));
 		rmSync(dir, { recursive: true, force: true });
 	}
 
@@ -600,26 +587,21 @@ async function main() {
 				noteSaved.questions[0].question.startsWith("这是一行超过三十个字符的说明正文首行") &&
 				noteSaved.questions[0].question.endsWith("…"),
 		);
-		// 12 题上限：note 同样占额度
-		let overMsg = "";
-		try {
-			await tool.execute(
-				"tc19",
-				{
-					id: "over-limit",
-					questions: [
-						...Array.from({ length: 3 }, (_, i) => ({ type: "note", content: `说明 ${i + 1}` })),
-						...Array.from({ length: 10 }, (_, i) => ({ type: "text", question: `问题 ${i + 1}` })),
-					],
-				},
-				null,
-				null,
-				ctx,
-			);
-		} catch (e) {
-			overMsg = e.message;
-		}
-		check("K: note 计入 12 题上限", overMsg.includes("上限 12"));
+		// 12 题上限：note 同样占额度（失败一律 isError 结果）
+		const over = await tool.execute(
+			"tc19",
+			{
+				id: "over-limit",
+				questions: [
+					...Array.from({ length: 3 }, (_, i) => ({ type: "note", content: `说明 ${i + 1}` })),
+					...Array.from({ length: 10 }, (_, i) => ({ type: "text", question: `问题 ${i + 1}` })),
+				],
+			},
+			null,
+			null,
+			ctx,
+		);
+		check("K: note 计入 12 题上限（返回失败结果）", over.isError === true && over.content[0].text.includes("上限 12"));
 		rmSync(dir, { recursive: true, force: true });
 	}
 

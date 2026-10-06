@@ -30,6 +30,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
+import { toolError } from "./shared/tool-result";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -208,7 +209,7 @@ function normalizeNewlines(s: string): string {
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
 				push("⚠ 读取失败", 6_000);
-				return { content: [{ type: "text", text: `读取剪贴板失败：${msg}` }], details: { error: msg } };
+				return toolError(`读取剪贴板失败：${msg}`, { error: msg });
 			}
 		},
 	});
@@ -263,7 +264,7 @@ function normalizeNewlines(s: string): string {
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
 				push("⚠ 写入失败", 6_000);
-				return { content: [{ type: "text", text: `写入剪贴板失败：${msg}` }], details: { error: msg } };
+				return toolError(`写入剪贴板失败：${msg}`, { error: msg });
 			}
 		},
 	});

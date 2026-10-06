@@ -20,6 +20,7 @@ import { Type } from "typebox";
 import { QuestionnairePage, type PageHooks, type PageResult, type TermDims } from "./page";
 import { enqueueQuestionnaireUI, refreshPendingStatus, rememberCtx, setWorkingWait } from "./state";
 import { createQuestionnaire, initStore, listQuestionnaires, removeQuestionnaire, saveQuestionnaire } from "./store";
+import { toolError } from "../shared/tool-result";
 import {
 	answeredProgress,
 	answerableQuestions,
@@ -214,14 +215,14 @@ export function registerAskTool(pi: ExtensionAPI): void {
 
 			// ---- cancel：作废待答/搁置问卷（问卷即文件，删文件即撤回）----
 			if (params.action === "cancel") {
-				if (!params.id?.trim()) throw new Error("ask cancel 需要 id（要作废的问卷标识）");
+				if (!params.id?.trim()) return toolError("ask cancel 需要 id（要作废的问卷标识）");
 				const want = params.id.trim().toLowerCase();
 				const { items } = listQuestionnaires();
 				const target = items.find(
 					(i) => i.q.id.toLowerCase() === want || path.basename(i.file, ".json").toLowerCase() === want,
 				);
 				if (!target) {
-					throw new Error(
+					return toolError(
 						`问卷「${params.id}」不存在` +
 							(items.length ? `（当前待答问卷：${items.map((i) => i.q.id).join("、")}）` : "（当前没有待答问卷）"),
 					);
@@ -247,7 +248,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 				const detail = params.questions
 					? "questions 是空数组"
 					: `本次只收到字段：${received.join("、") || "（无）"}，questions 数组整个缺失`;
-				throw new Error(
+				return toolError(
 					`ask 创建问卷缺少 questions（${detail}）。` +
 						"questions 是 1~12 题的数组，每题含完整问句 question 与题型 type（type 可省：有 options 自动算单选）。请补上 questions 重新调用。",
 				);
@@ -270,7 +271,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 				{ ...params, title, context, questions: params.questions, createdAt: new Date().toISOString() },
 				{ fallbackId },
 			);
-			if (!norm.ok) throw new Error(`问卷参数无效：${norm.error}`);
+			if (!norm.ok) return toolError(`问卷参数无效：${norm.error}`);
 			const q = norm.q;
 
 			const file = createQuestionnaire(q);

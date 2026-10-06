@@ -110,6 +110,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: `搜索失败：${msg}` }],
 					details: { error: msg },
+					isError: true,
 				};
 			}
 		},
@@ -162,6 +163,7 @@ export default function (pi: ExtensionAPI) {
 						},
 					],
 					details: { error: msg },
+					isError: true,
 				};
 			}
 		},

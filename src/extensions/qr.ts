@@ -359,6 +359,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: `生成二维码失败：${msg}${/too long|big/i.test(msg) ? "（文本过长超出二维码容量，可换 ecc=L 或精简文本）" : ""}` }],
 					details: { error: msg },
+					isError: true,
 				};
 			}
 		},
@@ -448,6 +449,7 @@ export default function (pi: ExtensionAPI) {
 						},
 					],
 					details: { error: msg, source: params.image },
+					isError: true,
 				};
 			}
 		},

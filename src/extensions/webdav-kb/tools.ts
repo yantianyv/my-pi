@@ -16,6 +16,7 @@ import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { setStatusWithTTL } from "../shared/status";
+import { toolError, toolText } from "../shared/tool-result";
 import { loadConfig, isConfigured, defaultMirrorDir, agentConfigDir } from "./store";
 import { readNote, readNoteBytes, listNotes, ensureRemoteDirs, loadLedger, saveLedger, syncAll, formatSyncSummary, formatSyncNotes, backupToHistory, SYNC_LOCK_WAIT_MS } from "./sync";
 import { getIndex } from "./search";
@@ -93,7 +94,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const mirror = mirrorOf();
 			const proto = readNote(mirror, "/PROTOCOL.md");
 			let content = proto ?? DEFAULT_PROTOCOL;
@@ -128,9 +129,9 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			if (params.namespace && params.namespace.startsWith("/lfs")) {
-				return text(`/lfs/（LFS 大文件区）不参与检索。请用 kb_lslfs 查看文件列表、kb_download 按需下载。`, {});
+				return err(`/lfs/（LFS 大文件区）不参与检索。请用 kb_lslfs 查看文件列表、kb_download 按需下载。`, {});
 			}
 			const mirror = mirrorOf();
 			const idx = getIndex(mirror);
@@ -155,7 +156,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				lines.push(`\n命中后用 kb_read 读全文。`);
 				return text(lines.join("\n"), { results: results.length });
 			} catch (e) {
-				return text(`检索失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
+				return err(`检索失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
 			}
 		},
 	});
@@ -176,9 +177,9 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			if (isLfsPath(params.path)) {
-				return text(
+				return err(
 					`/lfs/ 是 LFS 大文件区，不参与知识库读取。请用 kb_lslfs 查看可用文件、kb_download 下载到本地。`,
 					{},
 				);
@@ -187,7 +188,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			try {
 				const content = vaultReadNote(mirror, params.path);
 				if (content === null) {
-					return text(
+					return err(
 						`笔记不存在：${params.path}\n可先用 kb_search 搜关键词或 kb_list 浏览目录找到正确路径。`,
 						{},
 					);
@@ -204,7 +205,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				return text(head + chunk, { offset, truncated: hasMore });
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
-				return text(`读取失败（${params.path}）：${msg}`, { error: msg });
+				return err(`读取失败（${params.path}）：${msg}`, { error: msg });
 			}
 		},
 	});
@@ -227,13 +228,13 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const p = validateWritablePath(params.path);
-			if (p) return text(p, {});
+			if (p) return err(p, {});
 			// 文本大小硬限制：防伪装上传大文件（正常笔记远小于 50MB）；放最前，大内容直接拒
 			const contentBytes = Buffer.byteLength(params.content, "utf8");
 			if (contentBytes > NOTE_MAX_BYTES) {
-				return text(
+				return err(
 					`内容 ${formatSize(contentBytes)} 超过文本笔记上限 ${formatSize(NOTE_MAX_BYTES)}——笔记不应如此大。`
 						+ `大文件请用 kb_upload 上传到 LFS（/lfs/）。`,
 					{ size: contentBytes },
@@ -242,7 +243,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			// frontmatter 仅文档格式（md/markdown）强制：表格/数据格式加工会破坏内容（csv 首行是表头、json 以 { 开头）
 			const ext = "." + params.path.split(".").pop()?.toLowerCase();
 			if (DOC_EXT.has(ext) && !hasFrontmatter(params.content)) {
-				return text(
+				return err(
 					"md 文档缺少 frontmatter。每个 md 笔记必须以下格式开头：\n"
 						+ "---\ntitle: 一句话标题\ntags: [标签1, 标签2]\n---\n正文…\n"
 						+ "（表格/数据格式如 csv/json/yaml 不需要 frontmatter，直接写内容即可）",
@@ -253,7 +254,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			// 查重守卫：已存在且未显式 overwrite → 拒绝
 			const exists = vaultReadNote(mirror, params.path) !== null;
 			if (exists && !params.overwrite) {
-				return text(
+				return err(
 					`${params.path} 已存在。为防止误覆盖：\n`
 						+ "- 确认覆盖请重试并加 overwrite:true\n"
 						+ "- 补充内容用 kb_append\n"
@@ -271,7 +272,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 					{ etag },
 				);
 			} catch (e) {
-				return text(`写入失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
+				return err(`写入失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
 			}
 		},
 	});
@@ -289,19 +290,19 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			content: Type.String({ description: "要追加的内容（换行开头更清晰）" }),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const p = validateWritablePath(params.path);
-			if (p) return text(p, {});
+			if (p) return err(p, {});
 			const mirror = mirrorOf();
 			let existing: string;
 			try {
 				const cur = vaultReadNote(mirror, params.path);
 				if (cur === null) {
-					return text(`笔记不存在：${params.path}。新建请用 kb_write（需带 frontmatter）。`, {});
+					return err(`笔记不存在：${params.path}。新建请用 kb_write（需带 frontmatter）。`, {});
 				}
 				existing = cur;
 			} catch (e) {
-				return text(`读取失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
+				return err(`读取失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
 			}
 			const merged = existing.endsWith("\n") ? existing + params.content + "\n" : existing + "\n\n" + params.content + "\n";
 			const cfg = loadConfig(agentConfigDir());
@@ -310,7 +311,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				status(ctx, "✓ 已追加笔记", 4_000);
 				return text(`✓ 已追加 ${params.path}（共 ${merged.length} 字符）`, {});
 			} catch (e) {
-				return text(`追加失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
+				return err(`追加失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
 			}
 		},
 	});
@@ -327,7 +328,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			path: Type.Optional(Type.String({ description: "要浏览的目录，缺省为根（全部）" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const mirror = mirrorOf();
 			const all = listNotes(mirror)
 				.filter((f) => !isLfsPath(f.path))
@@ -342,7 +343,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			const raw = params.path ? params.path.replace(/^\/+|\/+$/g, "") : "";
 			const base = raw ? "/" + raw : "";
 			if (base.startsWith("/lfs")) {
-				return text(`/lfs/ 是 LFS 大文件区，不在知识库目录中。请用 kb_lslfs 查看。`, {});
+				return err(`/lfs/ 是 LFS 大文件区，不在知识库目录中。请用 kb_lslfs 查看。`, {});
 			}
 			const filtered = base ? all.filter((f) => f.path.startsWith(base + "/")) : all;
 			if (filtered.length === 0) {
@@ -380,30 +381,30 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			force: Type.Optional(Type.Boolean()),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const p = params.path;
-			if (!isLfsPath(p)) return text(`路径必须位于 /lfs/ 下（LFS 大文件区）。当前：${p}`, {});
+			if (!isLfsPath(p)) return err(`路径必须位于 /lfs/ 下（LFS 大文件区）。当前：${p}`, {});
 			// 次级分类约束：/lfs/ 根不直接放文件（与 md 命名空间一致）
 			if (p.split("/").filter(Boolean).length < 3) {
-				return text(`路径必须包含次级分类目录：/lfs/分类名/文件名（当前：${p}）。`, {});
+				return err(`路径必须包含次级分类目录：/lfs/分类名/文件名（当前：${p}）。`, {});
 			}
 			let src: string;
 			try {
 				src = path.resolve(ctx.cwd, params.sourcePath);
 			} catch {
-				return text(`源路径无法解析：${params.sourcePath}`, {});
+				return err(`源路径无法解析：${params.sourcePath}`, {});
 			}
 			let data: Buffer;
 			try {
 				data = fs.readFileSync(src);
 			} catch (e) {
-				return text(
+				return err(
 					`读取源文件失败：${params.sourcePath}（相对工作目录 ${ctx.cwd}）。${e instanceof Error ? e.message : String(e)}`,
 					{},
 				);
 			}
 			if (data.length > LFS_MAX_BYTES && !params.force) {
-				return text(
+				return err(
 					`文件 ${formatSize(data.length)} 超过 LFS 单文件上限 1GB。如确需上传请重试并加 force:true 参数。`,
 					{ size: data.length },
 				);
@@ -415,7 +416,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				// 已存在守卫（与 kb_write 一致）
 				const exists = await client.stat(p);
 				if (exists && !params.overwrite) {
-					return text(`${p} 已存在。确认覆盖请加 overwrite:true。`, { conflict: true });
+					return err(`${p} 已存在。确认覆盖请加 overwrite:true。`, { conflict: true });
 				}
 				await ensureRemoteDirs(client, p);
 				const { etag } = await client.put(p, data, { signal });
@@ -428,7 +429,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 					{ size: data.length },
 				);
 			} catch (e) {
-				return text(`上传失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
+				return err(`上传失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
 			}
 		},
 	});
@@ -450,9 +451,9 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			overwrite: Type.Optional(Type.Boolean()),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const p = params.path;
-			if (!isLfsPath(p)) return text(`路径必须位于 /lfs/ 下（LFS 大文件区）。当前：${p}`, {});
+			if (!isLfsPath(p)) return err(`路径必须位于 /lfs/ 下（LFS 大文件区）。当前：${p}`, {});
 			const cfg = loadConfig(agentConfigDir());
 			try {
 				const client = new WebDavClient(cfg.baseUrl!, cfg.username!, cfg.password!, { proxyUrl: cfg.proxyUrl });
@@ -461,7 +462,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 					? path.resolve(ctx.cwd, params.destPath)
 					: path.join(ctx.cwd, path.basename(p));
 				if (fs.existsSync(dest) && !params.overwrite) {
-					return text(`目标已存在：${dest}。确认覆盖请加 overwrite:true。`, { conflict: true });
+					return err(`目标已存在：${dest}。确认覆盖请加 overwrite:true。`, { conflict: true });
 				}
 				fs.mkdirSync(path.dirname(dest), { recursive: true });
 				fs.writeFileSync(dest, data);
@@ -469,9 +470,9 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				return text(`✓ 已下载：${dest}（${formatSize(data.length)}）`, { path: dest, size: data.length });
 			} catch (e) {
 				if (e instanceof DavError && e.status === 404) {
-					return text(`远端文件不存在：${p}。可用 kb_lslfs 查看 /lfs/ 下现有文件。`, {});
+					return err(`远端文件不存在：${p}。可用 kb_lslfs 查看 /lfs/ 下现有文件。`, {});
 				}
-				return text(`下载失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
+				return err(`下载失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
 			}
 		},
 	});
@@ -489,7 +490,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			force: Type.Optional(Type.Boolean({ description: "强制从远端刷新（忽略 1 小时缓存）" })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const cfg = loadConfig(agentConfigDir());
 			const mirror = mirrorOf();
 			try {
@@ -507,7 +508,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				lines.push(`\n共 ${shown.length} 项。需要时用 kb_download 下载到本地。`);
 				return text(lines.join("\n"), { count: shown.length });
 			} catch (e) {
-				return text(`列出失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
+				return err(`列出失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
 			}
 		},
 	});
@@ -529,19 +530,19 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const ns = params.namespace.replace(/\/+$/, "");
 			if (!(ALLOWED_NAMESPACES as readonly string[]).includes(ns)) {
-				return text(`目标命名空间必须为：${ALLOWED_NAMESPACES.join(" ")}（当前：${params.namespace}）。`, {});
+				return err(`目标命名空间必须为：${ALLOWED_NAMESPACES.join(" ")}（当前：${params.namespace}）。`, {});
 			}
 			let root: string;
 			try {
 				root = path.resolve(ctx.cwd, params.sourceDir);
 			} catch {
-				return text(`源目录无法解析：${params.sourceDir}`, {});
+				return err(`源目录无法解析：${params.sourceDir}`, {});
 			}
 			if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
-				return text(`源目录不存在或不是目录：${params.sourceDir}（相对工作目录 ${ctx.cwd}）`, {});
+				return err(`源目录不存在或不是目录：${params.sourceDir}（相对工作目录 ${ctx.cwd}）`, {});
 			}
 			const mode = params.mode ?? "skip";
 			const cfg = loadConfig(agentConfigDir());
@@ -634,14 +635,14 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			confirm: Type.Boolean({ description: "必须为 true 才执行删除" }),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			if (isLfsPath(params.path)) {
-				return text(`/lfs/ 文件删除请用 WebDAV 客户端（LFS 是网盘，不经知识库删除工具）。`, {});
+				return err(`/lfs/ 文件删除请用 WebDAV 客户端（LFS 是网盘，不经知识库删除工具）。`, {});
 			}
 			const p = validateWritablePath(params.path);
-			if (p) return text(p, {});
+			if (p) return err(p, {});
 			if (params.confirm !== true) {
-				return text(`删除需要二次确认：请重试并传 confirm:true。`, { confirm: false });
+				return err(`删除需要二次确认：请重试并传 confirm:true。`, { confirm: false });
 			}
 			const cfg = loadConfig(agentConfigDir());
 			const mirror = mirrorOf();
@@ -668,7 +669,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				status(ctx, "✓ 已删除笔记", 4_000);
 				return text(`✓ 已删除：${params.path}（远端 + 本地镜像 + 账本）`, {});
 			} catch (e) {
-				return text(`删除失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
+				return err(`删除失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
 			}
 		},
 	});
@@ -687,15 +688,15 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			destPath: Type.String({ description: "目标相对路径，须满足 /命名空间/用途/自由层级/文件名" }),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			if (isLfsPath(params.path)) {
-				return text(`/lfs/ 文件移动请用 WebDAV 客户端（LFS 是网盘，不经知识库工具）。`, {});
+				return err(`/lfs/ 文件移动请用 WebDAV 客户端（LFS 是网盘，不经知识库工具）。`, {});
 			}
 			// 源：宽松校验（兼容旧结构 3 段路径）；目标：严格分层校验
 			const errSrc = validateNs(params.path);
-			if (errSrc) return text(errSrc, {});
+			if (errSrc) return err(errSrc, {});
 			const errDst = validateWritablePath(params.destPath);
-			if (errDst) return text(errDst, {});
+			if (errDst) return err(errDst, {});
 			if (params.path === params.destPath) return text(`源与目标相同，无需移动。`, {});
 			const cfg = loadConfig(agentConfigDir());
 			const mirror = mirrorOf();
@@ -707,12 +708,12 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				const bytes = readNoteBytes(mirror, params.path);
 				content = bytes === null ? null : new TextDecoder().decode(bytes);
 			}
-			if (content === null) return text(`源文件不存在：${params.path}`, {});
+			if (content === null) return err(`源文件不存在：${params.path}`, {});
 			// 目标已存在防护（本地镜像判断）
 			const destExists = isVaultPath(params.destPath)
 				? vaultReadNote(mirror, params.destPath) !== null
 				: readNoteBytes(mirror, params.destPath) !== null;
-			if (destExists) return text(`目标已存在（防覆盖）：${params.destPath}。如需覆盖请先 kb_delete 目标。`, {});
+			if (destExists) return err(`目标已存在（防覆盖）：${params.destPath}。如需覆盖请先 kb_delete 目标。`, {});
 			try {
 				// 写目标（远端 + 本地镜像 + 账本）
 				await vaultPutNote(cfg, mirror, params.destPath, content, { signal });
@@ -729,7 +730,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 				status(ctx, "✓ 已移动笔记", 4_000);
 				return text(`✓ 已移动：${params.path} → ${params.destPath}`, {});
 			} catch (e) {
-				return text(`移动失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
+				return err(`移动失败：${e instanceof Error ? e.message : String(e)}`, { error: String(e) });
 			}
 		},
 	});
@@ -744,7 +745,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		promptSnippet: "同步状态：kb_status() → 摘要",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const mirror = mirrorOf();
 			const ledger = loadLedger(mirror);
 			const lfsCache = loadLfsCache(mirror);
@@ -799,7 +800,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 		promptSnippet: "同步：kb_sync() → 同步摘要",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
-			if (notConfiguredHint()) return text(notConfiguredHint()!, {});
+			if (notConfiguredHint()) return err(notConfiguredHint()!, {});
 			const cfg = loadConfig(agentConfigDir());
 			const mirror = mirrorOf();
 			setStatusWithTTL(ctx, "kb-sync", "🔄 同步中", 30_000);
@@ -823,7 +824,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 			} catch (e) {
 				const msg = describeSyncError(e);
 				const locked = e instanceof DavError && e.method === "SYNC_LOCKED";
-				return text(locked ? `同步暂缓：${msg}` : `同步失败：${msg}`, { error: msg, locked });
+				return err(locked ? `同步暂缓：${msg}` : `同步失败：${msg}`, { error: msg, locked });
 			}
 		},
 	});
@@ -930,6 +931,6 @@ function appendDeleteLog(mirrorDir: string, relPath: string): void {
 	}
 }
 
-function text(text: string, details: Record<string, unknown>): { content: { type: "text"; text: string }[]; details: unknown } {
-	return { content: [{ type: "text", text }], details };
-}
+/** 结果构造统一走 shared/tool-result：失败用 err（带 isError），成功用 text */
+const text = toolText;
+const err = toolError;

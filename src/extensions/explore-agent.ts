@@ -828,7 +828,7 @@ export default function (pi: ExtensionAPI) {
 	registerModelConfigCommand(pi, {
 		command: "explore-config",
 		description:
-			"配置 explore 子模型：auto（由 model-config 管理）或 provider/modelId；不带参数进入交互选择（含搜索）",
+			"explore 子模型：auto（由 model-config 管理）或 provider/modelId（无参开浮层）",
 		displayName: "explore 子模型",
 		setting: exploreModelSetting,
 		// 设置变更后立即按新模型重注册视觉标注
@@ -853,9 +853,11 @@ async function executeExplore(
 	signal: AbortSignal | undefined,
 	onUpdate: AgentToolUpdateCallback<ExploreDetails> | undefined,
 ): Promise<AgentToolResult<ExploreDetails>> {
+	/** 整体失败（无可用模型/重复运行/参数错）：带 isError，pi 侧模型与 UI 才识别为失败 */
 	const fail = (text: string): AgentToolResult<ExploreDetails> => ({
 		content: [{ type: "text", text }],
 		details: { model: "", total: 0, succeeded: 0, tasks: [] },
+		isError: true,
 	});
 
 	const model = pickExploreModel(ctx);

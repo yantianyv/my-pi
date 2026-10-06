@@ -1676,10 +1676,19 @@ async function enrichReviewTargets(cfg: BridgeConfig, args: string[], review: Pe
 	return { ...review, object: `收件人：${names.slice(0, 3).join("、")}${names.length > 3 ? ` 等 ${names.length} 人` : ""}`, objectItems: { label: "收件人", items: names } };
 }
 
-const text = (t: string, details: Record<string, unknown> = {}) => ({
-	content: [{ type: "text" as const, text: t }],
-	details,
-});
+/**
+ * 工具结果：details.kind 为 error/blocked 时置 isError（pi 侧模型与 UI 才识别为失败），
+ * 其余（ok/列表/预演）为正常结果。
+ */
+const text = (t: string, details: Record<string, unknown> = {}) => {
+	const kind = details.kind;
+	const failed = kind === "error" || kind === "blocked";
+	return {
+		content: [{ type: "text" as const, text: t }],
+		details,
+		...(failed ? { isError: true as const } : {}),
+	};
+};
 
 /**
  * 用通讯录详情富化候选（部门路径/职务/工号）——重名消歧的关键信息，aisearch 不返回。
