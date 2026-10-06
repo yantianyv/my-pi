@@ -64,7 +64,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 
 ## 测试说明
 
-- **无框架、无 runner、无 CI、无 lint**：27 个 `*.test.mjs` 都是独立可执行脚本（自定义 `check()` + exit code，唯一例外 `shared/test/shell-split.test.mjs` 用 `node:assert/strict`），每个文件单独跑：`node src/extensions/<...>/test/<name>.test.mjs`（仓库根执行）。
+- **无框架、无 runner、无 CI、无 lint**：29 个 `*.test.mjs` 都是独立可执行脚本（自定义 `check()` + exit code，唯一例外 `shared/test/shell-split.test.mjs` 用 `node:assert/strict`），每个文件单独跑：`node src/extensions/<...>/test/<name>.test.mjs`（仓库根执行）。
 - 测试需要 `.ts` 时用 esbuild 现场 bundle 成 `.tmp-*.mjs` 再 import（external 白名单同 build.js，tsconfig 用 `config/tsconfig.build.json`）；`qr` 例外（用 jiti 加载产物，与运行时一致）。
 - 集成类测试（ask / qr / workflow-mgr / `src/extensions/test/`）依赖 `src/extensions/node_modules/` 的 pi 全局包副本（不入库）——换机器或 pi 升级后跑 `node src/extensions/test/relink-deps.mjs` 重建（优先链接，不支持链接的文件系统回退递归复制）；`hud/test` 与 `shared/test` 不需要。
 - 缺省全部离线可跑；`MIMO_LIVE=1`、各 `*-live.mjs` 才需要真实网络/环境（硬编码本机路径，换机器不可用）。

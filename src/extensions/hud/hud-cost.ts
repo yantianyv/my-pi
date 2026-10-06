@@ -485,7 +485,8 @@ export function getTurnOutput(): number | null {
 // DeepSeek 官方人民币定价（元 / 百万 tokens）
 // 来源：https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
 // 峰谷定价：DEEPSEEK_PRICES 存「空闲时段」价，高峰时段 = 空闲 × 2
-//   （高峰时段 = 北京时间周一至周五 9:00-12:00 / 14:00-18:00，周末全天空闲价）：
+//   （高峰时段 = 北京时间周一至周五 9:00-12:00 / 14:00-18:00，周末全天空闲价；
+//     官方口径还排除中国法定节假日，isDeepSeekPeakHour 未内置节假日表，节假日会按高峰价估算）：
 //   deepseek-flash   ：缓存命中 ¥0.02，缓存未命中 ¥1，输出 ¥4（高峰 0.04 / 2 / 8）
 //     （V4.1-Flash；旧模型名 deepseek-v4-flash 已下线，请求由 V4.1-Flash 承接并按此价计费）
 //   deepseek-v4-pro ：缓存命中 ¥0.15，缓存未命中 ¥4.5，输出 ¥13.5（高峰 0.30 / 9.0 / 27.0）
@@ -584,7 +585,10 @@ function mimoModelKey(modelId: string): string {
 //   kimi-k2.7-code   ：缓存命中 ¥1.30，缓存未命中 ¥6.50， 输出 ¥27.00
 //   kimi-k2.7-code-highspeed（高速版，官方模型 ID 同名）：缓存命中 ¥2.60，缓存未命中 ¥13.00，输出 ¥54.00（普通版 2 倍）
 //   kimi-k2.6        ：缓存命中 ¥1.10，缓存未命中 ¥6.50， 输出 ¥27.00
-// 说明：Kimi For Coding 订阅制也按 K2.7 Code API 价估算等效消费。
+// Kimi For Coding 订阅（provider `kimi-coding`）的模型 id 与开放平台不同名：
+//   kimi-for-coding           = K2.8 Preview（2026-09 起该 id 原地换芯，1M 上下文）；无公开 API 单价，按 K2.7 Code 估算
+//   kimi-for-coding-highspeed = K2.7 Code 高速版（未随换芯，256K 上下文），按高速版价（普通版 2 倍）
+//   k3 / k3-256k              = K3；k3-256k 无单独公开价，按 K3 全价估算
 // ---------------------------------------------------------------------------
 
 interface KimiPrice {
@@ -594,27 +598,29 @@ interface KimiPrice {
 	cacheWrite?: number; // 缓存写入（元/百万 tokens，仅 K3 系列计费；按 5min TTL 档，1h 档为其 2 倍）
 }
 
-const KIMI_PRICES: Record<string, KimiPrice> = {
+export const KIMI_PRICES: Record<string, KimiPrice> = {
 	"kimi-k3": { cacheHit: 2.0, cacheMiss: 20.0, output: 100.0, cacheWrite: 20.0 },
 	"kimi-k2.7-code": { cacheHit: 1.3, cacheMiss: 6.5, output: 27.0 },
 	"kimi-k2.7-code-highspeed": { cacheHit: 2.6, cacheMiss: 13.0, output: 54.0 },
 	"kimi-k2.6": { cacheHit: 1.1, cacheMiss: 6.5, output: 27.0 },
 };
 
-function kimiModelKey(modelId: string): string {
+/** 模型 id → 定价键（未知 id 落 K2.7 Code：中间价位，避免低估）。新增模型需同步登记 KIMI_PRICES。 */
+export function kimiModelKey(modelId: string): string {
 	const id = modelId.toLowerCase();
+	// 高速档关键词也可能不带 k2.7 前缀（如 kimi-for-coding-highspeed），故先统一识别
+	const highspeed = id.includes("high") || id.includes("ultra") || id.includes("fast");
 	if (id.includes("k3")) return "kimi-k3";
 	if (id.includes("k2.7") || id.includes("k2-7")) {
-		if (id.includes("high") || id.includes("ultra") || id.includes("fast")) return "kimi-k2.7-code-highspeed";
-		return "kimi-k2.7-code";
+		return highspeed ? "kimi-k2.7-code-highspeed" : "kimi-k2.7-code";
 	}
 	if (id.includes("k2.6") || id.includes("k2-6")) return "kimi-k2.6";
-	return "kimi-k2.7-code"; // Kimi For Coding 默认按 K2.7 Code 估算
+	return highspeed ? "kimi-k2.7-code-highspeed" : "kimi-k2.7-code";
 }
 
 /**
  * Kimi 消耗成本（人民币元），按官方定价直算。
- * 对 Kimi For Coding 订阅制也按 K2.7 Code API 价估算等效消费。
+ * Kimi For Coding 订阅（kimi-for-coding = K2.8 Preview，无公开单价）按 K2.7 Code API 价估算等效消费。
  */
 function kimiCostCny(u: AssistantMessage["usage"], modelId: string): number {
 	const p = KIMI_PRICES[kimiModelKey(modelId)] ?? KIMI_PRICES["kimi-k2.7-code"];
@@ -656,6 +662,9 @@ function deepseekCostCny(u: AssistantMessage["usage"], modelId: string, ts: numb
 //   DeepSeek 系列：高峰 = 平峰 ×2。高峰时段 = 周一~周五 01:00-04:00 / 06:00-10:00 UTC
 //     （即北京时间周一~周五 09:00-12:00 / 14:00-18:00），周末全天平峰。
 //   分档价（≤/> 上下文阈值两档）只在有高低两档的模型上启用：按单条消息 token 总量判定。
+// 表内 glm-5.1 / qwen3.7-max / qwen3.6-plus / minimax-m2.5 / kimi-k2.6 上游当前已不在 Go
+// 模型列表（保留作回退，重新上架前数值不保证仍准）；glm-5.3-flashx 官方尚未上架，按 2.5×
+// GLM-5.3-Flash 折算预留。未知模型落 kimi-k2.7-code（中间价位，避免低估额度消耗）。
 // ---------------------------------------------------------------------------
 
 interface GoPrice {
@@ -673,7 +682,7 @@ interface GoPrice {
 	};
 }
 
-const GO_PRICES: Record<string, GoPrice> = {
+export const GO_PRICES: Record<string, GoPrice> = {
 	"grok-4.7": {
 		cacheMiss: 2.0,
 		cacheHit: 0.5,
@@ -742,17 +751,18 @@ const GO_PRICES: Record<string, GoPrice> = {
 	"deepseek-v4.1-flash": { cacheMiss: 0.15, cacheHit: 0.003, output: 0.6 },
 	"deepseek-v4-flash": { cacheMiss: 0.15, cacheHit: 0.003, output: 0.6 },
 	"deepseek-v4-flash-vision-exp": { cacheMiss: 0.15, cacheHit: 0.003, output: 0.6 },
-	"space-bunny-free": { cacheMiss: 0, cacheHit: 0, output: 0 }, // 限时免费
+	"space-bunny": { cacheMiss: 0.15, cacheHit: 0.03, output: 0.6 },
+	"longcat-2.5-preview-free": { cacheMiss: 0, cacheHit: 0, output: 0 }, // 限时免费
 	"hy4-preview": { cacheMiss: 0.834, cacheHit: 0.042, output: 2.501 },
 	"hy3": { cacheMiss: 0.14, cacheHit: 0.035, output: 0.58 },
 };
 
-function goModelKey(modelId: string): string {
+export function goModelKey(modelId: string): string {
 	const id = modelId.toLowerCase();
 	if (id.includes("grok-4.7") || id.includes("grok-4-7")) return "grok-4.7";
 	if (id.includes("grok")) return "grok-4.6";
-	if (id.includes("gpt-6") || id.includes("6-luna")) return "gpt-6-luna";
-	if (id.includes("gpt-5.6") || id.includes("luna")) return "gpt-5.6-luna";
+	if (id.includes("gpt-5.6")) return "gpt-5.6-luna";
+	if (id.includes("gpt-6") || id.includes("6-luna") || id.includes("luna")) return "gpt-6-luna";
 	if (id.includes("glm-5.3-flashx") || id.includes("glm-5.3-flash-x")) return "glm-5.3-flashx";
 	if (id.includes("glm-5.3-flash")) return "glm-5.3-flash";
 	if (id.includes("glm-5.3")) return "glm-5.3";
@@ -761,6 +771,7 @@ function goModelKey(modelId: string): string {
 	if (id.includes("kimi-k3") || id.includes("k3")) return "kimi-k3";
 	if (id.includes("k2.7") || id.includes("k2-7")) return "kimi-k2.7-code";
 	if (id.includes("k2.6") || id.includes("k2-6")) return "kimi-k2.6";
+	if (id.includes("longcat-2.5") || id.includes("longcat-2-5")) return "longcat-2.5-preview-free";
 	if (id.includes("longcat")) return "longcat-2.0";
 	if (id.includes("deepseek") && id.includes("vision")) return "deepseek-v4-flash-vision-exp";
 	if (id.includes("deepseek") && id.includes("pro")) return "deepseek-v4-pro";
@@ -776,7 +787,7 @@ function goModelKey(modelId: string): string {
 	if (id.includes("minimax")) return "minimax-m2.7"; // M2.7 同价
 	if (id.includes("muse") && id.includes("1.3")) return "muse-spark-1.3-contributor";
 	if (id.includes("muse")) return "muse-spark-1.2-contributor";
-	if (id.includes("bunny")) return "space-bunny-free"; // 限时免费
+	if (id.includes("bunny")) return "space-bunny";
 	if (id.includes("qwen3.8-max")) return "qwen3.8-max";
 	if (id.includes("qwen3.8-flash")) return "qwen3.8-flash";
 	if (id.includes("qwen3.7-max")) return "qwen3.7-max";

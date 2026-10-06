@@ -99,7 +99,7 @@ export async function runBtwTurn(
 		const fallback = overlay.getAnswer();
 		if (!fallback) {
 			if (retries < BTW_EMPTY_RETRY) {
-				// 模型偶发空回答（如 deepseek-v4-flash 瞬时返回空 assistant 消息）：清空状态重试
+				// 模型偶发空回答（如 deepseek-flash 瞬时返回空 assistant 消息）：清空状态重试
 				overlay.startQuestion(question); // 清空 answer/status，重新进入 thinking
 				return runBtwTurn(ctx, model, thread, question, signal, overlay, onDone, failover, retries + 1);
 			}

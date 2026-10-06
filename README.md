@@ -75,7 +75,7 @@ pi 内置供应商无火山引擎（volcengine/ark/doubao），模板通过 pi �
 ```
 
 - **配置 key**：设环境变量 `VOLCENGINE_CODING_API_KEY`（Coding Plan 专属 key，前缀 `sk-sp-`），或在 pi 里 `/login volcengine-coding` 输入。
-- **模型**：`ark-code-latest`（auto 选优）+ 常用具体模型（doubao-seed-2.0-code / deepseek-v3.2 / glm-5.1 / kimi-k2.6 / minimax-m2.7），列表随官方更新可自行增删。
+- **模型**：`ark-code-latest`（auto 选优）+ 常用具体模型（doubao-seed-2.1-pro / doubao-seed-evolving / doubao-seed-2.0-code / deepseek-v4-pro / deepseek-v4-1-flash / kimi-k2.7-code / glm-5.3 / glm-5.3-flash / minimax-m3），列表随官方更新可自行增删。
 - **额度**：订阅制（5h 滑动窗口 + 周 + 月三级），额度在火山控制台「开通管理」页查看（Coding Plan 无 key 直查余额接口）。
 
 ## 3 行 HUD（src/extensions/hud/）

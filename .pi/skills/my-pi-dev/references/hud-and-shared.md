@@ -10,7 +10,7 @@
 | `hud-balance.ts` | 供应商余额适配器注册表 `BALANCE_ADAPTERS` |
 | `hud-cost.ts` | usage 汇总 / 定价 / 按量付费文本 / 实时汇率 / EMA 与本轮速率 / Z.AI 积分轨 |
 | `hud-git.ts` | git 状态解析（porcelain + 路径 unquote + numstat）、Visual Git 面板、stage/discard/commit/sync、AI 提交信息与冲突消解 |
-| `test/` | 4 个回归：`sparkline`（宽度/档位/ref）、`token-rate`（速率口径）、`unquote`（八进制与引号解码 + 真实仓库操作，需 PATH 有 git）、`zai-credits`（积分差分/meteredRateText/adapter） |
+| `test/` | 6 个回归：`sparkline`（宽度/档位/ref）、`token-rate`（速率口径）、`unquote`（八进制与引号解码 + 真实仓库操作，需 PATH 有 git）、`zai-credits`（积分差分/meteredRateText/adapter）、`price-keys`（Go/Kimi 模型 id → 定价键路由）、`kimi-balance`（Kimi 余量字段解析：remaining 回推 / 加油包停用 / 额度耗尽） |
 
 三行三列（中右之间 dim 竖线，三行共用栏宽）：
 
@@ -35,6 +35,13 @@ hud 自己只推 `hud-bash` / `balance-error` / `model-switch` 三个 key，其�
 - `__PI_HUD_API__`：`registerExtraRows(provider)`（provider 为 `(theme, width) => string[] | null`，返回注销函数）与 `notifyExtraRowsUpdate()`。**当前 workflow-mgr 已依赖**：hud 开启时它注册渲染函数，常驻面板内容改由 hud 在 footer 最底部渲染、自绘面板隐藏；hud 关闭或 showPanel 关时注销并恢复自绘（`workflow-mgr/panel.ts` 与 `events.ts` 监听 `hud:state-change`）。
 
 **余额与定价**：`BALANCE_ADAPTERS` 覆盖 11 个 provider——`deepseek`、`xiaomi`、`kimi-coding`、`moonshotai`、`moonshotai-cn`、`xiaomi-token-plan-cn`、`openrouter`、`volcengine-coding`、`sensenova`、`opencode-go`、`zai-coding-cn`；余额状态统一 `ok|warning|error`，可返回实时余额 / 控制台链接 / 多窗口 quota / `rateText`。成本口径：DeepSeek / Kimi / MiMo 按官方人民币定价直算（恒 ¥，不依赖汇率），OpenCode Go 按其 USD 定价直算，其余用 pi 原始 USD 成本并在显示时换算；Z.AI 走积分独立轨（数字是积分、颜色按 USD 等效成本）。**汇率三态**：实时（frankfurter → open.er-api 双源，1h 节流）→ 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`）→ 无（双源请求失败且无缓存时显示原始货币 USD，**不用固定近似值**）。余额刷新周期 5min。
+
+**定价/余量数据的核对方法**（上游改价或改模型时走这三步）：
+1. pi 侧权威价目：`~/.pi/agent/models-store.json`（按 provider 分文件，每次会话自动刷新）——可直接对照 `hud-cost.ts` 的 `DEEPSEEK_PRICES` / `MIMO_PRICES` / `KIMI_PRICES` / `GO_PRICES`；
+2. 现网接口实测：`/coding/v1/usages`（Kimi）、`/zen/go/v1/usage`（OpenCode Go）、`/user/balance`（DeepSeek）、`/api/v1/key`（OpenRouter）、`/api/monitor/usage/quota/limit`（Z.AI）、`/v1/models`（火山方舟 / SenseNova），curl 一遍看字段形状是否变；
+3. 官方定价页与模型列表：OpenCode Go 表、Kimi 开放平台定价、DeepSeek 定价、火山 Coding Plan 套餐概览。
+
+模型 id 映射改动后跑 `node src/extensions/hud/test/price-keys.test.mjs`（盯 Go 与 Kimi 的路由键）。
 
 **两套速率口径**：
 

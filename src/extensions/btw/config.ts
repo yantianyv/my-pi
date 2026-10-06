@@ -27,7 +27,7 @@ import { isModelConfig, loadJsonConfig, saveJsonConfig } from "../shared/config"
 export const BTW_MAX_TOKENS = 4096;
 /** btw 面板单轮问答最多跑几轮（一轮 = 一次 LLM 调用 + 可能的工具调用） */
 export const BTW_MAX_TURNS = 6;
-/** 空回答自动重试次数：部分模型（如 deepseek-v4-flash）偶发返回空 assistant 消息（content 空数组、无流式、瞬时完成），重试可大概率恢复 */
+/** 空回答自动重试次数：部分模型（如 deepseek-flash）偶发返回空 assistant 消息（content 空数组、无流式、瞬时完成），重试可大概率恢复 */
 export const BTW_EMPTY_RETRY = 1;
 /** 请求超时 */
 export const BTW_TIMEOUT_MS = 5 * 60_000;

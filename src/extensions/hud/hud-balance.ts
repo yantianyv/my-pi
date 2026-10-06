@@ -137,7 +137,7 @@ const deepseekAdapter: BalanceAdapter = {
 /**
  * Kimi For Coding：订阅制 + 加油包（Extra Usage）混合计费。
  * 官方接口 GET https://api.kimi.com/coding/v1/usages（Bearer 认证），
- * 返回订阅额度（usage/limits）和加油包余额（boosterWallet）。
+ * 返回订阅额度（usage/limits）和加油包余额（booster_wallet）。
  */
 export const KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/v1";
 const KIMI_FIXED_POINT_CENTS = 1_000_000; // 加油包金额固定点：1e6 单位 = 1 分
@@ -149,6 +149,8 @@ interface KimiUsageWindow {
 
 interface KimiUsageRow {
 	used?: number;
+	/** 部分窗口只给剩余量（limit + remaining，无 used），需自行相减 */
+	remaining?: number;
 	limit?: number;
 	name?: string;
 	resetTime?: string;
@@ -156,6 +158,8 @@ interface KimiUsageRow {
 }
 
 interface KimiBoosterWallet {
+	/** STATUS_DISABLED = 未开通/已停用加油包，不当作可用余额展示 */
+	status?: string;
 	balance?: {
 		type?: string;
 		amount?: number;
@@ -173,6 +177,8 @@ interface KimiUsagePayload {
 		window?: KimiUsageWindow;
 		detail?: KimiUsageRow;
 	}>;
+	/** 上游实际返回 snake_case；camelCase 为历史字段，兼容保留 */
+	booster_wallet?: KimiBoosterWallet;
 	boosterWallet?: KimiBoosterWallet;
 }
 
@@ -222,12 +228,21 @@ function formatWindowShort(window?: KimiUsageWindow): string {
 	return formatWindow(window);
 }
 
+/** 行已用量：优先 used，否则由 limit − remaining 推得（部分窗口只回传剩余量）。 */
+function rowUsed(row: KimiUsageRow): number {
+	const used = toInt(row.used);
+	if (used !== null) return used;
+	const limit = toInt(row.limit);
+	const remaining = toInt(row.remaining);
+	if (limit !== null && remaining !== null) return Math.max(0, limit - remaining);
+	return 0;
+}
+
 function formatUsageRow(row: KimiUsageRow): string {
 	const name = row.name && row.name.length > 0 ? row.name : formatWindowShort(row.window);
-	const used = toInt(row.used) ?? 0;
 	const limit = toInt(row.limit) ?? 0;
 	const label = name || "额度";
-	return `${label} ${used}/${limit}`;
+	return `${label} ${rowUsed(row)}/${limit}`;
 }
 
 function rowLabel(row: KimiUsageRow): string {
@@ -237,7 +252,7 @@ function rowLabel(row: KimiUsageRow): string {
 const kimiCodingAdapter: BalanceAdapter = {
 	providerId: "kimi-coding",
 	label: "Kimi For Coding",
-	// 订阅制：仍按 K2.7 Code API 价估算等效消费（¥/min + ¥累计）
+	// 订阅制：按 K2.7 Code API 价估算等效消费（kimi-for-coding 现为 K2.8 Preview，无公开价）；¥/min + ¥累计
 	rateText(ctx, now) {
 		return meteredRateText(ctx, now);
 	},
@@ -282,12 +297,13 @@ const kimiCodingAdapter: BalanceAdapter = {
 			}
 		}
 
-		// 加油包余额（可选）
+		// 加油包余额（可选）：上游字段为 booster_wallet；balance.status 非 ACTIVE（如 STATUS_DISABLED）
+		// 或不再回传 amount/amountLeft 时视为无可用加油包，回落展示订阅额度
 		let boosterCents: number | null = null;
 		let boosterTotalCents: number | null = null;
 		let boosterCurrency = "CNY";
-		const booster = data.boosterWallet;
-		if (booster?.balance?.type === "BOOSTER") {
+		const booster = data.booster_wallet ?? data.boosterWallet;
+		if (booster?.balance?.type === "BOOSTER" && booster.status !== "STATUS_DISABLED") {
 			const amount = toInt(booster.balance.amount);
 			const amountLeft = toInt(booster.balance.amountLeft);
 			if (amount !== null && amount > 0) {
@@ -302,8 +318,8 @@ const kimiCodingAdapter: BalanceAdapter = {
 
 		// 状态判断：订阅额度耗尽 → error；额度/余额偏低 → warning
 		let status: BalanceStatus = "ok";
-		const summaryLimit = summary?.limit ?? 0;
-		const summaryUsed = summary?.used ?? 0;
+		const summaryLimit = toInt(summary?.limit) ?? 0;
+		const summaryUsed = summary ? rowUsed(summary) : 0;
 		if (summaryLimit > 0) {
 			const ratio = summaryUsed / summaryLimit;
 			if (ratio >= 1) status = "error";
@@ -334,10 +350,10 @@ const kimiCodingAdapter: BalanceAdapter = {
 		// 额度条：周额度 + 附加频限窗口，用于渲染进度条
 		const quotas: BalanceQuota[] = [];
 		if (summary) {
-			quotas.push({ label: rowLabel(summary), used: toInt(summary.used) ?? 0, limit: toInt(summary.limit) ?? 0 });
+			quotas.push({ label: rowLabel(summary), used: rowUsed(summary), limit: toInt(summary.limit) ?? 0 });
 		}
 		for (const limit of limits) {
-			quotas.push({ label: rowLabel(limit), used: toInt(limit.used) ?? 0, limit: toInt(limit.limit) ?? 0 });
+			quotas.push({ label: rowLabel(limit), used: rowUsed(limit), limit: toInt(limit.limit) ?? 0 });
 		}
 
 		return {
@@ -470,7 +486,7 @@ const volcengineCodingAdapter: BalanceAdapter = {
 
 /**
  * OpenRouter：美元充值账户。
- * 官方接口 GET https://openrouter.ai/api/v1/credits（Bearer 认证，需 management key），
+ * 官方接口 GET https://openrouter.ai/api/v1/credits（Bearer 认证：普通 key 亦可读，实测非 management key 返回 200），
  * 返回 total_credits（累计购买）与 total_usage（累计消耗），当前余额 ≈ total_credits - total_usage。
  * 注意：该接口有缓存，可能延迟最多约 60 秒，非实时数据。
  */
@@ -486,7 +502,7 @@ const openrouterAdapter: BalanceAdapter = {
 		const headers = { Authorization: `Bearer ${key}` };
 		const signal = AbortSignal.timeout(10_000);
 
-		// 账户总余额：GET /api/v1/credits（management key）
+		// 账户总余额：GET /api/v1/credits
 		const res = await fetch("https://openrouter.ai/api/v1/credits", { headers, signal });
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
 		const data = (await res.json()) as {
@@ -504,24 +520,45 @@ const openrouterAdapter: BalanceAdapter = {
 		const status: BalanceStatus = remainingUsd <= 1 ? "error" : remainingUsd < 5 ? "warning" : "ok";
 
 		// 单 Key 限额：GET /api/v1/key，limit 为 null（未设限）时不显示进度条；
-		// 该查询可失败，仅降级去掉进度条，不阻塞账户余额显示。
+		// 限额窗口由 limit_reset 给出（daily/weekly/monthly），用量取对应窗口（优先 limit_remaining，
+		// 无则按窗口取 usage_*）；该查询可失败，仅降级去掉进度条，不阻塞账户余额显示。
 		const keyQuota = (() => {
 			try {
 				return (async () => {
 					const keyRes = await fetch("https://openrouter.ai/api/v1/key", { headers, signal });
 					if (!keyRes.ok) return null;
 					const kd = (await keyRes.json()) as {
-						data?: { limit?: number | null; usage?: number; usage_monthly?: number | null };
+						data?: {
+							limit?: number | null;
+							limit_remaining?: number | null;
+							limit_reset?: string | null;
+							usage?: number;
+							usage_daily?: number | null;
+							usage_weekly?: number | null;
+							usage_monthly?: number | null;
+						};
 					};
 					const k = kd.data;
 					const limit = typeof k?.limit === "number" ? k.limit : 0;
 					if (limit <= 0) return null;
-					// 限额按周期重置（limit_reset 多为 monthly），优先用当月用量；无则退回累计用量
-					const kused =
-						(typeof k?.usage_monthly === "number" ? k.usage_monthly : 0) ||
-						(typeof k?.usage === "number" ? k.usage : 0) ||
-						0;
-					return { used: kused, limit } as const;
+					const windowUsage =
+						k?.limit_reset === "daily"
+							? k.usage_daily
+							: k?.limit_reset === "weekly"
+								? k.usage_weekly
+								: k?.limit_reset === "monthly"
+									? k.usage_monthly
+									: (k?.usage_monthly ?? k?.usage);
+					const used =
+						typeof k?.limit_remaining === "number"
+							? Math.max(limit - k.limit_remaining, 0)
+							: typeof windowUsage === "number"
+								? windowUsage
+								: 0;
+					// 窗口后缀进额度条标签，避免日限额被误读为月用量
+					const suffix =
+						k?.limit_reset === "daily" ? "日" : k?.limit_reset === "weekly" ? "周" : k?.limit_reset === "monthly" ? "月" : "";
+					return { used, limit, label: suffix ? `Key·${suffix}` : "Key" } as const;
 				})();
 			} catch {
 				return null; // 忽略：限额查询失败不阻塞余额显示
@@ -535,7 +572,7 @@ const openrouterAdapter: BalanceAdapter = {
 		if (rate !== null) {
 			const remainingCny = remainingUsd * rate;
 			const quotas: BalanceQuota[] = kq
-				? [{ label: "Key", used: kq.used * rate, limit: kq.limit * rate, currency: "CNY" }]
+				? [{ label: kq.label, used: kq.used * rate, limit: kq.limit * rate, currency: "CNY" }]
 				: [];
 			return {
 				status,
@@ -548,7 +585,9 @@ const openrouterAdapter: BalanceAdapter = {
 			};
 		}
 		// 无汇率：直接显示原始货币（不猜近似值）
-		const quotasUsd: BalanceQuota[] = kq ? [{ label: "Key", used: kq.used, limit: kq.limit, currency: "USD" }] : [];
+		const quotasUsd: BalanceQuota[] = kq
+			? [{ label: kq.label, used: kq.used, limit: kq.limit, currency: "USD" }]
+			: [];
 		return {
 			status,
 			amount: `USD ${remainingUsd.toFixed(2)}`,
@@ -561,11 +600,9 @@ const openrouterAdapter: BalanceAdapter = {
 
 /**
  * SenseNova Token Plan CN：免费公测，按请求次数限制（每5小时滚动窗口），无公开余额 API，显示控制台链接。
- * 可接入 Chat Completions 的模型（据官方 2026-08 文档）：
- *   - sensenova-6.8-flash-lite：262144 上下文 / 65536 输出，1500 次/5h，支持 text+image 输入
- *   - deepseek-v4-flash：1M 上下文 / 65536 输出，500 次/5h，支持 reasoning
- *   - glm-5.2：1M 上下文 / 131072 输出，500 次/5h，支持 reasoning
- * 注意：sensenova-u1-fast 使用独立的 /v1/images/generations 端点，不属 openai-completions，未在此列出。
+ * 已配置的模型见 static/models.json（sensenova-6.8-flash-lite / deepseek-v4-flash / deepseek-v4.1-flash /
+ * deepseek-flash / glm-5.2 / deepseek-v4-pro / kimi-k3），以 /v1/models 实测列表为准。
+ * sensenova-u1-fast / sensenova-u1.5-lite 未配置：前者输出图像，不属 openai-completions 对话模型。
  */
 const sensenovaAdapter: BalanceAdapter = {
 	providerId: "sensenova",
@@ -587,15 +624,16 @@ const sensenovaAdapter: BalanceAdapter = {
 };
 
 /**
- * OpenCode Go：订阅制，三层滚动额度（5h $12 / 每周 $30 / 每月 $60）。
+ * OpenCode Go：订阅制，三层滚动额度（5h = 月额度 20% / 周 50% / 月 100%，官方口径）。
  * 官方未写入文档的接口：GET https://opencode.ai/zen/go/v1/usage（Bearer API key），
  * 返回 rolling / weekly / monthly 的 percent 与 resetsAt。
- * 来源：https://github.com/farion1231/cc-switch/issues/6433
  *
  * HUD 行展示对齐 Kimi 风格（简化）：只画「额度条 + 窗口标签 + 百分比」，
  * 金额用量与重置倒计时收进 detail，由 /balance notify 查看。
  * 窗口顺序统一大周期在前：月 > 周 > 5h。
  */
+// 额度条的百分比直接用接口返回值；这里的 USD 基准只供 detail 里的金额文案换算，
+// 按 Go（$10）档月限 $60 的模型取值的近似（官方现按模型给 $15/$30/$60，Go Plus 档更高）。
 const GO_USAGE_LIMITS = { rolling: 12, weekly: 30, monthly: 60 }; // USD
 
 interface GoUsageWindow {

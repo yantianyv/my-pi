@@ -21,8 +21,8 @@
       },
       "models": [
         { "id": "ark-code-latest", "name": "Ark Code Auto", "contextWindow": 256000 },
-        { "id": "doubao-seed-2.1-pro", "name": "Doubao Seed 2.1 Pro", "reasoning": true, "contextWindow": 262144, "maxTokens": 262144, "compat": { "thinkingFormat": "openai" } },
-        { "id": "doubao-seed-2.1-turbo", "name": "Doubao Seed 2.1 Turbo", "reasoning": true, "contextWindow": 262144, "maxTokens": 262144, "compat": { "thinkingFormat": "openai" } },
+        { "id": "doubao-seed-2.1-pro", "name": "Doubao Seed 2.1 Pro", "reasoning": true, "contextWindow": 1048576, "maxTokens": 262144, "compat": { "thinkingFormat": "openai" } },
+        { "id": "doubao-seed-evolving", "name": "Doubao Seed Evolving", "reasoning": true, "contextWindow": 1048576, "maxTokens": 262144, "compat": { "thinkingFormat": "openai" } },
         { "id": "doubao-seed-2.0-code", "name": "Doubao Seed 2.0 Code", "reasoning": true, "contextWindow": 262144, "maxTokens": 131072, "compat": { "thinkingFormat": "openai" } },
         {
           "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "reasoning": true, "contextWindow": 1048576, "maxTokens": 393216,
@@ -32,8 +32,9 @@
           "id": "deepseek-v4-1-flash", "name": "DeepSeek V4.1 Flash", "reasoning": true, "contextWindow": 1048576, "maxTokens": 393216,
           "compat": { "thinkingFormat": "deepseek", "requiresReasoningContentOnAssistantMessages": true }
         },
-        { "id": "kimi-k2.7-code", "name": "Kimi K2.7 Code", "reasoning": true, "contextWindow": 262144, "maxTokens": 65536, "compat": { "thinkingFormat": "openai" } },
+        { "id": "kimi-k2.7-code", "name": "Kimi K2.7 Code", "reasoning": true, "contextWindow": 262144, "maxTokens": 32768, "compat": { "thinkingFormat": "openai" } },
         { "id": "glm-5.3", "name": "GLM-5.3", "reasoning": true, "contextWindow": 1048576, "maxTokens": 131072, "compat": { "thinkingFormat": "zai" } },
+        { "id": "glm-5.3-flash", "name": "GLM-5.3 Flash", "reasoning": true, "contextWindow": 1048576, "maxTokens": 131072, "compat": { "thinkingFormat": "zai" } },
         { "id": "minimax-m3", "name": "MiniMax M3", "reasoning": true, "contextWindow": 204800, "maxTokens": 131072, "compat": { "thinkingFormat": "openai" } }
       ]
     },
@@ -55,6 +56,22 @@
         {
           "id": "deepseek-v4-flash",
           "name": "DeepSeek V4 Flash",
+          "reasoning": true,
+          "contextWindow": 1048576,
+          "maxTokens": 65536,
+          "thinkingLevelMap": {
+            "off": "high",
+            "minimal": "high",
+            "low": "high",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "high",
+            "max": "high"
+          }
+        },
+        {
+          "id": "deepseek-flash",
+          "name": "DeepSeek Flash",
           "reasoning": true,
           "contextWindow": 1048576,
           "maxTokens": 65536,

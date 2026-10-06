@@ -63,7 +63,7 @@ import { splitShellSegments } from "./shared/shell-split";
 const CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "perm-gate.json");
 
 /** AI 审核优先选用的模型（provider/modelId）；不可用时自动选最便宜已认证模型 */
-const PREFERRED_MODELS: Array<[string, string]> = [["deepseek", "deepseek-v4-flash"]];
+const PREFERRED_MODELS: Array<[string, string]> = [["deepseek", "deepseek-flash"]];
 
 /** 喂给 AI 审核的命令最大字符数（超出截断） */
 const AI_CMD_MAX_CHARS = 4_000;

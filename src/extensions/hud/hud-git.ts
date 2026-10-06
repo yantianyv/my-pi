@@ -46,7 +46,7 @@ const COMMIT_MAX_DISPLAY_LINES = 6;
 // ---- AI 自动填写提交信息 ----
 
 /** 优先选用的 AI 模型（provider/modelId）；不可用时自动选最便宜已认证模型 */
-const COMMIT_AI_MODELS: Array<[string, string]> = [["deepseek", "deepseek-v4-flash"]];
+const COMMIT_AI_MODELS: Array<[string, string]> = [["deepseek", "deepseek-flash"]];
 /** 喂给模型的暂存区 diff 最大字符数（超出截断） */
 const COMMIT_DIFF_MAX_CHARS = 4_000;
 /** AI 生成提交信息超时 */

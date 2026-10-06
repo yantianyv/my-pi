@@ -53,7 +53,7 @@ vendor 包若有运行时 `dependencies`：`npm install --omit=dev --no-audit --
 | `themes/matrix.json` | 黑客帝国荧光绿主题（`vars` + `colors`），install.js 把它设为默认 `settings.json.theme = "matrix"` |
 | `sounds/*.wav` | 5 个音效，**只服务 status-beacon**：`task_complete`（正常结束）/`error`（出错）/`attention`（等待人工：问卷、权限复核）/`idle_prompt`（完成提醒后 60s 无操作补一声）/`subagent_complete`（explore/subagent/Task 工具成功）。音源 ClaudeCodeInit wav/piano；播放走系统播放器（Windows SoundPlayer / afplay / paplay→aplay，全不可用退终端响铃） |
 | `skills/markitdown/SKILL.md` | 微软 MarkItDown（MIT，Python 3.10+）文档转 Markdown skill，装到 `~/.pi/agent/skills/`；skill 本身不预装工具，规定 AI 每次先 `markitdown --version`，缺失自行 `pip install 'markitdown[all]'` |
-| `models.json` | OpenRouter 路由模板（`providers.openrouter.compat.openRouterRouting`）+ 自定义 provider `volcengine-coding`（ark-code-latest / deepseek-v4-flash / pro，含 modelOverrides thinkingFormat）+ `sensenova`（含 thinkingLevelMap） |
+| `models.json` | OpenRouter 路由模板（`providers.openrouter.compat.openRouterRouting`）+ 自定义 provider `volcengine-coding`（Coding Plan OpenAI 兼容端点 `/api/coding/v3`，ark-code-latest + doubao/deepseek/kimi/glm/minimax 常用档）+ `sensenova`（token-plan 端点，含 thinkingLevelMap）；深度合并，`models` 数组以模板为准 |
 | `patches/` | 3 个手工补丁脚本，**install.js 不会执行**，pi 升级后需重跑 |
 
 ## vendor

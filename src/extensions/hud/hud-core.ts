@@ -23,7 +23,7 @@
  *   不同供应商计费方式差异很大（按量充值余额 vs 订阅 plan 余量 vs 订阅+加油包余额），
  *   无法用通用模板，因此按供应商逐一适配（见 hud-balance.ts）。
  *   适配器统一返回 BalanceData，未适配的供应商显示占位提示。
- *   目前已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding / sensenova / opencode-go
+ *   目前已适配：deepseek / kimi-coding / moonshotai / moonshotai-cn / xiaomi / xiaomi-token-plan-cn / openrouter / volcengine-coding / sensenova / opencode-go / zai-coding-cn
  *
  * 命令：
  *   /balance  立即刷新余额并通知
