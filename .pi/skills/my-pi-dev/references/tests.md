@@ -37,7 +37,7 @@ const mod = await import(pathToFileURL(bundle).href);
 ## mock 方式
 
 - `makePi()` 收集 `tools`/`commands`/`events`；`makeCtx(cwd, captures)` 捕获 `ui.setStatus`/`widget`/`notify`/`custom`；`themeMock` 纯文本透传（`fg/bg` 直返文本、`bold` 直返）以免干扰 `visibleWidth` 计算。原型在 `workflow-mgr/test/render.test.mjs`，ask/qr/perm-gate/pair-guard 复用。
-- 扩展从不接触真实 `~/.pi/agent/`：`perm-gate.test.mjs` 只测模块级导出的 ReviewPanel 与纯函数（不触发默认导出，避免写真实 `perm-gate.json`）；webdav-kb 用 `KB_CONFIG_DIR`；presence 用 `PI_PRESENCE_DIR`、`PI_OS_IDLE_MS`；crash-log 用 `PI_CRASH_LOG_FILE`（ack 落同目录）；ask 用 `mkdtempSync` 临时问卷目录。
+- 扩展从不接触真实 `~/.pi/agent/`：`perm-gate.test.mjs` 只测模块级导出的 ReviewPanel 与纯函数（含配置面板的正则校验/命中测试）（不触发默认导出，避免写真实 `perm-gate.json`）；webdav-kb 用 `KB_CONFIG_DIR`；presence 用 `PI_PRESENCE_DIR`、`PI_OS_IDLE_MS`；crash-log 用 `PI_CRASH_LOG_FILE`（ack 落同目录）；ask 用 `mkdtempSync` 临时问卷目录。
 
 ## 各测试覆盖
 
@@ -45,7 +45,7 @@ const mod = await import(pathToFileURL(bundle).href);
 |---|---|
 | `test/status-keys.test.mjs` | **跨扩展**：源码文本解析出所有 `setStatus` key，与 `hud/hud-core.ts` 的 `STATUS_STYLE` 双向校验（推送 key 必须登记、登记不得是死条目）。新增状态 key 后必须先改 STATUS_STYLE 再跑它 |
 | `test/explore.test.mjs` | 落盘原语：任务哈希稳定、渐进落盘续跑、缓存复用、报告四状态渲染、上下文超限识别；场景 G 校验 `__PI_EXPLORE_API__` 契约（键名/版本/工具形状/alwaysFresh/4 参降级） |
-| `test/perm-gate.test.mjs` | ReviewPanel（信息区/折行/键位/canRemember 收敛）+ `shared/shell-split` 拆段判定 |
+| `test/perm-gate.test.mjs` | ReviewPanel（信息区/折行/键位/canRemember 收敛）+ `shared/shell-split` 拆段判定 + `/perm-gate-config` 名单编辑的正则校验与命中测试（`compilePatternError`/`patternHits`） |
 | `test/presence.test.mjs` | `shared/presence` 与 status-beacon 接线：computeActive/computeAway 三态、在场文件写/删/死进程忽略、`claimSoundSlot` 去重、人不在才出声；会起 win32 空闲探测，测完 `disposeIdleProbe()` |
 | `test/dingtalk-bridge.test.mjs` | 纯函数策略层（buildArgv / 标签拦截 / 两阶段确认 / 防重发 / parsePeople / schema 截断），不起真实 dws 进程 |
 | `test/mimo-omni.test.mjs` | 媒体内容块构造离线 18 项；`MIMO_LIVE=1` + 传音频/视频路径才真打 API |

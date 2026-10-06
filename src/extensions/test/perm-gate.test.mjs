@@ -2,7 +2,7 @@
 /**
  * perm-gate 回归测试（复用 ask 测试基建模式）
  *
- * 原理：esbuild（src/node_modules 构建依赖）把 perm-gate.ts bundle 成单文件 ESM 再 import；
+ * 原理：esbuild（src/node_modules 构建依赖）把 perm-gate/index.ts bundle 成单文件 ESM 再 import；
  * 只测模块级导出的 ReviewPanel 确认面板与纯函数（不触发默认导出函数，避免读写真实
  * ~/.pi/agent/perm-gate.json）。theme mock 纯文本透传，不干扰宽度计算。
  *
@@ -82,7 +82,7 @@ function checkWidth(lines, label) {
 
 async function main() {
 	await build({
-		entryPoints: [join(SRC_DIR, "extensions", "perm-gate.ts")],
+		entryPoints: [join(SRC_DIR, "extensions", "perm-gate", "index.ts")],
 		outfile: BUNDLE,
 		bundle: true,
 		format: "esm",
@@ -94,6 +94,15 @@ async function main() {
 	});
 	const mod = await import(`${pathToFileURL(BUNDLE).href}?t=${Date.now()}`);
 	check("ReviewPanel 已导出", typeof mod.ReviewPanel === "function");
+
+	// ---- 配置面板核心逻辑（/perm-gate-config 的名单编辑）----
+	console.log("配置面板：名单编辑的校验与命中测试");
+	check("compilePatternError 导出", typeof mod.compilePatternError === "function");
+	check("合法正则通过校验", mod.compilePatternError("\\bdws\\s+chat\\s+send\\b") === null, String(mod.compilePatternError("a")));
+	check("非法正则给出原因", typeof mod.compilePatternError("(") === "string", String(mod.compilePatternError("(")));
+	check("命中测试：命中", mod.patternHits("\\bgit\\s+push\\b", "git push origin main") === true);
+	check("命中测试：不误命中", mod.patternHits("\\bgit\\s+push\\b", "git status") === false);
+	check("命中测试：非法正则视为未命中", mod.patternHits("(", "anything") === false);
 
 	// ---- 场景 A：人话信息区 + 选项 + 键位 ----
 	console.log("场景 A：信息区与选项");

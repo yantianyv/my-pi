@@ -50,11 +50,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
-import { loadJsonConfig, saveJsonConfig } from "./shared/config";
-import { choiceKey, createBoxRenderer, dividerScrollNote, editInput, keyHintRow, renderChoiceList, renderScrollingInput, scrollByPage, wrapIndented } from "./shared/ui";
-import { openLocalModelPicker, resolveSettingArg, type AnyModel } from "./shared/model-select";
-import { LOCAL_AUTO, createModelSetting, type ModelSetting } from "./shared/model-setting";
-import { splitShellSegments } from "./shared/shell-split";
+import { loadJsonConfig, saveJsonConfig } from "../shared/config";
+import { choiceKey, createBoxRenderer, dividerScrollNote, editInput, keyHintRow, renderChoiceList, renderScrollingInput, scrollByPage, wrapIndented } from "../shared/ui";
+import { resolveSettingArg, type AnyModel } from "../shared/model-select";
+import { LOCAL_AUTO, createModelSetting, type ModelSetting } from "../shared/model-setting";
+import { PermGateConfigOverlay } from "./config-panel";
+export { compilePatternError, patternHits } from "./config-panel";
+import { splitShellSegments } from "../shared/shell-split";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -1149,18 +1151,93 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	});
 
-	// /perm-gate 命令：状态查看 / 开关 / 重读配置 / 审核模型选择 / 清理过期白名单
-	// （名单编辑走配置文件，不提供管理面板）
+	/* ---------- /perm-gate-config：配置面板（AI 审核 / 模型 / 超时 / sudo / 名单） ---------- */
+	pi.registerCommand("perm-gate-config", {
+		description: "配置：AI 审核·超时·sudo·审核模型·名单（面板）｜ aiReview|sudo on|off、timeout <秒>、model <id>",
+		handler: async (args, ctx) => {
+			const raw = args.trim();
+			const [key, ...rest] = raw.split(/\s+/);
+			const value = rest.join(" ").trim();
+			const summary = [
+				`perm-gate 配置（${CONFIG_FILE}）`,
+				`· AI 审核：${cfg.aiReview ? "开" : "关"}`,
+				`· 审核模型：${reviewModelSetting.getLocal() === LOCAL_AUTO ? "auto（由 model-config 管理）" : reviewModelSetting.getLocal()}`,
+				`· 审核超时：${Math.round(cfg.aiTimeoutMs / 1000)}s`,
+				`· sudo 授权通道：${cfg.sudoExec ? "开" : "关"}`,
+				`· 硬拒绝名单：${cfg.deny.length} 条 ｜ 关注项名单：${cfg.watch.length} 条`,
+			].join("\n");
+
+			if (!raw) {
+				if (!ctx.hasUI || ctx.mode !== "tui") {
+					ctx.ui.notify(summary, "info");
+					return;
+				}
+				await ctx.ui.custom<void>(
+					(tui, theme, _kb, done) =>
+						new PermGateConfigOverlay(
+							tui,
+							theme,
+							ctx,
+							{ cfg, persist: () => saveConfig(), reviewModel: reviewModelSetting },
+							done,
+						),
+					{ overlay: true, overlayOptions: { width: "76%", minWidth: 68, maxHeight: "80%" } },
+				);
+				return;
+			}
+
+			if (key === "aiReview" || key === "sudo") {
+				if (value !== "on" && value !== "off") {
+					ctx.ui.notify(`用法：/perm-gate-config ${key} on|off`, "warning");
+					return;
+				}
+				if (key === "aiReview") cfg.aiReview = value === "on";
+				else cfg.sudoExec = value === "on";
+				saveConfig();
+				ctx.ui.notify(`perm-gate ${key === "aiReview" ? "AI 审核" : "sudo 授权通道"}：${value}（已持久化）`, "info");
+				return;
+			}
+			if (key === "timeout") {
+				const secs = Number.parseInt(value, 10);
+				if (!Number.isFinite(secs) || secs < 1 || secs > 600) {
+					ctx.ui.notify("用法：/perm-gate-config timeout <1~600 秒>", "warning");
+					return;
+				}
+				cfg.aiTimeoutMs = secs * 1000;
+				saveConfig();
+				ctx.ui.notify(`perm-gate 审核超时：${secs}s（已持久化）`, "info");
+				return;
+			}
+			if (key === "model") {
+				const r = resolveSettingArg(ctx, value);
+				if ("error" in r) {
+					ctx.ui.notify(`perm-gate：${r.error}。用法：/perm-gate-config model <auto|provider/modelId>`, "error");
+					return;
+				}
+				reviewModelSetting.setLocal(r.value);
+				ctx.ui.notify(
+					`perm-gate 审核模型：${r.value === LOCAL_AUTO ? "auto（由 model-config 管理）" : r.value}（已持久化）`,
+					"info",
+				);
+				return;
+			}
+			ctx.ui.notify(
+				"用法：/perm-gate-config（面板）｜ aiReview on|off ｜ sudo on|off ｜ timeout <秒> ｜ model <auto|provider/modelId>",
+				"warning",
+			);
+		},
+	});
+
+	// /perm-gate 主命令：状态查看 / 开关 / 重读配置 / 清理记忆（配置项与名单在 /perm-gate-config）
 	pi.registerCommand("perm-gate", {
-		description:
-			"bash 权限门：状态与开关（on|off / sudo / model / prune）",
+		description: "bash 权限门：状态与开关（on|off / sudo / reload / prune）",
 		handler: async (args, ctx) => {
 			const sub = args.trim().toLowerCase();
 			// 未知子命令不静默当「查状态」——拼错时给用法，避免用户以为已生效
 			const KNOWN_SUBS = new Set(["", "on", "off", "sudo on", "sudo off", "reload", "prune"]);
-			if (!KNOWN_SUBS.has(sub) && sub !== "model" && !sub.startsWith("model ")) {
+			if (!KNOWN_SUBS.has(sub)) {
 				ctx.ui.notify(
-					`perm-gate：未知子命令「${args.trim()}」\n用法：/perm-gate（查看状态）｜ on ｜ off ｜ sudo on|off ｜ reload ｜ prune ｜ model <provider>/<modelId>|auto`,
+					`perm-gate：未知子命令「${args.trim()}」\n用法：/perm-gate（查看状态）｜ on ｜ off ｜ sudo on|off ｜ reload ｜ prune\n配置项与名单：/perm-gate-config`,
 					"warning",
 				);
 				return;
@@ -1188,40 +1265,6 @@ export default function (pi: ExtensionAPI) {
 				if (pruned > 0) saveConfig();
 				ctx.ui.notify(
 					`perm-gate：已清理 ${pruned} 条超过 ${REMEMBER_EXPIRE_DAYS} 天未命中的记忆，剩 ${cfg.remembered.length} 条`,
-					"info",
-				);
-				return;
-			}
-			if (sub === "model" || sub.startsWith("model ")) {
-				const arg = args.trim().slice(5).trim();
-				if (arg) {
-					const r = resolveSettingArg(ctx, arg);
-					if ("error" in r) {
-						ctx.ui.notify(
-							`perm-gate：${r.error}。用法：/perm-gate model <provider>/<modelId> ｜ auto`,
-							"error",
-						);
-						return;
-					}
-					reviewModelSetting.setLocal(r.value);
-					ctx.ui.notify(
-						`perm-gate 审核模型：${r.value === LOCAL_AUTO ? "auto（由 model-config 管理）" : r.value}（已持久化）`,
-						"info",
-					);
-					return;
-				}
-				if (!ctx.hasUI) {
-					ctx.ui.notify("用法：/perm-gate model <provider>/<modelId> ｜ /perm-gate model auto", "info");
-					return;
-				}
-				const picked = await openLocalModelPicker(ctx, {
-					current: reviewModelSetting.getLocal(),
-					title: "选择 perm-gate 审核模型",
-				});
-				if (!picked) return; // Esc 取消
-				reviewModelSetting.setLocal(picked);
-				ctx.ui.notify(
-					`perm-gate 审核模型：${picked === LOCAL_AUTO ? "auto（由 model-config 管理）" : picked}（已持久化）`,
 					"info",
 				);
 				return;

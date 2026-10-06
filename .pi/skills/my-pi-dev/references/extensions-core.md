@@ -50,7 +50,7 @@
 - 整屏页 = overlay（width/maxHeight 100% + 左上锚点 + 每行补满全宽；pi 的 overlay 是逐行不透明合成，全屏即遮蔽聊天/HUD）；高度权威值由 `overlayOptions.visible` 回调每帧捕获（`tui.terminal.rows` 可能滞后）。首帧停在顶部不跟随焦点（长说明题从头读），按键后恢复跟随。已知限制：regular（内联）模式下全屏 overlay 与聊天共享原生滚动缓冲，滚轮上滑会看到残影（仅美观问题）；fullscreen 模式零污染。
 - 渲染细节：顶部进度条 ▰▰▱▱；长文本经 `wrapTextWithAnsi` 折行完整展示不截断、续行缩进对齐首行文本起点；滚动位置提示（▲▼ 行数）只在状态行右侧；`answerableQuestions()` 排除 note，是进度条/必答/回执的统一分母。
 
-## perm-gate.ts
+## perm-gate（`perm-gate/`，产物 `perm-gate.ts`）
 
 三层名单（只管 bash，`tool_call` 拦截），判定顺序：**拆段（shared/shell-split）→ deny → remembered → watch 标记 → AI 审核**。
 
@@ -60,7 +60,7 @@
 - AI 审核：输出 `{action, reason, impact[], pattern}`，`pattern` 用 `<*>` 占位可变参数、落库前校验能命中当前命令否则退结构化兜底；`allow` 自动记住意图（通知写人话意图，不暴露正则），`reject` 拒绝；AI 不可用（超时/无模型/网络错/输出无法解析）降级人工确认，文案说明是降级而非任务失败；allow/reject 结论有会话级缓存，`completeSimple` 单次调用不占主会话上下文。
 - 人工确认面板 ReviewPanel（自有实现；**选项行渲染改用 `shared/ui.ts` 的 `renderChoiceList`**，与钉钉审核面板同一份代码）：顶部人话信息区（一句解读/影响面/命中原因），命令全文折行可滚、不展示正则原文；默认高亮「允许一次」，选项 = 允许一次 / 允许并永久记住这类操作（旁标将被记住的意图）/ 拒绝，Esc = 拒绝不执行。滚动提示、折行、按键语义、滚动位置已抽到 shared（见 hud-and-shared.md）。
 - 配置 `~/.pi/agent/perm-gate.json`：`enabled`、`deny`、`watch`、`remembered`、`aiReview`、`aiTimeoutMs`、`sudoExec`、`model`（本地模型设置，用途 `perm-gate.review`，默认策略 LITE）；`saveConfig` 写回时原样带上 `model` 键（该键由 shared/model-setting 维护）；首次运行写默认配置。历史字段（blacklist/whitelist）不再读取——不写迁移代码，旧值自然遗弃。
-- 命令 `/perm-gate`：`on/off`、`sudo on|off`、`reload`、`prune`、`model [provider/id|auto]`（无参开 shared/model-select 的选择浮层）；`auto` 时按用途解析（本地 → 中心 → 默认策略 LITE → AUTO）。
+- 命令：`/perm-gate`（状态 + 开关与维护：`on|off`、sudo 开关、`reload`、`prune`）+ `/perm-gate-config`（配置面板：AI 审核开关 / 审核模型 / 审核超时 / sudo 通道 / deny 与 watch 名单；带参直设 `aiReview|sudo on|off`、`timeout <秒>`、`model <auto|id>`）。名单编辑（`config-panel.ts`，只依赖 shared/ui + shared/model-select）：正则输入即校验（非法拒绝保存）、一行「测试命令」实时看命中、deny 删除需二次确认、Ctrl+D 删除、Enter 编辑。
 - sudo 专用授权通道：bash 里的段首 `sudo` 被拦截、引导改用 `sudo_exec` 工具；整屏授权面板（命令全文折行可滚 + 掩码密码框，错误原地重试 3 次，Esc 拒绝），扩展内 `spawn sudo -kS` 喂密执行（`-k` 不缓存 + 收尾 `sudo -k` 双保险，每次调用必重新授权）；密码只经扩展内存进 sudo stdin，不进会话/结果/磁盘；NOPASSWD 账户退化为确认弹窗（仍逐次授权）；requiretty / 无 sudo 明确报错请用户手动执行。
 - 状态 key `perm-gate`（审核中）；人工确认与 sudo 等待经 `globalThis.__PI_STATUS_BEACON_API__.wait(text)` 交给 status-beacon 的 Working 行。
 
