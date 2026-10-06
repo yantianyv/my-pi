@@ -997,7 +997,7 @@ export default function (pi: ExtensionAPI) {
 	// sudo_exec 工具：AI 需要 root 权限时的唯一通道（bash 里直接写 sudo 会被下方拦截打回）
 	pi.registerTool({
 		name: "sudo_exec",
-		label: "sudo 提权执行",
+		label: "提权执行命令",
 		description:
 			"以 root 权限执行 bash 命令（等价 sudo bash -c '<command>'）。每次调用都会向用户弹窗请求授权（用户直接输入 sudo 密码），授权仅当次有效、下次调用需重新授权。" +
 			"需要 sudo 权限时必须使用本工具——不要在 bash 工具命令里写 sudo（会被拦截打回）。command 不要带 sudo 前缀，整条命令将以 root 执行。" +

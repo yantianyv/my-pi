@@ -24,7 +24,7 @@
  * - 软冲突警告：write/edit 命中 peer 近窗口期内写过的文件时，tool_result 追加
  *   ⚠️ 警告文本（不阻断，AI 自行调整：先读最新内容、小步修改、告知用户）
  * - 状态栏推「👥 N 并发会话」（hud 动态区），peer 出现/消失时 notify 用户
- * - AI 自报标题：set_title 工具写 work（整个工作在干啥，同步
+ * - AI 自报标题：set_title 工具写 work 字段（整个工作在干啥，同步
  *   pi.setSessionName，/resume 会话选择器直接可见）；
  *   执行中「在等什么/在干什么」由 status-beacon 负责（Working 行：等你 X / 等 X 完成 /
  *   廉价 AI 概括），本扩展不写 Working 行，step 概念已删；
@@ -445,18 +445,18 @@ export default function (pi: ExtensionAPI) {
 			"开始一项新工作时设置一次，工作转向时更新；执行中的具体步骤展示由 status-beacon 自动完成，无需自报步骤。" +
 			"传空字符串清除标题。",
 		promptSnippet:
-			"自报工作标题：set_title({work?}) → work=整体工作标题（/resume 可见，并发会话互见）",
+			"自报工作标题：set_title({title?}) → title=整体工作标题（/resume 可见，并发会话互见）",
 		parameters: Type.Object({
-			work: Type.Optional(Type.String({ description: "整个工作的标题（空串清除）；开始新工作时设置，工作转向时更新" })),
+			title: Type.Optional(Type.String({ description: "整个工作的标题（空串清除）；开始新工作时设置，工作转向时更新" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			if (!self) {
 				return { content: [{ type: "text", text: "会话尚未注册（session_start 未触发），稍后再试" }], details: {} };
 			}
-			if (typeof params.work !== "string") {
-				return { content: [{ type: "text", text: "需传 work 参数" }], details: {} };
+			if (typeof params.title !== "string") {
+				return { content: [{ type: "text", text: "需传 title 参数" }], details: {} };
 			}
-			const changed = applyTitle(params.work);
+			const changed = applyTitle(params.title);
 			return { content: [{ type: "text", text: changed.join("；") }], details: {} };
 		},
 	});
