@@ -403,11 +403,13 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 
   - **面板统一布局**（`shared/review-panel.ts`）：弱化标题 → `动作 | 对象` 表头（对象是名单时按可用宽度塞名字、剩余收口为「等 N 人」，仅重名才带部门括注）→ 固定 5 行正文（超出用 PgUp/PgDn 翻页，分隔线内 ▲▼ 给余量）→ `⚠` 影响行 → 竖排选项。撤回类在弹窗前用只读查询补齐对象（`+messages-mget` + `conversation-info`：会话名 + 时间 + 正文预览）。**面板内不放 argv / flag / JSON / ID**（有单测断言）。
   - **实测纠错**：官方 `capability-limits.md` 写「个人身份发送的消息无法通过 API 撤回」，实测**能撤**（25 分钟前的消息也撤成功了）；撤回后面板/回执按真实 `recallStatus` 报，同一 messageId 不会重复撤回。
+- **落盘命令在非 NTFS 卷上自动重定向**：dws 下载资源用「写 `.part` 临时文件 → 硬链接到正式名」做原子发布（link 天然实现“不覆盖同名文件”），硬链接需 NTFS——exFAT（如 D: 盘）/某些网络盘上必然报 `link …: Incorrect function`。桥只在「下载类命令 + 硬链接失败」时触发一次重试（发送类不重试，避免重复外发）：把 `--output`/`--output-dir`/`--local-folder` 改到系统临时区重跑，成功后搬回原目标（默认不覆盖，`--overwrite` 才覆盖）、清掉 `.part` 残留、把结果里的 `localPath` 改写成用户视角路径，并在回执尾部说明。
+- **群发逐人个性化（正文占位符）**：dws 的 `+broadcast` schema 原文就是「所有人收到同一条」，所以正文一旦写出 `{{变量}}`，桥就自动切成**逐人模式**：只读预检拿到每人 openDingTalkId → 按变量表逐人渲染正文 → 逐人 `+messages-send --as user --open-dingtalk-id … --idempotency-key <确定性 UUID>`。变量表用 `--vars '<JSON>'` 或 `--vars-file <相对路径>`（key 与 `--to` 逐字一致，用 userId 消歧的就写 userId；正文只有一个占位符时值可简写为字符串）；覆盖不全、用字符串简写却多占位符、非广播命令里写占位符——都在草稿前拦下。草稿给渲染样例，人审面板仍给完整名单；逐人失败不阻断其余（回执给失败名单），同一人同一正文幂等键固定（重跑自动跳过，不会重复发）。
 - **三步走：读直通 / 写两阶段 / 敏感档弹窗**（不再靠提示词自觉）：分档由 dws 自己的 schema 元数据决定（`dws schema --cli-path <path> --compact` 的 `effect`/`confirmation`，本地缓存 `~/.pi/agent/dingtalk-bridge-schema.json`，手写表兜底；查不到就当写入）。
   - **读**：直通（`list/get/search/info/query…` 类词快速判定，命中写词则一律按写处理）。
   - **写**：首次只回草稿/计划（不执行），AI 把计划展示给用户、经明确同意后带 `confirm` 重调才执行。
   - **敏感档**（破坏性 + 会对外发出内容：发送/群发/转发/撤回/邀请/删除/清空/审批发起…）：在**真正执行的最后一瞬弹人工审核面板**——面板只写人话（要做什么 / 对谁 / 内容预览 / 影响与可逆性），**不放 argv、JSON、ID**；选项为「允许一次 / 当前工作区不再询问 / 拒绝」（destructive 不开放记住），Esc=拒绝。`当前工作区不再询问` 按命令路径记，可用 `/dws-bridge forget` 查看或清除。**无界面会话（print/RPC）直接拒绝敏感档**，绝不因为弹不出窗就放行。（面板复用 `shared/review-panel.ts`；与 perm-gate 的复核面板同一套串行链，避免并行工具批里浮层打架。）
-配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars` / `dedupMinutes` / `skillsDir` / `remembered`）；`/dws-bridge` 查看状态，`/dws-bridge forget <命令|all>` 清除「当前工作区不再询问」，`/dws-bridge refresh` 清空命令元数据缓存。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 A~Z 场景，不真实起 dws 进程）；真实联调 `node src/extensions/test/dingtalk-bridge-live.mjs [姓名]`（发送只走到草稿/预检即停，永不 confirm）。
+配置 `~/.pi/agent/dingtalk-bridge.json`（`requireAiTag` / `blockedSkillPrefixes` / `dwsPath` / `execTimeoutMs` / `maxOutputChars` / `dedupMinutes` / `skillsDir` / `remembered`）；`/dws-bridge` 查看状态，`/dws-bridge forget <命令|all>` 清除「当前工作区不再询问」，`/dws-bridge refresh` 清空命令元数据缓存。回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层纯函数 A~AB 场景，不真实起 dws 进程）；真实联调 `node src/extensions/test/dingtalk-bridge-live.mjs [姓名]`（发送只走到草稿/预检即停，永不 confirm）。
 
 ## pi-ai usage 缺失防护补丁（patches/apply-pi-ai-usage-guard.mjs）
 

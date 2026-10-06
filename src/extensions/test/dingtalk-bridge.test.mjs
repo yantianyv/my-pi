@@ -24,6 +24,8 @@
  * 用法：node src/extensions/test/dingtalk-bridge.test.mjs（仓库根目录执行）
  */
 import { build } from "esbuild";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -514,6 +516,96 @@ console.log("AE、人多时的名单排版");
 	check("正文仍在内容区", review.content.join(" ").includes("今晚 8 点"));
 	const few = buildReview(["chat", "+dm", "--to", "x", "--content", "【AI发送】在吗"], null, "会对外发出消息", { recipients: ["李娜（诚毅校区班主任）", "苗文硕"] });
 	check("宽宽度下人少时全部列出（不出现等 N 人）", (() => { const t = __test__.fitItems("收件人", few.objectItems.items, 100); return t.includes("李娜") && t.includes("苗文硕") && !t.includes("等 "); })());
+}
+
+// ---- 场景 AA：非 NTFS 卷（exFAT）上 dws 下载的自动重定向 ----
+{
+	const { isDownloadCommand, isLinkPublishFailure, redirectOutputFlags, relocateLocalPaths } = __test__;
+
+	check("AA: 下载命令被识别", isDownloadCommand(["chat", "+messages-resource-download", "--resource-id", "x"]) === true);
+	check("AA: --download-resources 被识别", isDownloadCommand(["chat", "+messages-mget", "--msg-ids", "m", "--download-resources"]) === true);
+	check("AA: drive pull / download 被识别", isDownloadCommand(["drive", "pull", "--remote-folder", "n"]) && isDownloadCommand(["drive", "download", "--node", "n"]));
+	check("AA: 发送/查询命令不识别（不会触发重试）", !isDownloadCommand(["chat", "+dm", "--to", "x"]) && !isDownloadCommand(["chat", "+messages-list"]));
+
+	const realErr = 'dws 失败（exit 5）：{"message":"发布消息资源失败: link D:\\a\\.x.part-123 D:\\a\\x.pdf: Incorrect function."}';
+	check("AA: 真实硬链接失败被识别", isLinkPublishFailure(realErr) === true);
+	check("AA: 普通错误不误判", isLinkPublishFailure("dws 失败（exit 3）：permission denied") === false);
+
+	const base = join(HERE, "fake-project");
+	const temp = join(HERE, "fake-temp");
+
+	const r1 = redirectOutputFlags(["chat", "+messages-resource-download", "--resource-id", "x", "--output", "收材料1006"], temp, base);
+	check("AA: --output 改成临时区相对路径", r1.argv[r1.argv.indexOf("--output") + 1] === ".", JSON.stringify(r1.argv));
+	check("AA: 目标目录按工作目录解析", r1.targets[0]?.targetAbs === join(base, "收材料1006"), r1.targets[0]?.targetAbs);
+
+	const absOut = join(HERE, "abs-out");
+	const r2 = redirectOutputFlags(["drive", "download", "--node", "n", "--output", absOut], temp, base);
+	check("AA: 绝对 --output 原样作为目标", r2.targets[0]?.targetAbs === absOut, r2.targets[0]?.targetAbs);
+	check("AA: --output=xxx 形式也重写", redirectOutputFlags(["chat", "+messages-mget", "--output-dir=./dl"], temp, base).argv.includes("--output-dir=."));
+
+	const r3 = redirectOutputFlags(["drive", "pull", "--local-folder", absOut], temp, base);
+	check("AA: --local-folder 指向临时区绝对值", r3.argv[r3.argv.indexOf("--local-folder") + 1] === temp);
+	check("AA: 无输出 flag 时不给目标（调用方兜底工作目录）", redirectOutputFlags(["chat", "+messages-mget"], temp, base).targets.length === 0);
+
+	const json = JSON.stringify({ resourceDownloads: { downloads: [{ localPath: "a.pdf", resourceId: "r" }] } });
+	const fixed = JSON.parse(relocateLocalPaths(json, temp, join(base, "收材料1006"), base));
+	check("AA: localPath 改写为用户视角路径", fixed.resourceDownloads.downloads[0].localPath === "收材料1006/a.pdf", fixed.resourceDownloads.downloads[0].localPath);
+	check("AA: 非 JSON 输出原样返回", relocateLocalPaths("not json", temp, base, base) === "not json");
+
+	// 搬回：递归复制 + 默认不覆盖
+	const { copyTree } = __test__;
+	const src = mkdtempSync(join(tmpdir(), "ct-src-"));
+	const dst = mkdtempSync(join(tmpdir(), "ct-dst-"));
+	mkdirSync(join(src, "sub"));
+	writeFileSync(join(src, "a.txt"), "A");
+	writeFileSync(join(src, "sub", "b.txt"), "B");
+	writeFileSync(join(dst, "a.txt"), "OLD");
+	const m1 = copyTree(src, dst, false);
+	check("AA: 不覆盖时同名跳过、其余照拷", m1.copied === 1 && m1.skipped.length === 1, JSON.stringify(m1));
+	check("AA: 跳过的文件内容未变", readFileSync(join(dst, "a.txt"), "utf8") === "OLD");
+	check("AA: 子目录结构与文件保留", existsSync(join(dst, "sub", "b.txt")));
+	const m2 = copyTree(src, dst, true);
+	check("AA: --overwrite 时全部复制且内容更新", m2.copied === 2 && readFileSync(join(dst, "a.txt"), "utf8") === "A");
+}
+
+// ---- 场景 AB：群发逐人个性化（正文占位符 + 每人一份变量表）----
+{
+	const { extractPlaceholders, stripVarsFlags, parseVarsMap, validateVars, renderVars, personalKey } = __test__;
+
+	check("AB: 提取单个占位符", JSON.stringify(extractPlaceholders("【AI发送】{{称呼}}老师您好")) === '["称呼"]');
+	check("AB: 多占位符去重保序", JSON.stringify(extractPlaceholders("{{姓名}}的课表：{{课程}}，{{姓名}}老师")) === '["姓名","课程"]');
+	check("AB: 占位符允许内部空格", JSON.stringify(extractPlaceholders("{{ 称呼 }}")) === '["称呼"]');
+	check("AB: 普通花括号不误判", extractPlaceholders("JSON 里 {a: 1} 不是占位符").length === 0);
+	check("AB: 超长变量名不算占位符", extractPlaceholders("{{" + "x".repeat(30) + "}}").length === 0);
+
+	const rawArgs = ["chat", "+broadcast", "--to", "张三,李四", "--content", "【AI发送】{{称呼}}老师", "--vars", '{"张三":{"称呼":"张老师"}}'];
+	const st = stripVarsFlags(rawArgs);
+	check("AB: --vars 从 dws argv 剥离", !st.args.includes("--vars") && st.args.length === rawArgs.length - 2, JSON.stringify(st.args));
+	check("AB: 剥离后仍是 broadcast 命令", st.args[0] === "chat" && st.args[1] === "+broadcast");
+	check("AB: --vars 原值带出、vars-file 为空", st.varsRaw === '{"张三":{"称呼":"张老师"}}' && st.varsFile === undefined);
+	check("AB: --vars= 等号形式也识别", stripVarsFlags(["chat", "+broadcast", "--vars={}"]).varsRaw === "{}");
+	check("AB: --vars-file 形式识别", stripVarsFlags(["chat", "+broadcast", "--vars-file", "vars.json"]).varsFile === "vars.json");
+
+	const ok = parseVarsMap('{"张三":{"称呼":"张老师"},"李四":"李老师"}', ["称呼"]);
+	check("AB: 对象与单占位符字符串简写都支持", !("error" in ok) && ok.map.张三.称呼 === "张老师" && ok.map.李四.称呼 === "李老师");
+	const num = parseVarsMap('{"甲":{"n":1,"b":true}}', ["n", "b"]);
+	check("AB: 数字/布尔自动转字符串", !("error" in num) && num.map.甲.n === "1" && num.map.甲.b === "true");
+	check("AB: 多占位符时字符串简写报错", "error" in parseVarsMap('{"张三":"张老师"}', ["称呼", "课程"]));
+	check("AB: 顶层非对象报错", "error" in parseVarsMap("[1,2]", ["x"]));
+	check("AB: 变量值非标量报错", "error" in parseVarsMap('{"张三":{"称呼":{"a":1}}}', ["称呼"]));
+	check("AB: 非法 JSON 报错", "error" in parseVarsMap("{oops", ["x"]));
+
+	check("AB: 变量表齐全时无问题", validateVars(["张三", "李四"], ["称呼"], { 张三: { 称呼: "张老师" }, 李四: { 称呼: "李老师" } }).length === 0);
+	const miss = validateVars(["张三", "王五"], ["称呼", "课程"], { 张三: { 称呼: "x" } });
+	check("AB: 缺人与缺变量都报出", miss.length === 2 && miss[0].includes("课程") && miss[1].includes("王五"), JSON.stringify(miss));
+
+	check("AB: 逐人渲染正文", renderVars("{{称呼}}老师：课表已更新", { 称呼: "张" }) === "张老师：课表已更新");
+	check("AB: 未给的占位符原样保留", renderVars("{{a}}{{b}}", { a: "1" }) === "1{{b}}");
+	check("AB: 渲染不误伤普通花括号", renderVars("保留 {x} 原样", { x: "1" }) === "保留 {x} 原样");
+
+	const k1 = personalKey("abc", "你好");
+	check("AB: 幂等键确定且为 UUID 形状", k1 === personalKey("abc", "你好") && /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/.test(k1), k1);
+	check("AB: 人不同/正文不同则幂等键不同", k1 !== personalKey("abc", "你好！") && k1 !== personalKey("abd", "你好"));
 }
 
 const failed = results.filter((r) => !r.ok);

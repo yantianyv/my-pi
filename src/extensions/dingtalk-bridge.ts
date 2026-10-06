@@ -547,6 +547,10 @@ export interface PendingDraft {
 	canRemember: boolean;
 	/** 人类语审核内容（弹窗展示，不含 argv/ID） */
 	review: ReturnType<typeof buildReview>;
+	/** 逐人个性化：变量表（按收件人 token；仅正文含占位符时存在） */
+	vars?: VarsMap;
+	/** 逐人个性化：预检得到的收件人（含 openId）——confirm 时按这份名单逐一发送 */
+	plan?: BroadcastPreflight;
 }
 export const newExecState = (): ExecState => ({ resolved: new Set(), resolvedGroups: new Set(), pending: new Map(), sent: new Map() });
 
@@ -824,6 +828,174 @@ export function parseBroadcastPreflight(stdout: string): BroadcastPreflight {
 export function formatBroadcastPreflight(pre: BroadcastPreflight): string {
 	const lines = pre.resolved.map((r) => `- ${r.recipient}${r.openId ? ` → ${r.openId}` : ""}`);
 	return `将发给（${pre.resolved.length} 人，每人各一条单聊）：\n${lines.join("\n") || "（无）"}`;
+}
+
+/* ===================== 逐人个性化：正文占位符 → 每人一份变量表 =====================
+ * dws 的 +broadcast 只支持「所有人收到同一条」（content 是单值），所以正文一旦含占位符，
+ * 就不能用它：改为预检拿到每人 openDingTalkId 后，逐人渲染正文、逐人 +messages-send。
+ * 替换值完全由调用方给出（不做"姓/名"语义猜测），插件只负责：取占位符、按人对齐、补幂等键。
+ */
+
+/** 插件私有 flag：--vars（JSON 字符串）/ --vars-file（工作目录内相对路径）；不传给 dws */
+const VARS_FLAGS = ["--vars", "--vars-file"];
+const PLACEHOLDER_SRC = "\\{\\{\\s*([\\p{L}\\p{N}_]{1,24})\\s*\\}\\}";
+const placeholderRe = () => new RegExp(PLACEHOLDER_SRC, "gu");
+
+/** 每人一条：收件人 token（与 --to 里的写法逐字一致）→ 变量表 */
+export type VarsMap = Record<string, Record<string, string>>;
+
+/** 提取正文里的占位符（去重保序） */
+export function extractPlaceholders(text: string): string[] {
+	const out: string[] = [];
+	for (const m of text.matchAll(placeholderRe())) {
+		const name = m[1];
+		if (name && !out.includes(name)) out.push(name);
+	}
+	return out;
+}
+
+/** 剥离插件私有 flag（--vars / --vars-file），返回给 dws 用的 argv 与原始输入 */
+export function stripVarsFlags(args: string[]): { args: string[]; varsRaw?: string; varsFile?: string } {
+	const out: string[] = [];
+	let varsRaw: string | undefined;
+	let varsFile: string | undefined;
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i]!;
+		if (VARS_FLAGS.includes(a)) {
+			if (a === "--vars") varsRaw = args[i + 1];
+			else varsFile = args[i + 1];
+			i++;
+			continue;
+		}
+		if (a.startsWith("--vars=")) {
+			varsRaw = a.slice("--vars=".length);
+			continue;
+		}
+		if (a.startsWith("--vars-file=")) {
+			varsFile = a.slice("--vars-file=".length);
+			continue;
+		}
+		out.push(a);
+	}
+	return { args: out, varsRaw, varsFile };
+}
+
+/** 变量表用法（报错时回给模型，照着改） */
+export const VARS_GUIDE =
+	'用法：--vars \'{"张三": {"称呼": "张老师"}, "李四": "李老师"}\'；正文只有一个占位符时值可简写为字符串。' +
+	"key 与 --to 里的写法逐字一致（用 userId 消歧的就写 userId）；大表用 --vars-file <工作目录内相对路径.json>。";
+
+/** 解析变量表：值可为字符串（单占位符简写）或「变量→字符串/数字/布尔」对象 */
+export function parseVarsMap(raw: string, placeholders: string[]): { map: VarsMap } | { error: string } {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (e) {
+		return { error: `变量表不是合法 JSON：${String(e).slice(0, 120)}` };
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return { error: "变量表必须是对象：{ \"姓名\": { \"变量\": \"值\" }, … }" };
+	}
+	const map: VarsMap = {};
+	for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+		const key = k.trim();
+		if (typeof v === "string") {
+			if (placeholders.length !== 1) {
+				return { error: `「${key}」用了字符串简写，但正文里有 ${placeholders.length} 个占位符（${placeholders.map((p) => `{{${p}}}`).join("、")}）——请改成对象逐个给值` };
+			}
+			map[key] = { [placeholders[0]!]: v };
+			continue;
+		}
+		if (!v || typeof v !== "object" || Array.isArray(v)) {
+			return { error: `「${key}」的值必须是字符串或对象` };
+		}
+		const row: Record<string, string> = {};
+		for (const [vk, vv] of Object.entries(v as Record<string, unknown>)) {
+			if (typeof vv === "string") row[vk] = vv;
+			else if (typeof vv === "number" || typeof vv === "boolean") row[vk] = String(vv);
+			else return { error: `「${key}」的变量「${vk}」值必须是字符串/数字/布尔` };
+		}
+		map[key] = row;
+	}
+	return { map };
+}
+
+/** 校验变量表覆盖全部收件人与占位符；返回问题清单（空 = 通过） */
+export function validateVars(recipients: string[], placeholders: string[], map: VarsMap): string[] {
+	const problems: string[] = [];
+	for (const r of recipients) {
+		const row = map[r];
+		if (!row) {
+			problems.push(`「${r}」没有给变量`);
+			continue;
+		}
+		const miss = placeholders.filter((p) => !(p in row));
+		if (miss.length) problems.push(`「${r}」缺变量：${miss.map((p) => `{{${p}}}`).join("、")}`);
+	}
+	return problems;
+}
+
+/** 用某人的变量渲染正文（未给的占位符原样保留，调用前应先过 validateVars） */
+export function renderVars(text: string, row: Record<string, string>): string {
+	return text.replace(placeholderRe(), (whole, name: string) => (name in row ? row[name]! : whole));
+}
+
+/** 确定性幂等键（UUID 形状）：同一人 + 同一正文 → 同一键，重跑不会重复发 */
+export function personalKey(openId: string, body: string): string {
+	const h = createHash("sha1").update(`${openId}\n${body}`).digest("hex");
+	return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+/** 读变量表输入：--vars 直给 JSON，--vars-file 读工作目录内相对路径 */
+function readVarsInput(baseDir: string, varsRaw?: string, varsFile?: string): { raw?: string; error?: string } {
+	if (varsRaw !== undefined) return { raw: varsRaw };
+	if (varsFile === undefined) return {};
+	const abs = path.isAbsolute(varsFile) ? varsFile : path.join(baseDir, varsFile);
+	const rel = path.relative(baseDir, abs);
+	if (rel.startsWith("..") || path.isAbsolute(rel)) return { error: `--vars-file 只接受工作目录内相对路径（当前目录 ${baseDir}）` };
+	try {
+		return { raw: fs.readFileSync(abs, "utf8") };
+	} catch {
+		return { error: `读不到变量表文件：${varsFile}` };
+	}
+}
+
+/**
+ * 逐人个性化发送：预检已给出每人 openDingTalkId，对每人渲染正文后单独发一条单聊。
+ * 逐人失败不阻断其余（最后汇总「成功/失败」名单）；幂等键随人随正文固定，重跑不会重复发。
+ */
+async function sendPersonalized(
+	cfg: BridgeConfig,
+	baseArgs: string[],
+	plan: BroadcastPreflight,
+	vars: VarsMap,
+	state: ExecState,
+): Promise<{ sent: string[]; failed: { name: string; why: string }[]; skipped: string[] }> {
+	const content = flagValues(baseArgs, CONTENT_FLAGS).at(-1) ?? "";
+	const sent: string[] = [];
+	const skipped: string[] = [];
+	const failed: { name: string; why: string }[] = [];
+	for (const rec of plan.resolved) {
+		if (!rec.openId) {
+			failed.push({ name: rec.recipient, why: "预检未返回 openDingTalkId" });
+			continue;
+		}
+		const body = renderVars(content, vars[rec.recipient] ?? {});
+		const sig = `send:${rec.openId}:${createHash("sha1").update(body).digest("hex").slice(0, 16)}`;
+		if (state.sent.has(sig)) {
+			skipped.push(rec.recipient);
+			continue;
+		}
+		const argv = ["chat", "+messages-send", "--as", "user", "--open-dingtalk-id", rec.openId, "--markdown", body, "--ai-tag", "--idempotency-key", personalKey(rec.openId, body)];
+		const r = await runDws(cfg, buildArgv(argv));
+		if (r.code === 0 && !r.timedOut) {
+			state.sent.set(sig, { at: Date.now(), snippet: `逐人个性化：${rec.recipient}` });
+			sent.push(rec.recipient);
+		} else {
+			failed.push({ name: rec.recipient, why: r.timedOut ? "超时" : (r.stderr.trim() || r.stdout.trim()).split("\n")[0]!.slice(0, 120) });
+		}
+	}
+	return { sent, failed, skipped };
 }
 
 export interface PersonHit {
@@ -1183,10 +1355,10 @@ interface RunResult {
 	timedOut: boolean;
 }
 
-function runDws(cfg: BridgeConfig, args: string[]): Promise<RunResult> {
+function runDws(cfg: BridgeConfig, args: string[], opts?: { cwd?: string }): Promise<RunResult> {
 	const bin = resolveDws(cfg);
 	return new Promise((resolveP, reject) => {
-		const child = spawn(bin.path, args, { shell: bin.shell, windowsHide: true });
+		const child = spawn(bin.path, args, { shell: bin.shell, windowsHide: true, cwd: opts?.cwd });
 		let stdout = "";
 		let stderr = "";
 		let timedOut = false;
@@ -1207,8 +1379,165 @@ function runDws(cfg: BridgeConfig, args: string[]): Promise<RunResult> {
 	});
 }
 
-let cachedSelf: { name: string; userId: string } | null | undefined;
+// ---------------------------------------------------------------------------
+// 落盘类命令在非 NTFS 卷（exFAT / 某些网络盘）上的自动重试
+//
+// dws 下载资源用「写 .part 临时文件 → 硬链接到正式名」做原子发布（link 天然实现
+// “不覆盖同名文件”）；硬链接需要 NTFS，exFAT 上必然报 `link …: Incorrect function`。
+// 这里不改正常路径：只有命中「下载类命令 + 硬链接失败」时，才改在系统临时区
+// （os.tmpdir()，通常在 NTFS 主盘）重跑一次，再把产物搬回用户原本要的位置。
+// ---------------------------------------------------------------------------
 
+/** 落盘类命令白名单：自动重试只对这些命令开放（下载幂等，重试不会重复发送） */
+const DOWNLOAD_PREFIXES: string[][] = [
+	["chat", "+messages-resource-download"],
+	["chat", "+messages-mget"],
+	["chat", "+messages-mdownload"],
+	["drive", "+download"],
+	["drive", "download"],
+	["drive", "pull"],
+];
+
+/** 是否为落盘（下载）类命令 */
+export function isDownloadCommand(args: string[]): boolean {
+	if (args.includes("--download-resources")) return true;
+	return DOWNLOAD_PREFIXES.some((p) => p.every((v, i) => args[i] === v));
+}
+
+/** dws 本地发布失败（.part 硬链接到正式名）：exFAT/网络盘等不支持硬链接的卷上必然出现 */
+export function isLinkPublishFailure(output: string): boolean {
+	return /Incorrect function/i.test(output) && /(link|发布消息资源失败)/i.test(output);
+}
+
+/** 输出目录类 flag（值既可能是「--flag 值」，也可能是「--flag=值」） */
+const OUTPUT_FLAGS = ["--output", "--output-dir", "--local-folder"];
+
+/**
+ * 把输出类 flag 指向临时目录：`--output`/`--output-dir` 是「工作目录内相对路径」，
+ * 在临时目录里执行时写成 `.`；`--local-folder` 是绝对路径，直接写临时目录。
+ * 返回重写后的 argv 与「flag → 用户期望的绝对目录」映射。
+ */
+export function redirectOutputFlags(
+	args: string[],
+	tempRoot: string,
+	baseDir: string,
+): { argv: string[]; targets: Array<{ flag: string; targetAbs: string }> } {
+	const argv = [...args];
+	const targets: Array<{ flag: string; targetAbs: string }> = [];
+	for (let i = 0; i < argv.length; i++) {
+		for (const f of OUTPUT_FLAGS) {
+			const eq = `${f}=`;
+			if (argv[i] === f) {
+				const v = argv[i + 1] ?? ".";
+				targets.push({ flag: f, targetAbs: path.resolve(baseDir, v) });
+				argv[i + 1] = f === "--local-folder" ? tempRoot : ".";
+			} else if (argv[i].startsWith(eq)) {
+				const v = argv[i].slice(eq.length);
+				targets.push({ flag: f, targetAbs: path.resolve(baseDir, v) });
+				argv[i] = eq + (f === "--local-folder" ? tempRoot : ".");
+			}
+		}
+	}
+	return { argv, targets };
+}
+
+/** 递归复制目录内容（目标已存在且不许覆盖时跳过）；返回复制数与被跳过的路径 */
+function copyTree(src: string, dest: string, overwrite: boolean): { copied: number; skipped: string[] } {
+	const skipped: string[] = [];
+	let copied = 0;
+	const walk = (s: string, d: string) => {
+		fs.mkdirSync(d, { recursive: true });
+		for (const e of fs.readdirSync(s, { withFileTypes: true })) {
+			const sp = path.join(s, e.name);
+			const dp = path.join(d, e.name);
+			if (e.isDirectory()) walk(sp, dp);
+			else if (e.isFile()) {
+				if (fs.existsSync(dp) && !overwrite) {
+					skipped.push(dp);
+					continue;
+				}
+				fs.copyFileSync(sp, dp);
+				copied++;
+			}
+		}
+	};
+	walk(src, dest);
+	return { copied, skipped };
+}
+
+/** 把结果 JSON 里的 localPath 从「相对临时区」改写为「用户视角（相对工作目录）」 */
+export function relocateLocalPaths(stdout: string, tempRoot: string, targetAbs: string, baseDir: string): string {
+	try {
+		const parsed: unknown = JSON.parse(stdout);
+		const fix = (o: unknown): void => {
+			if (Array.isArray(o)) {
+				for (const v of o) fix(v);
+				return;
+			}
+			if (!o || typeof o !== "object") return;
+			for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+				if (k === "localPath" && typeof v === "string") {
+					const abs = path.resolve(tempRoot, v);
+					const dest = path.join(targetAbs, path.relative(tempRoot, abs));
+					(o as Record<string, unknown>)[k] = path.relative(baseDir, dest).split(path.sep).join("/");
+				} else fix(v);
+			}
+		};
+		fix(parsed);
+		return JSON.stringify(parsed, null, 2);
+	} catch {
+		return stdout; // 非 JSON 输出原样返回（搬回来的文件仍在目标目录里）
+	}
+}
+
+/** 清理 dws 失败时要留下的 `.part-<随机数>` 残留（仅限目标目录顶层） */
+function cleanPartFiles(dir: string): void {
+	try {
+		for (const f of fs.readdirSync(dir)) {
+			if (/\.part-\d+$/.test(f)) fs.rmSync(path.join(dir, f), { force: true });
+		}
+	} catch {
+		/* 目录不可读就算了 */
+	}
+}
+
+/**
+ * 重跑落盘命令：输出改到系统临时区并搬回目标目录。
+ * 调用方负责把门：只对下载类命令、且已确认是硬链接失败时才调。返回 null = 重试也没成。
+ */
+async function runDwsRedirected(
+	cfg: BridgeConfig,
+	args: string[],
+	baseDir: string,
+	overwrite: boolean,
+): Promise<{ result: RunResult; copied: number; skipped: string[]; targets: string[] } | null> {
+	const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dws-dl-"));
+	try {
+		const { argv, targets } = redirectOutputFlags(args, tempRoot, baseDir);
+		if (!targets.length) targets.push({ flag: "--output", targetAbs: baseDir });
+		const result = await runDws(cfg, argv, { cwd: tempRoot });
+		if (result.code !== 0) return null;
+		let copied = 0;
+		const skipped: string[] = [];
+		for (const t of targets) {
+			const r = copyTree(tempRoot, t.targetAbs, overwrite);
+			copied += r.copied;
+			skipped.push(...r.skipped);
+			cleanPartFiles(t.targetAbs);
+		}
+		const stdout = relocateLocalPaths(result.stdout, tempRoot, targets[0].targetAbs, baseDir);
+		return { result: { ...result, stdout }, copied, skipped, targets: targets.map((t) => t.targetAbs) };
+	} finally {
+		fs.rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
+/** 用户是否显式要求覆盖（决定搬回时是否覆盖同名文件） */
+function wantsOverwrite(args: string[]): boolean {
+	return args.some((a) => a === "--overwrite" || a.startsWith("--overwrite="));
+}
+
+let cachedSelf: { name: string; userId: string } | null | undefined;
 /** 本人身份（惰性获取并缓存）：发后核验命令需要自己的姓名作 --sender */
 async function whoAmI(cfg: BridgeConfig): Promise<{ name: string; userId: string } | null> {
 	if (cachedSelf !== undefined) return cachedSelf;
@@ -1553,6 +1882,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"执行钉钉 dws CLI 命令。args 为完整子命令的 argv 数组（不含 dws 本身），如 [\"chat\", \"+dm\", \"--to\", \"<userId>\", \"--content\", \"【AI发送】…\"]；" +
 			"数组直传不过 shell，内容含空格/引号/换行都安全。自动附加 --format json 与 --yes；写/敏感命令在生成草稿前按 schema 参数表校验 flag，未知 flag 直接拒绝（同类命令参数名不一定相同，先 dws_schema 查）。" +
+			"群发正文可写按人替换的占位符 {{变量}}，此时须带 --vars '<JSON 对象>'（每人一份变量表，key 与 --to 逐字一致；正文只有一个占位符时值可简写为字符串）或 --vars-file <工作目录内相对路径.json>；插件会改为逐人单聊发送（dws +broadcast 只支持所有人同一内容），每人正文不同。" +
 			"读操作直通；写操作两阶段：首次只回执行计划（不执行），带 confirm 重调即执行。" +
 			"破坏性与对外发出内容（发送/群发/转发/撤回/删除等）在执行前弹窗请用户本人确认，无界面会话直接拒绝。" +
 			"发送缺【AI发送】标签、目标为中文姓名、同内容重复发送都会被拒；--dry-run 只读预演。",
@@ -1564,7 +1894,8 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			// 字面 反斜杠-n 先归一：模型常把换行写成两个字符，dws 会吃成空格导致静默粘连
 			const norm = normalizeContent(params.args);
-			const args = norm.args;
+			// 逐人个性化 flag 由插件消费：剥离后再进 dws argv（否则会被 unknown flag 校验拦下）
+			const { args, varsRaw, varsFile } = stripVarsFlags(norm.args);
 			// 文件存在性预检：路径笔误不必真去捅 dws（--file 限工作目录内相对路径）
 			const baseDir = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 			for (const f of flagValues(args, new Set(["--file", "--file-path"]))) {
@@ -1588,6 +1919,30 @@ export default function (pi: ExtensionAPI) {
 			}
 			// 先偷看草稿（decideExec 确认时会把它删掉）：确认路径需要知道分档与审核内容
 			const peek = params.confirm ? state.pending.get(params.confirm) : undefined;
+			// 逐人个性化准备：正文含占位符 → 只能走广播逐人发送（dws +broadcast 只支持同一内容）
+			const placeholders = extractPlaceholders(flagValues(args, CONTENT_FLAGS).at(-1) ?? "");
+			let varsMap: VarsMap | undefined;
+			if (placeholders.length) {
+				if (!matchPrefix(args, BROADCAST_PREFIXES)) {
+					stats.blocked++;
+					return text(`🚫 正文里的 {{${placeholders[0]}}} 是按人替换的占位符，目前只在群发（chat +broadcast）下生效；其他命令请直接把正文写好。`, { kind: "blocked" });
+				}
+				const input = readVarsInput(baseDir, varsRaw, varsFile);
+				const parsed = input.error
+					? ({ error: input.error } as const)
+					: input.raw === undefined
+						? undefined
+						: parseVarsMap(input.raw, placeholders);
+				if (parsed && "error" in parsed) {
+					stats.blocked++;
+					return text(`🚫 ${parsed.error}\n\n${VARS_GUIDE}`, { kind: "blocked" });
+				}
+				if (parsed) varsMap = parsed.map;
+				else if (!isDryRun(args)) {
+					stats.blocked++;
+					return text(`🚫 正文里有占位符 ${placeholders.map((p) => `{{${p}}}`).join("、")}，但没有给变量表。\n\n${VARS_GUIDE}`, { kind: "blocked" });
+				}
+			}
 			const decision = decideExec(args, { confirm: params.confirm, formal: params.formal, tier, meta, why, flags: schema?.params }, state, cfg, Date.now());
 			const dryRun = isDryRun(args);
 			if (decision.action === "block") {
@@ -1618,10 +1973,30 @@ export default function (pi: ExtensionAPI) {
 						);
 					}
 					const dupNotes = await dupNameNotes(cfg, plan);
+					// 逐人个性化：变量表必须覆盖每个人与每个占位符；草稿里展示渲染样例
+					let sampleLines: string[] = [];
+					if (varsMap) {
+						const problems = validateVars(plan.resolved.map((r) => r.recipient), placeholders, varsMap);
+						if (problems.length) {
+							state.pending.delete(decision.token);
+							stats.blocked++;
+							return text(`🚫 变量表不齐（未生成草稿、未发送任何消息）：\n${problems.map((p) => `- ${p}`).join("\n")}\n\n${VARS_GUIDE}`, { kind: "blocked" });
+						}
+						const content = flagValues(args, CONTENT_FLAGS).at(-1) ?? "";
+						sampleLines = plan.resolved.slice(0, 3).map((r) => `- ${r.recipient} → ${renderVars(content, varsMap![r.recipient] ?? {}).replace(/\s*\n\s*/g, " ⏎ ").slice(0, 70)}`);
+					}
 					// 把预检得到的真实收件人塞进审核内容（弹窗时才能看到"发给谁"）
 					const draft = state.pending.get(decision.token);
-					if (draft) draft.review = buildReview(args, meta, why, { recipients: plan.resolved.map((r) => r.recipient) });
-					broadcastTable = `\n\n${formatBroadcastPreflight(plan)}${dupNotes.length ? `\n${dupNotes.join("\n")}` : ""}\n（预检已通过：以上每人各收到一条单聊）`;
+					if (draft) {
+						draft.review = buildReview(args, meta, why, { recipients: plan.resolved.map((r) => r.recipient) });
+						if (varsMap) {
+							draft.vars = varsMap;
+							draft.plan = plan;
+						}
+					}
+					broadcastTable = varsMap
+						? `\n\n（逐人个性化：共 ${plan.resolved.length} 条单聊，正文按变量表逐人渲染）\n${sampleLines.join("\n")}${plan.resolved.length > sampleLines.length ? `\n…（其余 ${plan.resolved.length - sampleLines.length} 人同理）` : ""}${dupNotes.length ? `\n${dupNotes.join("\n")}` : ""}`
+						: `\n\n${formatBroadcastPreflight(plan)}${dupNotes.length ? `\n${dupNotes.join("\n")}` : ""}\n（预检已通过：以上每人各收到一条单聊）`;
 				}
 				const notes = [
 					norm.fixed ? `正文里的 ${norm.fixed} 处字面反斜杠-n 已转为真换行` : "",
@@ -1658,7 +2033,28 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 					ctx.ui.notify(`dingtalk-bridge：已记住「${rememberedKey(args)}」，以后这类操作不再弹窗（可用 /dws-bridge forget 取消）`, "info");
 				}
 			}
-			const r = await runDws(cfg, buildArgv(args));
+			// 逐人个性化：确认后按草稿里的名单逐个渲染发送（dws +broadcast 只支持同一内容）
+			if (peek?.vars && peek.plan && matchPrefix(args, BROADCAST_PREFIXES)) {
+				const res = await sendPersonalized(cfg, args, peek.plan, peek.vars, state);
+				saveLedger(cfg, state);
+				stats.sent += res.sent.length;
+				const failLines = res.failed.length ? `\n\n失败 ${res.failed.length} 人（未发出，可修好后重发这些人）：\n${res.failed.map((f) => `- ${f.name}：${f.why}`).join("\n")}` : "";
+				const skipLines = res.skipped.length ? `\n\n已发过、本次跳过 ${res.skipped.length} 人：${res.skipped.join("、")}（同一人同一正文有固定幂等键）` : "";
+				return text(
+					`✓ 逐人发送完成（共 ${peek.plan.resolved.length} 人）：成功 ${res.sent.length} 人${failLines}${skipLines}`,
+					{ kind: "ok", sent: res.sent, skipped: res.skipped, failed: res.failed.map((f) => f.name) },
+				);
+			}
+			let r = await runDws(cfg, buildArgv(args));
+			// exFAT/网络盘不支持硬链接：dws 落盘发布必然失败 → 换到系统临时区重跑一次再搬回
+			let redirectNote = "";
+			if (r.code !== 0 && isDownloadCommand(args) && isLinkPublishFailure(r.stderr + r.stdout)) {
+				const redirected = await runDwsRedirected(cfg, buildArgv(args), baseDir, wantsOverwrite(args));
+				if (redirected) {
+					r = redirected.result;
+					redirectNote = `\n\n（本机工作目录所在磁盘不支持硬链接，已自动改在系统临时区下载并搬回：${redirected.copied} 个文件${redirected.skipped.length ? `，${redirected.skipped.length} 个因已存在未覆盖` : ""}）`;
+				}
+			}
 			if (r.timedOut) return text(`dws 执行超时（${cfg.execTimeoutMs / 1000}s），命令可能未生效——如涉及发送，先用只读查询确认，绝不要直接重跑`, { kind: "error" });
 			let out = r.stdout.trim();
 			const errTail = r.stderr.trim();
@@ -1673,6 +2069,17 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 				// 主动预检：把 dws 的 JSON 整理成「将发给谁 / 未唯一解析」两栏，重名直接给候选+部门
 				const plan = parseBroadcastPreflight(out);
 				const body = [formatBroadcastPreflight(plan)];
+				if (placeholders.length && varsMap) {
+					const content = flagValues(args, CONTENT_FLAGS).at(-1) ?? "";
+					body.push(
+						"",
+						`逐人个性化（${placeholders.map((p) => `{{${p}}}`).join("、")}）渲染样例：`,
+						...plan.resolved.slice(0, 3).map((r) => `- ${r.recipient} → ${renderVars(content, varsMap![r.recipient] ?? {}).replace(/\s*\n\s*/g, " ⏎ ").slice(0, 70)}`),
+						`（共 ${plan.resolved.length} 条单聊，每人正文不同）`,
+					);
+				} else if (placeholders.length) {
+					body.push("", `⚠️ 正文含占位符 ${placeholders.map((p) => `{{${p}}}`).join("、")}，正式发送必须带变量表：${VARS_GUIDE}`);
+				}
 				if (plan.skipped.length) {
 					body.push("", "未能唯一解析：", ...(await unresolvedLines(cfg, plan.skipped)), "", BROADCAST_FIX_GUIDE);
 				} else if (plan.resolved.length) {
@@ -1725,7 +2132,6 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 				}
 			}
 			if (dryRun) out += "\n\n（--dry-run 预演：未发送任何消息，也未记入防重发台账）";
-			if (dryRun) out += "\n\n（--dry-run 预演：未发送任何消息，也未记入防重发台账）";
 			out = annotateQuery(args, out, new Date());
 			// 只读结果：云盘分享引用结构化成可直接下载的指引；[文件夹] 消息给出明确结论
 			if (!matchPrefix(args, SEND_PREFIXES) && !matchPrefix(args, RECALL_PREFIXES)) {
@@ -1737,6 +2143,7 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 						"请让对方打包成 zip 或逐个文件重发——不要反复尝试下载。";
 				}
 			}
+			if (redirectNote) out = `${out}${redirectNote}`;
 			return text(truncateOut(out, cfg.maxOutputChars) || "（无输出）", { kind: "ok" });
 		},
 	});
@@ -1872,7 +2279,15 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 
 			if (kind === "folder") {
 				const pullArgs = ["drive", "pull", "--remote-folder", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--local-folder", abs, "--if-exists", "skip", "--yes", "--format", "json"];
-				const r = await runDws(cfg, pullArgs);
+				let r = await runDws(cfg, pullArgs);
+				let pullNote = "";
+				if (r.code !== 0 && isLinkPublishFailure(r.stderr + r.stdout)) {
+					const redirected = await runDwsRedirected(cfg, pullArgs, cwd, false);
+					if (redirected) {
+						r = redirected.result;
+						pullNote = `\n\n（本机工作目录所在磁盘不支持硬链接，已自动改在系统临时区镜像并搬回：${redirected.copied} 个文件）`;
+					}
+				}
 				if (r.code !== 0) return text(`文件夹镜像失败（exit ${r.code}）：${(r.stderr || r.stdout).trim().slice(0, 400)}`, { kind: "error" });
 				const files: string[] = [];
 				const walk = (dir: string) => {
@@ -1886,7 +2301,7 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 					walk(abs);
 				} catch { /* 目录不存在则视为空 */ }
 				const list = files.length ? files.map((f) => `  ${f}`).join("\n") : "  （文件夹为空）";
-				return text(`✓ 文件夹已镜像${name ? `「${name}」` : ""}到 ${abs}（${files.length} 个文件）：\n${list}\n\n（可直接用 read 工具读这些绝对路径）`, {
+				return text(`✓ 文件夹已镜像${name ? `「${name}」` : ""}到 ${abs}（${files.length} 个文件）：\n${list}\n\n（可直接用 read 工具读这些绝对路径）${pullNote}`, {
 					kind: "ok",
 					localDir: abs,
 					files,
@@ -1894,14 +2309,23 @@ ${decision.preview}${broadcastTable}${fixedNote}`,
 			}
 
 			const dlArgs = ["drive", "download", "--node", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--output", abs, "--format", "json"];
-			const r = await runDws(cfg, dlArgs);
+			let r = await runDws(cfg, dlArgs);
+			let dlNote = "";
+			if (r.code !== 0 && isLinkPublishFailure(r.stderr + r.stdout)) {
+				// `--output` 这里是绝对路径，重定向执行器按 baseDir 解析后原样返回
+				const redirected = await runDwsRedirected(cfg, dlArgs, cwd, true);
+				if (redirected) {
+					r = redirected.result;
+					dlNote = "（本机工作目录所在磁盘不支持硬链接，已自动改在系统临时区下载并搬回）";
+				}
+			}
 			if (r.code !== 0) {
 				return text(`下载失败（exit ${r.code}）：${(r.stderr || r.stdout).trim().slice(0, 400)}\n如消息是「[文件夹] 名字」形式，钉钉不提供引用，只能让对方重发。`, { kind: "error" });
 			}
 			const saved = /"savedPath"\s*:\s*"([^"]+)"/.exec(r.stdout)?.[1] ?? name ?? nodeId;
 			const size = /"sizeBytes"\s*:\s*(\d+)/.exec(r.stdout)?.[1];
 			const localPath = path.isAbsolute(saved) ? saved : path.join(abs, path.basename(saved));
-			return text(`✓ 已下载${name ? `「${name}」` : ""}：${localPath}${size ? `（${Math.round(Number(size) / 1024)} KB）` : ""}\n\n（可直接用 read 工具读此绝对路径）`, {
+			return text(`✓ 已下载${name ? `「${name}」` : ""}：${localPath}${size ? `（${Math.round(Number(size) / 1024)} KB）` : ""}\n\n（可直接用 read 工具读此绝对路径）${dlNote}`, {
 				kind: "ok",
 				localPath,
 			});
@@ -2003,4 +2427,15 @@ export const __test__ = {
 	flagValues,
 	parseCmdParams,
 	unknownFlags,
+	isDownloadCommand,
+	isLinkPublishFailure,
+	redirectOutputFlags,
+	relocateLocalPaths,
+	copyTree,
+	extractPlaceholders,
+	stripVarsFlags,
+	parseVarsMap,
+	validateVars,
+	renderVars,
+	personalKey,
 };

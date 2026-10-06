@@ -46,6 +46,8 @@
 - `--dry-run` 一律视为只读预演：不进两阶段门、不记防重发台账（否则会拦掉随后的真发）、结果尾部附明确提示。
 - 其他：字面 `\n` 归一 + 多行自动补 markdown 行尾双空格硬换行（钉钉单换行会拼成一行）；文件/媒体消息回报「本条不含正文」（`--title` 不显示给收件人）；查询结果附当前时间锚点；字段拼写不一致自解释（群成员 `openDingtalkId` / 消息 `openDingTalkId`，解析大小写不敏感）。
 - 已知限制：这类分享消息用 `+messages-resource-download` 会 `TABLE_NOT_FOUND`——`resourceRefs` 是缺 spaceId 的数字 dentryId，spaceId 藏在正文 yunpan 链接里，只读结果会自动附结构化下载指引；「[文件夹] 姓名」形式无任何引用、实测不可读，直接提示让对方重发 zip。
+- **非 NTFS 卷（exFAT/网络盘）上的下载自动重定向**：dws 落盘用「写 `.part` 临时文件 → 硬链接到正式名」做原子发布（link 天然实现“不覆盖”语义），硬链接需 NTFS，exFAT 上必然报 `link …: Incorrect function`（与参数无关）。桥只在「下载类命令 + 硬链接失败」时触发重试（`isDownloadCommand` 白名单：`+messages-resource-download`/`+messages-mget --download-resources`/`drive download|pull`；发送类不重试，避免重复外发），把 `--output`/`--output-dir`/`--local-folder` 改到 `os.tmpdir()`（通常在 NTFS 主盘）重跑，成功后 `copyTree` 搬回原目标（默认不覆盖，`--overwrite` 才覆盖）、`cleanPartFiles` 清残留、`relocateLocalPaths` 把结果 JSON 的 `localPath` 改写成用户视角路径，并在回执尾部附一句说明。
+- **群发逐人个性化**：`chat +broadcast` 的 schema 是单值 content（“所有人收到同一条”），所以正文含 `{{变量}}` 时改走逐人循环（`sendPersonalized`）：预检拿每人 `receiverOpenDingTalkId` → `renderVars` 逐人渲染 → `chat +messages-send --as user --open-dingtalk-id <id> --markdown <正文> --ai-tag --idempotency-key <personalKey>`。`--vars`/`--vars-file` 由 `stripVarsFlags` 在进入 schema 校验前剥离（否则会被 unknown flag 拦下）；`parseVarsMap`（值可为对象，或单占位符时字符串简写）/`validateVars`（每人每变量覆盖检查）/`extractPlaceholders`（`{{名}}`，名限中英文数字下划线 1~24 字）三道校验全部在草稿前，拦下时不发一条；台账按人记（`send:<openId>:<正文哈希>`），`personalKey` 是确定性 UUID（同一人同一正文固定），重跑自动跳过；草稿给人话渲染样例，人审面板用预检名单。实测逐人 argv（含 UUID 形状幂等键）dws 接受。
 
 ## mimo-omni.ts（媒体兼容层，过渡件）
 
