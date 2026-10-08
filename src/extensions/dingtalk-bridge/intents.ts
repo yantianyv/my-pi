@@ -84,6 +84,21 @@ export function toCells(values: Array<Array<string | number | boolean | null>>):
 	return JSON.stringify(cells);
 }
 
+/* ============================== 消息附件落盘 ============================== */
+
+/** 消息附件（图片/语音/文件）默认落盘目录：工作目录内相对路径 */
+export const MEDIA_OUT_DIR = ".tmp/dingtalk-media";
+
+/** 附件目录规范化：dws 只收工作目录内的相对路径（拒绝盘符/前导斜杠/.. 逃逸），这里先拦给人话 */
+export function mediaOutDir(input?: string): string | { error: string } {
+	const raw = (input ?? "").trim().replace(/\\/g, "/");
+	if (!raw || raw === "." || raw === "./") return MEDIA_OUT_DIR;
+	if (/^([a-zA-Z]:|\/)/.test(raw) || raw.split("/").includes("..")) {
+		return { error: `附件目录得是工作目录内的相对路径（不带盘符、前导斜杠或 ..）：${input}` };
+	}
+	return raw.replace(/\/+$/, "");
+}
+
 /* ============================== 参数形状（工具 schema，单一真值源） ============================== */
 
 const Action = (values: readonly string[], extra?: string) =>
@@ -107,6 +122,8 @@ export const MessageParams = Type.Object({
 	sender: Type.Optional(Type.String({ description: "找消息时的发送人：姓名、me、对方姓名；默认 me" })),
 	days: Type.Optional(Type.Number({ description: "找消息的时间范围：最近 N 天，默认 7" })),
 	limit: Type.Optional(Type.Number({ description: "read 返回条数，默认 20" })),
+	outDir: Type.Optional(Type.String({ description: `（read）消息附件的保存目录：工作目录内相对路径，默认 ${MEDIA_OUT_DIR}` })),
+	downloadResources: Type.Optional(Type.Boolean({ description: "（read）是否把消息里的附件（图片/语音/文件）一并下载，默认 true" })),
 	dingType: Type.Optional(Type.String({ description: "（ding）提醒方式：应用内（默认）/短信/电话，后两者有费用" })),
 	taskId: Type.Optional(Type.String({ description: "（sendStatus）发送任务 ID" })),
 	confirm: Type.Optional(Type.String({ description: "两阶段确认 token（首次调用的回执里给出）" })),
@@ -260,6 +277,12 @@ export function buildMessage(p: MessageParamsT, r: Resolved): Built {
 			if (sender) args.push("--sender-query", sender);
 			if (p.keyword) args.push("--query", p.keyword);
 			args.push("--days", String(Math.max(1, Math.min(p.days ?? 7, 30))));
+			// 查消息顺手落盘附件：dws 自带 --download-resources，省一轮「先看有什么再单独下载」
+			if (p.downloadResources !== false) {
+				const dir = mediaOutDir(p.outDir);
+				if (typeof dir !== "string") return err(dir.error);
+				args.push("--download-resources", "--output-dir", dir);
+			}
 			return { args };
 		}
 	}

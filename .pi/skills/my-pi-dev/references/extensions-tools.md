@@ -43,6 +43,7 @@
 - 覆盖范围即上表六个域的主用动作；长尾（听记/考勤/邮箱/组织/表格结构/多维表视图等）**AI 做不了**，只能读 `dws_skill` 判断可行性后回报用户——需要时按动作表补进行。
 - 安全门禁（`decideExec` + `runGuarded`）：读直通 / 写两阶段（草稿 + confirm）/ 敏感档人工面板（`shared/review-panel.ts`，面板只写人话、无 argv/ID，无界面会话直接拒绝）；面板「当前工作区不再询问」写 `remembered`（cli_path，destructive 不可记）。分档由 dws schema 元数据的 `effect`/`availability` 决定（缓存 `~/.pi/agent/dingtalk-bridge-schema.json` + 手写表兜底）：上游标 `availability≠available` 的命令直接报不可用与原因，不掩成内容错；命令路径（canonical/点分/本地旧写法）统一归一到可执行 cli_path。
 - 群发逐人个性化：`dingtalk_msg` 的 `vars` 参数（`{收件人: 值}` 或 `{收件人: {变量: 值}}`）映射到管线的私有 `--vars`，正文含 `{{变量}}` 时由管线逐人渲染发送；缺变量表在草稿前拦下。
+- 查消息连附件一起落盘：`dingtalk_msg action="read"` 默认附 `--download-resources --output-dir <outDir>`（缺省 `.tmp/dingtalk-media`），dws 把命中消息的 mediaId/fileId 全下到该目录（非 NTFS 卷自动重定向），结果里回显目录与 localPath（模型可直接 read）；`downloadResources=false` 只查文字，`outDir` 改目录（必须是工作目录内相对路径，插件先拦盘符/前导斜杠/`..`）。
 - 群发 `chat +broadcast`：草稿前先跑只读 dry-run 预检收件人，有人未唯一解析就整体拦下（不半批次发送）；正文含 `{{变量}}` 时改走逐人单聊（`sendPersonalized`，每人一份变量表 + 确定性幂等键，重跑自动跳过）。
 - 分享链接落地走 `dingtalk_file action="fetch"`（link 或 spaceId+nodeId；文件直下、文件夹递归镜像，非 NTFS 卷自动改到系统临时区下载再搬回）。
 - 配置 `~/.pi/agent/dingtalk-bridge.json`；防重发台账 `~/.pi/agent/dingtalk-bridge-sent.json`（`dedupMinutes` 默认 60）；官方 `dingtalk-*` 技能不再常驻系统提示词（`before_agent_start` 过滤，`dws_skill` 按需取回）。

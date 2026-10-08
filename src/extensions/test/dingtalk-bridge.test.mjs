@@ -516,6 +516,18 @@ console.log("AE、人多时的名单排版");
 	check("AA: 真实硬链接失败被识别", isLinkPublishFailure(realErr) === true);
 	check("AA: 普通错误不误判", isLinkPublishFailure("dws 失败（exit 3）：permission denied") === false);
 
+	// 查消息附带下载时 dws 以 exit 0 把失败写进结果 JSON，重试决策不能看退出码
+	const { shouldRetryRedirect, formatResourceDownloads } = __test__;
+	const softFail = JSON.stringify({ resourceDownloads: { downloadedCount: 0, failedCount: 1, failures: [{ error: '发布消息资源失败: link D:\\a\\.x.part-1 D:\\a\\x.jpg: Incorrect function.' }], ok: false } });
+	check("AA: exit 0 的软失败仍触发重试（查消息附带下载）", shouldRetryRedirect(["chat", "+search-msg", "--download-resources", "--output-dir", "dl"], softFail) === true);
+	check("AA: 非下载类命令不重试", shouldRetryRedirect(["chat", "+dm", "--to", "x"], softFail) === false);
+	check("AA: 正常结果不重试", shouldRetryRedirect(["chat", "+search-msg", "--download-resources"], '{"resourceDownloads":{"downloadedCount":2,"failedCount":0}}') === false);
+
+	check("AA: 附件全成功 → 报目录", formatResourceDownloads('{"downloadedCount":2,"failedCount":0}', ".tmp/dingtalk-media").includes(".tmp/dingtalk-media"));
+	check("AA: 部分成功 → 两个数都给", (() => { const t = formatResourceDownloads('{"downloadedCount":1,"failedCount":2}', "dl"); return t.includes("1 个") && t.includes("2 个"); })());
+	check("AA: 全失败 → 不再反复重试", formatResourceDownloads('{"downloadedCount":0,"failedCount":3}', "dl").includes("别反复重试"));
+	check("AA: 无附件 → 明说没有", formatResourceDownloads('{"count":2}', "dl").includes("没有可下载的附件"));
+
 	const base = join(HERE, "fake-project");
 	const temp = join(HERE, "fake-temp");
 

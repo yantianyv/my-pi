@@ -22,6 +22,7 @@
  *   · 本会话相同（目标+内容）重复发送 → 拒执（防「为验证重发」）；撤回同理防重复
  *   · 查询结果自动附当前时间锚点；正文里的字面「反斜杠-n」自动归一为真换行；
  *     文件/媒体消息回报「本条不含正文」（说明文字必须另发一条）
+ *   · 查消息顺手把消息里的附件落盘（图片/语音/文件 → 工作目录，路径回显，可直接 read）
  *   · 上游把能力标成对 AI 关闭（schema availability 非 available）或命令路径根本不存在时，
  *     直接说清原因，不让它伪装成内容错
  * - L0 技能过滤：before_agent_start 把 dingtalk-* 从系统提示词的技能清单摘掉（省上下文），
@@ -63,6 +64,7 @@ import {
 	type FileParamsT,
 	MessageParams,
 	type MessageParamsT,
+	MEDIA_OUT_DIR,
 	TodoParams,
 	type TodoParamsT,
 } from "./intents";
@@ -76,6 +78,8 @@ const LEDGER_FILE = path.join(os.homedir(), ".pi", "agent", "dingtalk-bridge-sen
 const PENDING_TTL_MS = 10 * 60_000;
 /** dws_skill 单次返回的技能正文上限 */
 const SKILL_MAX_CHARS = 12_000;
+/** 落盘类命令的执行上限：下大文件/多附件比查询慢得多，60s 会误杀（仅下限，不覆盖更大的 execTimeoutMs） */
+const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 
 interface BridgeConfig {
 	/** 发送内容缺【AI发送】标签时拒执（formal=true 豁免） */
@@ -1361,6 +1365,17 @@ export function formatDriveRefs(refs: { spaceId: string; fileId: string; type: s
 	return `\n\n🔗 钉盘/云盘分享资源（这类消息用 +messages-resource-download 会报 TABLE_NOT_FOUND，需走 drive）：\n${lines.join("\n")}`;
 }
 
+/** 查消息附带下载（--download-resources）的落地情况：告诉模型文件在哪，没下下来的别再试 */
+export function formatResourceDownloads(stdout: string, dir: string): string {
+	const count = (re: RegExp) => Number(re.exec(stdout)?.[1] ?? 0);
+	const ok = count(/"downloadedCount"\s*:\s*(\d+)/);
+	const lost = count(/"failedCount"\s*:\s*(\d+)/);
+	if (ok && lost) return `\n\n📎 消息附件：${ok} 个已下载到 ${dir}（JSON 里的 localPath 即文件路径，可直接 read），${lost} 个没下下来——失败的那些不要反复重试。`;
+	if (ok) return `\n\n📎 消息里的图片/语音/文件已下载到 ${dir}（JSON 里的 localPath 即文件路径，可直接用 read 工具读）。`;
+	if (lost) return `\n\n⚠️ 消息里有 ${lost} 个附件没下下来（本地磁盘不支持硬链接时 dws 的原子落盘会失败，临时区重试也没成）——本地没有这些文件，别反复重试，如实告诉用户。`;
+	return "\n\n📎 本次消息里没有可下载的附件。";
+}
+
 /** 递归收集满足谓词的对象（仅取 userId/name 等稳定字段，不猜层级） */
 function parsePeopleLike(v: unknown, pred: (o: Record<string, unknown>) => boolean): Record<string, unknown>[] {
 	const out: Record<string, unknown>[] = [];
@@ -1491,7 +1506,7 @@ async function resolveCliPath(cfg: BridgeConfig, pathSpec: string): Promise<{ cl
 	return cliPath ? { cliPath, canonical: String(hit.canonical_path ?? "") } : null;
 }
 
-function runDws(cfg: BridgeConfig, args: string[], opts?: { cwd?: string }): Promise<RunResult> {
+function runDws(cfg: BridgeConfig, args: string[], opts?: { cwd?: string; timeoutMs?: number }): Promise<RunResult> {
 	const bin = resolveDws(cfg);
 	return new Promise((resolveP, reject) => {
 		const child = spawn(bin.path, args, { shell: bin.shell, windowsHide: true, cwd: opts?.cwd });
@@ -1501,7 +1516,7 @@ function runDws(cfg: BridgeConfig, args: string[], opts?: { cwd?: string }): Pro
 		const timer = setTimeout(() => {
 			timedOut = true;
 			child.kill();
-		}, cfg.execTimeoutMs);
+		}, opts?.timeoutMs ?? cfg.execTimeoutMs);
 		child.stdout.on("data", (d) => (stdout += d));
 		child.stderr.on("data", (d) => (stderr += d));
 		child.on("error", (e) => {
@@ -1540,9 +1555,22 @@ export function isDownloadCommand(args: string[]): boolean {
 	return DOWNLOAD_PREFIXES.some((p) => p.every((v, i) => args[i] === v));
 }
 
+/** 按命令性质选超时：下载类抬高上限 */
+const execTimeoutOf = (cfg: BridgeConfig, args: string[]): number =>
+	isDownloadCommand(args) ? Math.max(cfg.execTimeoutMs, DOWNLOAD_TIMEOUT_MS) : cfg.execTimeoutMs;
+
 /** dws 本地发布失败（.part 硬链接到正式名）：exFAT/网络盘等不支持硬链接的卷上必然出现 */
 export function isLinkPublishFailure(output: string): boolean {
 	return /Incorrect function/i.test(output) && /(link|发布消息资源失败)/i.test(output);
+}
+
+/**
+ * 是否该改到系统临时区重试：下载类命令 + 输出里出现硬链接发布失败。
+ * 不看退出码：查消息附带下载（--download-resources）把失败写进结果 JSON（exit 0），
+ * 只有单独调 +messages-resource-download 才返回非 0。重试幂等（失败那次不落任何文件）。
+ */
+export function shouldRetryRedirect(args: string[], output: string): boolean {
+	return isDownloadCommand(args) && isLinkPublishFailure(output);
 }
 
 /** 输出目录类 flag（值既可能是「--flag 值」，也可能是「--flag=值」） */
@@ -1651,8 +1679,9 @@ async function runDwsRedirected(
 	try {
 		const { argv, targets } = redirectOutputFlags(args, tempRoot, baseDir);
 		if (!targets.length) targets.push({ flag: "--output", targetAbs: baseDir });
-		const result = await runDws(cfg, argv, { cwd: tempRoot });
-		if (result.code !== 0) return null;
+		const result = await runDws(cfg, argv, { cwd: tempRoot, timeoutMs: execTimeoutOf(cfg, argv) });
+		// 临时区也不支持硬链接时（软失败也可能 exit 0）就当重试失败，保留原输出与失败明细
+		if (result.code !== 0 || isLinkPublishFailure(result.stdout + result.stderr)) return null;
 		let copied = 0;
 		const skipped: string[] = [];
 		for (const t of targets) {
@@ -2067,9 +2096,9 @@ const fetchDriveShare = async (params: { link?: string; spaceId?: string; nodeId
 
 	if (kind === "folder") {
 		const pullArgs = ["drive", "pull", "--remote-folder", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--local-folder", abs, "--if-exists", "skip", "--yes", "--format", "json"];
-		let r = await runDws(cfg, pullArgs);
+		let r = await runDws(cfg, pullArgs, { timeoutMs: execTimeoutOf(cfg, pullArgs) });
 		let pullNote = "";
-		if (r.code !== 0 && isLinkPublishFailure(r.stderr + r.stdout)) {
+		if (shouldRetryRedirect(pullArgs, r.stderr + r.stdout)) {
 			const redirected = await runDwsRedirected(cfg, pullArgs, cwd, false);
 			if (redirected) {
 				r = redirected.result;
@@ -2097,9 +2126,9 @@ const fetchDriveShare = async (params: { link?: string; spaceId?: string; nodeId
 	}
 
 	const dlArgs = ["drive", "download", "--node", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--output", abs, "--format", "json"];
-	let r = await runDws(cfg, dlArgs);
+	let r = await runDws(cfg, dlArgs, { timeoutMs: execTimeoutOf(cfg, dlArgs) });
 	let dlNote = "";
-	if (r.code !== 0 && isLinkPublishFailure(r.stderr + r.stdout)) {
+	if (shouldRetryRedirect(dlArgs, r.stderr + r.stdout)) {
 		// `--output` 这里是绝对路径，重定向执行器按 baseDir 解析后原样返回
 		const redirected = await runDwsRedirected(cfg, dlArgs, cwd, true);
 		if (redirected) {
@@ -2337,9 +2366,11 @@ ${res.failed.map((f) => `- ${f.name}：${f.why}`).join("\n")}` : "";
 					{ kind: "ok", sent: res.sent, skipped: res.skipped, failed: res.failed.map((f) => f.name) }
 				);
 			}
-			let r = await runDws(cfg, buildArgv(args));
+			let r = await runDws(cfg, buildArgv(args), { timeoutMs: execTimeoutOf(cfg, args) });
 			let redirectNote = "";
-			if (r.code !== 0 && isDownloadCommand(args) && isLinkPublishFailure(r.stderr + r.stdout)) {
+			// 硬链接失败可能以 exit 0 + 结果里 failedCount 的形式回来（查消息附带下载就是这种），
+			// 所以不靠退出码判断，只看错误文本；重试幂等（第一次失败不落任何文件）
+			if (shouldRetryRedirect(args, r.stderr + r.stdout)) {
 				const redirected = await runDwsRedirected(cfg, buildArgv(args), baseDir, wantsOverwrite(args));
 				if (redirected) {
 					r = redirected.result;
@@ -2348,7 +2379,11 @@ ${res.failed.map((f) => `- ${f.name}：${f.why}`).join("\n")}` : "";
 （本机工作目录所在磁盘不支持硬链接，已自动改在系统临时区下载并搬回：${redirected.copied} 个文件${redirected.skipped.length ? `，${redirected.skipped.length} 个因已存在未覆盖` : ""}）`;
 				}
 			}
-			if (r.timedOut) return text(`dws 执行超时（${cfg.execTimeoutMs / 1e3}s），命令可能未生效——如涉及发送，先用只读查询确认，绝不要直接重跑`, { kind: "error" });
+			if (r.timedOut)
+				return text(
+					`dws 执行超时（${Math.round(execTimeoutOf(cfg, args) / 1e3)}s）${isDownloadCommand(args) ? "：下载可能只是没跑完，目标目录里已落盘的文件仍然有效，别整条重跑" : "，命令可能未生效——如涉及发送，先用只读查询确认，绝不要直接重跑"}`,
+					{ kind: "error" },
+				);
 			let out = r.stdout.trim();
 			const errTail = r.stderr.trim();
 			if (r.code !== 0) {
@@ -2438,6 +2473,10 @@ openTaskId：${taskId}（要用它时可交给 dingtalk_msg action="sendStatus"�
 			if (!matchPrefix(args, SEND_PREFIXES) && !matchPrefix(args, RECALL_PREFIXES)) {
 				out += formatDriveRefs(parseDriveRefs(out));
 				out += formatFieldSpellingNote(out);
+				// 附件的落地情况回给模型：省一轮「先看有什么、再单独下」，也避免拿不到文件时反复重试
+				if (args.includes("--download-resources")) {
+					out += formatResourceDownloads(out, flagValues(args, new Set(["--output-dir"]))[0] ?? MEDIA_OUT_DIR);
+				}
 				if (isFolderMessage(out)) {
 					out += "\n\n⚠️ 上述含「[文件夹] xxx」的消息：钉钉不提供任何可下载引用（实测：无 resourceRefs、无 id、无 mediaId，连 download-media 也无从下手），插件无法读取。请让对方打包成 zip 或逐个文件重发——不要反复尝试下载。";
 				}
@@ -2784,7 +2823,8 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 		label: "收发钉钉消息",
 		description:
 			"钉钉消息：单聊/群消息/多人单聊/引用回复/转发/转 DING/撤回/查消息。收件人写姓名或账号 ID，会话写群名或会话 ID。" +
-			"发文件时本条不含说明正文，说明要另发一条文本。",
+			"发文件时本条不含说明正文，说明要另发一条文本。" +
+			"查消息默认把消息里的图片/语音/文件下载到工作目录（路径见结果，可直接 read；outDir 改目录、downloadResources=false 关闭）。",
 		params: MessageParams,
 		async resolve(p: MessageParamsT) {
 			const r: Resolved = {};
@@ -3045,6 +3085,8 @@ export const __test__ = {
 	unknownFlags,
 	isDownloadCommand,
 	isLinkPublishFailure,
+	shouldRetryRedirect,
+	formatResourceDownloads,
 	redirectOutputFlags,
 	relocateLocalPaths,
 	copyTree,

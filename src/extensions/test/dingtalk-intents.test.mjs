@@ -75,6 +75,11 @@ console.log("B、消息域");
 	check("B: 撤回只要 msg-id", argv(buildMessage({ action: "recall", messageId: "m1" }, { message: msg })) === "chat +messages-recall --msg-id m1");
 	check("B: 发送状态用 open-task-id", argv(buildMessage({ action: "sendStatus", taskId: "t1" }, {})) === "chat +messages-query-send-status --open-task-id t1");
 	check("B: 查消息带会话/关键词/时间窗", (() => { const a = argv(buildMessage({ action: "read", inGroup: "教研室", keyword: "教研", days: 3 }, { inGroup: group })); return a.includes("+search-msg") && a.includes("--chat-id cidA") && a.includes("--query 教研") && a.includes("--days 3"); })());
+	check("B: 查消息默认连附件一起落盘", (() => { const a = argv(buildMessage({ action: "read", sender: "王舒莹" }, {})); return a.includes("--download-resources") && a.includes("--output-dir .tmp/dingtalk-media"); })());
+	check("B: 附件目录可改（相对路径原样传、尾部斜杠去掉）", argv(buildMessage({ action: "read", outDir: "收材料/图片/" }, {})).includes("--output-dir 收材料/图片"));
+	check("B: downloadResources=false 时纯查消息", !argv(buildMessage({ action: "read", downloadResources: false }, {})).includes("--download-resources"));
+	check("B: 附件目录用 .. 逃出工作目录 → 报错", (() => { const e = buildMessage({ action: "read", outDir: "../x" }, {}); return "error" in e && e.error.includes("相对路径"); })());
+	check("B: 附件目录不许绝对路径/盘符", typeof buildMessage({ action: "read", outDir: "C:\\tmp" }, {}).error === "string" && typeof buildMessage({ action: "read", outDir: "/tmp" }, {}).error === "string" && typeof buildMessage({ action: "read", outDir: "/" }, {}).error === "string");
 	check("B: 群发逐人个性化把变量表交给管线", (() => {
 		const a = argv(buildMessage({ action: "broadcast", to: ["李娜"], content: "【{{称呼}}】开会", vars: { 李娜: { 称呼: "张老师" } } }, { people }));
 		return a.includes('--vars {"李娜":{"称呼":"张老师"}}');
