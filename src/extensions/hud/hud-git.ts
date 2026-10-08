@@ -15,18 +15,17 @@
  *   - git 输出路径默认按 core.quotePath 做 C-style 转义（中文/空格等特殊字符被引号+八进制
  *     包裹），解析时统一经 `gitUnquotePath` 解码后才用于显示与操作，否则删除/暂存会因假路径失败。
  *   - 面板使用 `ctx.ui.custom()` 的 overlay 渲染，内置 commit message 输入行。
- *   - AI 生成走 `completeSimple` 单次调用（模型按用途取，见下），不占用主会话上下文。
+ *   - AI 生成走 shared/llm 的单次调用（模型按用途取，见下），不占用主会话上下文。
  *   - 文件列表右侧通过 `git diff --numstat` 显示 +/-/binary 预览，不占用额外空间。
  *   - 操作失败时通过 `ctx.ui.notify` 反馈，成功后面板自动刷新并回调 `onRefresh` 更新 HUD。
  */
 import type { ExtensionAPI, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth, visibleWidth, parseKey } from "@earendil-works/pi-tui";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { editInput } from "../shared/ui";
+import { aiComplete, type AiModelChain } from "../shared/llm";
 import { openLocalModelPicker, resolveSettingArg } from "../shared/model-select";
 import { LOCAL_AUTO, createModelSetting, type ModelSetting } from "../shared/model-setting";
 import type { AnyModel } from "../shared/model-util";
-import type { Message } from "@earendil-works/pi-ai";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { rm, readFile, writeFile } from "node:fs/promises";
@@ -73,12 +72,8 @@ const conflictModelSetting: ModelSetting = createModelSetting({
 });
 /** 喂给模型的暂存区 diff 最大字符数（超出截断） */
 const COMMIT_DIFF_MAX_CHARS = 4_000;
-/** AI 生成提交信息超时 */
-const COMMIT_AI_TIMEOUT_MS = 30_000;
 /** 单文件超过该字符数不让 AI 处理冲突（上下文长度与可靠性考虑） */
 const CONFLICT_FILE_MAX_CHARS = 20_000;
-/** AI 解决冲突超时（整文件重写，比提交信息慢） */
-const CONFLICT_AI_TIMEOUT_MS = 60_000;
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -492,14 +487,14 @@ export function registerGitModelConfigCommand(pi: ExtensionAPI): void {
 	});
 }
 
-/** 提交信息模型：本地设置 → 中心设置 → 默认策略 LITE → AUTO（shared/model-setting） */
-function pickCommitModel(ctx: ExtensionContext): AnyModel | undefined {
-	return commitModelSetting.resolve(ctx).model;
+/** 提交信息模型链：本地设置 → 中心设置 → 默认策略 LITE → AUTO（shared/model-setting） */
+function pickCommitModel(ctx: ExtensionContext): AiModelChain {
+	return commitModelSetting.resolve(ctx);
 }
 
-/** 冲突消解模型：本地设置 → 中心设置 → 默认策略 FAST → AUTO */
-function pickConflictModel(ctx: ExtensionContext): AnyModel | undefined {
-	return conflictModelSetting.resolve(ctx).model;
+/** 冲突消解模型链：本地设置 → 中心设置 → 默认策略 FAST → AUTO */
+function pickConflictModel(ctx: ExtensionContext): AiModelChain {
+	return conflictModelSetting.resolve(ctx);
 }
 
 /** 由 AI 根据暂存区改动（git diff --cached）生成提交信息。 */
@@ -509,11 +504,8 @@ export async function generateCommitMessage(ctx: ExtensionContext, cwd: string):
 	const truncated =
 		diff.length > COMMIT_DIFF_MAX_CHARS ? diff.slice(0, COMMIT_DIFF_MAX_CHARS) + "\n…(diff 过长已截断)" : diff;
 
-	const model = pickCommitModel(ctx);
-	if (!model) throw new Error("找不到已认证的可用模型");
-
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (!auth.ok) throw new Error(`认证失败：${auth.error}`);
+	const chain = pickCommitModel(ctx);
+	if (!chain.model) throw new Error("找不到已认证的可用模型");
 
 	const systemPrompt = [
 		"你是 git 提交信息助手，根据用户提供的暂存区 diff 生成一条简洁的提交信息。",
@@ -524,34 +516,14 @@ export async function generateCommitMessage(ctx: ExtensionContext, cwd: string):
 		"4. 只输出提交信息本身，不要解释、不要引号、不要代码块围栏",
 	].join("\n");
 
-	const messages: Message[] = [
-		{
-			role: "user",
-			content: `以下是暂存区改动（git diff --cached）：\n\n${truncated}`,
-			timestamp: Date.now(),
-		},
-	];
-
-	const result = await completeSimple(
-		model,
-		{ systemPrompt, messages },
-		{
-			apiKey: auth.apiKey,
-			headers: { ...auth.headers },
-			maxTokens: 300,
-			temperature: 0.3,
-			signal: AbortSignal.timeout(COMMIT_AI_TIMEOUT_MS),
-		},
-	);
-
-	const text = result.content
-		.filter((b) => b.type === "text")
-		.map((b) => (b as { type: "text"; text: string }).text)
-		.join("\n")
-		.trim();
-	if (!text) throw new Error("AI 未返回内容");
+	const r = await aiComplete(ctx, chain, {
+		systemPrompt,
+		prompt: `以下是暂存区改动（git diff --cached）：\n\n${truncated}`,
+		temperature: 0.3,
+	});
+	if (!r.ok) throw new Error(r.error);
 	// 去掉可能的 markdown 代码块围栏
-	return text.replace(/^```[^\n]*\n/, "").replace(/\n```\s*$/, "").trim();
+	return r.text.replace(/^```[^\n]*\n/, "").replace(/\n```\s*$/, "").trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -567,10 +539,8 @@ async function resolveConflictFileWithAI(ctx: ExtensionContext, cwd: string, pat
 		throw new Error(`${path} 过大（${content.length} 字符），请手动解决`);
 	}
 
-	const model = pickConflictModel(ctx);
-	if (!model) throw new Error("找不到已认证的可用模型");
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (!auth.ok) throw new Error(`认证失败：${auth.error}`);
+	const chain = pickConflictModel(ctx);
+	if (!chain.model) throw new Error("找不到已认证的可用模型");
 
 	const systemPrompt = [
 		"你是 git 合并冲突解决助手。用户给你一个含冲突标记（<<<<<<< / ======= / >>>>>>>）的文件，输出解决冲突后的完整文件。",
@@ -581,30 +551,13 @@ async function resolveConflictFileWithAI(ctx: ExtensionContext, cwd: string, pat
 		"4. 只输出文件内容本身，不要解释、不要代码块围栏",
 	].join("\n");
 
-	const messages: Message[] = [
-		{
-			role: "user",
-			content: `文件路径：${path}\n\n${content}`,
-			timestamp: Date.now(),
-		},
-	];
-
-	const result = await completeSimple(
-		model,
-		{ systemPrompt, messages },
-		{
-			apiKey: auth.apiKey,
-			headers: { ...auth.headers },
-			maxTokens: 8000,
-			temperature: 0.2,
-			signal: AbortSignal.timeout(CONFLICT_AI_TIMEOUT_MS),
-		},
-	);
-
-	let text = result.content
-		.filter((b) => b.type === "text")
-		.map((b) => (b as { type: "text"; text: string }).text)
-		.join("\n");
+	const r = await aiComplete(ctx, chain, {
+		systemPrompt,
+		prompt: `文件路径：${path}\n\n${content}`,
+		temperature: 0.2,
+	});
+	if (!r.ok) throw new Error(r.error);
+	let text = r.text;
 	// 去掉可能的整文件代码块围栏（仅当首行是 ```xxx 且末行是 ``` 才剥）
 	const fence = text.match(/^\s*```[^\n]*\n([\s\S]*)\n```\s*$/);
 	if (fence) text = fence[1];

@@ -1,7 +1,7 @@
 /**
  * perm-gate/config-panel：`/perm-gate-config` 配置面板（↑↓ 选择 · Enter 修改 · Esc 返回）
  *
- * 覆盖六项：AI 审核开关、审核模型（内嵌 shared/model-select 的选择浮层）、审核超时（秒）、
+ * 覆盖五项：AI 审核开关、审核模型（内嵌 shared/model-select 的选择浮层）、
  * sudo 授权通道开关、硬拒绝名单、关注项名单。
  *
  * 名单编辑是面板存在的主要理由（原先只能手改 JSON，正则写错要等运行时才暴露）：
@@ -20,7 +20,6 @@ import { LOCAL_AUTO, type ModelSetting } from "../shared/model-setting";
 /** 面板需要的最小配置视图（由 perm-gate/index.ts 的 PermGateConfig 满足） */
 export interface ConfigPanelConfig {
 	aiReview: boolean;
-	aiTimeoutMs: number;
 	sudoExec: boolean;
 	deny: string[];
 	watch: string[];
@@ -37,13 +36,11 @@ export interface ConfigPanelHost {
 type Row =
 	| { kind: "toggle"; key: "aiReview" | "sudoExec"; label: string }
 	| { kind: "model"; label: string }
-	| { kind: "timeout"; label: string }
 	| { kind: "list"; key: "deny" | "watch"; label: string };
 
 const ROWS: Row[] = [
 	{ kind: "toggle", key: "aiReview", label: "AI 审核" },
 	{ kind: "model", label: "审核模型" },
-	{ kind: "timeout", label: "审核超时（秒）" },
 	{ kind: "toggle", key: "sudoExec", label: "sudo 授权通道" },
 	{ kind: "list", key: "deny", label: "硬拒绝名单" },
 	{ kind: "list", key: "watch", label: "关注项名单" },
@@ -90,7 +87,6 @@ export class PermGateConfigOverlay {
 	private listKey: "deny" | "watch" | null = null;
 	private listSel = 0;
 	private editor: Editor | null = null;
-	private timeoutEdit: { text: string; cursor: number } | null = null;
 	private picker: ModelSelectOverlay | null = null;
 	private pickerDone: ((v: string | null) => void) | null = null;
 	private pendingDelete = -1;
@@ -115,8 +111,6 @@ export class PermGateConfigOverlay {
 				const local = this.host.reviewModel.getLocal();
 				return local === LOCAL_AUTO ? "auto（由 model-config 管理）" : local;
 			}
-			case "timeout":
-				return `${Math.round(c.aiTimeoutMs / 1000)}s`;
 			case "list":
 				return `${c[row.key].length} 条`;
 		}
@@ -131,10 +125,6 @@ export class PermGateConfigOverlay {
 		}
 		if (this.editor) {
 			this.handleEditor(data);
-			return;
-		}
-		if (this.timeoutEdit) {
-			this.handleTimeoutEdit(data);
 			return;
 		}
 		if (this.listKey) {
@@ -156,11 +146,6 @@ export class PermGateConfigOverlay {
 			this.host.cfg[row.key] = !this.host.cfg[row.key];
 			this.host.persist();
 			this.status = `${row.label}：${this.host.cfg[row.key] ? "开" : "关"}`;
-			return;
-		}
-		if (row.kind === "timeout") {
-			const text = String(Math.round(this.host.cfg.aiTimeoutMs / 1000));
-			this.timeoutEdit = { text, cursor: text.length };
 			return;
 		}
 		if (row.kind === "model") {
@@ -195,32 +180,6 @@ export class PermGateConfigOverlay {
 				{ title: "选择审核模型" },
 			);
 		});
-	}
-
-	private handleTimeoutEdit(data: string): void {
-		const ed = this.timeoutEdit;
-		if (!ed) return;
-		if (matchesKey(data, "escape")) {
-			this.timeoutEdit = null;
-			this.tui.requestRender();
-			return;
-		}
-		if (matchesKey(data, "return")) {
-			const secs = Number.parseInt(ed.text, 10);
-			if (!Number.isFinite(secs) || secs < 1 || secs > 600) {
-				this.status = "超时需为 1~600 秒";
-			} else {
-				this.host.cfg.aiTimeoutMs = secs * 1000;
-				this.host.persist();
-				this.status = `审核超时已设为 ${secs}s`;
-				this.timeoutEdit = null;
-			}
-			this.tui.requestRender();
-			return;
-		}
-		const r = editInput(ed.text, ed.cursor, data);
-		if (r !== "skip") this.timeoutEdit = { text: r.text, cursor: r.cursor };
-		this.tui.requestRender();
 	}
 
 	// ---- 名单页 ----
@@ -353,15 +312,6 @@ export class PermGateConfigOverlay {
 			);
 			if (this.status) lines.push(row(th.fg("warning", `  ${this.status}`)));
 			lines.push(row(th.fg("dim", "  Tab 切换 · Enter 下一行/保存（非法正则拒绝保存）· Esc 取消")));
-			lines.push(bottomBorder());
-			return lines;
-		}
-
-		if (this.timeoutEdit) {
-			lines.push(row(""));
-			lines.push(row(`  审核超时：${this.timeoutEdit.text} 秒`));
-			if (this.status) lines.push(row(th.fg("warning", `  ${this.status}`)));
-			lines.push(row(th.fg("dim", "  Enter 保存（1~600）· Esc 取消")));
 			lines.push(bottomBorder());
 			return lines;
 		}

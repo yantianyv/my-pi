@@ -42,8 +42,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
-import type { Message } from "@earendil-works/pi-ai";
+import { aiComplete, type AiModelChain } from "./shared/llm";
 import { openLocalModelPicker, resolveSettingArg, type AnyModel } from "./shared/model-select";
 import { LOCAL_AUTO, createModelSetting, type ModelSetting } from "./shared/model-setting";
 import {
@@ -143,7 +142,8 @@ const WORK_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /** 执行中标题转帧间隔（比提醒闪烁快，一眼看出「在跑」） */
 const WORK_TITLE_INTERVAL_MS = 200;
 
-/** Working 行：廉价 AI 概括「正在干什么」短语的超时与节流（概括是增强，失败静默保留旧短语） */
+/** Working 行：廉价 AI 概括「正在干什么」短语的超时与节流。失败静默保留旧短语（失败代价≈ 0，
+ * 等下去不划算）→ 只有它按「失败代价小于等待代价」设超时；其余调用点失败代价更大，不设。 */
 const STEP_PHRASE_MAX_CHARS = 16;
 const STEP_PHRASE_TIMEOUT_MS = 15_000;
 const STEP_PHRASE_MIN_INTERVAL_MS = 12_000;
@@ -293,8 +293,8 @@ export default function (pi: ExtensionAPI) {
 	let presenceCfg = loadPresenceConfig(); // 提示音在场门控（session_start 重读，便于手改配置后重启会话生效）
 
 	/** 概括用模型：本地设置 → 中心设置 → 默认策略 BATCH → AUTO，见 shared/model-setting */
-	function resolveStepModel(ctx: ExtensionContext): AnyModel | undefined {
-		return stepModelSetting.resolve(ctx).model;
+	function resolveStepModel(ctx: ExtensionContext): AiModelChain {
+		return stepModelSetting.resolve(ctx);
 	}
 
 	/**
@@ -331,49 +331,28 @@ export default function (pi: ExtensionAPI) {
 	/** 廉价 AI 概括「正在干什么」：最新 assistant 回复 → ≤16 字动词短语（异步、节流、失败静默） */
 	function summarizeStep(ctx: ExtensionContext, assistantText: string): void {
 		if (stepInFlight || Date.now() - stepLastAt < STEP_PHRASE_MIN_INTERVAL_MS) return;
-		const model = resolveStepModel(ctx);
-		if (!model) return;
+		const chain = resolveStepModel(ctx);
+		if (!chain.model) return;
 		void (async () => {
 			stepInFlight = true;
 			stepLastAt = Date.now();
 			try {
-				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-				if (!auth.ok) return;
 				const work = readWork(ctx);
 				const truncated =
 					assistantText.length > STEP_PHRASE_MAX_CHARS_INPUT
 						? assistantText.slice(0, STEP_PHRASE_MAX_CHARS_INPUT) + "\n…(已截断)"
 						: assistantText;
-				const messages: Message[] = [
-					{
-						role: "user",
-						content: `工作标题：${work ?? "（未设）"}\n\nAI 助手最新回复：\n${truncated}`,
-						timestamp: Date.now(),
-					},
-				];
-				const result = await completeSimple(
-					model,
-					{
-						systemPrompt:
-							"你是实时进度观察员。根据 AI 助手的最新回复，用一个不超过 16 字的动词短语概括它当前正在执行的步骤（如「排查图片超限问题」「重构锁等待逻辑」）。只输出短语本身，不要主语、句号或任何解释。",
-						messages,
-					},
-					{
-						apiKey: auth.apiKey,
-						headers: { ...auth.headers },
-						maxTokens: 64,
-						temperature: 0,
-						signal: AbortSignal.timeout(STEP_PHRASE_TIMEOUT_MS),
-					},
-				);
-				const text = result.content
-					.filter((b) => b.type === "text")
-					.map((b) => (b as { type: "text"; text: string }).text)
-					.join("")
-					.trim()
-					.split("\n")[0]
-					.trim()
-					.slice(0, STEP_PHRASE_MAX_CHARS);
+				const r = await aiComplete(ctx, chain, {
+					systemPrompt:
+						"你是实时进度观察员。根据 AI 助手的最新回复，用一个不超过 16 字的动词短语概括它当前正在执行的步骤（如「排查图片超限问题」「重构锁等待逻辑」）。只输出短语本身，不要主语、句号或任何解释。",
+					prompt: `工作标题：${work ?? "（未设）"}\n\nAI 助手最新回复：\n${truncated}`,
+					temperature: 0,
+					timeoutMs: STEP_PHRASE_TIMEOUT_MS,
+					textJoin: "",
+				});
+				const text = r.ok
+					? r.text.split("\n")[0]!.trim().slice(0, STEP_PHRASE_MAX_CHARS)
+					: "";
 				if (text && text !== stepPhrase) {
 					stepPhrase = text;
 					applyWorking(ctx); // 生成中/空闲工具态立即热更

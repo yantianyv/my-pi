@@ -24,8 +24,8 @@ import {
 	type AgentTool,
 } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm, createPiStreamFn, systemMessage } from "./shared/agent";
+import { aiComplete, type AiModelChain } from "./shared/llm";
 import { CONTEXT_OVERFLOW_RE, pruneOldToolResults } from "./shared/context-budget";
 import { getExploreApi } from "./shared/explore-api";
 import { CONTEXT_FILE, checkContextArtifacts, findContextFiles } from "./shared/context-files";
@@ -37,8 +37,6 @@ import * as path from "node:path";
 // 可调配置
 // ---------------------------------------------------------------------------
 
-/** 子代理单次输出上限 */
-const INIT_MAX_TOKENS = 8192;
 /**
  * 无进展保护阈值：连续这么多轮既没写文件也没派 explore → 注入收尾指令（只提醒不做硬停）。
  * 不设轮数与墙钟上限：/init 是稀有大工程，成本按价值配比；要中断用 /init cancel。
@@ -52,8 +50,6 @@ const MAX_COMPACTIONS = 2;
 const COMPACT_RECORD_CHARS = 24_000;
 /** 压缩记录兜底保留长度（模型压缩不可用时直接用记录尾巴） */
 const COMPACT_FALLBACK_CHARS = 6_000;
-/** 审计子代理单次输出上限 */
-const AUDIT_MAX_TOKENS = 4096;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyModel = Model<any>;
@@ -247,45 +243,19 @@ function renderProcessRecord(messages: AgentMessage[]): string {
  */
 async function compactInitNotes(
 	ctx: ExtensionContext,
-	model: AnyModel,
+	chain: AiModelChain,
 	record: string,
 	previous: string | null,
 ): Promise<string> {
 	const merged = [previous ? `（更早的压缩记录）\n${previous}` : "", record].filter(Boolean).join("\n\n");
 	const fallback = merged.trim().slice(-COMPACT_FALLBACK_CHARS);
-	try {
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		if (!auth.ok) return fallback;
-		const res = await completeSimple(
-			model,
-			{
-				systemPrompt:
-					"你在压缩一次 /init（生成/维护项目上下文文件）的过程记录。保留：已确认的项目事实（命令、目录职责、不变量、约定、坑、子系统细节要点与出处）、已写入文件的内容摘要与位置、未完成的待办。丢弃：冗余叙述、重复内容、工具调用外壳、已被压缩过的内容。输出纯文本要点清单，不要客套。",
-				messages: [
-					{
-						role: "user",
-						content: `--- 过程记录 ---\n${merged.slice(-COMPACT_RECORD_CHARS)}`,
-						timestamp: Date.now(),
-					},
-				],
-			},
-			{
-				apiKey: auth.apiKey,
-				headers: { ...auth.headers },
-				maxTokens: 2_000,
-				temperature: 0,
-				signal: AbortSignal.timeout(60_000),
-			},
-		);
-		const text = res.content
-			.filter((b) => b.type === "text")
-			.map((b) => (b as { type: "text"; text: string }).text)
-			.join("\n")
-			.trim();
-		return text || fallback;
-	} catch {
-		return fallback;
-	}
+	const r = await aiComplete(ctx, chain, {
+		systemPrompt:
+			"你在压缩一次 /init（生成/维护项目上下文文件）的过程记录。保留：已确认的项目事实（命令、目录职责、不变量、约定、坑、子系统细节要点与出处）、已写入文件的内容摘要与位置、未完成的待办。丢弃：冗余叙述、重复内容、工具调用外壳、已被压缩过的内容。输出纯文本要点清单，不要客套。",
+		prompt: `--- 过程记录 ---\n${merged.slice(-COMPACT_RECORD_CHARS)}`,
+		temperature: 0,
+	});
+	return r.ok && r.text ? r.text : fallback;
 }
 
 
@@ -352,7 +322,6 @@ async function runInitAudit(
 			{ messages: [auditSystem], tools },
 			{
 				model,
-				maxTokens: AUDIT_MAX_TOKENS,
 				convertToLlm,
 				// 打算停下却没干活 / 末句是意图陈述 → 顶回去做完（最多两次）；审计也不能空手交报告
 				getFollowUpMessages: async () => {
@@ -385,7 +354,7 @@ async function runInitAudit(
 			const more = await runAgentLoop(
 				[{ role: "user", content: "请用一两句话给出审计结论：改了什么（没改也说明）。", timestamp: Date.now() }],
 				{ messages: [auditSystem, ...messages], tools: [] },
-				{ model, maxTokens: AUDIT_MAX_TOKENS, convertToLlm },
+				{ model, convertToLlm },
 				() => {},
 				signal,
 				streamFn,
@@ -441,7 +410,6 @@ async function runInitAgent(
 	const userNudge = (content: string): AgentMessage => ({ role: "user", content, timestamp: Date.now() });
 	const config: AgentLoopConfig = {
 		model,
-		maxTokens: INIT_MAX_TOKENS,
 		convertToLlm,
 		transformContext: async (messages) => pruneOldToolResults(messages, contextBudget),
 		// 连续多轮没有产出（既没写文件也没派 explore）→ 注入收尾指令，让它落盘而不是空转
@@ -572,7 +540,7 @@ async function runInitAgent(
 						const more = await runAgentLoop(
 							[nudge],
 							{ messages: [systemMsg(), ...newMessages], tools: [] },
-							{ model, maxTokens: INIT_MAX_TOKENS, convertToLlm },
+							{ model, convertToLlm },
 							() => {},
 							signal,
 							streamFn,
@@ -600,7 +568,7 @@ async function runInitAgent(
 					record.length > 0 &&
 					!signal.aborted
 				) {
-					const compacted = await compactInitNotes(ctx, model, renderProcessRecord(record), notes);
+					const compacted = await compactInitNotes(ctx, initModelSetting.resolve(ctx), renderProcessRecord(record), notes);
 					// 压不出东西（如首轮就超限）就不重启：同一条提示重试只会白烧 token
 					if (compacted.trim()) {
 						compactions++;

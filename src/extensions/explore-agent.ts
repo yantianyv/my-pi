@@ -43,8 +43,7 @@ import {
 	type AgentMessage,
 	type AgentTool,
 } from "@earendil-works/pi-agent-core";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
-import type { Message } from "@earendil-works/pi-ai";
+import { aiComplete, type AiModelChain } from "./shared/llm";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -563,48 +562,24 @@ function lastAssistantText(messages: AgentMessage[]): string {
  */
 async function compactNotes(
 	ctx: ExtensionContext,
-	model: AnyModel,
+	chain: AiModelChain,
 	task: string,
 	notes: string,
 	mode: "continue" | "report",
 ): Promise<string> {
 	const fallback = notes.trim().slice(-6_000);
-	try {
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		if (!auth.ok) return fallback;
-		const system =
-			mode === "continue"
-				? "你在压缩一次探索子代理的过程记录。保留：已确认的事实（文件路径 + 行号 + 结论）、数据流、" +
+	const system =
+		mode === "continue"
+			? "你在压缩一次探索子代理的过程记录。保留：已确认的事实（文件路径 + 行号 + 结论）、数据流、" +
 					"已排除的路径及原因、尚未验证的线索。丢弃：冗余叙述、重复内容、工具调用外壳。输出纯文本要点，不要客套。"
-				: "把探索过程整理成最终报告（markdown：检索到的文件 / 关键代码 / 架构说明 / 下一步建议）。" +
+			: "把探索过程整理成最终报告（markdown：检索到的文件 / 关键代码 / 架构说明 / 下一步建议）。" +
 					"只写记录里确实有的内容，不确定的明确标注「待验证」，不要编造。";
-		const messages: Message[] = [
-			{
-				role: "user",
-				content: `任务：${task}\n\n--- 过程记录 ---\n${notes.slice(-24_000)}`,
-				timestamp: Date.now(),
-			},
-		];
-		const res = await completeSimple(
-			model,
-			{ systemPrompt: system, messages },
-			{
-				apiKey: auth.apiKey,
-				headers: { ...auth.headers },
-				maxTokens: 2_000,
-				temperature: 0,
-				signal: AbortSignal.timeout(60_000),
-			},
-		);
-		const text = res.content
-			.filter((b) => b.type === "text")
-			.map((b) => (b as { type: "text"; text: string }).text)
-			.join("\n")
-			.trim();
-		return text || fallback;
-	} catch {
-		return fallback;
-	}
+	const r = await aiComplete(ctx, chain, {
+		systemPrompt: system,
+		prompt: `任务：${task}\n\n--- 过程记录 ---\n${notes.slice(-24_000)}`,
+		temperature: 0,
+	});
+	return r.ok && r.text ? r.text : fallback;
 }
 
 function linkSignals(
@@ -751,17 +726,17 @@ async function runSubAgent(
 				const report =
 					out.text.trim() && !out.hitTurnCap
 						? out.text.trim()
-						: await compactNotes(ctx, model, task, merged, "report");
+						: await compactNotes(ctx, exploreModelSetting.resolve(ctx), task, merged, "report");
 				return { task, ok: true, report, compactions };
 			}
 			if (out.kind === "overflow" && compactions < MAX_COMPACTIONS && !signal.aborted) {
 				compactions++;
-				notes = await compactNotes(ctx, model, task, merged, "continue");
+				notes = await compactNotes(ctx, exploreModelSetting.resolve(ctx), task, merged, "continue");
 				continue; // 用压缩后的要点重新起一轮
 			}
 			// 中断 / 超限次数用尽 / 其他异常：保留已有正文当成果（白烧 token 最不能接受）
 			const partial = out.text.trim();
-			const report = partial || (notes ? await compactNotes(ctx, model, task, merged, "report") : "");
+			const report = partial || (notes ? await compactNotes(ctx, exploreModelSetting.resolve(ctx), task, merged, "report") : "");
 			const why =
 				out.kind === "aborted"
 					? signal.reason instanceof Error && signal.reason.message.includes("超时")
