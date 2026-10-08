@@ -17,7 +17,6 @@ import type { AnyModel } from "../shared/model-select";
 import { createPiStreamFn, systemMessage } from "../shared/agent";
 import {
 	BTW_SYSTEM_PROMPT,
-	BTW_MAX_TOKENS,
 	BTW_MAX_TURNS,
 	BTW_MAX_TOTAL_MESSAGES,
 	BTW_EMPTY_RETRY,
@@ -57,7 +56,6 @@ export async function runBtwTurn(
 	let turns = 0;
 	const config: AgentLoopConfig = {
 		model,
-		maxTokens: BTW_MAX_TOKENS,
 		convertToLlm,
 		finishTurn: () => (++turns >= BTW_MAX_TURNS ? { action: "end" as const } : undefined),
 	};

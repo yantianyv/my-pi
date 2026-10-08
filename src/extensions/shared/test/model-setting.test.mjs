@@ -5,9 +5,9 @@
  * 锁住的不变量（改动 shared/model-setting 或各插件注册参数前先看这里）：
  * - 本地固定模型优先于中心设置；本地 auto 才看中心
  * - 中心无该用途记录 → 用插件注册时声明的默认策略；策略未映射 → 回落当前会话模型
- * - AUTO = 当前会话模型；FREE = 只在免费模型里取，且带故障转移链
- * - 故障转移链 = 首选在前，其余可用模型按价格升序
- * - 任何解析结果都带链；具体模型不可用时回落 AUTO
+ * - AUTO = 当前会话模型；FREE = 只在免费模型里取，且带回退链（唯一有多候选的策略）
+ * - 回退链 = 免费模型按价格升序
+ * - 任何解析结果都带链（单模型链的回退为空）；具体模型不可用时回落 AUTO
  * - 本地设置写入是读-改-写：不丢同文件里插件的其它配置键；解析不出的本地值不做兼容映射，自然回落 AUTO
  *
  * 原理：把 HOME/USERPROFILE 指向临时目录后动态 import esbuild bundle，
@@ -104,7 +104,8 @@ const declA = {
 const settingAuto = createModelSetting(declA);
 check("默认策略 AUTO → 当前会话模型", settingAuto.resolve(ctx).model?.id === "session-model", settingAuto.resolve(ctx).model?.id);
 check("默认策略 AUTO 的来源 = default", settingAuto.resolve(ctx).source === "default");
-check("AUTO 链：会话模型在前，其余按价格升序", refs(settingAuto.resolve(ctx)) === "main/session-model > freeA/free-a > freeB/free-b > p1/cheap > p2/mid > p3/strong > p4/vision", refs(settingAuto.resolve(ctx)));
+check("AUTO 链只有会话模型（不跨模型回退）", refs(settingAuto.resolve(ctx)) === "main/session-model", refs(settingAuto.resolve(ctx)));
+check("AUTO 无回退候选", settingAuto.resolve(ctx).failover() === undefined, refs(settingAuto.resolve(ctx)));
 
 // ---- 2. 未映射的策略槽 → 回落会话模型 ----
 const settingLite = createModelSetting({ purpose: "t.lite", plugin: "test", label: "lite 用途", defaultStrategy: "LITE" });

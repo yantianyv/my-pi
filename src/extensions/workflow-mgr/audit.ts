@@ -36,8 +36,6 @@ type AnyModel = Model<any>;
 const AUDIT_MAX_TURNS = 10;
 /** 审计超时（毫秒）：审计是同步阻塞 wf_switch 的，不能拖太久 */
 const AUDIT_TIMEOUT_MS = 90_000;
-/** 审计输出上限 */
-const AUDIT_MAX_TOKENS = 2048;
 
 export interface AuditVerdict {
 	pass: boolean;
@@ -93,7 +91,6 @@ export async function auditCompletion(ctx: ExtensionContext, task: TaskDef): Pro
 	const tools = [...createReadOnlyTools(ctx.cwd), createBashTool(ctx.cwd)];
 	const config: AgentLoopConfig = {
 		model,
-		maxTokens: AUDIT_MAX_TOKENS,
 		convertToLlm,
 		finishTurn: (() => {
 			let turns = 0;

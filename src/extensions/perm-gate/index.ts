@@ -30,21 +30,20 @@
  *     "deny": ["\\brm\\s+-rf\\s+/(\\s|$)"],        // 硬拒绝正则（命中即拒，不询问）
  *     "watch": ["\\bdws\\s+chat\\s+send\\b"],      // 关注项正则（只提高审核严格度）
  *     "remembered": [{ "pattern": "...", "intent": "...", ... }],  // 已记住的操作
- *     "aiReview": true, "aiTimeoutMs": 15000, "sudoExec": true, "model": "auto",
+ *     "aiReview": true, "sudoExec": true, "model": "auto",
  *   }
  *   model 键是本插件的本地模型设置（auto = 交给 model-config；或 provider/modelId 本地固定），
  *   由 shared/model-setting 维护；配置只认当前字段，历史字段（blacklist/whitelist）不再读取。
  *
  * 命令：/perm-gate 查看状态；on|off 开关；reload 重读配置；sudo on|off；prune 清理过期记忆；
  *       model [provider/id|auto] 直接设置，无参打开模型选择浮层（shared/model-select）。
- * AI 审核进度经官方 setStatus 通道推「perm-gate」状态（含最长耗时与超时降级说明），由 hud 行 1 显示。
+ * AI 审核进度经官方 setStatus 通道推「perm-gate」状态，由 hud 行 1 显示；审核不设人工超时，
+ * 时间给足，要中断由用户 Esc（透传当前轮次中断信号）。
  */
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { TUI } from "@earendil-works/pi-tui";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
-import type { Message } from "@earendil-works/pi-ai";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -57,6 +56,7 @@ import { LOCAL_AUTO, createModelSetting, type ModelSetting } from "../shared/mod
 import { PermGateConfigOverlay } from "./config-panel";
 export { compilePatternError, patternHits } from "./config-panel";
 import { splitShellSegments } from "../shared/shell-split";
+import { aiComplete, type AiModelChain } from "../shared/llm";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -103,7 +103,6 @@ interface PermGateConfig {
 	/** 已记住的操作（意图缓存）：命中即放行 */
 	remembered: RememberedRule[];
 	aiReview: boolean;
-	aiTimeoutMs: number;
 	/** sudo 授权通道（sudo_exec 工具）开关；关 = sudo 命令退回名单审核流程 */
 	sudoExec: boolean;
 }
@@ -130,7 +129,6 @@ const DEFAULT_CONFIG: PermGateConfig = {
 	watch: DEFAULT_WATCH,
 	remembered: [],
 	aiReview: true,
-	aiTimeoutMs: 15_000,
 	sudoExec: true,
 };
 
@@ -150,7 +148,7 @@ interface Verdict {
 // 配置读写
 // ---------------------------------------------------------------------------
 
-/** 配置校验：只认当前字段（enabled/deny/watch/remembered/aiReview/aiTimeoutMs/sudoExec），缺字段/多余字段放行 */
+/** 配置校验：只认当前字段（enabled/deny/watch/remembered/aiReview/sudoExec），缺字段/多余字段放行 */
 function isConfig(v: unknown): v is PermGateConfig {
 	const c = v as Partial<PermGateConfig> | null;
 	const okList = (x: unknown) => x === undefined || (Array.isArray(x) && x.every((s) => typeof s === "string"));
@@ -166,7 +164,6 @@ function isConfig(v: unknown): v is PermGateConfig {
 		okList(c.watch) &&
 		okRules(c.remembered) &&
 		typeof c.aiReview === "boolean" &&
-		typeof c.aiTimeoutMs === "number" &&
 		(c.sudoExec === undefined || typeof c.sudoExec === "boolean")
 	);
 }
@@ -205,7 +202,6 @@ function loadConfig(): { cfg: PermGateConfig; isNew: boolean } {
 		watch: Array.isArray(raw.watch) ? raw.watch : structuredClone(DEFAULT_WATCH),
 		remembered: toRememberedRules(raw.remembered),
 		aiReview: raw.aiReview,
-		aiTimeoutMs: raw.aiTimeoutMs,
 		sudoExec: raw.sudoExec ?? true,
 	};
 	return { cfg, isNew };
@@ -305,61 +301,64 @@ const AI_SYSTEM_PROMPT = [
 ].join("\n");
 
 /**
- * 调辅助小模型审核命令；失败（超时/无模型/网络错误/输出无法解析）返回 null（调用方降级人工确认）。
+ * 调辅助小模型审核命令；失败（超时/无模型/网络错误/输出无法解析）返回 {verdict:null, error}，
+ * 由调用方降级人工确认并把原因写进文案（原因可用于定位到底坏在哪一环）。
  * segInfo 为逐段记忆命中标注；watched=true 表示命中关注项，要求 AI 从严判断（宁可 review 不 allow）。
  */
 async function aiReview(
 	ctx: ExtensionContext,
 	command: string,
-	timeoutMs: number,
-	model: AnyModel,
+	chain: AiModelChain,
 	segInfo = "",
 	watched = false,
-): Promise<Verdict | null> {
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (!auth.ok) return null;
-
+): Promise<{ verdict: Verdict | null; error: string }> {
 	const truncated = command.length > AI_CMD_MAX_CHARS ? command.slice(0, AI_CMD_MAX_CHARS) + "\n…(已截断)" : command;
 	const prompt =
 		`工作目录：${ctx.cwd}\n\n待审核命令：\n${truncated}` +
 		(segInfo ? `\n\n拆段分析（[已记住] = 用户预先认可，可信；重点审核 [未命中] 段落）：\n${segInfo}` : "") +
 		(watched ? "\n\n【关注项】：该命令命中了用户标记为需要留意的类别，请从严判断——宁可 review，不要 allow。" : "");
-	const messages: Message[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
 
-	ctx.ui.setStatus("perm-gate", `🛡 正在审核命令…（≤${Math.round(timeoutMs / 1000)} 秒）`);
+	ctx.ui.setStatus("perm-gate", "🛡 正在审核命令…");
 	try {
-		const result = await completeSimple(
-			model,
-			{ systemPrompt: AI_SYSTEM_PROMPT, messages },
-			{
-				apiKey: auth.apiKey,
-				headers: { ...auth.headers },
-				maxTokens: 500, // reason + impact + pattern 三件事需要额外输出空间
-				temperature: 0,
-				signal: AbortSignal.timeout(timeoutMs),
+		const r = await aiComplete(ctx, chain, {
+			systemPrompt: AI_SYSTEM_PROMPT,
+			prompt,
+			temperature: 0,
+			textJoin: "",
+			// 审核要求可解析的结论；不合格（模型回散文/坏 JSON）换下一个候选重试
+			validate: (text) => {
+				const m = text.match(/\{[\s\S]*\}/);
+				if (!m) return false;
+				try {
+					const a = (JSON.parse(m[0]) as { action?: string }).action;
+					return a === "allow" || a === "review" || a === "reject";
+				} catch {
+					return false;
+				}
 			},
-		);
-		const text = result.content
-			.filter((b) => b.type === "text")
-			.map((b) => (b as { type: "text"; text: string }).text)
-			.join("")
-			.trim();
-		const m = text.match(/\{[\s\S]*\}/);
-		if (!m) return null;
+		});
+		if (!r.ok) return { verdict: null, error: r.error };
+		const m = r.text.match(/\{[\s\S]*\}/);
+		if (!m) return { verdict: null, error: "输出无法解析" };
 		const parsed = JSON.parse(m[0]) as Partial<Verdict>;
-		if (parsed.action !== "allow" && parsed.action !== "review" && parsed.action !== "reject") return null;
+		if (parsed.action !== "allow" && parsed.action !== "review" && parsed.action !== "reject") {
+			return { verdict: null, error: "输出无法解析" };
+		}
 		const impact = Array.isArray(parsed.impact)
 			? parsed.impact.filter((x): x is string => typeof x === "string" && x.trim() !== "").slice(0, 4)
 			: [];
 		return {
-			action: parsed.action,
-			reason: typeof parsed.reason === "string" ? parsed.reason : "",
-			intent: typeof parsed.intent === "string" ? parsed.intent : "",
-			impact,
-			pattern: typeof parsed.pattern === "string" ? parsed.pattern : "",
+			verdict: {
+				action: parsed.action,
+				reason: typeof parsed.reason === "string" ? parsed.reason : "",
+				intent: typeof parsed.intent === "string" ? parsed.intent : "",
+				impact,
+				pattern: typeof parsed.pattern === "string" ? parsed.pattern : "",
+			},
+			error: "",
 		};
-	} catch {
-		return null;
+	} catch (e) {
+		return { verdict: null, error: e instanceof Error ? e.message : String(e) };
 	} finally {
 		ctx.ui.setStatus("perm-gate", undefined);
 	}
@@ -796,9 +795,9 @@ export default function (pi: ExtensionAPI) {
 		return out;
 	}
 
-	/** 解析 AI 审核模型（本地设置 → 中心设置 → 默认策略 LITE → AUTO，见 shared/model-setting） */
-	function resolveReviewModel(ctx: ExtensionContext): AnyModel | undefined {
-		return reviewModelSetting.resolve(ctx).model;
+	/** 解析 AI 审核模型链（本地设置 → 中心设置 → 默认策略 LITE → AUTO，见 shared/model-setting） */
+	function resolveReviewModel(ctx: ExtensionContext): AiModelChain {
+		return reviewModelSetting.resolve(ctx);
 	}
 
 	/**
@@ -1118,9 +1117,16 @@ export default function (pi: ExtensionAPI) {
 					.join("\n")
 			: "";
 		let verdict = aiCache.get(command) ?? null;
+		let failure = "";
 		if (!verdict) {
-			const model = resolveReviewModel(ctx);
-			if (model) verdict = await aiReview(ctx, command, cfg.aiTimeoutMs, model, segInfo, Boolean(hitLabel));
+			const chain = resolveReviewModel(ctx);
+			if (chain.model) {
+			const r = await aiReview(ctx, command, chain, segInfo, Boolean(hitLabel));
+				verdict = r.verdict;
+				failure = r.error;
+			} else {
+				failure = "没有已认证的可用模型";
+			}
 			// allow / reject 可缓存（review 不缓存：每次都该由人决定）
 			if (verdict && verdict.action !== "review") aiCache.set(command, verdict);
 		}
@@ -1131,7 +1137,7 @@ export default function (pi: ExtensionAPI) {
 				segments,
 				"degraded",
 				null,
-				hitLabel ?? "AI 审核暂时不可用（超时或网络问题）",
+				hitLabel ?? `AI 审核暂不可用（${failure || "未知原因"}）`,
 			);
 		}
 		if (verdict.action === "review") {
@@ -1153,7 +1159,7 @@ export default function (pi: ExtensionAPI) {
 
 	/* ---------- /perm-gate-config：配置面板（AI 审核 / 模型 / 超时 / sudo / 名单） ---------- */
 	pi.registerCommand("perm-gate-config", {
-		description: "配置：AI 审核·超时·sudo·审核模型·名单（面板）｜ aiReview|sudo on|off、timeout <秒>、model <id>",
+		description: "配置：AI 审核·sudo·审核模型·名单（面板）｜ aiReview|sudo on|off、model <id>",
 		handler: async (args, ctx) => {
 			const raw = args.trim();
 			const [key, ...rest] = raw.split(/\s+/);
@@ -1162,7 +1168,6 @@ export default function (pi: ExtensionAPI) {
 				`perm-gate 配置（${CONFIG_FILE}）`,
 				`· AI 审核：${cfg.aiReview ? "开" : "关"}`,
 				`· 审核模型：${reviewModelSetting.getLocal() === LOCAL_AUTO ? "auto（由 model-config 管理）" : reviewModelSetting.getLocal()}`,
-				`· 审核超时：${Math.round(cfg.aiTimeoutMs / 1000)}s`,
 				`· sudo 授权通道：${cfg.sudoExec ? "开" : "关"}`,
 				`· 硬拒绝名单：${cfg.deny.length} 条 ｜ 关注项名单：${cfg.watch.length} 条`,
 			].join("\n");
@@ -1197,17 +1202,6 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`perm-gate ${key === "aiReview" ? "AI 审核" : "sudo 授权通道"}：${value}（已持久化）`, "info");
 				return;
 			}
-			if (key === "timeout") {
-				const secs = Number.parseInt(value, 10);
-				if (!Number.isFinite(secs) || secs < 1 || secs > 600) {
-					ctx.ui.notify("用法：/perm-gate-config timeout <1~600 秒>", "warning");
-					return;
-				}
-				cfg.aiTimeoutMs = secs * 1000;
-				saveConfig();
-				ctx.ui.notify(`perm-gate 审核超时：${secs}s（已持久化）`, "info");
-				return;
-			}
 			if (key === "model") {
 				const r = resolveSettingArg(ctx, value);
 				if ("error" in r) {
@@ -1222,7 +1216,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			ctx.ui.notify(
-				"用法：/perm-gate-config（面板）｜ aiReview on|off ｜ sudo on|off ｜ timeout <秒> ｜ model <auto|provider/modelId>",
+				"用法：/perm-gate-config（面板）｜ aiReview on|off ｜ sudo on|off ｜ model <auto|provider/modelId>",
 				"warning",
 			);
 		},
