@@ -26,7 +26,7 @@
 import { build } from "esbuild";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -517,11 +517,15 @@ console.log("AE、人多时的名单排版");
 	check("AA: 普通错误不误判", isLinkPublishFailure("dws 失败（exit 3）：permission denied") === false);
 
 	// 查消息附带下载时 dws 以 exit 0 把失败写进结果 JSON，重试决策不能看退出码
-	const { shouldRetryRedirect, formatResourceDownloads } = __test__;
+	const { shouldRetryRedirect, formatResourceDownloads, hasOutputFlag, schemaSaysLocalOutput } = __test__;
 	const softFail = JSON.stringify({ resourceDownloads: { downloadedCount: 0, failedCount: 1, failures: [{ error: '发布消息资源失败: link D:\\a\\.x.part-1 D:\\a\\x.jpg: Incorrect function.' }], ok: false } });
-	check("AA: exit 0 的软失败仍触发重试（查消息附带下载）", shouldRetryRedirect(["chat", "+search-msg", "--download-resources", "--output-dir", "dl"], softFail) === true);
-	check("AA: 非下载类命令不重试", shouldRetryRedirect(["chat", "+dm", "--to", "x"], softFail) === false);
-	check("AA: 正常结果不重试", shouldRetryRedirect(["chat", "+search-msg", "--download-resources"], '{"resourceDownloads":{"downloadedCount":2,"failedCount":0}}') === false);
+	check("AA: exit 0 的软失败仍触发重试（查消息附带下载）", (await shouldRetryRedirect(null, ["chat", "+search-msg", "--download-resources", "--output-dir", "dl"], softFail)) === true);
+	check("AA: 非下载类命令不重试", (await shouldRetryRedirect(null, ["chat", "+dm", "--to", "x"], softFail)) === false);
+	check("AA: 正常结果不重试", (await shouldRetryRedirect(null, ["chat", "+search-msg", "--download-resources"], '{"resourceDownloads":{"downloadedCount":2,"failedCount":0}}')) === false);
+	check("AA: 带输出 flag 的命令认得出来（超时按落盘类放宽）", hasOutputFlag(["doc", "download", "--output", "x.pdf"]) === true && hasOutputFlag(["doc", "read", "--node", "n"]) === false);
+	check("AA: schema 参数含输出参数 = 本地落盘", schemaSaysLocalOutput({ params: ["node", "output"], meta: { effect: "read" } }) === true);
+	check("AA: 写命令即使带输出参数也不自动重放", schemaSaysLocalOutput({ params: ["output"], meta: { effect: "write" } }) === false);
+	check("AA: 无输出参数/取不到 schema 时不猜", schemaSaysLocalOutput({ params: ["node"], meta: { effect: "read" } }) === false && schemaSaysLocalOutput(null) === false);
 
 	check("AA: 附件全成功 → 报目录", formatResourceDownloads('{"downloadedCount":2,"failedCount":0}', ".tmp/dingtalk-media").includes(".tmp/dingtalk-media"));
 	check("AA: 部分成功 → 两个数都给", (() => { const t = formatResourceDownloads('{"downloadedCount":1,"failedCount":2}', "dl"); return t.includes("1 个") && t.includes("2 个"); })());
@@ -532,37 +536,54 @@ console.log("AE、人多时的名单排版");
 	const temp = join(HERE, "fake-temp");
 
 	const r1 = redirectOutputFlags(["chat", "+messages-resource-download", "--resource-id", "x", "--output", "收材料1006"], temp, base);
-	check("AA: --output 改成临时区相对路径", r1.argv[r1.argv.indexOf("--output") + 1] === ".", JSON.stringify(r1.argv));
-	check("AA: 目标目录按工作目录解析", r1.targets[0]?.targetAbs === join(base, "收材料1006"), r1.targets[0]?.targetAbs);
+	check("AA: 相对 --output 原样保留（靠换 cwd 落到临时区）", r1.argv[r1.argv.indexOf("--output") + 1] === "收材料1006", JSON.stringify(r1.argv));
+	check("AA: 相对目标按工作目录解析", r1.targets[0]?.rel === "收材料1006" && r1.targets[0]?.targetAbs === join(base, "收材料1006"));
+	check("AA: --output 指向文件时不改写成目录", (() => { const r = redirectOutputFlags(["chat", "+messages-resource-download", "--output", "./wsy.jpg"], temp, base); return r.argv[r.argv.indexOf("--output") + 1] === "./wsy.jpg" && r.targets[0].targetAbs === join(base, "wsy.jpg"); })());
 
 	const absOut = join(HERE, "abs-out");
 	const r2 = redirectOutputFlags(["drive", "download", "--node", "n", "--output", absOut], temp, base);
-	check("AA: 绝对 --output 原样作为目标", r2.targets[0]?.targetAbs === absOut, r2.targets[0]?.targetAbs);
-	check("AA: --output=xxx 形式也重写", redirectOutputFlags(["chat", "+messages-mget", "--output-dir=./dl"], temp, base).argv.includes("--output-dir=."));
+	check("AA: 绝对 --output 改成临时区、目标仍是用户给的绝对路径", r2.argv[r2.argv.indexOf("--output") + 1] === temp && r2.targets[0]?.targetAbs === absOut && r2.targets[0]?.rel === undefined, JSON.stringify(r2.argv));
+	check("AA: --output-dir=xxx 形式同样处理", (() => { const r = redirectOutputFlags(["chat", "+messages-mget", "--output-dir=./dl"], temp, base); return r.argv.includes("--output-dir=./dl") && r.targets[0].rel === "./dl"; })());
 
 	const r3 = redirectOutputFlags(["drive", "pull", "--local-folder", absOut], temp, base);
 	check("AA: --local-folder 指向临时区绝对值", r3.argv[r3.argv.indexOf("--local-folder") + 1] === temp);
+	check("AA: --transcript-output 也认", redirectOutputFlags(["minutes", "+detail", "--transcript-output", "./t.md"], temp, base).targets.length === 1);
 	check("AA: 无输出 flag 时不给目标（调用方兜底工作目录）", redirectOutputFlags(["chat", "+messages-mget"], temp, base).targets.length === 0);
 
-	const json = JSON.stringify({ resourceDownloads: { downloads: [{ localPath: "a.pdf", resourceId: "r" }] } });
-	const fixed = JSON.parse(relocateLocalPaths(json, temp, join(base, "收材料1006"), base));
-	check("AA: localPath 改写为用户视角路径", fixed.resourceDownloads.downloads[0].localPath === "收材料1006/a.pdf", fixed.resourceDownloads.downloads[0].localPath);
-	check("AA: 非 JSON 输出原样返回", relocateLocalPaths("not json", temp, base, base) === "not json");
+	// localPath 改写：相对 flag 的产出与工作目录同构（原样），绝对目标换算到目标目录
+	const relTargets = [{ flag: "--output-dir", rel: ".tmp/dingtalk-media", targetAbs: join(base, ".tmp/dingtalk-media") }];
+	const json = JSON.stringify({ resourceDownloads: { downloads: [{ localPath: ".tmp/dingtalk-media/a.pdf", resourceId: "r" }] } });
+	const fixed = JSON.parse(relocateLocalPaths(json, temp, relTargets, base));
+	check("AA: 相对 flag 的 localPath 保持用户视角", fixed.resourceDownloads.downloads[0].localPath === ".tmp/dingtalk-media/a.pdf", fixed.resourceDownloads.downloads[0].localPath);
+	const absTargets = [{ flag: "--output", targetAbs: absOut }];
+	const fixedAbs = JSON.parse(relocateLocalPaths(JSON.stringify({ x: { localPath: "a.pdf", savedPath: "a.pdf" } }), temp, absTargets, base));
+	check("AA: 绝对目标的 localPath 换算到目标目录", fixedAbs.x.localPath === relative(base, join(absOut, "a.pdf")).split(sep).join("/"), fixedAbs.x.localPath);
+	check("AA: savedPath 一并改写（钉盘下载家族用这个名字）", fixedAbs.x.savedPath === fixedAbs.x.localPath, fixedAbs.x.savedPath);
+	check("AA: 非 JSON 输出原样返回", relocateLocalPaths("not json", temp, relTargets, base) === "not json");
 
-	// 搬回：递归复制 + 默认不覆盖
-	const { copyTree } = __test__;
+	// 搬回：递归复制 + 默认不覆盖；文件（含 .part 残留）单独处理
+	const { copyTree, copyEntry } = __test__;
 	const src = mkdtempSync(join(tmpdir(), "ct-src-"));
 	const dst = mkdtempSync(join(tmpdir(), "ct-dst-"));
 	mkdirSync(join(src, "sub"));
 	writeFileSync(join(src, "a.txt"), "A");
 	writeFileSync(join(src, "sub", "b.txt"), "B");
+	writeFileSync(join(src, ".x.pdf.part-123"), "TMP");
 	writeFileSync(join(dst, "a.txt"), "OLD");
 	const m1 = copyTree(src, dst, false);
-	check("AA: 不覆盖时同名跳过、其余照拷", m1.copied === 1 && m1.skipped.length === 1, JSON.stringify(m1));
+	check("AA: 不覆盖时同名跳过、其余照拷（.part 残留不搬）", m1.copied === 1 && m1.skipped.length === 1 && !existsSync(join(dst, ".x.pdf.part-123")), JSON.stringify(m1));
 	check("AA: 跳过的文件内容未变", readFileSync(join(dst, "a.txt"), "utf8") === "OLD");
 	check("AA: 子目录结构与文件保留", existsSync(join(dst, "sub", "b.txt")));
 	const m2 = copyTree(src, dst, true);
 	check("AA: --overwrite 时全部复制且内容更新", m2.copied === 2 && readFileSync(join(dst, "a.txt"), "utf8") === "A");
+
+	// 单文件产出：落到用户要的文件名；目标是目录时放进目录（与 dws 把 --output 当目录一致）
+	const fdir = mkdtempSync(join(tmpdir(), "ce-dst-"));
+	const one = join(src, "a.txt");
+	check("AA: 单文件产出落到指定文件名", copyEntry(one, join(fdir, "renamed.pdf"), true).copied === 1 && readFileSync(join(fdir, "renamed.pdf"), "utf8") === "A");
+	check("AA: 默认不覆盖已存在的同名文件", copyEntry(one, join(fdir, "renamed.pdf"), false).skipped.length === 1 && readFileSync(join(fdir, "renamed.pdf"), "utf8") === "A");
+	check("AA: 目标已存在且是目录时放进目录", copyEntry(one, fdir, true).copied === 1 && existsSync(join(fdir, "a.txt")));
+	check("AA: 源不存在时不算失败", copyEntry(join(src, "nope.txt"), join(fdir, "x"), true).copied === 0);
 }
 
 // ---- 场景 AB：群发逐人个性化（正文占位符 + 每人一份变量表）----

@@ -46,6 +46,7 @@
 - 查消息连附件一起落盘：`dingtalk_msg action="read"` 默认附 `--download-resources --output-dir <outDir>`（缺省 `.tmp/dingtalk-media`），dws 把命中消息的 mediaId/fileId 全下到该目录（非 NTFS 卷自动重定向），结果里回显目录与 localPath（模型可直接 read）；`downloadResources=false` 只查文字，`outDir` 改目录（必须是工作目录内相对路径，插件先拦盘符/前导斜杠/`..`）。
 - 群发 `chat +broadcast`：草稿前先跑只读 dry-run 预检收件人，有人未唯一解析就整体拦下（不半批次发送）；正文含 `{{变量}}` 时改走逐人单聊（`sendPersonalized`，每人一份变量表 + 确定性幂等键，重跑自动跳过）。
 - 分享链接落地走 `dingtalk_file action="fetch"`（link 或 spaceId+nodeId；文件直下、文件夹递归镜像，非 NTFS 卷自动改到系统临时区下载再搬回）。
+- **非 NTFS 卷（exFAT/网络盘）落盘自动重定向**：dws 用「`.part` 临时文件 → `link` 硬链接到正式名」做原子发布，硬链接只在 NTFS 可用 → exFAT 上必然 `link …: Incorrect function`。触发不看退出码（`--download-resources` 类把失败写进结果 JSON、exit 仍是 0），也不靠手写命令清单：`isLinkPublishFailure(输出)` + `shouldRetryRedirect`（已知下载类直通；否则要求 argv 带输出类 flag 且 schema 参数表含 `output`/`output-dir`/`local-folder`/`transcript-output`、且 `effect=read`——写命令不自动重放）。重试只把 cwd 换到 `os.tmpdir()`，相对输出路径原样保留（不猜文件还是目录），搬回时按产出物本身决定落文件还是落目录（默认不覆盖）、`.part` 残留不搬、`localPath`/`savedPath` 改写为用户视角；搬回失败（盘满/只读/FAT32 单文件 4GB 上限）则放弃重试、保留原始输出，不假装已搬回。落盘类超时下限 5 分钟（`DOWNLOAD_TIMEOUT_MS`）。
 - 配置 `~/.pi/agent/dingtalk-bridge.json`；防重发台账 `~/.pi/agent/dingtalk-bridge-sent.json`（`dedupMinutes` 默认 60）；官方 `dingtalk-*` 技能不再常驻系统提示词（`before_agent_start` 过滤，`dws_skill` 按需取回）。
 - 回归测试：`node src/extensions/test/dingtalk-bridge.test.mjs`（策略层 A~AH）、`node src/extensions/test/dingtalk-intents.test.mjs`（语义层映射 A~G）；真实联调 `dingtalk-bridge-live.mjs`。
 

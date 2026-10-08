@@ -1535,8 +1535,10 @@ function runDws(cfg: BridgeConfig, args: string[], opts?: { cwd?: string; timeou
 //
 // dws 下载资源用「写 .part 临时文件 → 硬链接到正式名」做原子发布（link 天然实现
 // “不覆盖同名文件”）；硬链接需要 NTFS，exFAT 上必然报 `link …: Incorrect function`。
-// 这里不改正常路径：只有命中「下载类命令 + 硬链接失败」时，才改在系统临时区
-// （os.tmpdir()，通常在 NTFS 主盘）重跑一次，再把产物搬回用户原本要的位置。
+// 这里不改正常路径：只有命中「硬链接发布失败 + 该命令确实会往本地写文件」时，才改在
+// 系统临时区（os.tmpdir()，通常在 NTFS 主盘）重跑一次，再把产物搬回用户原本要的位置。
+// 属于落盘类的判定不靠手写命令清单：argv 带输出类 flag + schema 参数表确认 + 只读命令
+// （写命令宁可漏重试，也不自动重放）。
 // ---------------------------------------------------------------------------
 
 /** 落盘类命令白名单：自动重试只对这些命令开放（下载幂等，重试不会重复发送） */
@@ -1549,15 +1551,30 @@ const DOWNLOAD_PREFIXES: string[][] = [
 	["drive", "pull"],
 ];
 
-/** 是否为落盘（下载）类命令 */
+/** 是否为落盘（下载）类命令（快路径；schema 确认不了时也用它兼底） */
 export function isDownloadCommand(args: string[]): boolean {
 	if (args.includes("--download-resources")) return true;
 	return DOWNLOAD_PREFIXES.some((p) => p.every((v, i) => args[i] === v));
 }
 
-/** 按命令性质选超时：下载类抬高上限 */
+/** 输出类 flag（argv 形态）：带上任一即说明命令会往本地磁盘写文件 */
+const OUTPUT_FLAGS = ["--output", "--output-dir", "--local-folder", "--transcript-output"];
+
+/** argv 里是否带输出类 flag */
+export function hasOutputFlag(args: string[]): boolean {
+	return args.some((a) => OUTPUT_FLAGS.includes(a.split("=")[0] ?? ""));
+}
+
+/** schema 参数表是否坐实了它往本地写文件（只读命令才允许自动重放） */
+export function schemaSaysLocalOutput(schema: { params?: string[]; meta?: { effect?: string } } | null): boolean {
+	if (!schema || !Array.isArray(schema.params)) return false;
+	if (schema.meta?.effect && schema.meta.effect !== "read") return false;
+	return schema.params.some((p) => OUTPUT_FLAGS.includes(`--${p}`));
+}
+
+/** 按命令性质选超时：落盘类抬高上限 */
 const execTimeoutOf = (cfg: BridgeConfig, args: string[]): number =>
-	isDownloadCommand(args) ? Math.max(cfg.execTimeoutMs, DOWNLOAD_TIMEOUT_MS) : cfg.execTimeoutMs;
+	isDownloadCommand(args) || hasOutputFlag(args) ? Math.max(cfg.execTimeoutMs, DOWNLOAD_TIMEOUT_MS) : cfg.execTimeoutMs;
 
 /** dws 本地发布失败（.part 硬链接到正式名）：exFAT/网络盘等不支持硬链接的卷上必然出现 */
 export function isLinkPublishFailure(output: string): boolean {
@@ -1565,47 +1582,56 @@ export function isLinkPublishFailure(output: string): boolean {
 }
 
 /**
- * 是否该改到系统临时区重试：下载类命令 + 输出里出现硬链接发布失败。
+ * 是否该改到系统临时区重试：输出里出现硬链接发布失败 且 该命令确实会往本地写文件。
  * 不看退出码：查消息附带下载（--download-resources）把失败写进结果 JSON（exit 0），
  * 只有单独调 +messages-resource-download 才返回非 0。重试幂等（失败那次不落任何文件）。
  */
-export function shouldRetryRedirect(args: string[], output: string): boolean {
-	return isDownloadCommand(args) && isLinkPublishFailure(output);
+export async function shouldRetryRedirect(cfg: BridgeConfig, args: string[], output: string): Promise<boolean> {
+	if (!isLinkPublishFailure(output)) return false;
+	if (isDownloadCommand(args)) return true;
+	if (!hasOutputFlag(args)) return false;
+	return schemaSaysLocalOutput(await commandSchema(cfg, args));
 }
 
-/** 输出目录类 flag（值既可能是「--flag 值」，也可能是「--flag=值」） */
-const OUTPUT_FLAGS = ["--output", "--output-dir", "--local-folder"];
+/** 输出目标：rel = 保留的相对路径（换 cwd 执行后产出落在临时区同一位置）；undefined = 已改写成临时区绝对值 */
+export interface RedirectTarget {
+	flag: string;
+	rel?: string;
+	/** 用户视角的落盘目标（文件或目录，按原值解析） */
+	targetAbs: string;
+}
 
 /**
- * 把输出类 flag 指向临时目录：`--output`/`--output-dir` 是「工作目录内相对路径」，
- * 在临时目录里执行时写成 `.`；`--local-folder` 是绝对路径，直接写临时目录。
- * 返回重写后的 argv 与「flag → 用户期望的绝对目录」映射。
+ * 把输出 flag 指向临时区：相对路径原样保留（靠换 cwd 落到临时区），绝对路径与
+ * --local-folder 改成临时区绝对值。不猜「文件还是目录」——搬回时按产出物本身判断。
  */
 export function redirectOutputFlags(
 	args: string[],
 	tempRoot: string,
 	baseDir: string,
-): { argv: string[]; targets: Array<{ flag: string; targetAbs: string }> } {
+): { argv: string[]; targets: RedirectTarget[] } {
 	const argv = [...args];
-	const targets: Array<{ flag: string; targetAbs: string }> = [];
+	const targets: RedirectTarget[] = [];
+	const note = (flag: string, v: string) => {
+		const moved = path.isAbsolute(v) || flag === "--local-folder";
+		targets.push({ flag, ...(moved ? {} : { rel: v }), targetAbs: path.resolve(baseDir, v) });
+		return moved;
+	};
 	for (let i = 0; i < argv.length; i++) {
 		for (const f of OUTPUT_FLAGS) {
 			const eq = `${f}=`;
 			if (argv[i] === f) {
-				const v = argv[i + 1] ?? ".";
-				targets.push({ flag: f, targetAbs: path.resolve(baseDir, v) });
-				argv[i + 1] = f === "--local-folder" ? tempRoot : ".";
+				if (note(f, argv[i + 1] ?? ".")) argv[i + 1] = tempRoot;
 			} else if (argv[i].startsWith(eq)) {
 				const v = argv[i].slice(eq.length);
-				targets.push({ flag: f, targetAbs: path.resolve(baseDir, v) });
-				argv[i] = eq + (f === "--local-folder" ? tempRoot : ".");
+				if (note(f, v)) argv[i] = eq + tempRoot;
 			}
 		}
 	}
 	return { argv, targets };
 }
 
-/** 递归复制目录内容（目标已存在且不许覆盖时跳过）；返回复制数与被跳过的路径 */
+/** 递归复制目录内容（目标已存在且不许覆盖时跳过；dws 的 .part 残留不搬） */
 function copyTree(src: string, dest: string, overwrite: boolean): { copied: number; skipped: string[] } {
 	const skipped: string[] = [];
 	let copied = 0;
@@ -1616,6 +1642,7 @@ function copyTree(src: string, dest: string, overwrite: boolean): { copied: numb
 			const dp = path.join(d, e.name);
 			if (e.isDirectory()) walk(sp, dp);
 			else if (e.isFile()) {
+				if (/\.part-\d+$/.test(e.name)) continue;
 				if (fs.existsSync(dp) && !overwrite) {
 					skipped.push(dp);
 					continue;
@@ -1629,8 +1656,41 @@ function copyTree(src: string, dest: string, overwrite: boolean): { copied: numb
 	return { copied, skipped };
 }
 
-/** 把结果 JSON 里的 localPath 从「相对临时区」改写为「用户视角（相对工作目录）」 */
-export function relocateLocalPaths(stdout: string, tempRoot: string, targetAbs: string, baseDir: string): string {
+/** 把一处产出搬回目标：按产出物本身是文件还是目录决定落法（不猜用户给的是文件还是目录） */
+function copyEntry(src: string, dest: string, overwrite: boolean): { copied: number; skipped: string[] } {
+	let st: fs.Stats;
+	try {
+		st = fs.statSync(src);
+	} catch {
+		return { copied: 0, skipped: [] }; // dws 没产出（该 flag 本次没用到）
+	}
+	if (st.isDirectory()) return copyTree(src, dest, overwrite);
+	// 文件：目标是既有目录时放进目录里（与 dws 把 --output 当目录用的行为一致）
+	const to = fs.existsSync(dest) && fs.statSync(dest).isDirectory() ? path.join(dest, path.basename(src)) : dest;
+	if (fs.existsSync(to) && !overwrite) return { copied: 0, skipped: [to] };
+	fs.mkdirSync(path.dirname(to), { recursive: true });
+	fs.copyFileSync(src, to);
+	return { copied: 1, skipped: [] };
+}
+
+/** p 是否在 dir 之下（含自身） */
+const isUnder = (p: string, dir: string): boolean => {
+	const rel = path.relative(dir, p);
+	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+};
+
+/** 需要改写成用户视角的本地路径键（dws 两个家族各用各的名字） */
+const LOCAL_PATH_KEYS = new Set(["localPath", "savedPath"]);
+
+/**
+ * 把结果 JSON 里的本地路径从「临时区视角」改写成「用户视角（相对工作目录）」：
+ * 保留相对路径的 flag 与工作目录同构（原样保留）；绝对目标（含 --local-folder）按目标目录换算。
+ */
+export function relocateLocalPaths(stdout: string, tempRoot: string, targets: RedirectTarget[], baseDir: string): string {
+	const pick = (abs: string): RedirectTarget | undefined =>
+		targets.find((t) => t.rel !== undefined && isUnder(abs, path.resolve(tempRoot, t.rel))) ??
+		targets.find((t) => t.rel === undefined) ??
+		targets[targets.length - 1];
 	try {
 		const parsed: unknown = JSON.parse(stdout);
 		const fix = (o: unknown): void => {
@@ -1640,10 +1700,15 @@ export function relocateLocalPaths(stdout: string, tempRoot: string, targetAbs: 
 			}
 			if (!o || typeof o !== "object") return;
 			for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
-				if (k === "localPath" && typeof v === "string") {
+				if (LOCAL_PATH_KEYS.has(k) && typeof v === "string") {
 					const abs = path.resolve(tempRoot, v);
-					const dest = path.join(targetAbs, path.relative(tempRoot, abs));
-					(o as Record<string, unknown>)[k] = path.relative(baseDir, dest).split(path.sep).join("/");
+					const t = pick(abs);
+					const user = !t
+						? abs
+						: t.rel === undefined
+							? path.join(t.targetAbs, path.relative(tempRoot, abs))
+							: path.resolve(baseDir, path.relative(tempRoot, abs));
+					(o as Record<string, unknown>)[k] = path.relative(baseDir, user).split(path.sep).join("/");
 				} else fix(v);
 			}
 		};
@@ -1678,19 +1743,26 @@ async function runDwsRedirected(
 	const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dws-dl-"));
 	try {
 		const { argv, targets } = redirectOutputFlags(args, tempRoot, baseDir);
-		if (!targets.length) targets.push({ flag: "--output", targetAbs: baseDir });
+		if (!targets.length) targets.push({ flag: "--output", rel: ".", targetAbs: baseDir });
 		const result = await runDws(cfg, argv, { cwd: tempRoot, timeoutMs: execTimeoutOf(cfg, argv) });
 		// 临时区也不支持硬链接时（软失败也可能 exit 0）就当重试失败，保留原输出与失败明细
 		if (result.code !== 0 || isLinkPublishFailure(result.stdout + result.stderr)) return null;
 		let copied = 0;
 		const skipped: string[] = [];
-		for (const t of targets) {
-			const r = copyTree(tempRoot, t.targetAbs, overwrite);
-			copied += r.copied;
-			skipped.push(...r.skipped);
-			cleanPartFiles(t.targetAbs);
+		const dirs = new Set<string>();
+		try {
+			for (const t of targets) {
+				const src = t.rel === undefined ? tempRoot : path.resolve(tempRoot, t.rel);
+				const r = copyEntry(src, t.targetAbs, overwrite);
+				copied += r.copied;
+				skipped.push(...r.skipped);
+				dirs.add(fs.existsSync(t.targetAbs) && fs.statSync(t.targetAbs).isDirectory() ? t.targetAbs : path.dirname(t.targetAbs));
+			}
+		} catch {
+			return null; // 搬回失败（盘满/只读/单文件超目标文件系统上限）：保留原输出，别假装已搬回
 		}
-		const stdout = relocateLocalPaths(result.stdout, tempRoot, targets[0].targetAbs, baseDir);
+		for (const d of dirs) cleanPartFiles(d);
+		const stdout = relocateLocalPaths(result.stdout, tempRoot, targets, baseDir);
 		return { result: { ...result, stdout }, copied, skipped, targets: targets.map((t) => t.targetAbs) };
 	} finally {
 		fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -2098,7 +2170,7 @@ const fetchDriveShare = async (params: { link?: string; spaceId?: string; nodeId
 		const pullArgs = ["drive", "pull", "--remote-folder", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--local-folder", abs, "--if-exists", "skip", "--yes", "--format", "json"];
 		let r = await runDws(cfg, pullArgs, { timeoutMs: execTimeoutOf(cfg, pullArgs) });
 		let pullNote = "";
-		if (shouldRetryRedirect(pullArgs, r.stderr + r.stdout)) {
+		if (await shouldRetryRedirect(cfg, pullArgs, r.stderr + r.stdout)) {
 			const redirected = await runDwsRedirected(cfg, pullArgs, cwd, false);
 			if (redirected) {
 				r = redirected.result;
@@ -2128,7 +2200,7 @@ const fetchDriveShare = async (params: { link?: string; spaceId?: string; nodeId
 	const dlArgs = ["drive", "download", "--node", nodeId, ...(spaceId ? ["--space-id", spaceId] : []), "--output", abs, "--format", "json"];
 	let r = await runDws(cfg, dlArgs, { timeoutMs: execTimeoutOf(cfg, dlArgs) });
 	let dlNote = "";
-	if (shouldRetryRedirect(dlArgs, r.stderr + r.stdout)) {
+	if (await shouldRetryRedirect(cfg, dlArgs, r.stderr + r.stdout)) {
 		// `--output` 这里是绝对路径，重定向执行器按 baseDir 解析后原样返回
 		const redirected = await runDwsRedirected(cfg, dlArgs, cwd, true);
 		if (redirected) {
@@ -2370,7 +2442,7 @@ ${res.failed.map((f) => `- ${f.name}：${f.why}`).join("\n")}` : "";
 			let redirectNote = "";
 			// 硬链接失败可能以 exit 0 + 结果里 failedCount 的形式回来（查消息附带下载就是这种），
 			// 所以不靠退出码判断，只看错误文本；重试幂等（第一次失败不落任何文件）
-			if (shouldRetryRedirect(args, r.stderr + r.stdout)) {
+			if (await shouldRetryRedirect(cfg, args, r.stderr + r.stdout)) {
 				const redirected = await runDwsRedirected(cfg, buildArgv(args), baseDir, wantsOverwrite(args));
 				if (redirected) {
 					r = redirected.result;
@@ -3086,10 +3158,13 @@ export const __test__ = {
 	isDownloadCommand,
 	isLinkPublishFailure,
 	shouldRetryRedirect,
+	hasOutputFlag,
+	schemaSaysLocalOutput,
 	formatResourceDownloads,
 	redirectOutputFlags,
 	relocateLocalPaths,
 	copyTree,
+	copyEntry,
 	extractPlaceholders,
 	stripVarsFlags,
 	parseVarsMap,
