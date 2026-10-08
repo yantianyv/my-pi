@@ -10,14 +10,15 @@
  *   `MAX / FAST / LITE / BASE / BATCH` 是用户可重指到具体模型的槽
  *
  * 解析链（resolve）：
- *   本地固定模型 → 直接用（故障转移链 = 其余可用模型按价格升序）
+ *   本地固定模型 → 直接用
  *   本地 auto → 中心里该用途的设置 → 无记录则插件注册时声明的默认策略 → 仍无则 AUTO
  *   中心插件缺席时仍读 model-config.json（文件通道），因此离开管理插件设置依旧生效
  *
  * 跨扩展只走两条既有公开通道：`globalThis.__PI_MODEL_DECLS__`（用途声明清单，供面板枚举）
  * 与 `~/.pi/agent/model-config.json`（中心设置）。每插件产物内联本模块，不 import 对方产物。
  *
- * 故障转移：任何解析结果的 failover 都按价格升序给出后续候选（首选失败可继续尝试）。
+ * 回退（failover）：只有 FREE 免费池给出多个候选（按价格升序依次尝试）；
+ * 其余解析结果都是单模型，失败由调用方处理。
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -254,9 +255,9 @@ export function writeLocalSetting(decl: PurposeDecl, value: string): void {
 export interface ResolvedChain {
 	/** 首选模型；没有任何可用模型时为 undefined（调用方降级） */
 	model?: AnyModel;
-	/** 依次取下一个候选（价格升序），耗尽返回 undefined */
+	/** 依次取下一个候选；只有 FREE 免费池是多候选，其余返回 undefined */
 	failover: () => AnyModel | undefined;
-	/** 完整候选链（首选在前） */
+	/** 候选链（FREE 池多个；其余只一个） */
 	chain: AnyModel[];
 	/** 解析来源说明（面板/通知文案） */
 	label: string;
@@ -268,13 +269,12 @@ function chainOf(models: AnyModel[], label: string): ResolvedChain {
 	return { model: chain[0], chain, label, failover: () => chain[++idx] };
 }
 
-/** 具体模型（或槽映射值）→ 链：该模型在前，其余可用模型按价格升序跟上 */
-function chainForModel(m: AnyModel, ctx: ExtensionContext, label: string): ResolvedChain {
-	const rest = listAvailableModels(ctx).filter((x) => modelRef(x) !== modelRef(m));
-	return chainOf([m, ...rest], label);
+/** 具体模型（或槽映射值）→ 单模型链：不跨模型回退（回退只属于 FREE 免费池） */
+function chainForModel(m: AnyModel, label: string): ResolvedChain {
+	return chainOf([m], label);
 }
 
-/** AUTO：当前会话模型在前，其余可用模型按价格升序跟上（会话模型不可用时取最便宜的可用模型） */
+/** AUTO：当前会话模型（会话模型不可用时取最便宜的可用模型） */
 function chainForSession(ctx: ExtensionContext): ResolvedChain {
 	const session = ctx.model as AnyModel | undefined;
 	const available = listAvailableModels(ctx);
@@ -284,7 +284,7 @@ function chainForSession(ctx: ExtensionContext): ResolvedChain {
 			? session
 			: available[0];
 	if (!usable) return chainOf([], "AUTO 跟随会话（无可用模型）");
-	return chainOf([usable, ...available.filter((m) => modelRef(m) !== modelRef(usable))], "AUTO 跟随会话");
+	return chainOf([usable], "AUTO 跟随会话");
 }
 
 /**
@@ -307,10 +307,10 @@ export function resolveSetting(setting: string, ctx: ExtensionContext): Resolved
 		if (!mapped) return chainForSession(ctx);
 		const m = findConfiguredModel(ctx, mapped);
 		if (!m) return chainForSession(ctx);
-		return chainForModel(m, ctx, `${upper} → ${mapped}`);
+		return chainForModel(m, `${upper} → ${mapped}`);
 	}
 	const m = findConfiguredModel(ctx, raw);
-	if (m) return chainForModel(m, ctx, raw);
+	if (m) return chainForModel(m, raw);
 	return chainForSession(ctx);
 }
 
