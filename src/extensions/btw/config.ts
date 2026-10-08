@@ -18,8 +18,6 @@ import { createModelSetting, type ModelSetting, type ResolvedModel } from "../sh
 // 可调配置
 // ---------------------------------------------------------------------------
 
-/** btw 单次 LLM 调用最大输出 token（含工具轮次） */
-export const BTW_MAX_TOKENS = 4096;
 /** btw 面板单轮问答最多跑几轮（一轮 = 一次 LLM 调用 + 可能的工具调用） */
 export const BTW_MAX_TURNS = 6;
 /** 空回答自动重试次数：部分模型（如 deepseek-flash）偶发返回空 assistant 消息（content 空数组、无流式、瞬时完成），重试可大概率恢复 */
