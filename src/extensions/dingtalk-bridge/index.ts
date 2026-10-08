@@ -23,6 +23,7 @@
  *   · 查询结果自动附当前时间锚点；正文里的字面「反斜杠-n」自动归一为真换行；
  *     文件/媒体消息回报「本条不含正文」（说明文字必须另发一条）
  *   · 查消息顺手把消息里的附件落盘（图片/语音/文件 → 工作目录，路径回显，可直接 read）
+ *   · 转发/回复/撤回/查消息的会话可以写个人姓名（自动定位单聊会话），不限于群
  *   · 上游把能力标成对 AI 关闭（schema availability 非 available）或命令路径根本不存在时，
  *     直接说清原因，不让它伪装成内容错
  * - L0 技能过滤：before_agent_start 把 dingtalk-* 从系统提示词的技能清单摘掉（省上下文），
@@ -1355,14 +1356,14 @@ export function formatDriveRefs(refs: { spaceId: string; fileId: string; type: s
 	if (!refs.length) return "";
 	const lines = refs.map((r) => {
 		if (!r.spaceId) {
-			return `- ${r.fileId}（type=${r.type}）：仅数字 dentryId、缺 spaceId，不能用 +messages-resource-download 下载；spaceId 在正文的 yunpan 链接里，或让对方重发。`;
+			return `- ${r.fileId}（type=${r.type}）：只有数字 dentryId、缺 spaceId，插件下载不了；spaceId 在正文的 yunpan 链接里，或让对方重发。`;
 		}
 		if (r.type === "folder") {
 			return `- 文件夹 spaceId=${r.spaceId} fileId=${r.fileId}：用 dingtalk_file（action="fetch", link="<消息原文>"）镜像到本地`;
 		}
 		return `- 文件 spaceId=${r.spaceId} fileId=${r.fileId}：用 dingtalk_file（action="fetch", link="<消息原文>"）下载`;
 	});
-	return `\n\n🔗 钉盘/云盘分享资源（这类消息用 +messages-resource-download 会报 TABLE_NOT_FOUND，需走 drive）：\n${lines.join("\n")}`;
+	return `\n\n🔗 钉盘/云盘分享资源（这类消息要走钉盘下载，不能当消息附件下）：\n${lines.join("\n")}`;
 }
 
 /** 查消息附带下载（--download-resources）的落地情况：告诉模型文件在哪，没下下来的别再试 */
@@ -1854,11 +1855,12 @@ export function parseMessageDigest(text: string): { conversationId: string; prev
 }
 
 /** 从 conversation-info 输出取会话名与类型（单聊标题就是对方姓名） */
-export function parseConversationInfo(text: string): { title: string; singleChat: boolean; memberCount: number } | null {
+export function parseConversationInfo(text: string): { cid: string; title: string; singleChat: boolean; memberCount: number } | null {
 	try {
 		const info = (JSON.parse(text) as { result?: { conversationInfo?: Record<string, unknown> } }).result?.conversationInfo;
 		if (!info) return null;
 		return {
+			cid: typeof info.openConversationId === "string" ? info.openConversationId : "",
 			title: typeof info.title === "string" ? info.title : "",
 			singleChat: info.singleChat === true,
 			memberCount: typeof info.memberCount === "number" ? info.memberCount : 0,
@@ -2519,7 +2521,7 @@ ${body.join("\n")}`, { kind: "ok", resolved: plan.resolved, skipped: plan.skippe
 				if (media) {
 					out += `
 
-⚠️ 本条是${media === "file" ? "文件" : "媒体"}消息，已发出但**不含任何说明正文**（--title 只作文件卡标题，不在消息里显示）。如用户需要说明文字，请现在另发一条文本消息（--text/--markdown 或 +dm --content）；不要以为说明已随本条发出。`;
+⚠️ 本条是${media === "file" ? "文件" : "媒体"}消息，已发出但**不含任何说明正文**（--title 只作文件卡标题，不在消息里显示）。如用户需要说明文字，请现在另发一条文本消息（action="send" 或发到对应会话）；不要以为说明已随本条发出。`;
 				}
 				const unverifiedGroup = flagPairs(args, GROUP_FLAGS).filter((p) => !state.resolvedGroups.has(p.value));
 				if (unverifiedGroup.length) {
@@ -2742,7 +2744,7 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 		const hits = list.filter((g) => ci(g, "title") === token || ci(g, "openConversationId"));
 		const named = hits.filter((g) => pickStr(ci(g, "title")) === token);
 		const cands = named.length ? named : hits;
-		if (!cands.length) return { error: `没找到群「${token}」（可先用逃生舱 chat +chat-search 核对群名）` };
+		if (!cands.length) return { error: `没找到群「${token}」——核对群名用字，或直接给会话 ID` };
 		if (cands.length > 1) {
 			const lines = cands.map((g) => `· ${pickStr(ci(g, "title"))}（${pickStr(ci(g, "openConversationId"))}）`);
 			return { error: `群名「${token}」匹配到 ${cands.length} 个会话，请让用户确认：\n${lines.join("\n")}\n（确认后把 group 改成对应的 openConversationId）` };
@@ -2753,13 +2755,43 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 		return { ok: { token, cid, title: pickStr(ci(g, "title")) || token } };
 	};
 
+	/** 单聊会话定位：姓名 → 对方 openDingTalkId → 单聊会话 ID（转发/回复/撤回的目标也可能是个人） */
+	const resolveSingleChat = async (token: string): Promise<{ ok: ResolvedGroup } | { error: string } | { choice: string }> => {
+		const people = await resolvePeople([token]);
+		if (!("ok" in people)) return people;
+		const withIds = await withOpenIds(people.ok);
+		if (!("ok" in withIds)) return withIds;
+		const person = withIds.ok[0]!;
+		const data = await callJson(["chat", "+conversation-info", "--open-dingtalk-id", person.openId!]);
+		const info = data ? parseConversationInfo(JSON.stringify(data)) : null;
+		const name = person.name || token;
+		if (!info?.cid) {
+			return {
+				error: `没找到与「${name}」的单聊会话（对方可能还没与你聊过）——要把内容发给对方，用 action="send" to=["${token}"]；要转发这条消息，可先让对方发一条消息再试`,
+			};
+		}
+		return { ok: { token, cid: info.cid, title: info.title || name } };
+	};
+
+	/**
+	 * 会话定位：先当群找，再当个人找单聊——转发/回复/撤回/查消息的目标都可以写人名。
+	 * 已经是会话 ID 的不再猜人。
+	 */
+	const resolveConversation = async (token: string): Promise<{ ok: ResolvedGroup } | { error: string } | { choice: string }> => {
+		const g = await resolveGroup(token);
+		if ("ok" in g || token.startsWith("cid")) return g;
+		const person = await resolveSingleChat(token);
+		if ("ok" in person || "choice" in person) return person;
+		return { error: `没找到会话「${token}」：群名对不上，按人名也没找到单聊（${person.error}）` };
+	};
+
 	/** 消息定位：直接给 messageId 时补会话；否则按会话+发送人+关键词搜一条 */
-	const resolveMessage = async (p: { messageId?: string; inGroup?: string; group?: string; keyword?: string; sender?: string; days?: number }): Promise<{ ok: ResolvedMessage } | { error: string }> => {
+	const resolveMessage = async (p: { messageId?: string; inGroup?: string; group?: string; keyword?: string; sender?: string; days?: number }): Promise<{ ok: ResolvedMessage } | { error: string } | { choice: string }> => {
 		let cid: string | undefined;
 		let groupTitle: string | undefined;
 		const gToken = p.inGroup ?? p.group;
 		if (gToken) {
-			const g = await resolveGroup(gToken);
+			const g = await resolveConversation(gToken);
 			if (!("ok" in g)) return g;
 			cid = g.ok.cid;
 			groupTitle = g.ok.title;
@@ -2776,7 +2808,7 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 		if (p.keyword) args.push("--query", p.keyword);
 		const data = await callJson(args);
 		const msgId = data ? findScalar(data, ["openMessageId", "msgId", "messageId"]) : undefined;
-		if (!msgId) return { error: `在「${groupTitle ?? cid}」里没找到符合条件的消息——把关键词说得更准，或用逃生舱 chat +search-msg 自己查一条` };
+		if (!msgId) return { error: `在「${groupTitle ?? cid}」里没找到符合条件的消息——把关键词说得更准，或直接给 messageId` };
 		const conv = data ? findScalar(data, ["openConversationId", "conversationId"]) : undefined;
 		return { ok: { msgId, conversationId: conv ?? cid } };
 	};
@@ -2894,7 +2926,7 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 		name: "dingtalk_msg",
 		label: "收发钉钉消息",
 		description:
-			"钉钉消息：单聊/群消息/多人单聊/引用回复/转发/转 DING/撤回/查消息。收件人写姓名或账号 ID，会话写群名或会话 ID。" +
+			"钉钉消息：单聊/群消息/多人单聊/引用回复/转发/转 DING/撤回/查消息。收件人写姓名或账号 ID，会话写群名、会话 ID 或单聊对方姓名。" +
 			"发文件时本条不含说明正文，说明要另发一条文本。" +
 			"查消息默认把消息里的图片/语音/文件下载到工作目录（路径见结果，可直接 read；outDir 改目录、downloadResources=false 关闭）。",
 		params: MessageParams,
@@ -2919,13 +2951,13 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 				r.group = g.ok;
 			}
 			if (p.destGroup) {
-				const g = await resolveGroup(p.destGroup);
+				const g = await resolveConversation(p.destGroup);
 				if (!("ok" in g)) return g;
 				r.destGroup = g.ok;
 			}
 			if (["reply", "forward", "ding", "recall"].includes(p.action) || (p.action === "read" && p.inGroup)) {
 				if (p.action === "read") {
-					const g = await resolveGroup(p.inGroup!);
+					const g = await resolveConversation(p.inGroup!);
 					if (!("ok" in g)) return g;
 					return { ...r, inGroup: g.ok, ids: { now: new Date().toISOString() } };
 				}
@@ -3089,7 +3121,7 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 			if (p.action === "wikiList" && p.workspace) {
 				const data = await callJson(["wiki", "space", "list", "--type", "orgWikiSpace"]);
 				const ws = isIdLike(p.workspace) ? p.workspace : data ? findByField(data, ["name", "spaceName", "title", "workspaceName"], ["workspaceId"], p.workspace) : undefined;
-				if (!ws) return { error: `没找到知识库「${p.workspace}」（可先用逃生舱 wiki +space-list 看清单）` };
+				if (!ws) return { error: `没找到知识库「${p.workspace}」（可用 dingtalk_doc action="wikiList" 看清单）` };
 				ids.workspace = ws;
 			}
 			if (["tableQuery", "tableAdd", "tableUpdate", "tableDelete"].includes(p.action)) {

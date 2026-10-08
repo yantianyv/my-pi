@@ -478,9 +478,10 @@ console.log("AD、撤回对象识别（弹窗要能看出撤的是哪条）");
 	check("长正文截断到 90 字", (() => { const d = parseMessageDigest(JSON.stringify({ messages: [{ text: "啊".repeat(200) }] })); return d[0].preview.length <= 91; })());
 	check("无文字消息不报错", parseMessageDigest(JSON.stringify({ messages: [{ conversationId: "c" }] }))[0].preview === "");
 	check("坏输入返回空", parseMessageDigest("nope").length === 0);
-	const single = parseConversationInfo(JSON.stringify({ result: { conversationInfo: { title: "严天宇", singleChat: true, memberCount: 2 } } }));
-	const group = parseConversationInfo(JSON.stringify({ result: { conversationInfo: { title: "教研室", singleChat: false, memberCount: 8 } } }));
+	const single = parseConversationInfo(JSON.stringify({ result: { conversationInfo: { openConversationId: "cidA", title: "严天宇", singleChat: true, memberCount: 2 } } }));
+	const group = parseConversationInfo(JSON.stringify({ result: { conversationInfo: { openConversationId: "cidB", title: "教研室", singleChat: false, memberCount: 8 } } }));
 	check("单聊认得出对方姓名", single && single.title === "严天宇" && single.singleChat === true);
+	check("单聊取出会话 ID（转发给个人用）", single && single.cid === "cidA");
 	check("群聊给群名与人数", group && group.title === "教研室" && group.memberCount === 8 && group.singleChat === false);
 	check("坏输入返回 null", parseConversationInfo("nope") === null);
 }
