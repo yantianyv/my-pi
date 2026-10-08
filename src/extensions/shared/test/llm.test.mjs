@@ -6,7 +6,8 @@
  * - 文本抽取：多 text 块拼接 + trim；空/非数组返回空串
  * - aiComplete 永不抛异常：认证失败/注册表异常都返回 {ok:false}，绝不网络直调
  * - aiComplete 依次尝试候选链：首选失败自动换下一个，耗尽后回最后一次错误；总时长不超 timeoutMs
- * - pi 内部头管道不可用时 piAttributionHeaders 降级返回 undefined（不带头，不崩）
+ * - 功能必需头（opencode 系会话头）不依赖 pi 内部管道：管道不可达也必须带，且 sessionId
+ *   缺失时给非空值（真实启动 argv[1] 是 .bin/pi shim，深加载必落空——误信它会直接 400）
  * - 纪律守卫：扩展源码不得出现 maxTokens（推理模型思考 token 计入该预算 → 正文/JSON 截断）
  *
  * 用法：node src/extensions/shared/test/llm.test.mjs（仓库根目录执行）
@@ -142,17 +143,38 @@ try {
 		check("扩展源码不出现 maxTokens（输出上限纪律）", offenders.length === 0, offenders.join(", "));
 	}
 
-	// ---- 头管道降级：测试进程找不到 pi 包根 → undefined 且不抛 ----
+	// ---- 功能必需头：不依赖 pi 内部管道（真实启动 argv[1] 是 .bin/pi shim，深加载必然落空） ----
+	// 本测试进程的 argv[1] 不是 pi 入口，且探测结果会被缓存，故此段必须最先跑：
+	// 它正是「内部管道不可达」的等价场景。
 	{
 		let threw = false;
 		let v;
 		try {
-			v = piAttributionHeaders(fakeModel(), TEST_DIR, "sid");
-		} catch (e) {
+			v = piAttributionHeaders(fakeModel(), TEST_DIR, "sid-test");
+		} catch {
 			threw = true;
 		}
-		check("piAttributionHeaders 降级不抛异常", !threw);
-		check("piAttributionHeaders 找不到 pi 管道返回 undefined", v === undefined, JSON.stringify(v));
+		check("opencode 系：管道不可达也自建会话头", !threw && v?.["x-opencode-session"] === "sid-test", JSON.stringify(v));
+		check("opencode 系：带 x-opencode-client", v?.["x-opencode-client"] === "pi", JSON.stringify(v));
+		const noSid = piAttributionHeaders(fakeModel(), TEST_DIR, undefined);
+		check(
+			"opencode 系：sessionId 缺失也给非空值（空值照样被拒）",
+			typeof noSid?.["x-opencode-session"] === "string" && noSid["x-opencode-session"].length > 0,
+			JSON.stringify(noSid),
+		);
+		const other = piAttributionHeaders(
+			{ provider: "xiaomi-token-plan-cn", id: "m", api: "openai-completions", baseUrl: "https://api.xiaomimimo.com/v1" },
+			TEST_DIR,
+			"sid",
+		);
+		check("其他供应商：无必需头且不抛", other === undefined, JSON.stringify(other));
+		// 经 baseUrl 识别（供应商 id 非 opencode 系，但指向 opencode 域）
+		const byHost = piAttributionHeaders(
+			{ provider: "custom", id: "m", api: "openai-completions", baseUrl: "https://opencode.ai/zen/go/v1" },
+			TEST_DIR,
+			"sid-2",
+		);
+		check("按 baseUrl 域名识别 opencode 系", byHost?.["x-opencode-session"] === "sid-2", JSON.stringify(byHost));
 	}
 } finally {
 	rmSync(BUNDLE, { force: true });

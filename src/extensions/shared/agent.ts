@@ -46,6 +46,7 @@ export function createPiStreamFn(ctx: ExtensionContext): StreamFn {
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
 		if (!auth.ok) throw new Error(`认证失败：${auth.error}`);
 		const attribution = piAttributionHeaders(m, ctx.cwd, sessionId);
+		// 功能必需头（opencode 系会话头）由 piAttributionHeaders 自建，不依赖 pi 内部文件路径
 		return streamSimple(m, c, {
 			...options,
 			apiKey: auth.apiKey ?? options?.apiKey,

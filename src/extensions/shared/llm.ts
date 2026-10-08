@@ -62,12 +62,13 @@ export function extractAiText(blocks: unknown, join = "\n"): string {
 // ---------------------------------------------------------------------------
 
 // pi 主会话的请求头管道在 dist/core/provider-attribution.js 的 mergeProviderAttributionHeaders：
-// 按供应商规则表统一注入（opencode/opencode-go 系的 x-opencode-session 是功能必需头，缺失直接
-// 400 MissingSessionID；OpenRouter/NIM/Cloudflare 的归因头为遥测可选）。该函数未从包主入口
+// 按供应商规则表统一注入（OpenRouter/NIM/Cloudflare 的归因头为遥测可选）。该函数未从包主入口
 // 公开导出且 package.json exports 封锁深路径（动态 import 报 ERR_PACKAGE_PATH_NOT_EXPORTED，
-// jiti 下已实测），故按「process.argv[1]（pi 入口 cli.js）向上定位包根 → 按文件路径 require」
-// 绕过。pi 升级若移动该文件，任何一环失败都会降级为不带头（单次调用退回旧行为，主会话不受影响），
-// 届时对照 pi 新版源码更新路径即可。
+// jiti 下已实测），故按「进程入口向上定位包根 → 按文件路径 require」绕过。
+//
+// 注意：**功能必需头不走这条深加载**——pi 托管安装的启动器执行的是 node_modules/.bin/pi shim，
+// process.argv[1] 在那里（向上找不到包根），只顾深加载就会整体降级为不带头，opencode 系直接 400；
+// 所以会话头按供应商规则自建（见 functionalHeaders），深加载仅用于遥测类头的尽力增强。
 type AttributionHeaders = Record<string, string> | undefined;
 type MergeAttributionHeaders = (
 	model: unknown,
@@ -78,11 +79,25 @@ type MergeAttributionHeaders = (
 
 let mergeAttributionHeaders: MergeAttributionHeaders | null | undefined; // undefined=未探测，null=不可用
 
-/** 从进程入口脚本（argv[1]，如 …/dist/bundle/cli.js）向上找 package.json 定位 pi 包根。 */
-function findPiPackageRoot(): string | null {
-	const entry = process.argv[1];
-	if (!entry) return null;
-	let dir = path.dirname(path.resolve(entry));
+/** opencode 系的会话头：服务端要求必须带 x-opencode-session，缺失直接 400 */
+function functionalHeaders(model: unknown, sessionId: string | undefined): Record <string, string> | undefined {
+	const m = model as { provider?: string; baseUrl?: string } | null;
+	const host = (() => {
+		try {
+			return new URL(m?.baseUrl ?? "").hostname;
+		} catch {
+			return "";
+		}
+	})();
+	const isOpencode = m?.provider === "opencode" || m?.provider === "opencode-go" || host === "opencode.ai";
+	if (!isOpencode) return undefined;
+	// sessionId 缺失也要给非空值（空值仍会被服务端当缺头拒）
+	return { "x-opencode-session": sessionId || `pi-ext-${process.pid}`, "x-opencode-client": "pi" };
+}
+
+/** 从目录向上逐级找 pi 包的 package.json */
+function walkUpForPiPackage(startDir: string): string | null {
+	let dir = startDir;
 	for (let i = 0; i < 6; i++) {
 		try {
 			if (
@@ -99,6 +114,20 @@ function findPiPackageRoot(): string | null {
 		dir = parent;
 	}
 	return null;
+}
+
+/** 定位 pi 包根：先按模块解析（.bin/pi 这类 shim 也能解析到包），再退化为逐级向上找 */
+function findPiPackageRoot(): string | null {
+	const entry = process.argv[1];
+	if (!entry) return null;
+	try {
+		const main = createRequire(entry).resolve("@earendil-works/pi-coding-agent");
+		const root = walkUpForPiPackage(path.dirname(main));
+		if (root) return root;
+	} catch {
+		/* 解析不到 → 退化为目录遍历 */
+	}
+	return walkUpForPiPackage(path.dirname(path.resolve(entry)));
 }
 
 /** 深加载 pi 内部的 mergeProviderAttributionHeaders；不可用返回 null（不带该头）。 */
@@ -127,23 +156,30 @@ function loadMergeAttributionHeaders(): MergeAttributionHeaders | null {
 const settingsCache = new Map<string, SettingsManager>();
 
 /**
- * 取某次请求应带的供应商头（会话/归因），与主会话的注入端完全同源；
- * pi 内部管道不可用时返回 undefined（调用方带头基座为空，仅 opencode 系供应商会因此落回旧行为）。
+ * 取某次请求应带的供应商头：功能必需头（opencode 系会话头）自建，遥测/归因头尽力从 pi 内部管道取。
+ * 内部管道不可用也不影响功能头；非 opencode 供应商且管道不可用时返回 undefined。
  */
 export function piAttributionHeaders(model: unknown, cwd: string, sessionId?: string): AttributionHeaders {
+	const functional = functionalHeaders(model, sessionId);
 	const merge = loadMergeAttributionHeaders();
-	if (!merge) return undefined;
-	try {
-		let settings = settingsCache.get(cwd);
-		if (!settings) {
-			settings = SettingsManager.create(cwd);
-			settingsCache.set(cwd, settings);
+	let telemetry: AttributionHeaders;
+	if (merge) {
+		try {
+			let settings = settingsCache.get(cwd);
+			if (!settings) {
+				settings = SettingsManager.create(cwd);
+				settingsCache.set(cwd, settings);
+			}
+			telemetry = merge(model, settings, sessionId);
+		} catch {
+			/* 管道对个别模型形态不适用（如缺 baseUrl）→ 只丢遥测头 */
+			telemetry = undefined;
 		}
-		return merge(model, settings, sessionId);
-	} catch {
-		/* 管道对个别模型形态不适用（如缺 baseUrl）→ 不带头，不让头部问题毁掉整次调用 */
-		return undefined;
+	} else {
+		telemetry = undefined;
 	}
+	if (!telemetry && !functional) return undefined;
+	return { ...(telemetry ?? {}), ...(functional ?? {}) };
 }
 
 /** 故障转移上限（含首选）：候选链再长也不无限试，避免审核长时间挂起 */
