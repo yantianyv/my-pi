@@ -21,9 +21,9 @@
  * pi 升级会覆盖 node_modules，需重跑本脚本。改完重启 pi 生效。
  * 幂等：已打补丁时直接跳过。
  */
-import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { piPackageDir } from "./pi-root.mjs";
 
 const MARKER = "PATCH(usage-guard)";
 
@@ -52,8 +52,7 @@ const NEW_ANTHROPIC_USAGE = `                    // PATCH(usage-guard): usage �
                     output.usage.cacheWrite = event.message.usage?.cache_creation_input_tokens || 0;`;
 
 function piPath(rel) {
-	const npmRoot = execSync("npm root -g").toString().trim();
-	const p = path.join(npmRoot, "@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "dist", ...rel);
+	const p = path.join(piPackageDir("@earendil-works/pi-ai"), "dist", ...rel);
 	if (!fs.existsSync(p)) {
 		throw new Error(`找不到 ${p}`);
 	}

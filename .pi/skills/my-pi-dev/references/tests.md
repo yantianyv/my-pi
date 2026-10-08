@@ -27,7 +27,7 @@ const mod = await import(pathToFileURL(bundle).href);
 
 集成类测试（ask / qr / workflow-mgr / `src/extensions/test/` 等）需要能解析到 pi 全局包（`@earendil-works/*`、`typebox`）。依赖统一放在 **`src/extensions/node_modules/`**（gitignore，不入库），所有子目录测试沿祖先向上解析到同一份。
 
-重建（换机器 / pi 升级后）：`node src/extensions/test/relink-deps.mjs`（仓库根执行）。脚本把全局 `pi-coding-agent/node_modules` 树扁平搬运过来（第三方 + `@earendil-works/*` + pi 本体），优先 symbolic link / junction，不支持链接的文件系统（如 D:）回退为递归复制（约 270MB）。**各 test 子目录里不要再放 node_modules**——空壳会挡在解析路径上。
+重建（换机器 / pi 升级后）：`node src/extensions/test/relink-deps.mjs`（仓库根执行）。脚本把 pi 安装的 node_modules 树扁平搬运过来（第三方 + `@earendil-works/*` + pi 本体；托管安装依赖提升在 releases 层、npm 全局可能嵌套在 pi 包内，两处都扫、同名先到先得），优先 symbolic link / junction，不支持链接的文件系统（如 D:）回退为递归复制（约 270MB）。**各 test 子目录里不要再放 node_modules**——空壳会挡在解析路径上。
 
 - `hud/test/` 与 `shared/test/` 不需要（前者用 esbuild `alias` 把 pi / pi-ai 别名到内联的 `.tmp-pi-mock.mjs` 并需补齐用到的导出，后者零外部依赖）
 - `webdav-kb/test/node_modules/` 另有真实 npm 依赖树（跑 `npm install` 即可）

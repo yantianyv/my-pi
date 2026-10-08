@@ -37,7 +37,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `mimo-omni.ts` — 媒体兼容层（过渡件）：`mimo_transcribe` 解析音频/视频（逐字稿或按需求解析）+ `mimo_speak` 文字合成语音，`/mimo-config` 面板配置（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `dingtalk-bridge/` — 钉钉受控桥接：业务语义工具（消息/待办/日程/审批/文件/文档表格，AI 不碰 dws 命令）+ 唯一逃生舱 `dws_skill`（只给知识）+ 两阶段确认/人工面板/防重发（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `model-config/` — 模型管理插件：`/model-config` 面板集中设置各插件用途使用的模型（策略槽 MAX/FAST/LITE/BASE/BATCH 可重指，AUTO/FREE 固定语义），见下 | `~/.pi/agent/extensions/` |
-| `patches/` | 两个 pi 补丁：ai usage 防护 / 祖冲之汉化（见下） | 打补丁到全局 node_modules |
+| `patches/` | 三个 pi 补丁：ai usage 防护 / 祖冲之汉化 / 启动垫片崩溃取证（见下；共用 `pi-root.mjs` 定位 pi 安装目录） | 打补丁到 pi 安装目录（托管安装 `~/.pi/agent/install/releases/<版本>/node_modules` 或 npm 全局 node_modules） |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装） | `~/.pi/agent/skills/` |
 | `models.json` | 模型配置模板：OpenRouter 路由（provider 级 `compat.openRouterRouting`）+ 火山方舟 Coding Plan 自定义供应商（见下；已在则深度合并，保留手改的其他 provider） | `~/.pi/agent/models.json` |
@@ -440,7 +440,7 @@ node static/patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂等）
 1. `pi-ai/dist/utils/estimate.js`：`calculateContextTokens` 对 usage 缺失返回 0——调用处 `> 0` 判断自然跳过该消息，与“不用缺失 usage 的消息估算上下文”语义一致（主修复）。
 2. `pi-ai/dist/api/anthropic-messages.js`：`message_start` 解析 usage 处改可选链——兼容端点（如 deepseek）响应缺 usage 字段时不再抛 `'input_tokens'` 类异常（防御）。
 
-注意：补丁打在全局 `node_modules` 的 pi-ai 上，**pi 每次升级会覆盖，需重跑脚本**；若版本变动导致匹配失败，脚本会拒绝执行并提示人工核对。
+注意：补丁打在 pi 安装目录的 pi-ai 上（托管安装为 `~/.pi/agent/install/releases/<版本>/node_modules`，npm 全局为 `npm root -g`），**pi 每次升级会覆盖，需重跑脚本**；若版本变动导致匹配失败，脚本会拒绝执行并提示人工核对。
 
 ## 祖冲之汉化补丁（patches/apply-zuchongzhi-zh.mjs）
 
@@ -473,7 +473,19 @@ node static/patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
 3. **自动备份 + `--restore` 一键还原**；状态与备份在 `~/.pi/agent/tmp/zuchongzhi/`。
 4. **幂等（SHA256 记录）**：pi 升级覆盖 dist 后哈希变化自动重打；缺失目标串（升级后文案变动）只警告不致命，汇总列出供人工核对。
 
-注意：补丁打在全局 `node_modules` 的 pi 上，**pi 每次升级会覆盖，需重跑脚本**；汉化不影响会话文件与 LLM 上下文（仅 TUI 显示层），还原后重启即回英文。
+注意：补丁打在 pi 安装目录的 pi 上，**pi 每次升级会覆盖，需重跑脚本**；汉化不影响会话文件与 LLM 上下文（仅 TUI 显示层），还原后重启即回英文。
+
+## 启动垫片崩溃取证补丁（patches/apply-pi-launch-report.mjs）
+
+修「无声崩溃零痕迹」：进程直接消失、无 JS 异常、无 V8 报告时，abort 类原生死亡（node 内部断言 / V8 CHECK）只会在 stderr 留下原生调用栈——本补丁给 pi 启动器加上这整条取证通道。
+
+```bash
+node static/patches/apply-pi-launch-report.mjs   # 打补丁/升级（幂等），重启 pi 生效
+```
+
+注入内容（按启动器形态适配，托管安装的 `<agent>/bin/pi` 与 npm 全局的 `pi` / `pi.cmd` / `pi.ps1` 都支持）：`--max-old-space-size=8192`（排除堆上限 OOM）、`--report-on-fatalerror --report-directory=~/.pi/agent/reports`（V8 诊断报告）、stderr 追加落盘 `~/.pi/agent/pi-stderr.log`、启动/退出记 `[START]/[EXIT]` 行。
+
+注意：**pi 每次升级会重写启动器，需重跑脚本**；崩溃后先看 `~/.pi/agent/pi-stderr.log` 尾部（`/crash-log` 会指向取证路径）。
 
 ## 卸载
 
@@ -493,7 +505,7 @@ pi remove ~/.pi/agent/vendor/pi-rtk-optimizer
 rm -rf ~/.pi/agent/vendor
 ```
 
-（`settings.json` 里的 `"theme": "matrix"` 改回其他主题即可；`models.json` 已并入你手改的 `~/.pi/agent/models.json`（深度合并，模板键以仓库为准），要还原需手动移除模板注入的 `providers.openrouter.compat.openRouterRouting`；三个补丁打在全局 node_modules 上，重装 pi 即还原，祖冲之汉化另有 `--restore` 一键还原英文；rtk 二进制按安装位置删（Windows `%APPDATA%\npm\rtk.exe`，Unix `~/.local/bin/rtk` 或 `~/.pi/agent/bin/rtk`）。）
+（`settings.json` 里的 `"theme": "matrix"` 改回其他主题即可；`models.json` 已并入你手改的 `~/.pi/agent/models.json`（深度合并，模板键以仓库为准），要还原需手动移除模板注入的 `providers.openrouter.compat.openRouterRouting`；三个补丁打在 pi 安装目录上，重装 pi 即还原，祖冲之汉化另有 `--restore` 一键还原英文；rtk 二进制按安装位置删（Windows `%APPDATA%\npm\rtk.exe`，Unix `~/.local/bin/rtk` 或 `~/.pi/agent/bin/rtk`）。）
 
 ## 说明
 

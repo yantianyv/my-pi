@@ -126,9 +126,43 @@ function checkNode() {
 	return { ok: true, version: process.versions.node };
 }
 
-/** 探测 pi 全局安装根目录（含 @earendil-works/pi-coding-agent 的 node_modules 根）。 */
+/** pi 自带安装器的托管安装根（releases-v1 布局）：PI_MANAGED_INSTALL_ROOT 优先，
+ *  其次由 pi 启动器位置反推（<agent>/bin/pi 的兄弟目录 install/）。*/
+function managedInstallRoot() {
+	const candidates = [process.env.PI_MANAGED_INSTALL_ROOT];
+	try {
+		const launcher = execSync(process.platform === "win32" ? "where pi" : "command -v pi", { encoding: "utf8", windowsHide: true })
+			.trim()
+			.split(/\r?\n/)[0];
+		if (launcher) candidates.push(path.join(path.dirname(path.dirname(fs.realpathSync(launcher))), "install"));
+	} catch {}
+	for (const c of candidates) {
+		if (!c) continue;
+		const root = path.resolve(c);
+		if (fs.existsSync(path.join(root, "managed-install.json"))) return root;
+	}
+	return null;
+}
+
+/** 托管安装当前版本的 node_modules 根（<install>/releases/<版本>/node_modules）。 */
+function managedNodeModulesRoot() {
+	const root = managedInstallRoot();
+	if (!root) return null;
+	try {
+		const version = fs.readFileSync(path.join(root, "current-version"), "utf8").trim();
+		const modules = path.join(root, "releases", version, "node_modules");
+		return fs.existsSync(path.join(modules, ...PI_PACKAGE.split("/"))) ? modules : null;
+	} catch {
+		return null;
+	}
+}
+
+/** 探测 pi 安装的 node_modules 根（含 @earendil-works/pi-coding-agent）：
+ *  托管安装优先（pi 自带安装器 / pi update 的布局），其次 npm 全局安装。 */
 function findPiGlobalRoot() {
-	// 优先 npm root -g（覆盖 Windows/macOS/Linux 的 npm 默认全局目录）
+	const managed = managedNodeModulesRoot();
+	if (managed) return managed;
+	// npm root -g（覆盖 Windows/macOS/Linux 的 npm 默认全局目录）
 	try {
 		const root = execSync("npm root -g", { encoding: "utf8", windowsHide: true }).trim();
 		if (root && fs.existsSync(path.join(root, "@earendil-works", "pi-coding-agent"))) return root;
@@ -642,7 +676,17 @@ function applySettings() {
 	}
 }
 
-/** 用模板生成 tsconfig.json（paths 指向探测到的 pi 全局目录），换机器/pi 升级后重跑即可。 */
+/** pi 依赖包目录：npm 全局可能嵌套在 pi 包内，托管安装与 npm 默认则提升到 node_modules 根，两种都认。 */
+function piPackageDir(root, name) {
+	const nested = path.join(root, ...PI_PACKAGE.split("/"), "node_modules", ...name.split("/"));
+	const hoisted = path.join(root, ...name.split("/"));
+	for (const dir of [nested, hoisted]) {
+		if (fs.existsSync(path.join(dir, "package.json"))) return dir;
+	}
+	return hoisted; // 都缺：留下提升布局的预期路径，让 TS 报出具体缺失文件
+}
+
+/** 用模板生成 tsconfig.json（paths 指向探测到的 pi 安装目录），换机器/pi 升级后重跑即可。 */
 function generateTsconfig() {
 	const templatePath = path.join(ROOT, "src", "config", "tsconfig.template.json");
 	const outPath = path.join(ROOT, "src", "config", "tsconfig.json");
@@ -652,11 +696,26 @@ function generateTsconfig() {
 	}
 	const root = findPiGlobalRoot();
 	if (!root) {
-		log("跳过 tsconfig（未找到 pi 全局安装目录 @earendil-works/pi-coding-agent，可手动修改 src/config/tsconfig.json）");
+		log("跳过 tsconfig（未找到 pi 安装目录 @earendil-works/pi-coding-agent，可手动修改 src/config/tsconfig.json）");
 		return;
 	}
-	const template = fs.readFileSync(templatePath, "utf8");
-	const out = template.replace(/__PI_ROOT__/g, root.replace(/\\/g, "/")); // 统一正斜杠，JSON 免转义
+	// 占位符 → pi 各包入口 d.ts 的绝对路径（统一正斜杠，JSON 免转义）
+	const entries = {
+		__PI_PKG_CODING_AGENT__: [PI_PACKAGE, ["dist", "index.d.ts"]],
+		__PI_PKG_AGENT_CORE__: ["@earendil-works/pi-agent-core", ["dist", "index.d.ts"]],
+		__PI_PKG_AI__: ["@earendil-works/pi-ai", ["dist", "index.d.ts"]],
+		__PI_PKG_AI_COMPAT__: ["@earendil-works/pi-ai", ["dist", "compat.d.ts"]],
+		__PI_PKG_TUI__: ["@earendil-works/pi-tui", ["dist", "index.d.ts"]],
+		__PI_PKG_TYPEBOX__: ["typebox", ["build", "index.d.mts"]],
+	};
+	let out = fs.readFileSync(templatePath, "utf8");
+	for (const [token, [name, rel]] of Object.entries(entries)) {
+		out = out.replaceAll(token, (piPackageDir(root, name) + "/" + rel.join("/")).replace(/\\/g, "/"));
+	}
+	const typeRoots =
+		[path.join(root, "@types"), path.join(piPackageDir(root, PI_PACKAGE), "node_modules", "@types")].find((d) => fs.existsSync(d)) ??
+		path.join(root, "@types");
+	out = out.replaceAll("__PI_TYPES__", typeRoots.replace(/\\/g, "/"));
 	log(`生成 src/config/tsconfig.json（paths → ${root}）`);
 	if (!dryRun) fs.writeFileSync(outPath, out, "utf8");
 }

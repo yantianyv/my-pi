@@ -14,8 +14,8 @@
  *   （未入库）；换 x64 机器后该问题未复现，A/B 启动器随之废弃
  * - 若在其他机器复现同类崩溃，按本补丁的 stderr 落盘通道取证，机器细节记在各自现场，不回填仓库文档
  *
- * 本补丁给 npm 生成的 pi 启动垫片（Windows 的 pi.cmd / pi.ps1；POSIX 的 pi sh 垫片，或
- * npm 11 起的符号链接目标 dist/bundle/cli.js）注入：
+ * 本补丁给 pi 启动垫片（托管安装的 <agent>/bin/pi sh 启动器；npm 生成的垫片——Windows 的
+ * pi.cmd / pi.ps1，POSIX 的 pi sh 垫片，或 npm 11 起的符号链接目标 dist/bundle/cli.js）注入：
  * - --max-old-space-size=8192：排除 V8 堆上限 OOM
  * - --report-on-fatalerror：V8 致命错误诊断报告 → ~/.pi/agent/reports/
  * - stderr 追加落盘 → ~/.pi/agent/pi-stderr-<时间戳>.log（每次启动独立文件，避免多实例写锁；
@@ -25,21 +25,23 @@
  * 旗标注入方式：pi.cmd 的 SETLOCAL 环境在 node 调用同行的 endLocal 时被回收，
  * SET NODE_OPTIONS 走不通，故 cmd 把 node 旗标内联在调用行；ps1/sh 用进程环境变量。
  *
- * POSIX 两种形态：
+ * POSIX 三种形态：
+ * - 托管安装启动器（<agent>/bin/pi，自带安装器生成）：调用行前 export NODE_OPTIONS，
+ *   调用行尾 2>> 重定向，前后插 [START]/[EXIT] 追加行（去掉 exec 才能在退出后记账）
  * - 旧式 npm sh 垫片（npm ≤10）：脚本内 export NODE_OPTIONS + 调用行尾 2>> 重定向
  * - npm 11 起全局 bin 是符号链接（pi → 包内 dist/bundle/cli.js 的 ESM 垫片）：垫片
  *   自身无法改启动旗标，补丁把它改写为 spawn wrapper——用 node 旗标拉起 cli-runtime.js，
  *   子进程 stderr 落 pi-stderr.log，信号与退出码转发，NODE_COMPILE_CACHE 保留编译缓存
  *
- * 幂等（检测到 v2 标记跳过；自动清理 v1 注入行）。pi 升级（npm i -g）会重写垫片，
- * 届时需重跑本补丁（与其他 patches 同惯例）。
+ * 幂等（检测到 v2 标记跳过；自动清理 v1 注入行）。pi 升级（pi update / npm i -g）会重写
+ * 启动器与 dist，届时需重跑本补丁（与其他 patches 同惯例）。
  *
  * 用法：node static/patches/apply-pi-launch-report.mjs
  */
-import { readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { piBinDirs } from "./pi-root.mjs";
 
 const MARKER = "PI-CRASH-FORENSICS";
 const DIR = join(homedir(), ".pi", "agent");
@@ -71,16 +73,13 @@ function stripOld(s) {
 		.join("\n");
 }
 
-function npmBinDir() {
-	try {
-		const prefix = execFileSync("npm", ["prefix", "-g"], { encoding: "utf8" }).trim();
-		return join(prefix, process.platform === "win32" ? "" : "bin");
-	} catch {
-		return process.env.APPDATA ? join(process.env.APPDATA, "npm") : join(homedir(), ".npm-global", "bin");
-	}
+/** pi 启动器所在目录：实际在用 / 托管 / npm 全局里第一个真有启动器的（见 pi-root.mjs）。 */
+function piBinDir() {
+	const dirs = piBinDirs();
+	return dirs.find((d) => existsSync(join(d, "pi")) || existsSync(join(d, "pi.cmd")) || existsSync(join(d, "pi.ps1"))) ?? dirs[0] ?? "";
 }
 
-const BIN = npmBinDir();
+const BIN = piBinDir();
 mkdirSync(REPORT_DIR, { recursive: true });
 let patched = 0;
 
@@ -100,11 +99,14 @@ try {
 		// node 旗标内联进调用行（SETLOCAL 的环境变量在同行 endLocal 时被回收，SET NODE_OPTIONS 走不通）
 		// + 行尾挂 stderr 追加重定向 + 统一回 CRLF（批处理 LF-only 有 GOTO 标签风险）
 		s = s.replace(/("%_prog%")([^&\r\n]*%*)(\r?\n)$/, `$1${CMD_FLAGS}$2 2>>"${ERRLOG}"$3`);
-		if (!s.includes(CMD_FLAGS)) console.error(`[警告] ${cmdPath} 调用行注入失败，请人工核对`);
-		if (!s.includes("\r\n")) s = s.replace(/\n/g, "\r\n");
-		writeFileSync(cmdPath, s);
-		patched++;
-		console.log(`[完成] ${cmdPath}`);
+		if (!s.includes(CMD_FLAGS)) {
+			console.error(`[跳过] ${cmdPath} 调用行注入失败（垫片形态不认识），请人工核对`);
+		} else {
+			if (!s.includes("\r\n")) s = s.replace(/\n/g, "\r\n");
+			writeFileSync(cmdPath, s);
+			patched++;
+			console.log(`[完成] ${cmdPath}`);
+		}
 	}
 } catch (e) {
 	if (e.code === "ENOENT") console.log(`[跳过] ${cmdPath} 不存在（非 Windows 环境）`);
@@ -139,21 +141,47 @@ try {
 					: [l],
 			)
 			.join("\n");
-		writeFileSync(ps1Path, s);
-		patched++;
-		console.log(`[完成] ${ps1Path}`);
+		if (!s.includes("2>> $piStderr")) {
+			console.error(`[跳过] ${ps1Path} 调用行注入失败（垫片形态不认识），请人工核对`);
+		} else {
+			writeFileSync(ps1Path, s);
+			patched++;
+			console.log(`[完成] ${ps1Path}`);
+		}
 	}
 } catch (e) {
 	if (e.code === "ENOENT") console.log(`[跳过] ${ps1Path} 不存在（非 Windows 环境）`);
 	else console.error(`[失败] ${ps1Path}: ${e.message}`);
 }
 
-// --- pi (sh：旧式垫片 / npm 11 符号链接) ---
+// --- pi (sh：托管安装启动器 / 旧式垫片 / npm 11 符号链接) ---
 const shPath = join(BIN, "pi");
 try {
 	const raw = readFileSync(shPath, "utf8");
 	if (raw.includes(MARKER)) {
 		console.log(`[跳过] ${shPath} 已是 v2`);
+	} else if (raw.includes("PI_MANAGED_INSTALL_ROOT")) {
+		// 托管安装启动器（<agent>/bin/pi）：调用行前导出 NODE_OPTIONS，行尾挂 stderr 重定向；
+		// 去掉 exec 才能在退出后记 [EXIT]（同一进程组，信号照常抵达子进程）
+		let s = stripOld(raw);
+		const startLines = [
+			`mkdir -p "${REPORT_DIR}" 2>/dev/null`,
+			`export NODE_OPTIONS="${NODE_OPTS} --report-directory=${REPORT_DIR}"`,
+			`printf '[START %s args=%s]\\n' "$(date '+%F %T')" "$*" >> "${ERRLOG}"`,
+		]
+			.map((l) => `${l}  # ${MARKER}`)
+			.join("\n");
+		const inject = `# ${MARKER} v2: 崩溃取证（大堆+诊断报告+stderr落盘），pi 升级后重跑 static/patches/apply-pi-launch-report.mjs\n${startLines}\n`;
+		const execLine = `"$pi_release_bin" "$@" 2>>"${ERRLOG}"`;
+		s = s.replace(/^exec "\$pi_release_bin" "\$@"$/m, inject + execLine);
+		if (!s.includes(execLine)) {
+			console.error(`[跳过] ${shPath} 调用行注入失败（启动器形态不认识），请人工核对`);
+		} else {
+			s += ["", `__pi_exit=$?  # ${MARKER}`, `printf '[EXIT %s code=%s]\\n' "$(date '+%F %T')" "$__pi_exit" >> "${ERRLOG}"  # ${MARKER}`, `exit $__pi_exit  # ${MARKER}`, ""].join("\n");
+			writeFileSync(shPath, s);
+			patched++;
+			console.log(`[完成] ${shPath}（托管安装启动器）`);
+		}
 	} else if (raw.includes("case `uname` in")) {
 		// 旧式 npm sh 垫片（npm ≤10 POSIX）：在脚本内注入环境变量与 stderr 重定向
 		let s = stripOld(raw);

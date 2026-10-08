@@ -21,7 +21,7 @@ CLI 参数（仅 4 个）：`--dry-run`/`-n`、`--skip-build`、`-y`/`--yes`（�
 | 全局 npm | pi 缺失时 `npm i -g @earendil-works/pi-coding-agent` |
 | `src/node_modules/` | `ensureDeps` 按 src/package.json 清单全量比对，任一缺失即 `npm install` |
 | rtk 二进制 | 按平台下载 GitHub release（直连优先、gh-proxy 镜像回落、checksums.txt 校验）；Windows → `%APPDATA%\npm\`，Unix 优先 `~/.local/bin`，否则 `~/.pi/agent/bin` |
-| `src/config/tsconfig.json` | `generateTsconfig` 探测 `npm root -g` 替换模板 `__PI_ROOT__`；模板缺失或探测失败只打 log **静默跳过**（不报错） |
+| `src/config/tsconfig.json` | `generateTsconfig` 探测 pi 安装目录（托管安装优先，其次 `npm root -g` + 常见全局目录候选）后逐个解析 `__PI_PKG_*` / `__PI_TYPES__` 占位符替换模板；包目录嵌套/提升两种布局都认；模板缺失或探测失败只打 log **静默跳过**（不报错） |
 
 vendor 包若有运行时 `dependencies`：`npm install --omit=dev --no-audit --no-fund`，失败 `process.exit(1)` 中断整个安装。
 
@@ -35,6 +35,12 @@ vendor 包若有运行时 `dependencies`：`npm install --omit=dev --no-audit --
 - 跳过（只打 log 不报错）：非 Linux、无 fontconfig、终端字体已是 DejaVu Sans Mono、无待钉字符；`--dry-run` 打印条数与目标路径但不写文件
 - 生效：`~/.config/fontconfig/conf.d/` 由 fontconfig 自身加载（不依赖 `/etc/fonts/fonts.conf` 的 xdg include）；运行中的终端不会重读配置，需新开窗口/标签
 - 验证/回退：`fc-match 'Ubuntu Sans Mono:charset=25b0' family` 应回 `DejaVu Sans Mono`；删掉该文件即恢复系统默认回退
+
+### pi 安装布局（托管安装 vs npm 全局）
+
+pi 用自带安装器时为**托管安装**（releases-v1）：`<agent>/install/` 下 `managed-install.json` + `current-version` + `releases/<版本>/node_modules`（依赖提升到这一层），启动器 `<agent>/bin/pi` 导出 `PI_MANAGED_INSTALL_ROOT`；`pi update` 只改 `current-version` 与 releases（保留新旧两个版本）。此时 `npm root -g` 里没有 pi。
+
+仓库里探测 pi 安装位置的地方共四处，逻辑一致（nested → hoisted、托管 → npm 全局）：install.js（CJS，自带内联实现）与 `static/patches/pi-root.mjs`（ESM，供三个补丁脚本 + `src/extensions/test/relink-deps.mjs` import）。
 
 
 ## src/build.js（伪编译）
@@ -62,10 +68,12 @@ vendor 包若有运行时 `dependencies`：`npm install --omit=dev --no-audit --
 
 ## static/patches/ 三个补丁
 
+共用 `pi-root.mjs` 定位 pi 安装目录（托管安装 / npm 全局，见上文），补丁目标一律是**当前活动安装**：托管安装为 `~/.pi/agent/install/releases/<版本>/node_modules/...` 与启动器 `~/.pi/agent/bin/pi`；npm 全局为 `npm root -g` 与全局 bin。
+
 | 脚本 | 作用 | 写入位置 | 参数 / 幂等 |
 |---|---|---|---|
-| `apply-pi-ai-usage-guard.mjs` | pi-ai `dist/utils/estimate.js` 的 `calculateContextTokens` 对缺 usage 的消息抛 TypeError（模型偶发无文字回答会导致后续调用瞬时失败）；顺带把 `dist/api/anthropic-messages.js` 的 `message_start` usage 解析改可选链 | 全局 `node_modules/@earendil-works/pi-ai/dist/`（原地 patch） | 无参数；源码含 `PATCH(usage-guard)` 标记即跳过；目标旧串匹配不上 `exit(1)` 拒绝执行 |
+| `apply-pi-ai-usage-guard.mjs` | pi-ai `dist/utils/estimate.js` 的 `calculateContextTokens` 对缺 usage 的消息抛 TypeError（模型偶发无文字回答会导致后续调用瞬时失败）；顺带把 `dist/api/anthropic-messages.js` 的 `message_start` usage 解析改可选链 | 活动安装的 `@earendil-works/pi-ai/dist/`（原地 patch） | 无参数；源码含 `PATCH(usage-guard)` 标记即跳过；目标旧串匹配不上 `exit(1)` 拒绝执行 |
 | `apply-zuchongzhi-zh.mjs` | 祖冲之汉化：直接替换 pi 全局 dist 编译产物里硬编码的英文 UI 文案（`dist/modes/interactive/` 10 个文件 + `pi-tui` 的 settings-list + `dist/bundle/chunks/*.js` 并集，仅带引号条目扩散到压缩产物） | 同上（dist 与 pi-tui dist） | `--dry-run`/`-n`、`--restore`（从 `~/.pi/agent/tmp/zuchongzhi/backup/` 还原，还原前校验 `version.json` 的 pi 版本戳，不符拒绝）；`state.json` 记 SHA256，pi 升级哈希变化 → 自动废弃旧备份、重新备份重打；写盘前 `node --check` 语法校验。处数口径以脚本实跑输出为准（文档里的数字已过时） |
-| `apply-pi-launch-report.mjs` | 启动垫片取证 v2：给 npm 的 pi 启动垫片注入 `--max-old-space-size=8192 --report-on-fatalerror --report-directory=~/.pi/agent/reports`、stderr 追加落盘 `~/.pi/agent/pi-stderr.log`、ps1 记 `[START]/[EXIT]`。Windows `pi.cmd`/`pi.ps1`；POSIX 旧式 sh 垫片走 NODE_OPTIONS（cmd 因 SETLOCAL 回收环境变量改为调用行内联 node 旗标）；npm 11 起 POSIX 全局 bin 是符号链接（pi → 包内 ESM 垫片），补丁把它改写为 spawn wrapper 拉起 `cli-runtime.js` + 信号/退出码转发 + 保留 NODE_COMPILE_CACHE | npm 全局 bin 垫片（**不写 node_modules**），并建 `~/.pi/agent/reports` | 无参数；含 `PI-CRASH-FORENSICS` 标记跳过；每次运行先 strip 旧 v1 注入；崩溃取证史见文件头注释（不写入本文档） |
+| `apply-pi-launch-report.mjs` | 启动垫片取证 v2：给 pi 启动器注入 `--max-old-space-size=8192 --report-on-fatalerror --report-directory=~/.pi/agent/reports`、stderr 追加落盘 `~/.pi/agent/pi-stderr.log`、记 `[START]/[EXIT]`。托管安装启动器（`<agent>/bin/pi` sh）在调用行前 export NODE_OPTIONS、行尾 `2>>` 重定向、去掉 `exec` 以便记退出码；npm 侧 Windows `pi.cmd`/`pi.ps1`，POSIX 旧式 sh 垫片走 NODE_OPTIONS（cmd 因 SETLOCAL 回收环境变量改为调用行内联 node 旗标）；npm 11 起 POSIX 全局 bin 是符号链接（pi → 包内 ESM 垫片），补丁把它改写为 spawn wrapper 拉起 `cli-runtime.js` + 信号/退出码转发 + 保留 NODE_COMPILE_CACHE | pi 启动器（实际在用 / 托管 / npm 全局里第一个存在的启动器目录；**不写 node_modules**），并建 `~/.pi/agent/reports` | 无参数；含 `PI-CRASH-FORENSICS` 标记跳过；每次运行先 strip 旧注入；注入失败（启动器形态不认识）只警告不写盘；崩溃取证史见文件头注释（不写入本文档） |
 
-三个补丁都与渲染模式无关；`fullscreen` 渲染已是定稿默认，旧的滚动冻结补丁（`apply-pi-tui-scroll-freeze.mjs`）已随定稿移除。pi 升级（`npm i -g`）会覆盖 dist/垫片，故都需重跑（祖冲之脚本重跑即自动收敛）。
+三个补丁都与渲染模式无关；`fullscreen` 渲染已是定稿默认，旧的滚动冻结补丁（`apply-pi-tui-scroll-freeze.mjs`）已随定稿移除。pi 升级（`pi update` / `npm i -g`）会重写 dist 与启动器，故都需重跑（祖冲之脚本重跑即自动收敛）。

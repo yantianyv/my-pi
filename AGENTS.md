@@ -15,7 +15,7 @@ pi（`@earendil-works/pi-coding-agent`）的个人定制配置仓库：扩展、
 | `cd src && npm install` | 拉构建依赖（esbuild 等装入 `src/node_modules`） |
 | `cd src && npm run typecheck` | = `npx typescript -p config/tsconfig.json`，全扩展类型检查（`tsconfig.json` 是 install.js 生成物；当前 0 报错，换机器/pi 升级后重跑 `node install.js` 重新生成即可） |
 | `node src/extensions/<...>/test/<name>.test.mjs` | 回归测试（无 runner、无 test script，见「测试说明」） |
-| `node static/patches/<脚本>.mjs` | pi 全局产物补丁（install.js **不会**代跑；pi 升级后需重跑） |
+| `node static/patches/<脚本>.mjs` | pi 安装产物补丁（3 个：usage 防护 / 祖冲之汉化 / 启动垫片取证）；install.js **不会**代跑；pi 升级后需重跑 |
 
 安装后在 pi 里 `/reload` 热加载扩展生效。
 
@@ -72,7 +72,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 
 - **无框架、无 runner、无 CI、无 lint**：32 个 `*.test.mjs` 都是独立可执行脚本（自定义 `check()` + exit code，唯一例外 `shared/test/shell-split.test.mjs` 用 `node:assert/strict`），每个文件单独跑：`node src/extensions/<...>/test/<name>.test.mjs`（仓库根执行）。
 - 测试需要 `.ts` 时用 esbuild 现场 bundle 成 `.tmp-*.mjs` 再 import（external 白名单同 build.js，tsconfig 用 `config/tsconfig.build.json`）；`qr` 例外（用 jiti 加载产物，与运行时一致）。
-- 集成类测试（ask / qr / workflow-mgr / `src/extensions/test/`）依赖 `src/extensions/node_modules/` 的 pi 全局包副本（不入库）——换机器或 pi 升级后跑 `node src/extensions/test/relink-deps.mjs` 重建（优先链接，不支持链接的文件系统回退递归复制）；`hud/test` 与 `shared/test` 不需要。
+- 集成类测试（ask / qr / workflow-mgr / `src/extensions/test/`）依赖 `src/extensions/node_modules/` 的 pi 安装包副本（不入库）——换机器或 pi 升级后跑 `node src/extensions/test/relink-deps.mjs` 重建（优先链接，不支持链接的文件系统回退递归复制）；`hud/test` 与 `shared/test` 不需要。
 - 缺省全部离线可跑；`MIMO_LIVE=1`、各 `*-live.mjs` 才需要真实网络/环境（硬编码本机路径，换机器不可用）。
 - 新增/修改 `setStatus` 的 key 必须同步登记 `hud-core.ts` 的 `STATUS_STYLE`，否则 `status-keys.test.mjs` 失败且状态永远不会显示。
 
@@ -80,8 +80,9 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 
 - **改完不重装不生效**：源码在 `src/extensions/`，运行时是 `~/.pi/agent/extensions/` 的副本（dist 产物），两处易不同步。流程：改 `src/extensions/` → `node src/build.js` → `node install.js`（或一步 `node install.js`）→ pi 内 `/reload`。只改静态资源（主题色、提示音）可 `node install.js --skip-build`。
 - **install.js 会改用户全局文件/目录**（`~/.pi/agent/` 下 settings.json 的 theme + hideThinkingBlock + packages、models.json、AGENTS.md 标记块、extensions 并删历史扩展、vendor 并删已移除包、themes/sounds/skills、rtk 二进制、全局 npm；Linux 另写 `~/.config/fontconfig/conf.d/99-pi-symbols.conf` 修符号字形回退）；先跑 `--dry-run` 预览。models.json 是深度合并（模板键为准），用户文件 JSON 解析失败会被模板覆盖。
-- `static/patches/` 三个补丁**不由 install.js 执行**，需手工 `node static/patches/<脚本>.mjs`；pi 升级后都要重跑（祖冲之脚本重跑即自动收敛）。
-- `src/config/tsconfig.json` 是 install.js 生成物（gitignore）：`npm root -g` 探测失败会回落常见全局目录候选，全找不到才跳过生成并给出提示。换机器/pi 升级重跑 `node install.js` 即可。
+- `static/patches/` 三个补丁**不由 install.js 执行**，需手工 `node static/patches/<脚本>.mjs`；pi 升级后都要重跑（祖冲之脚本重跑即自动收敛）。**pi 安装目录定位统一走 `static/patches/pi-root.mjs`**（托管安装 releases-v1 与 npm 全局两种布局都认，别在各脚本里自写探测）。
+- `src/config/tsconfig.json` 是 install.js 生成物（gitignore）：按 `__PI_PKG_*` / `__PI_TYPES__` 占位符逐个解析 pi 各包 .d.ts（托管安装与 npm 全局、嵌套与提升布局都认）；探测不到 pi 安装目录才跳过生成并给出提示。换机器/pi 升级重跑 `node install.js` 即可。
+- **pi 用自带安装器时为「托管安装」**（`~/.pi/agent/install/releases/<版本>/node_modules` + 启动器 `~/.pi/agent/bin/pi`，环境变量 `PI_MANAGED_INSTALL_ROOT`），此时 `npm root -g` 下没有 pi：install.js、补丁脚本、relink-deps 均按托管安装优先探测，不要再假设 npm 全局。
 - **`tool_result` 钩子改写 content 必须透传 `structuredContent`**（`structuredContent: event.structuredContent`）：pi ≥ 0.99 的 runner 见到 content 被替换而未带 structuredContent 会丢弃它。img-slim / pair-guard 已遵此约束。
 - **`navigateTree` 只返回 `{cancelled}`**：编辑框文本回填由 interactive-mode 内部完成，扩展侧拿不到 editorText（claude-it `/rewind` 依赖此行为）。
 - `claude-it.ts` 会拦截裸输入 `exit`（不带 `/`）直接退出 pi，属刻意设计。

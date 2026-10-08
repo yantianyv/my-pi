@@ -8,18 +8,18 @@
 		"skipLibCheck": true,
 		"esModuleInterop": true,
 		"resolveJsonModule": true,
-		// 本文件是模板：install.js 会探测 pi 全局安装目录并把 __PI_ROOT__ 替换为
-		// 实际路径生成 tsconfig.json（该生成物已被 .gitignore 忽略）。
-		// paths 把 pi 全局安装的包映射到本地检查，避免 TS2307；运行时仍由 jiti 加载。
+		// 本文件是模板：install.js 探测 pi 安装目录（npm 全局 / 托管安装），逐个解析包路径后替换
+		// 下列占位符生成 tsconfig.json（该生成物已被 .gitignore 忽略）。
+		// paths 把 pi 安装的包映射到本地检查，避免 TS2307；运行时仍由 jiti 加载。
 		"paths": {
-			"@earendil-works/pi-coding-agent": ["__PI_ROOT__/@earendil-works/pi-coding-agent/dist/index.d.ts"],
-			"@earendil-works/pi-agent-core": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"],
-			"@earendil-works/pi-ai": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
-			"@earendil-works/pi-ai/compat": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/compat.d.ts"],
-			"@earendil-works/pi-tui": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.d.ts"],
-			"typebox": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.d.mts"]
+			"@earendil-works/pi-coding-agent": ["__PI_PKG_CODING_AGENT__"],
+			"@earendil-works/pi-agent-core": ["__PI_PKG_AGENT_CORE__"],
+			"@earendil-works/pi-ai": ["__PI_PKG_AI__"],
+			"@earendil-works/pi-ai/compat": ["__PI_PKG_AI_COMPAT__"],
+			"@earendil-works/pi-tui": ["__PI_PKG_TUI__"],
+			"typebox": ["__PI_PKG_TYPEBOX__"]
 		},
-		"typeRoots": ["__PI_ROOT__/@earendil-works/pi-coding-agent/node_modules/@types"]
+		"typeRoots": ["__PI_TYPES__"]
 	},
 	"include": ["../extensions/**/*.ts"]
 }

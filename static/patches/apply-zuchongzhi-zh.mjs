@@ -47,7 +47,7 @@
  *   node patches/apply-zuchongzhi-zh.mjs --restore  从备份还原英文原文
  *
  * 环境变量（测试/调试用）：
- *   PI_HAN_ROOT  覆盖 pi 安装根目录（默认 npm root -g 探测）
+ *   PI_HAN_ROOT  覆盖 pi 安装根目录（默认自动探测：托管安装 / npm 全局，见 pi-root.mjs）
  *   PI_HAN_TMP   覆盖状态/备份目录（默认 ~/.pi/agent/tmp/zuchongzhi/）
  *
  * 幂等与升级：~/.pi/agent/tmp/zuchongzhi/state.json 记录每个文件 SHA256，
@@ -55,11 +55,12 @@
  * 缺失目标串（pi 升级导致文案变动）只警告不致命，汇总列出供人工核对。
  * 汉化后用 /reload 或重启 pi 生效；不改会话文件，不影响 LLM 上下文。
  */
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { piPackageDir, piPackageRoot } from "./pi-root.mjs";
 
 const dryRun = process.argv.includes("--dry-run") || process.argv.includes("-n");
 const restore = process.argv.includes("--restore");
@@ -82,7 +83,7 @@ const PATCHES = {
 		["Print the transcript or only a session resume hint when exiting fullscreen mode", "退出全屏模式时打印完整记录，或只打印会话恢复提示"],
 		["Scrollbar behavior in fullscreen mode; has no effect in regular mode", "全屏模式下的滚动条行为；常规模式下无效"],
 		["Resize large images to 2000x2000 max for better model compatibility", "将大图缩放至最长边 2000px 以提升模型兼容性"],
-		["Horizontal padding for user messages, assistant messages, and thinking", "用户消息、助手消息与思考块的水平内边距"],
+		["Horizontal padding for messages, tool output, and command output", "消息、工具输出与命令输出的水平内边距"],
 		["Show OSC 9;4 progress indicators in the terminal tab bar", "在终端标签栏显示 OSC 9;4 进度指示"],
 		["Automatically copy selected text in fullscreen mode; disable to copy selections with Ctrl+X", "全屏模式下选中即复制；禁用后需按 Ctrl+X 复制选中内容"],
 		["Enter while streaming queues steering messages. 'one-at-a-time': deliver one, wait for response. 'all': deliver all at once.", "流式输出期间按 Enter 会排队引导消息。「one-at-a-time」：逐条送达并等待响应；「all」：一次全部送达。"],
@@ -428,17 +429,15 @@ const BUNDLE_EXTRA = [
 	["Resume a session", "恢复会话"],
 ];
 
-/** 探测 pi 安装根目录（含 dist/modes/interactive/ 的包根）。 */
+/** 探测 pi 安装包根目录（含 dist/modes/interactive/ 的包根）。 */
 function findPiRoot() {
 	if (process.env.PI_HAN_ROOT) return process.env.PI_HAN_ROOT;
-	try {
-		// execSync 走 shell，Windows 下能解析 npm.cmd
-		const root = execSync("npm root -g", { encoding: "utf8" }).trim();
-		if (root && fs.existsSync(path.join(root, "@earendil-works", "pi-coding-agent"))) {
-			return path.join(root, "@earendil-works", "pi-coding-agent");
-		}
-	} catch {}
-	throw new Error("未找到 pi 全局安装（npm root -g 探测失败），可设置 PI_HAN_ROOT 指定安装根目录");
+	return piPackageRoot();
+}
+
+/** pi-tui 包 dist 目录（补丁目标之一）。 */
+function tuiDistDir() {
+	return path.join(piPackageDir("@earendil-works/pi-tui"), "dist");
 }
 
 function sha256(s) {
@@ -485,7 +484,7 @@ function main() {
 		}
 		let restored = 0;
 		const bundleDir = path.join(root, "dist", "bundle");
-		const tuiDir = path.join(root, "node_modules", "@earendil-works", "pi-tui", "dist");
+		const tuiDir = tuiDistDir();
 		for (const rel of fs.readdirSync(backupDir, { recursive: true })) {
 			const from = path.join(backupDir, rel);
 			if (!fs.statSync(from).isFile()) continue;
@@ -630,7 +629,7 @@ function main() {
 
 	// pi-tui 未打包组件（扩展经包导入渲染的列表/选择器）
 	if (!syntaxError) {
-		const tuiDir = path.join(root, "node_modules", "@earendil-works", "pi-tui", "dist");
+		const tuiDir = tuiDistDir();
 		for (const [rel, entries] of Object.entries(PATCHES_TUI)) {
 			if (!applyToFile(path.join(tuiDir, rel), entries, path.join("pi-tui", rel), `pi-tui/${rel}`)) break;
 		}
