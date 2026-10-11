@@ -181,6 +181,7 @@ function loadEnabled(): boolean {
 let enabled = loadEnabled();
 let budgetLeft = MAX_CONTINUATIONS; // 本次用户输入还剩几次自检额度
 let awaitingTriage = false; // 已注入 keep-ask，等自检轮收尾
+let pendingTriage: Triage | null | undefined; // message_end 预解析的自检结果（替换显示后原文已毁，turn_end 必须复用）
 let awaitingGo = false; // 已注入 keep-go，等续跑轮验证有没有实际动作
 let runDidWork = false; // 本轮（自上次用户输入起）出现过改写类工具调用
 let hintCache: Map<string, boolean | undefined> | null = null; // 工具注解缓存（随 before_agent_start 重建）
@@ -223,6 +224,7 @@ export default function (pi: ExtensionAPI) {
 		const msg = event.message as Msg;
 		if (msg.role !== "assistant" || hasToolCalls(msg)) return;
 		const t = parseTriage(assistantText(msg));
+		pendingTriage = t; // 替换会破坏原文，把解析结果带给紧随其后的 turn_end
 		if (!t) return; // 无法解析的回答是面向用户的自然语言，原样保留
 		return { message: { ...msg, content: [{ type: "text", text: triageDisplay(t) }] } as AgentMessage };
 	});
@@ -237,6 +239,7 @@ export default function (pi: ExtensionAPI) {
 			enabled = !enabled;
 			saveJsonConfig(CONFIG_FILE, { enabled });
 			awaitingTriage = false;
+			pendingTriage = undefined;
 			awaitingGo = false;
 			if (enabled) budgetLeft = MAX_CONTINUATIONS;
 			else clearStatus(ctx);
@@ -253,6 +256,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", () => {
 		budgetLeft = MAX_CONTINUATIONS;
 		awaitingTriage = false;
+		pendingTriage = undefined;
 		awaitingGo = false;
 		runDidWork = false;
 		hintCache = null;
@@ -286,7 +290,10 @@ export default function (pi: ExtensionAPI) {
 		// 以下都是「无 toolCall」的收尾轮
 		if (awaitingTriage) {
 			awaitingTriage = false;
-			const t = parseTriage(assistantText(msg));
+			// message_end 已把消息替换为展示行，原文 JSON 不存在了，用预解析结果；
+			// 未经过 message_end（如历史消息收尾）才回退到原文解析
+			const t = pendingTriage !== undefined ? pendingTriage : parseTriage(assistantText(msg));
+			pendingTriage = undefined;
 			if (!t) {
 				clearStatus(ctx);
 				ctx.ui.notify("keep：自检回答无法解析，保持停下（需要时手动指示）", "warning");

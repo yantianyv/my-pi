@@ -68,7 +68,12 @@ async function makeHarness(tools = [], configPath) {
 	const work = (toolName = "edit") => handlers["tool_execution_end"]({ toolName }, ctx);
 	const newRun = () => handlers["before_agent_start"]({}, ctx);
 	const messageEnd = (message) => handlers["message_end"]?.({ message }, ctx);
-	return { handlers, commands, notifies, ctx, turnEnd, filter, work, newRun, messageEnd, renderers };
+	// 完整自检轮：message_end（可能替换消息）→ turn_end 收到替换后的消息（模拟 pi 真实状态流转）
+	const triageTurn = (message) => {
+		const pretty = messageEnd(message);
+		return { pretty, r: turnEnd(pretty?.message ?? message) };
+	};
+	return { handlers, commands, notifies, ctx, turnEnd, filter, work, newRun, messageEnd, triageTurn, renderers };
 }
 
 // ---------------------------------------------------------------------------
@@ -122,8 +127,8 @@ async function main() {
 		const r1 = h.turnEnd(answerText("做到这里先停了"));
 		check("默认开：自然停点 → 注入 keep-ask 并 continue",
 			r1?.continue === true && r1.entries?.[0]?.customType === "keep-ask");
-		const r2 = h.turnEnd(answerText('{"class":"A","reason":"还差测试","next":"跑测试"}'));
-		check("答 A → 注入 keep-go 并 continue",
+		const r2 = h.triageTurn(answerText('{"class":"A","reason":"还差测试","next":"跑测试"}')).r;
+		check("答 A → 注入 keep-go 并 continue（经 message_end 替换后仍识别）",
 			r2?.continue === true && r2.entries?.[0]?.customType === "keep-go");
 		const r3 = h.turnEnd(answerText("我想了想还是不干了"));
 		check("续跑轮仍无 toolCall → 直接停（防死循环）", r3 === undefined);
@@ -163,9 +168,8 @@ async function main() {
 		const h = await makeHarness();
 		h.work();
 		h.turnEnd(answerText("停")); // 注入 keep-ask，进入等回答状态
-		const pretty = h.messageEnd(answerText('{"class":"B","reason":"要用户选方案"}'));
+		const { pretty, r } = h.triageTurn(answerText('{"class":"B","reason":"要用户选方案"}'));
 		check("答 B → 消息替换为人话行", pretty?.message?.content?.[0]?.text?.includes("需要人工") === true);
-		const r = h.turnEnd(answerText('{"class":"B","reason":"要用户选方案"}'));
 		check("答 B → 停下", r === undefined);
 	}
 	{
@@ -181,7 +185,7 @@ async function main() {
 		const h = await makeHarness();
 		h.work();
 		h.turnEnd(answerText("停"));
-		const r = h.turnEnd(answerText('{"class":"C","reason":"全部完成"}'));
+		const r = h.triageTurn(answerText('{"class":"C","reason":"全部完成"}')).r;
 		check("答 C → 静默停下（无警告通知）",
 			r === undefined && !h.notifies.some(([k]) => k === "warning"));
 	}
@@ -189,21 +193,21 @@ async function main() {
 		const h = await makeHarness();
 		h.work();
 		h.turnEnd(answerText("停"));
-		const r = h.turnEnd(answerText("我觉得可能是 A 吧"));
+		const r = h.triageTurn(answerText("我觉得可能是 A 吧")).r;
 		check("回答无法解析 → 降级停下并通知", r === undefined && h.notifies.some(([, t]) => t.includes("无法解析")));
 	}
 	{
 		const h = await makeHarness();
 		h.work();
 		h.turnEnd(answerText("停"));
-		const r = h.turnEnd(answerText('分析一下：当前还有收尾工作。{"class":"A","reason":"剩收尾","next":"收尾"} 以上。'));
+		const r = h.triageTurn(answerText('分析一下：当前还有收尾工作。{"class":"A","reason":"剩收尾","next":"收尾"} 以上。')).r;
 		check("解析加固：散文裹 JSON → 捞出并续跑", r?.continue === true && r.entries?.[0]?.customType === "keep-go");
 	}
 	{
 		const h = await makeHarness();
 		h.work();
 		h.turnEnd(answerText("停"));
-		const r = h.turnEnd(answerText('```json\n{"class":"C","reason":"完了","next":""}\n```'));
+		const r = h.triageTurn(answerText('```json\n{"class":"C","reason":"完了","next":""}\n```')).r;
 		check("解析加固：代码围栏 JSON → 捞出并判 C 停下", r === undefined);
 	}
 	{
@@ -211,7 +215,7 @@ async function main() {
 		h.work();
 		h.turnEnd(answerText("停"));
 		// 第一段花括号是干扰项（无合法 class），第二段才是答案
-		const r = h.turnEnd(answerText('格式是 {"class":"D"} 吗？不对，应该是 {"class":"B","reason":"要人拍板","next":""}'));
+		const r = h.triageTurn(answerText('格式是 {"class":"D"} 吗？不对，应该是 {"class":"B","reason":"要人拍板","next":""}')).r;
 		check("解析加固：跳过非法候选取后续合法 JSON（判 B 停下）", r === undefined);
 	}
 	{
