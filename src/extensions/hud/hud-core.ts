@@ -176,6 +176,7 @@ export default async function (pi: ExtensionAPI) {
 		"workflow-mgr": { color: "accent", priority: 72 }, // 人机协作任务摘要 / 完成信号审计（workflow-mgr）
 		"model-switch": { color: "accent", priority: 70 }, // 模型切换
 		"explore": { color: "accent", priority: 68 }, // 探索子代理进度（explore-agent；高于通用运行态）
+		"keep": { color: "accent", priority: 66 }, // 停顿点续航判断/续跑计数（keep）
 		"qr": { color: "accent", priority: 64 }, // 二维码生成/解码状态（qr）
 		"kb-vault": { color: "muted", priority: 62 }, // vault 解锁/锁定状态（webdav-kb）
 		"clipboard": { color: "accent", priority: 61 }, // 剪贴板读写状态（clipboard）

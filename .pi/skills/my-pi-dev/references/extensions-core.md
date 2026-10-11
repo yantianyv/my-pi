@@ -91,6 +91,15 @@
 
 时间感知：`context` 事件给每条 user 消息的**发往模型的副本**贴 `[YYYY-MM-DD HH:mm]` 常量前缀（带年），会话记录/UI/其他扩展看到的上下文均不动。核心事实：AgentMessage 自带 `timestamp`（ms，常量），零对齐零读盘；toolResult 是独立 role 天然不误伤；前缀是常量 → provider 前缀缓存照常命中；`/reload` 后首轮对长历史一次性全 miss（部署时机选在会话初期可避开）。只贴非空文本（string 或首个 text 块），已带前缀（`/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] /`）跳过防重贴；纯图/空串不贴。工具 `now()`：本地时间+星期+时区+ISO，需要绝对「现在」时按需调。无状态 key（behind-the-scenes，不进 STATUS_STYLE 也不报警）。
 
+## keep.ts
+
+- 停顿点续航：`turn_end` 时本轮 assistant 消息无 toolCall、`outcome === "completed"`、无排队消息、预算未用完、**且本轮出现过改写类工具调用**（`WORK_TOOLS` 内建集合 bash/write/edit/codemode → `readOnlyHint` 注解（`pi.getAllTools()`，MCP/扩展声明）→ 无注解按只读（安全默认）；零工具与只读工具的收尾是问答/调研的天然终点，不自检。全仓插件工具已逐个声明 `annotations: { readOnlyHint }`（AGENTS.md 约定新工具注册必带），钉钉工具组按能力统一标 false）→ 注入 custom_message（`keep-ask` 三选一自检）并 continue；自检轮回复 JSON（A/B/C），A 再注入 `keep-go`（下一步指示）continue，B 通知、C 静默、解析失败降级停。防失控：续跑轮仍无 toolCall 直接停 + 每次 `before_agent_start` 重置的预算 16。
+- **in-transcript 追问 + context 过滤**（不用侧路 aiComplete）：provider 前缀缓存从第 0 个 token 起匹配，侧路调用系统提示词不同必然 0 命中（usage 实测主会话每轮增量仅几百 tokens）；自问自答两轮都是主会话正常 turn、缓存全吃。问答留在会话记录（`display: true` 可见可审计），`context` 事件把 keep-ask/keep-go 与「紧跟 keep-ask 的无工具调用 assistant 消息」从 LLM 请求滤掉——无状态规则（靠 customType），/reload 后仍生效；带工具调用的回答必须保留（工具配对）。
+- 过滤必留末尾「活尾巴」（进行中的问答/刚注入的指令是当前轮输入）；续跑必须带注入（pi 边界校验在 entries 落账后重算，custom_message 使 transcript 末尾为 user 角色才合法；自然停点的 `canContinue` 恒 false，不能拿它当守卫）。
+- 命令 `/keep` 无参切换（默认关，会话级）；状态 key `keep`（priority 66）；回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx 驱动）。
+- UI 层：`registerMessageRenderer` 给 keep-ask（一行 dim 摘要）/ keep-go（details 传 reason/next/used/budget，渲染续航计数行 + 下一步）注册定制渲染，原文块不再大段展示；自检回答的生 JSON 在 `message_end` 替换为人话行（`✓/↻/⚠ 自检判定：…——理由`，保角色，context 过滤规则不受影响，无法解析的自然语言回答原样保留）；常规 notify 全删，只留异常类（解析失败/预算耗尽/空转）。
+- 解析兑底（不为弱遵从模型打提示词补丁）：平衡括号扫描从散文/围栏里捞第一个 class 合法的 JSON；捞不到 = 回答是面向用户的自然语言（总结≈C / 求助≈B），语义自洽的兑底就是停下，想继续的模型更常见的表现是直接发工具调用（已被 hasToolCalls 视同 A）。
+
 ## crash-log.ts
 
 崩溃黑匣子：`prependListener` 抢在 pi 的 `uncaughtException` 处理器（同步 exit）之前把堆栈同步落盘 `~/.pi/agent/pi-crash.log`（含 unhandledRejection 与 exit 码；滚动上限 2MB、保留尾部 1MB），崩溃条目与会话文件按时间配对；命令 `/crash-log` 报告最近一条崩溃与取证路径（`clear` 清空日志与 ack）。
