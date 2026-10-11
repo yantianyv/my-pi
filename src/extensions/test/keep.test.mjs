@@ -11,7 +11,8 @@
  * - B/C/解析失败/预算耗尽/排队消息/aborted/关闭状态 均保持停下
  */
 import { build } from "esbuild";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -42,8 +43,9 @@ const toolResult = () => ({ role: "toolResult", toolCallId: "1", toolName: "bash
 
 let importCount = 0;
 // 每个场景独立 import（模块级 enabled 状态不串场；URL 加查询串绕过模块缓存）
-// tools：模拟 pi.getAllTools() 返回的工具注解表
-async function makeHarness(tools = []) {
+// 配置文件经 PI_KEEP_CONFIG 指向唯一临时路径，与真实配置隔离（默认开 = 文件不存在）
+async function makeHarness(tools = [], configPath) {
+	process.env.PI_KEEP_CONFIG = configPath ?? path.join(os.tmpdir(), `keep-test-${process.pid}-${importCount}.json`);
 	const mod = await import(pathToFileURL(OUT).href + `?i=${importCount++}`);
 	const handlers = {};
 	const notifies = [];
@@ -116,11 +118,9 @@ async function main() {
 	// ---- 状态机 ----
 	{
 		const h = await makeHarness();
-		check("关闭时自然停点不动作", h.turnEnd(answerText("做完了")) === undefined);
-		await h.commands["keep"].handler("", h.ctx);
 		h.work();
 		const r1 = h.turnEnd(answerText("做到这里先停了"));
-		check("自然停点 → 注入 keep-ask 并 continue",
+		check("默认开：自然停点 → 注入 keep-ask 并 continue",
 			r1?.continue === true && r1.entries?.[0]?.customType === "keep-ask");
 		const r2 = h.turnEnd(answerText('{"class":"A","reason":"还差测试","next":"跑测试"}'));
 		check("答 A → 注入 keep-go 并 continue",
@@ -131,7 +131,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		check("零工具轮（纯问答）不自检", h.turnEnd(answerText("这是答案")) === undefined);
 		h.work("read");
 		h.work("web_search");
@@ -141,7 +140,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		h.work();
 		check("工作轮停点自检", h.turnEnd(answerText("停"))?.continue === true);
 		h.newRun(); // 新的用户输入 → 重置
@@ -155,7 +153,6 @@ async function main() {
 			{ name: "some_plugin_tool" }, // 无注解
 		];
 		const h = await makeHarness(tools);
-		await h.commands["keep"].handler("", h.ctx);
 		h.work("kb_read");
 		h.work("some_plugin_tool");
 		check("注解只读 + 无注解工具 → 不自检", h.turnEnd(answerText("答")) === undefined);
@@ -164,7 +161,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		h.work();
 		h.turnEnd(answerText("停")); // 注入 keep-ask，进入等回答状态
 		const pretty = h.messageEnd(answerText('{"class":"B","reason":"要用户选方案"}'));
@@ -174,7 +170,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		check("未在等回答时 message_end 不替换", h.messageEnd(answerText('{"class":"C"}')) === undefined);
 		h.work();
 		h.turnEnd(answerText("停"));
@@ -184,7 +179,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		h.work();
 		h.turnEnd(answerText("停"));
 		const r = h.turnEnd(answerText('{"class":"C","reason":"全部完成"}'));
@@ -193,7 +187,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		h.work();
 		h.turnEnd(answerText("停"));
 		const r = h.turnEnd(answerText("我觉得可能是 A 吧"));
@@ -201,7 +194,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		h.work();
 		h.turnEnd(answerText("停"));
 		const r = h.turnEnd(answerText('分析一下：当前还有收尾工作。{"class":"A","reason":"剩收尾","next":"收尾"} 以上。'));
@@ -209,7 +201,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		h.work();
 		h.turnEnd(answerText("停"));
 		const r = h.turnEnd(answerText('```json\n{"class":"C","reason":"完了","next":""}\n```'));
@@ -217,7 +208,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		h.work();
 		h.turnEnd(answerText("停"));
 		// 第一段花括号是干扰项（无合法 class），第二段才是答案
@@ -226,7 +216,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		h.work();
 		check("aborted 不动作", h.turnEnd(answerText("停"), { outcome: "aborted" }) === undefined);
 		check("有排队消息不动作",
@@ -235,7 +224,6 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx);
 		h.work();
 		let asks = 0;
 		for (let i = 0; i < 20; i++) {
@@ -250,8 +238,24 @@ async function main() {
 	}
 	{
 		const h = await makeHarness();
+		await h.commands["keep"].handler("", h.ctx); // 默认开 → 此调为关
+		h.work();
+		check("/keep 关闭后自然停点不动作", h.turnEnd(answerText("做完了")) === undefined);
+		check("开关已写盘", JSON.parse(readFileSync(process.env.PI_KEEP_CONFIG, "utf8")).enabled === false);
+		const h2 = await makeHarness([], process.env.PI_KEEP_CONFIG); // 重新 import 模拟 /reload
+		h2.work();
+		check("持久化：reload 后仍为关", h2.turnEnd(answerText("又做完了")) === undefined);
+		await h2.commands["keep"].handler("", h2.ctx); // 开回
+		const h3 = await makeHarness([], process.env.PI_KEEP_CONFIG);
+		h3.work();
+		check("持久化：开回后 reload 仍为开", h3.turnEnd(answerText("停了"))?.continue === true);
+	}
+	{
+		const h = await makeHarness();
 		await h.commands["keep"].handler("多余的参数", h.ctx);
-		check("带参调用给用法提示且不切换", h.notifies.some(([k]) => k === "warning"));
+		check("带参调用给用法提示", h.notifies.some(([k]) => k === "warning"));
+		h.work();
+		check("带参调用不改变开关（仍为开）", h.turnEnd(answerText("停了"))?.continue === true);
 	}
 
 	const failed = results.filter((r) => !r.ok);

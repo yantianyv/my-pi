@@ -27,11 +27,14 @@
  * 1. 续跑轮（keep-go 后）仍无 toolCall → 直接停，不再追问；
  * 2. 每次用户输入重置的续航预算 MAX_CONTINUATIONS（一次自检消耗 1），用完强制停。
  *
- * 命令：/keep 无参切换开关（默认关，会话级）。状态 key：keep（hud-core STATUS_STYLE 已登记）。
+ * 命令：/keep 无参切换开关（全局持久于 ~/.pi/agent/keep.json，默认开）。状态 key：keep（hud-core STATUS_STYLE 已登记）。
  */
+import * as os from "node:os";
+import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext, TurnEndEvent, TurnEndEventResult } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { Box, Text } from "@earendil-works/pi-tui";
+import { loadJsonConfig, saveJsonConfig } from "./shared/config";
 import { clearStatusTimers, setStatusWithTTL } from "./shared/status";
 
 // ---------------------------------------------------------------------------
@@ -167,7 +170,15 @@ function parseTriage(text: string): Triage | null {
 // 扩展本体
 // ---------------------------------------------------------------------------
 
-let enabled = false; // 会话级开关，默认关
+/** 开关持久化文件（全局粒度，默认开；测试用 PI_KEEP_CONFIG 指向临时文件隔离） */
+const CONFIG_FILE = process.env.PI_KEEP_CONFIG ?? path.join(os.homedir(), ".pi", "agent", "keep.json");
+
+function loadEnabled(): boolean {
+	return loadJsonConfig(CONFIG_FILE, { enabled: true }, (v): v is { enabled: boolean } =>
+		typeof v === "object" && v !== null && typeof (v as { enabled?: unknown }).enabled === "boolean").enabled;
+}
+
+let enabled = loadEnabled();
 let budgetLeft = MAX_CONTINUATIONS; // 本次用户输入还剩几次自检额度
 let awaitingTriage = false; // 已注入 keep-ask，等自检轮收尾
 let awaitingGo = false; // 已注入 keep-go，等续跑轮验证有没有实际动作
@@ -224,6 +235,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			enabled = !enabled;
+			saveJsonConfig(CONFIG_FILE, { enabled });
 			awaitingTriage = false;
 			awaitingGo = false;
 			if (enabled) budgetLeft = MAX_CONTINUATIONS;

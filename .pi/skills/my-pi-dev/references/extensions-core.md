@@ -96,7 +96,7 @@
 - 停顿点续航：`turn_end` 时本轮 assistant 消息无 toolCall、`outcome === "completed"`、无排队消息、预算未用完、**且本轮出现过改写类工具调用**（`WORK_TOOLS` 内建集合 bash/write/edit/codemode → `readOnlyHint` 注解（`pi.getAllTools()`，MCP/扩展声明）→ 无注解按只读（安全默认）；零工具与只读工具的收尾是问答/调研的天然终点，不自检。全仓插件工具已逐个声明 `annotations: { readOnlyHint }`（AGENTS.md 约定新工具注册必带），钉钉工具组按能力统一标 false）→ 注入 custom_message（`keep-ask` 三选一自检）并 continue；自检轮回复 JSON（A/B/C），A 再注入 `keep-go`（下一步指示）continue，B 通知、C 静默、解析失败降级停。防失控：续跑轮仍无 toolCall 直接停 + 每次 `before_agent_start` 重置的预算 16。
 - **in-transcript 追问 + context 过滤**（不用侧路 aiComplete）：provider 前缀缓存从第 0 个 token 起匹配，侧路调用系统提示词不同必然 0 命中（usage 实测主会话每轮增量仅几百 tokens）；自问自答两轮都是主会话正常 turn、缓存全吃。问答留在会话记录（`display: true` 可见可审计），`context` 事件把 keep-ask/keep-go 与「紧跟 keep-ask 的无工具调用 assistant 消息」从 LLM 请求滤掉——无状态规则（靠 customType），/reload 后仍生效；带工具调用的回答必须保留（工具配对）。
 - 过滤必留末尾「活尾巴」（进行中的问答/刚注入的指令是当前轮输入）；续跑必须带注入（pi 边界校验在 entries 落账后重算，custom_message 使 transcript 末尾为 user 角色才合法；自然停点的 `canContinue` 恒 false，不能拿它当守卫）。
-- 命令 `/keep` 无参切换（默认关，会话级）；状态 key `keep`（priority 66）；回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx 驱动）。
+- 命令 `/keep` 无参切换（全局持久 `~/.pi/agent/keep.json`，默认开；测试用 `PI_KEEP_CONFIG` 环境变量隔离配置文件）；状态 key `keep`（priority 66）；回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx 驱动）。
 - UI 层：`registerMessageRenderer` 给 keep-ask（一行 dim 摘要）/ keep-go（details 传 reason/next/used/budget，渲染续航计数行 + 下一步）注册定制渲染，原文块不再大段展示；自检回答的生 JSON 在 `message_end` 替换为人话行（`✓/↻/⚠ 自检判定：…——理由`，保角色，context 过滤规则不受影响，无法解析的自然语言回答原样保留）；常规 notify 全删，只留异常类（解析失败/预算耗尽/空转）。
 - 解析兑底（不为弱遵从模型打提示词补丁）：平衡括号扫描从散文/围栏里捞第一个 class 合法的 JSON；捞不到 = 回答是面向用户的自然语言（总结≈C / 求助≈B），语义自洽的兑底就是停下，想继续的模型更常见的表现是直接发工具调用（已被 hasToolCalls 视同 A）。
 
