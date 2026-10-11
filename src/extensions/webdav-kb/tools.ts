@@ -82,6 +82,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_help ----------
 	pi.registerTool({
 		name: "kb_help",
+		annotations: { readOnlyHint: true },
 		label: "读知识库守则",
 		description:
 			"知识库（WebDAV 云网盘）的使用守则：命名空间、写入规范、检索策略。"
@@ -113,6 +114,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_search ----------
 	pi.registerTool({
 		name: "kb_search",
+		annotations: { readOnlyHint: true },
 		label: "检索知识库",
 		description:
 			"本地全文检索知识库，返回 路径/标题/命中片段/分数。"
@@ -164,6 +166,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_read ----------
 	pi.registerTool({
 		name: "kb_read",
+		annotations: { readOnlyHint: true },
 		label: "读取笔记",
 		description:
 			`读取笔记全文（相对路径，如 /notes/分类/webdav.md；vault 下自动解密）。`
@@ -213,6 +216,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_write ----------
 	pi.registerTool({
 		name: "kb_write",
+		annotations: { readOnlyHint: false },
 		label: "写入笔记",
 		description:
 			"写入/覆盖一篇笔记（相对路径，必须位于 /notes /references /scratch /vault 之一，"
@@ -280,6 +284,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_append ----------
 	pi.registerTool({
 		name: "kb_append",
+		annotations: { readOnlyHint: false },
 		label: "追加笔记",
 		description:
 			"向已有笔记追加内容（vault 下自动解密-追加-加密）。笔记不存在时报错。"
@@ -319,6 +324,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_list ----------
 	pi.registerTool({
 		name: "kb_list",
+		annotations: { readOnlyHint: true },
 		label: "列出目录",
 		description:
 			`列出本地镜像目录（相对路径），便于浏览知识库结构、确认命名空间与已有笔记。`
@@ -367,6 +373,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_upload（LFS：附加真网盘，与 md 知识库隔离） ----------
 	pi.registerTool({
 		name: "kb_upload",
+		annotations: { readOnlyHint: false },
 		label: "上传文件到 LFS",
 		description:
 			"把本地文件上传到知识库的 LFS 大文件区（/lfs/：任何类型文件，不随知识库同步、不参与检索）。"
@@ -437,6 +444,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_download ----------
 	pi.registerTool({
 		name: "kb_download",
+		annotations: { readOnlyHint: false },
 		label: "从 LFS 下载文件",
 		description:
 			"把 /lfs/ 下的文件下载到本地（一次性操作，不留知识库缓存）。"
@@ -480,6 +488,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_lslfs ----------
 	pi.registerTool({
 		name: "kb_lslfs",
+		annotations: { readOnlyHint: true },
 		label: "列出 LFS 大文件",
 		description:
 			"列出 LFS 大文件区（/lfs/）的文件（路径/大小/时间）。基于元数据缓存（1 小时有效）；"
@@ -516,6 +525,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_import（批量导入：本地目录 → kb 命名空间） ----------
 	pi.registerTool({
 		name: "kb_import",
+		annotations: { readOnlyHint: false },
 		label: "批量导入本地目录",
 		description:
 			"把本地目录批量导入知识库（迁移场景）：递归扫描 sourceDir（相对工作目录）下的文本文件（后缀同 kb_write），"
@@ -622,6 +632,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_delete（带二次确认的删除） ----------
 	pi.registerTool({
 		name: "kb_delete",
+		annotations: { readOnlyHint: false },
 		label: "删除笔记",
 		description:
 			"删除一篇笔记（本地镜像 + 远端 + 账本三方一致，vault 自动删密文）。"
@@ -675,6 +686,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_move（移动/重命名：镜像 + 远端 + 账本三方一致，vault 透明搬移） ----------
 	pi.registerTool({
 		name: "kb_move",
+		annotations: { readOnlyHint: false },
 		label: "移动/重命名笔记",
 		description:
 			"移动或重命名笔记（本地镜像 + 远端 + 账本三方一致）。"
@@ -736,6 +748,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_status（同步状态可见性，pull 式轻量） ----------
 	pi.registerTool({
 		name: "kb_status",
+		annotations: { readOnlyHint: true },
 		label: "查同步状态",
 		description:
 			"查看知识库同步状态（本地账本，无需网络）：上次同步时间、冲突文件数（.conflict- 副本）、"
@@ -790,6 +803,7 @@ export function registerKbTools(pi: ExtensionAPI): void {
 	// ---------- kb_sync（AI 触发手动同步：首次配置后 / 离线写入补传 / 迁移与守则更新后同步远端） ----------
 	pi.registerTool({
 		name: "kb_sync",
+		annotations: { readOnlyHint: false },
 		label: "同步知识库",
 		description:
 			"手动增量同步知识库（远端与本地镜像对齐，同步方向随配置自适应）。"

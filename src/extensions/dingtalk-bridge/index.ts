@@ -2572,6 +2572,7 @@ ${out}`;
 	// 唯一逃生舱：只给知识（官方技能正文），不给执行通道
 	pi.registerTool({
 		name: "dws_skill",
+		annotations: { readOnlyHint: true },
 		label: "读钉钉技能文档",
 		description:
 			"查钉钉官方技能文档（dingtalk-* 技能）：无 topic 时列出全部技能及一句话说明，传 topic（短名如 sheet/todo，或全名 dingtalk-chat）返回该技能正文。",
@@ -2877,6 +2878,7 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 	}) => {
 		pi.registerTool({
 			name: def.name,
+			annotations: { readOnlyHint: false }, // 钉钉工具组都能产生外部副作用（发送/写入），按能力标注
 			label: def.label,
 			description: def.description,
 			promptSnippet: `${def.label}：${def.name}(action, …) → 结果`,

@@ -163,6 +163,7 @@ interface AskDetails {
 export function registerAskTool(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "ask",
+		annotations: { readOnlyHint: false },
 		label: "向用户提问",
 		description:
 			"创建问卷向用户批量提问，整屏弹出，用户提交后答案作为本工具结果返回；一次只创建一份。" +

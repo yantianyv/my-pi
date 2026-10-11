@@ -217,6 +217,7 @@ function buildExploreToolDefinition(
 	const visionNote = hasVision ? "子代理模型支持读图，可派发截图/图片/图表分析任务。" : "";
 	return {
 		name: "explore",
+		annotations: { readOnlyHint: true },
 		label: "探索子代理",
 		description:
 			`并行派出 2~${MAX_TASKS} 个只读子代理探索代码库并返回结构化报告（一个任务 = 一个子代理）。` +

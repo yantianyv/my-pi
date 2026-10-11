@@ -53,6 +53,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => clearStatusTimers());
 	pi.registerTool({
 		name: "web_search",
+		annotations: { readOnlyHint: true },
 		label: "联网搜索",
 		description:
 			"搜索互联网，返回标题 + URL + 摘要列表（深读某条用 web_fetch 抓 URL）。"
@@ -118,6 +119,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "web_fetch",
+		annotations: { readOnlyHint: true },
 		label: "抓取网页",
 		description:
 			"抓取网页 URL 转 markdown（正文提取 + 去导航广告 + 截断）。适合深读文档/README；失败时改用 web_search 查摘要。",
@@ -172,6 +174,7 @@ export default function (pi: ExtensionAPI) {
 	// ---- web_dislike：搜索结果差评（动态黑名单，持久化降权） ----
 	pi.registerTool({
 		name: "web_dislike",
+		annotations: { readOnlyHint: false },
 		label: "搜索差评",
 		description:
 			"给低质量域名记差评（本地持久化、跨会话生效）：累计差评使该域名在搜索结果中降权（×0.6/次，5 次滤除）。"

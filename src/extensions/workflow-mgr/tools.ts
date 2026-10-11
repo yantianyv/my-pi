@@ -190,6 +190,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_workflow（工作流定义管理） ---------- */
 	pi.registerTool({
 		name: "wf_workflow",
+		annotations: { readOnlyHint: false },
 		label: "维护工作流",
 		description:
 			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）；动作一律作用于本会话绑定的工作流。" +
@@ -597,6 +598,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_status ---------- */
 	pi.registerTool({
 		name: "wf_status",
+		annotations: { readOnlyHint: true },
 		label: "查工作流状态",
 		description:
 			"工作流管理：获取当前阶段、当前任务（含人机分工、交付物、完成信号）、下一步、阻塞项、里程碑。" +
@@ -616,6 +618,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_switch（推进核心：完成当前 + 开始下一个，或显式切换/搁置转移） ---------- */
 	pi.registerTool({
 		name: "wf_switch",
+		annotations: { readOnlyHint: false },
 		label: "切换任务",
 		description:
 			"推进工作流：一次调用 = 完成当前任务 + 开始下一个。" +
@@ -753,6 +756,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_block ---------- */
 	pi.registerTool({
 		name: "wf_block",
+		annotations: { readOnlyHint: false },
 		label: "标记阻塞",
 		description: "把任务标记为阻塞并记录原因（如等待导师意见、等待数据）。解除时用 wf_switch 重新开始。",
 		promptSnippet: "标记阻塞：wf_block(reason[, taskId]) → 任务转 blocked 并记录原因",
@@ -783,6 +787,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_rollback ---------- */
 	pi.registerTool({
 		name: "wf_rollback",
+		annotations: { readOnlyHint: false },
 		label: "回退任务",
 		description:
 			"把任务状态回退到 todo 或 doing（如发现误标完成、需要重做）。" +
@@ -833,6 +838,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_note（AI 记录） ---------- */
 	pi.registerTool({
 		name: "wf_note",
+		annotations: { readOnlyHint: false },
 		label: "记录信息",
 		description:
 			"AI 的记录工具：记录后续步骤需要知晓的信息。进入新步骤先 list 查看已有记录，不再需要的及时 remove。\n" +
@@ -941,6 +947,7 @@ export function registerTools(pi: ExtensionAPI) {
 	/* ---------- 工具：wf_milestone ---------- */
 	pi.registerTool({
 		name: "wf_milestone",
+		annotations: { readOnlyHint: false },
 		label: "设置里程碑",
 		description:
 			"设置/更新/删除里程碑（名称/日期/完成态）。名称不存在则自动创建，如 开题、中期、答辩。" +

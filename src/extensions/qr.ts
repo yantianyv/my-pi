@@ -285,6 +285,7 @@ export default function (pi: ExtensionAPI) {
 	// ---- qr_encode：文本 → 二维码（显示到 UI + 可选 PNG 落盘） ----
 	pi.registerTool({
 		name: "qr_encode",
+		annotations: { readOnlyHint: false },
 		label: "生成二维码",
 		description:
 			"把文本（URL/Wi-Fi 配置/名片等）编码成二维码并显示到用户界面（图形终端 PNG 真图、普通终端字符绘制，可直接扫码），默认同时保存 PNG（save=false 则不落盘）。",
@@ -368,6 +369,7 @@ export default function (pi: ExtensionAPI) {
 	// ---- qr_decode：图片 → 二维码文本 ----
 	pi.registerTool({
 		name: "qr_decode",
+		annotations: { readOnlyHint: true },
 		label: "解码二维码",
 		description:
 			"从图片解码二维码：本地路径或 http(s) URL，PNG/JPEG（自动尝试正反色）。返回码内文本与版本/尺寸元信息。",

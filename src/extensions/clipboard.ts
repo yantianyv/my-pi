@@ -163,6 +163,7 @@ function normalizeNewlines(s: string): string {
 	// ---- clipboard_get：读取剪贴板 ----
 	pi.registerTool({
 		name: "clipboard_get",
+		annotations: { readOnlyHint: true },
 		label: "读取剪贴板",
 		description:
 			"读取系统剪贴板文本（用户最近复制的内容）。为空或只含图片等非文本时返回提示；超长截断并提示。",
@@ -217,6 +218,7 @@ function normalizeNewlines(s: string): string {
 	// ---- clipboard_set：写入剪贴板 ----
 	pi.registerTool({
 		name: "clipboard_set",
+		annotations: { readOnlyHint: false },
 		label: "写入剪贴板",
 		description:
 			"把文本写入系统剪贴板（覆盖现有内容），供用户直接 Ctrl+V 粘贴；空字符串 = 清空。"

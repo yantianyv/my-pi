@@ -317,6 +317,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "mimo_transcribe",
+		annotations: { readOnlyHint: true },
 		label: "解析音频/视频",
 		description:
 			"解析本地音频/视频（或公网 URL）：返回逐字稿，或按 prompt 指定要求解析（要点、行动项、时间轴）。" +
@@ -377,6 +378,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "mimo_speak",
+		annotations: { readOnlyHint: false },
 		label: "合成语音",
 		description: "把文字合成为语音文件并播放（可换音色；适合把较长内容念给用户听）。",
 		promptSnippet: "合成语音：mimo_speak(text[, voice][, out][, play]) → 音频文件路径",

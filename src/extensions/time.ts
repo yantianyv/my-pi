@@ -101,6 +101,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "now",
+		annotations: { readOnlyHint: true },
 		label: "查询当前时间",
 		description:
 			"获取当前本地时间（含星期、时区、ISO 串）。需要绝对的「现在」时调用：给输出落日期、「隔了多久」的换算基点、"

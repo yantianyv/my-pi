@@ -438,6 +438,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "set_title",
+		annotations: { readOnlyHint: false },
 		label: "自报工作标题",
 		description:
 			"给当前会话设置工作标题，讲述整个工作在干啥（如「重构 HUD 余额模块」）。同步为会话显示名，" +
