@@ -621,6 +621,9 @@ export function mediaKind(args: string[]): string | undefined {
 
 const hasCJK = (s: string): boolean => /[㐀-鿿豈-﫿]/.test(s);
 
+/** 某个 token 像稳定 ID（无中文且够长；cid 等 base64 串常带 = 填充符）还是像姓名 */
+export const isIdLike = (s: string): boolean => !hasCJK(s) && /^[0-9A-Za-z_+\-=]{6,}$/.test(s.trim());
+
 /** 取 flag→值 配对（报错文案需区分是姓名还是群名） */
 function flagPairs(args: string[], flags: Set<string>): { flag: string; value: string }[] {
 	const out: { flag: string; value: string }[] = [];
@@ -1296,6 +1299,11 @@ export function parseGroups(text: string): { cid: string; name: string; extra: s
 	} catch {
 		return [];
 	}
+}
+
+/** 群名精确匹配（chat-search 结果经 parseGroups 后按 name 全等过滤） */
+export function matchGroupsByName(list: { cid: string; name: string; extra: string }[], token: string): { cid: string; name: string; extra: string }[] {
+	return list.filter((g) => g.name === token.trim());
 }
 
 /**
@@ -2643,9 +2651,6 @@ ${out}`;
 		return hit;
 	};
 
-	/** 某个 token 像稳定 ID（无中文且够长）还是像姓名 */
-	const isIdLike = (s: string): boolean => !hasCJK(s) && /^[0-9A-Za-z_+-]{6,}$/.test(s.trim());
-
 	/** 调 dws 并解析 JSON（失败 / 非 JSON 返回 null） */
 	const callJson = async (args: string[]): Promise<unknown | null> => {
 		try {
@@ -2741,19 +2746,15 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 	const resolveGroup = async (token: string): Promise<{ ok: ResolvedGroup } | { error: string }> => {
 		if (isIdLike(token) && token.startsWith("cid")) return { ok: { token, cid: token } };
 		const data = await callJson(["chat", "+chat-search", "--query", token]);
-		const list = data ? parseGroups(JSON.stringify(data)) : [];
-		const hits = list.filter((g) => ci(g, "title") === token || ci(g, "openConversationId"));
-		const named = hits.filter((g) => pickStr(ci(g, "title")) === token);
-		const cands = named.length ? named : hits;
+		const cands = data ? matchGroupsByName(parseGroups(JSON.stringify(data)), token) : [];
 		if (!cands.length) return { error: `没找到群「${token}」——核对群名用字，或直接给会话 ID` };
 		if (cands.length > 1) {
-			const lines = cands.map((g) => `· ${pickStr(ci(g, "title"))}（${pickStr(ci(g, "openConversationId"))}）`);
+			const lines = cands.map((g) => `· ${g.name}（${g.cid}）`);
 			return { error: `群名「${token}」匹配到 ${cands.length} 个会话，请让用户确认：\n${lines.join("\n")}\n（确认后把 group 改成对应的 openConversationId）` };
 		}
 		const g = cands[0]!;
-		const cid = pickStr(ci(g, "openConversationId"));
-		if (!cid) return { error: `群「${token}」没解析出会话 ID` };
-		return { ok: { token, cid, title: pickStr(ci(g, "title")) || token } };
+		if (!g.cid) return { error: `群「${token}」没解析出会话 ID` };
+		return { ok: { token, cid: g.cid, title: g.name || token } };
 	};
 
 	/** 单聊会话定位：姓名 → 对方 openDingTalkId → 单聊会话 ID（转发/回复/撤回的目标也可能是个人） */

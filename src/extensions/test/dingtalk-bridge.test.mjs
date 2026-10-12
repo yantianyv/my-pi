@@ -49,7 +49,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, parseCanonicalPath, matchToolByPath, localAliases, formalFlagError, reviewKind, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, parseCanonicalPath, matchToolByPath, localAliases, formalFlagError, reviewKind, isIdLike, matchGroupsByName, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -257,6 +257,17 @@ console.log("U、群与本人解析");
 	const me = parseSelf(JSON.stringify({ ok: true, data: { name: "严天宇", userId: "u1", dept: "教研室" } }));
 	check("本人身份提取", me && me.name === "严天宇" && me.userId === "u1");
 	check("坏输入不抛", parseSelf("nope") === null && parseGroups("nope").length === 0);
+	// 回归：群名→cid 链路（resolveGroup 曾按 title/openConversationId 键过滤 parseGroups 结果，永远 0 命中）
+	const search = parseGroups(JSON.stringify({ chats: [
+		{ name: "乌鲁木齐市第八中学", title: "乌鲁木齐市第八中学", openConversationId: "cidGcszODYFzAG2T9Ho4vjuaQ==", groupType: "INTERNAL_GROUP", memberCount: 388 },
+		{ name: "工作通知:乌鲁木齐市第八中学", openConversationId: "cideXP/5BH3MjO4sFa+God1ew==" },
+	] }));
+	const hit = matchGroupsByName(search, "乌鲁木齐市第八中学");
+	check("群名精确匹配取 cid", hit.length === 1 && hit[0].cid === "cidGcszODYFzAG2T9Ho4vjuaQ==");
+	check("部分同名不误配", matchGroupsByName(search, "第八中学").length === 0);
+	// 回归：base64 填充符 == 曾使 isIdLike 拒收真实 cid
+	check("带 == 的 cid 视为 ID", isIdLike("cidGcszODYFzAG2T9Ho4vjuaQ==") === true);
+	check("中文群名不视为 ID", isIdLike("乌鲁木齐市第八中学") === false);
 }
 
 console.log("V、钉盘/云盘分享解析");
