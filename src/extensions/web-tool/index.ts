@@ -7,7 +7,7 @@
  *   标题/URL/摘要按权重计分 + 完整查询短语命中强加成，跨源去重（URL 规范化 /
  *   标题归一化）后按分数降序取前 15 条——两个源的高质量条目都能入选，bing 泛化
  *   查询（地名+机构被吞长尾词）混入的低相关条目自然沉底；
- * - 垂类包：npm registry JSON API（source: "npm"）；pypi.org 搜索页有 Client
+ * - 垂类 JSON API：npm registry（source: "npm"）/ GitHub 仓库搜索（source: "github"）；pypi.org 搜索页有 Client
  *   Challenge 反爬（实测 curl 只回挑战页），不做垂类源，Python 包让 agent 走
  *   普通网页搜索查；
  * - 不依赖服务端 AI 总结：直接返回 标题+URL+摘要 列表由主 agent 自行判断，
@@ -29,7 +29,7 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { setStatusWithTTL, clearStatusTimers } from "../shared/status";
-import { searchWeb, searchNpm, formatSearchResults, type SearchResult } from "./search";
+import { searchWeb, searchNpm, searchGithub, formatSearchResults, type SearchResult } from "./search";
 import { fetchAsMarkdown, DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT } from "./fetch";
 import { loadDislikeData, saveDislikeData, dislikeKey, DISLIKE_BAN_THRESHOLD } from "./dislike";
 import { getProxyUrl, setProxySetting, validateProxy } from "./http";
@@ -57,7 +57,7 @@ export default function (pi: ExtensionAPI) {
 		label: "联网搜索",
 		description:
 			"搜索互联网，返回标题 + URL + 摘要列表（深读某条用 web_fetch 抓 URL）。"
-			+ "查 npm 包用 source=\"npm\"；Python 包走默认网页搜索（site:pypi.org/project/）。"
+			+ "查 npm 包用 source=\"npm\"，查 GitHub 仓库用 source=\"github\"；Python 包走默认网页搜索（site:pypi.org/project/）。"
 			+ "低质量结果（文题不符/灌水/死链）用 web_dislike 记差评降权。",
 		promptSnippet: "搜索互联网：web_search(查询词[, source]) → 标题+URL+摘要列表",
 		renderCall: (args, theme) => {
@@ -76,6 +76,7 @@ export default function (pi: ExtensionAPI) {
 					[
 						Type.Literal("web", { description: "通用网页搜索（Bing、360、百度多源合并，按相关度评分排序）" }),
 						Type.Literal("npm", { description: "npm 包搜索（npm registry JSON API）" }),
+						Type.Literal("github", { description: "GitHub 仓库搜索（官方 JSON API，返回仓库名/简介/语言/星数）" }),
 					],
 					{ description: "搜索源类型，默认 web" },
 				),
@@ -95,6 +96,9 @@ export default function (pi: ExtensionAPI) {
 					if ((params.source ?? "web") === "npm") {
 						results = await searchNpm(params.query);
 						src = "npm";
+					} else if (params.source === "github") {
+						results = await searchGithub(params.query);
+						src = "github";
 					} else {
 						const r = await searchWeb(params.query);
 						results = r.results;

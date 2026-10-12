@@ -6,6 +6,8 @@
  * - 代理配置（/web-tool-config 写入，持久化到 ~/.pi/agent/web-fetch-proxy.json，reload 后恢复）
  * - 双路径 fetch：global fetch 直连 + Node http/https 经 HTTP 代理建 CONNECT 隧道
  *   （被墙/网络不可达时自动经代理重试一次）；统一 FRes 响应类型（含 gzip/br/deflate 解码）
+ * - curl 通道：Node 的 TLS 指纹会被 GitHub 等站点判死（301 挑战循环 / 400 Bad Request），
+ *   系统 curl（Windows schannel）指纹不同可绕过——fetch 降级与 GitHub API 兜底都用它
  * - 字符编码探测与解码（兼容 gbk/big5 等常见非 utf-8 站点）
  * - httpGet：GET 文本（浏览器标准请求头），供搜索源使用
  *
@@ -16,6 +18,7 @@ import * as path from "node:path";
 import * as http from "node:http";
 import * as https from "node:https";
 import * as zlib from "node:zlib";
+import { execFile } from "node:child_process";
 import { loadJsonConfig, saveJsonConfig } from "../shared/config";
 import { makeProxyConnection, makeTimeoutSignal } from "../shared/net";
 
@@ -238,6 +241,75 @@ export async function fetchWithRetry(url: string, init: any, timeoutMs: number, 
 export const SEARCH_TIMEOUT_MS = 15_000;
 
 // ---------------------------------------------------------------------------
+// curl 通道（Node TLS 指纹被 GitHub 等站点判死时的绕路；Windows 10+ / macOS / 多数 Linux 自带 curl）
+// ---------------------------------------------------------------------------
+
+/** 系统 curl 是否可用（探测结果缓存） */
+let curlAvailable: boolean | undefined;
+export function hasCurl(): Promise<boolean> {
+	if (curlAvailable !== undefined) return Promise.resolve(curlAvailable);
+	return new Promise((resolve) => {
+		execFile("curl", ["--version"], { timeout: 5000, windowsHide: true }, (err) => {
+			curlAvailable = !err;
+			resolve(curlAvailable);
+		});
+	});
+}
+
+/**
+ * 用系统 curl 抓取：-f 非 2xx 报错、-L 跟随重定向（≤10 跳）、超时；有代理则走代理；
+ * 输出原始字节交 charset 检测解码。curl 的 TLS 指纹（Windows schannel / 可响应 renegotiation）
+ * 与 Node OpenSSL 不同，可绕过 GitHub 等站点对 Node TLS 指纹的判死。
+ */
+export async function curlFetch(url: string, timeoutMs: number, maxBytes: number, outerSignal?: AbortSignal): Promise<FRes> {
+	const args = [
+		"-sS", "-f", "-L", "--max-redirs", "10",
+		"--max-time", String(Math.max(5, Math.ceil(timeoutMs / 1000))),
+		"--connect-timeout", "5",
+		"--compressed", // 自动声明 Accept-Encoding 并解码 gzip/br/deflate，避免拿到压缩字节流
+		"-A", UA_POOL[0],
+		"-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+	];
+	const proxy = getProxyUrl();
+	if (proxy) args.push("-x", proxy);
+	args.push("--", url); // -- 防止 URL 以 - 开头被当作选项
+	const buf = await new Promise<Buffer>((resolve, reject) => {
+		execFile(
+			"curl",
+			args,
+			{
+				timeout: timeoutMs + 3000,
+				maxBuffer: maxBytes + 1024 * 1024,
+				windowsHide: true,
+				encoding: "buffer",
+				signal: outerSignal,
+			},
+			(err, stdout, stderr) => {
+				if (err) {
+					// curl -f：HTTP 错误退出码 22，详情在 stderr（"The requested URL returned error: 4xx/5xx"）
+					const errText = stderr instanceof Buffer ? stderr.toString("utf8") : String(stderr ?? "");
+					const m = /returned error: (\d{3})/.exec(errText);
+					if (m) {
+						reject(new Error(`HTTP ${m[1]}`));
+						return;
+					}
+					reject(new Error(errText.trim() || err.message));
+					return;
+				}
+				resolve(stdout as Buffer);
+			},
+		);
+	});
+	return {
+		ok: true,
+		status: 200,
+		url,
+		headers: { get: () => null }, // 无 content-type 头，charset 由调用方从 HTML <meta> 探测
+		arrayBuffer: async () => buf,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 字符编码探测与解码（httpGet 与 fetch 共用；GBK/Big5 等常见非 utf-8 站点）
 // ---------------------------------------------------------------------------
 
@@ -269,4 +341,11 @@ export async function httpGet(url: string, timeoutMs: number): Promise<string> {
 	if (!res.ok) throw new Error(`HTTP ${res.status}`);
 	const buf = await resBytes(res);
 	return decodeBody(buf, res.headers.get("content-type") ?? "");
+}
+
+/** GET 文本（curl 通道）：Node TLS 指纹被站点判死（GitHub 等）时的兑底；有代理自动走代理 */
+export async function httpGetCurl(url: string, timeoutMs: number, maxBytes: number): Promise<string> {
+	const res = await curlFetch(url, timeoutMs, maxBytes);
+	const buf = await resBytes(res);
+	return decodeBody(buf, "");
 }

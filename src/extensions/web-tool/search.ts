@@ -2,7 +2,7 @@
  * web-tool/search：多源搜索 + 条目级评分合并（web-tool 多文件扩展的组成部分）
  *
  * 职责：
- * - 四源：bing.cn RSS / 360 HTML / baidu HTML（通用网页，三源并行）/ npm registry JSON（垂类包）
+ * - 五源：bing.cn RSS / 360 HTML / baidu HTML（通用网页，三源并行）/ npm registry / GitHub 仓库搜索（垂类 JSON API）
  *   （第三源选型实测 2026-08：DuckDuckGo html/lite 两端点均返回 202 反爬验证、Jina 直连与代理均不可达、
  *   Mojeek 403、公共 SearXNG 实例不稳定、Exa MCP 需完整协议握手成本过高——最终落 baidu；
  *   baidu 块级 mu 属性直接给真实 URL，免去跳转链解析）
@@ -13,7 +13,7 @@
  *
  * 注意：本模块不注册任何 pi API，仅导出纯函数/类型，由本目录其它模块与入口驱动。
  */
-import { httpGet, SEARCH_TIMEOUT_MS } from "./http";
+import { httpGet, httpGetCurl, hasCurl, SEARCH_TIMEOUT_MS } from "./http";
 import { loadDislikeData, dislikePenalty, hostnameOf } from "./dislike";
 
 /** 单次搜索返回给 agent 的结果条数上限（多源合并去重后取分数最高的这么多条） */
@@ -25,7 +25,7 @@ export interface SearchResult {
 	title: string;
 	url: string;
 	snippet: string;
-	/** 来源标识（bing/so360/npm），合并搜索结果时标注用 */
+	/** 来源标识（bing/so360/baidu/npm/github），合并搜索结果时标注用 */
 	src?: string;
 }
 
@@ -152,6 +152,40 @@ export async function searchNpm(query: string): Promise<SearchResult[]> {
 			title: version ? `${name}@${version}` : name,
 			url: (pkg.links as { npm?: string } | undefined)?.npm ?? `https://www.npmjs.com/package/${name}`,
 			snippet: desc,
+		});
+	}
+	return results;
+}
+
+/** GitHub 仓库搜索 JSON API（垂类：仓库名/语言/星数；未认证限流 10 次/分钟，超限返回
+ *  { message } 而非 items；api.github.com 被墙时代理兑底——GitHub 会对 Node 的 TLS 指纹
+ *  判死 400，代理隧道走不通时换 curl（schannel 指纹）拿） */
+export async function searchGithub(query: string): Promise<SearchResult[]> {
+	const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&per_page=${MAX_RESULTS}`;
+	const text = await httpGet(url, SEARCH_TIMEOUT_MS).catch(async (e) => {
+		if (!(await hasCurl())) throw e;
+		return httpGetCurl(url, SEARCH_TIMEOUT_MS, 2 * 1024 * 1024);
+	});
+	let data: { items?: Array<Record<string, unknown>>; message?: string };
+	try {
+		data = JSON.parse(text) as { items?: Array<Record<string, unknown>>; message?: string };
+	} catch {
+		throw new Error("GitHub API 返回非 JSON（可能被限流）");
+	}
+	if (!Array.isArray(data.items)) {
+		throw new Error(`GitHub API 未返回结果${data.message ? `：${data.message}` : "（可能触发限流）"}`);
+	}
+	const results: SearchResult[] = [];
+	for (const it of data.items) {
+		const fullName = typeof it.full_name === "string" ? it.full_name : "";
+		if (!fullName) continue;
+		const desc = typeof it.description === "string" ? it.description : "";
+		const stars = typeof it.stargazers_count === "number" ? it.stargazers_count : 0;
+		const lang = typeof it.language === "string" && it.language ? ` [${it.language}]` : "";
+		results.push({
+			title: fullName,
+			url: typeof it.html_url === "string" ? it.html_url : `https://github.com/${fullName}`,
+			snippet: `${desc}${lang} ⭐${stars}`.trim(),
 		});
 	}
 	return results;

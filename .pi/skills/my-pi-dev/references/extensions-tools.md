@@ -4,10 +4,10 @@
 
 - 文件：`http.ts`（网络层/代理）、`search.ts`（多源搜索 + 评分）、`fetch.ts`（抓取转 md）、`dislike.ts`（差评）、`panel.ts`（配置面板）、`index.ts`。
 - 工具 `web_search` / `web_dislike` / `web_fetch`；命令 `/web-tool-config`（代理设置 + 搜索结果黑名单查看/删除选中项）；状态 key `web-search`、`web-fetch`。
-- `web_search`：bing + 360 + baidu 三源并行（另含 npm 垂类），结果逐条评分后合并去重取前 15（标题/URL/摘要权重 + 完整短语命中加成，评分 0 滤除）；零 key 零费用、无 AI 总结。第三源选型实测否决 DDG 202 反爬 / Jina 不可达 / Mojeek 403（见 `search.ts` 头注释）。
+- `web_search`：bing + 360 + baidu 三源并行（另含 npm / GitHub 仓库两个垂类 JSON API，`source` 参数选用；GitHub 源在 httpGet 失败后自动换 curl 兑底——GitHub 对 Node TLS 指纹判死 400，隧道走得通也拿不到结果），结果逐条评分后合并去重取前 15（标题/URL/摘要权重 + 完整短语命中加成，评分 0 滤除）；零 key 零费用、无 AI 总结。第三源选型实测否决 DDG 202 反爬 / Jina 不可达 / Mojeek 403（见 `search.ts` 头注释）。
 - `web_dislike`：AI 对低质量域名记差评，×0.6/次、5 次滤除，跨会话持久化 `~/.pi/agent/web-search-blacklist.json`。
-- `web_fetch`：正文提取（turndown/domino/gfm 由 build.js 内联）+ 截断；GitHub blob URL 重写为 raw 直取（防源码被当标签吞）；正文极短（JS 空壳）时用 Googlebot UA 重试一次。
-- 代理配置 `~/.pi/agent/web-fetch-proxy.json`；直连与降级（系统 curl 自动带代理 / 无 curl 退 Node CONNECT 隧道）**并行竞速**，谁先成功用谁，404 等确定性错误立即判死。HTTP 层复用 `shared/net`。
+- `web_fetch`：正文提取（turndown/domino/gfm 由 build.js 内联）+ 截断；GitHub blob URL 重写为 raw 直取（防源码被当标签吞）；正文极短（JS 空壳）时用 Googlebot UA 重试一次；极短且命中 Cloudflare 等挑战特征时明确报「反爬验证页」而非误判抓取成功。
+- 代理配置 `~/.pi/agent/web-fetch-proxy.json`；直连与降级（系统 curl 自动带代理 / 无 curl 退 Node CONNECT 隧道）**并行竞速**，谁先成功用谁，404 等确定性错误立即判死。HTTP 层复用 `shared/net`；curl 通道（`hasCurl`/`curlFetch`/`httpGetCurl`）收在 `http.ts` 供 fetch 与 GitHub 源共用。
 - 无测试文件。
 
 ## webdav-kb（`webdav-kb/`，产物 `webdav-kb.ts`）

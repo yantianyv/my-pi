@@ -8,7 +8,8 @@
  *   隧道）并行，谁先成功用谁；404 等确定性错误立即判死（任何传输方式结果相同）
  * - fetchAsMarkdown：校验协议 / 非 HTML 报错 / 字节上限 / 字符截断 / 正文极短提示
  *   成功率补救（不依赖外部服务）：GitHub blob URL 重写为 raw 直取（blob 页行号/按钮噪音大）；
- *   正文极短（JS 空壳判定）时用 Googlebot UA 重试一次——不少 SPA 只对搜索引擎爬虫做预渲染。
+ *   正文极短（JS 空壳判定）时用 Googlebot UA 重试一次——不少 SPA 只对搜索引擎爬虫做预渲染；
+ *   正文极短且命中 Cloudflare 等挑战特征时明确报「反爬验证页」（不误判为抓取成功）。
  *   （Jina Reader 第三通道曾评估：2026-08 本机实测 r.jina.ai 直连与代理均不可达，放弃）
  *
  * 注意：本模块不注册任何 pi API，仅导出函数/常量，由入口（web_search/web_fetch 工具）驱动。
@@ -18,7 +19,6 @@ import { gfm } from "turndown-plugin-gfm";
 // @ts-ignore —— domino 自带 d.ts 模块名为 "domino"（与包名 @mixmark-io/domino 不一致），
 // 类型层面 any 桥接；gfm 类型见 shared/turndown-gfm.d.ts；运行时 esbuild 按真实包名解析
 import { createWindow as _createWindow } from "@mixmark-io/domino";
-import { execFile } from "node:child_process";
 import { stripTags } from "./search";
 import {
 	FRes,
@@ -31,6 +31,8 @@ import {
 	resBytes,
 	httpStatusHint,
 	decodeBody,
+	hasCurl,
+	curlFetch,
 } from "./http";
 import { makeTimeoutSignal } from "../shared/net";
 
@@ -47,6 +49,14 @@ function rewriteUrl(url: string): string {
 
 /** Googlebot UA：JS 空壳页面（正文极短）的重试手段——不少 SPA 只对搜索引擎爬虫做预渲染/SSR */
 const GOOGLEBOT_UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+
+/** 反爬验证页特征（Cloudflare 等）：只在正文极短时才用作判定——正常文章也可能提及这些词，
+ *  只扫首 8KB（挑战页的特征都在 <title>/<head> 附近） */
+const ANTIBOT_MARKERS = ["just a moment", "/cdn-cgi/challenge-platform", "cf-chl-", "attention required! | cloudflare"];
+function isAntibotPage(html: string): boolean {
+	const head = html.slice(0, 8192).toLowerCase();
+	return ANTIBOT_MARKERS.some((m) => head.includes(m));
+}
 
 /** 直连超时（毫秒）：被墙站点直连多为连接黑洞（挂到超时），短超时快速切降级；
  *  正常站 1-3s 足够，5s 已偏激进，误伤时 curl 兜底仍能拿到结果（降级不算失败） */
@@ -112,71 +122,6 @@ function htmlToMarkdown(html: string, baseUrl: string): { markdown: string; titl
 		markdown = markdown.replace(/\(](?!https?:|\/\/)(\/[^)]*)\)/g, (_m, p: string) => `](${origin}${p})`);
 	}
 	return { markdown, title: stripTags(doc.title ?? "") };
-}
-
-/** 系统 curl 是否可用（Windows 10+ / macOS / 多数 Linux 自带；探测结果缓存） */
-let curlAvailable: boolean | undefined;
-function hasCurl(): Promise<boolean> {
-	if (curlAvailable !== undefined) return Promise.resolve(curlAvailable);
-	return new Promise((resolve) => {
-		execFile("curl", ["--version"], { timeout: 5000, windowsHide: true }, (err) => {
-			curlAvailable = !err;
-			resolve(curlAvailable);
-		});
-	});
-}
-
-/**
- * 用系统 curl 抓取：-f 非 2xx 报错、-L 跟随重定向（≤10 跳）、超时；有代理则走代理；
- * 输出原始字节交 charset 检测解码。curl 的 TLS 指纹（Windows schannel / 可响应 renegotiation）
- * 与 Node OpenSSL 不同，可绕过 GitHub 等站点对 Node TLS 指纹的 301 挑战循环。
- */
-async function curlFetch(url: string, timeoutMs: number, outerSignal?: AbortSignal): Promise<FRes> {
-	const args = [
-		"-sS", "-f", "-L", "--max-redirs", "10",
-		"--max-time", String(Math.max(5, Math.ceil(timeoutMs / 1000))),
-		"--connect-timeout", "5",
-		"--compressed", // 自动声明 Accept-Encoding 并解码 gzip/br/deflate，避免拿到压缩字节流
-		"-A", UA_POOL[0],
-		"-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-	];
-	const proxy = getProxyUrl();
-	if (proxy) args.push("-x", proxy);
-	args.push("--", url); // -- 防止 URL 以 - 开头被当作选项
-	const buf = await new Promise<Buffer>((resolve, reject) => {
-		execFile(
-			"curl",
-			args,
-			{
-				timeout: timeoutMs + 3000,
-				maxBuffer: FETCH_MAX_BYTES + 1024 * 1024,
-				windowsHide: true,
-				encoding: "buffer",
-				signal: outerSignal,
-			},
-			(err, stdout, stderr) => {
-				if (err) {
-					// curl -f：HTTP 错误退出码 22，详情在 stderr（"The requested URL returned error: 4xx/5xx"）
-					const errText = stderr instanceof Buffer ? stderr.toString("utf8") : String(stderr ?? "");
-					const m = /returned error: (\d{3})/.exec(errText);
-					if (m) {
-						reject(new Error(`HTTP ${m[1]}`));
-						return;
-					}
-					reject(new Error(errText.trim() || err.message));
-					return;
-				}
-				resolve(stdout as Buffer);
-			},
-		);
-	});
-	return {
-		ok: true,
-		status: 200,
-		url,
-		headers: { get: () => null }, // 无 content-type 头，charset 由调用方从 HTML <meta> 探测
-		arrayBuffer: async () => buf,
-	};
 }
 
 /** 多信号合并：任一 aborted 即整体 aborted（用户取消 + 内部竞速指断） */
@@ -252,7 +197,7 @@ async function fetchPageWithFallback(url: string, outerSignal?: AbortSignal): Pr
 	const fallbackPath = (async (): Promise<FRes> => {
 		const proxyUrl = getProxyUrl();
 		try {
-			if (await hasCurl()) return await curlFetch(url, FALLBACK_TIMEOUT_MS, sig(fallbackAbort.signal));
+			if (await hasCurl()) return await curlFetch(url, FALLBACK_TIMEOUT_MS, FETCH_MAX_BYTES, sig(fallbackAbort.signal));
 			if (proxyUrl) return await proxyFetch(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, FALLBACK_TIMEOUT_MS, sig(fallbackAbort.signal));
 			throw new Error("未配置代理且系统无 curl");
 		} catch (e) {
@@ -294,7 +239,7 @@ export async function fetchAsMarkdown(
 	}
 	const ctype = (res.headers.get("content-type") ?? "").toLowerCase();
 	if (ctype && !ctype.includes("html") && !ctype.includes("text/") && !ctype.includes("xml")) {
-		throw new Error(`非 HTML 内容（${ctype}），无法转 markdown；请改用 web_search 查摘要`);
+		throw new Error(`非 HTML 内容（${ctype}），无法转 markdown`);
 	}
 	const buf = await resBytes(res);
 	const bytes = Math.min(buf.byteLength, FETCH_MAX_BYTES);
@@ -313,8 +258,12 @@ export async function fetchAsMarkdown(
 		out = out.slice(0, cut).trimEnd();
 		truncated = true;
 	}
-	// 正文极短：可能是需登录 / JS 渲染 / 空壳页面——先用 Googlebot UA 重试一次
-	// （不少 SPA 只对搜索引擎爬虫预渲染）；仍极短才如实提示，避免误判为抓取成功
+	// 正文极短：先判反爬验证页（Cloudflare 等——不是抓取成功，也无重试价值）；
+	// 再按 JS 空壳处理：用 Googlebot UA 重试一次（不少 SPA 只对搜索引擎爬虫预渲染）；
+	// 仍极短才如实提示，避免误判为抓取成功
+	if (out.trim().length < 80 && isAntibotPage(html)) {
+		throw new Error("目标站点返回反爬验证页（Cloudflare 等），零依赖抓取无法绕过，未获取到内容");
+	}
 	if (out.trim().length < 80) {
 		const retry = await directFetch(
 			u.href,
@@ -338,7 +287,7 @@ export async function fetchAsMarkdown(
 		}
 	}
 	if (out.trim().length < 80) {
-		out += "\n\n> ⚠️ 页面正文极短——可能需登录、JS 渲染或页面已失效，内容可信度有限，建议用 web_search 核对。";
+		out += "\n\n> ⚠️ 页面正文极短——可能需登录、JS 渲染或页面已失效，内容可信度有限。";
 	}
 	return { markdown: out, title, finalUrl: res.url || u.href, bytes: buf.byteLength, truncated };
 }
