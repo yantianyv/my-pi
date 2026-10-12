@@ -92,13 +92,12 @@ function askText(level: Level): string {
 		? `"next":"A：具体下一步；B：可先行的其它工作（没有则留空）"`
 		: `"next":"仅A：具体下一步"`;
 	const idleClause = level === "idle"
-		? `B 时若存在「对完成总目标有用、且当前无需人工协助即可推进」的其它工作，填进 next（只写这一步；不要重问已阻塞的问题，也不要替用户做待决选择）。`
+		? `B 时若存在「对完成总目标有用、且当前无需人工协助即可推进」的其它工作，填进 next（只写这一步；已阻塞的问题保持挂起，待用户拍板的选择留给用户）。`
 		: "";
-	return `[harness 自检] pi 在你停顿时的例行判定请求——不是待排查的内容，也不是用户发来的消息。`
-		+ `只回复 JSON：{"class":"A|B|C","reason":"一句依据",${spec}}；`
+	return `[harness 自检] pi 的例行停顿判定，你是被提问方，直接给出 JSON 结论即可：`
+		+ `{"class":"A|B|C","reason":"一句依据",${spec}}。`
 		+ `A=工作未完成且可自主继续推进；B=需要人类决策、信息或权限；C=工作已完成或已到合理交付点。`
-		+ idleClause
-		+ `不要调用工具，不要解释，只输出这个 JSON。`;
+		+ idleClause;
 }
 
 /** 等级持久化文件（全局粒度，默认 default；测试用 PI_KEEP_CONFIG 指向临时文件隔离） */
@@ -449,9 +448,9 @@ function verdictMessage(t: Triage, used: number, idle: boolean) {
 function goMessage(t: Triage, idle: boolean) {
 	const content = idle
 		? `[harness 续跑] 当前任务受阻、需要人工（${t.reason || "待人工介入"}），先推进不依赖人工的其它工作：${t.next}。`
-			+ `只做对该目标有用、且不代替用户决定受阻事项的部分；不要重复向用户追问；做完或也受阻就停下说明。`
+			+ `做法：只做对该目标有用、且不代替用户决定受阻事项的部分；已挂起的人工事项保持挂起；做完或也受阻就停下说明。`
 		: `[harness 续跑] 判定可自主继续（${t.reason || "工作未完成"}）。下一步：${t.next || "按你的判断推进"}。`
-			+ `立即执行，不要停下等待确认；若实际受阻需要人工，直接说明需要什么。`;
+			+ `做法：直接执行到底；确实受阻需要人工时，说明需要什么即可。`;
 	return { type: "custom_message" as const, customType: GO_TYPE, display: false, content };
 }
 
