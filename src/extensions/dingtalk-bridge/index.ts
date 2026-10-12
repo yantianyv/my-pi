@@ -2136,7 +2136,7 @@ export default function (pi: ExtensionAPI) {
 		const g3 =
 			"同名或同名群会返回候选（带部门/职务/工号与账号 ID）：由 AI 自己挑定后，把该项换成候选里的 ID 重调——不要重复猜姓名，也不必转问用户。";
 		const g4 =
-			"业务工具覆盖不到的长尾钉钉操作，用 dws_skill 读官方文档判断可行性，再把结论回报用户。";
+			"业务工具做不到的钉钉操作：先回报用户（缺什么能力、常用的话建议补进插件）；dws_skill 只为这份回报评估可行性而读，不允许照文档换参数/换格式自己继续试。";
 		if (!guidelines.includes(g1)) guidelines.push(g1, g2, g3, g4);
 	});
 
@@ -2583,7 +2583,7 @@ ${out}`;
 		annotations: { readOnlyHint: true },
 		label: "读钉钉技能文档",
 		description:
-			"查钉钉官方技能文档（dingtalk-* 技能）：无 topic 时列出全部技能及一句话说明，传 topic（短名如 sheet/todo，或全名 dingtalk-chat）返回该技能正文。",
+			"查钉钉官方技能文档（dingtalk-* 技能）：无 topic 时列出全部技能及一句话说明，传 topic（短名如 sheet/todo，或全名 dingtalk-chat）返回该技能正文。只在要向用户回报「插件做不到的事」时用来评估可行性，不作失败后的绕行手册。",
 		promptSnippet: "查钉钉技能文档：dws_skill([topic]) → 技能索引 / 技能正文",
 		parameters: Type.Object({
 			topic: Type.Optional(Type.String({ description: "技能短名（如 chat、sheet、todo）或全名（dingtalk-chat）；缺省列出全部技能" })),
