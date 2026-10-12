@@ -2930,7 +2930,7 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 		description:
 			"钉钉消息：单聊/群消息/多人单聊/引用回复/转发/转 DING/撤回/查消息。收件人写姓名或账号 ID，会话写群名、会话 ID 或单聊对方姓名。" +
 			"发文件时本条不含说明正文，说明要另发一条文本。" +
-			"查消息默认把消息里的图片/语音/文件下载到工作目录（路径见结果，可直接 read；outDir 改目录、downloadResources=false 关闭）。",
+			"查消息默认把附件（图片/语音/文件）下载到工作目录（路径见结果，可直接 read）。",
 		params: MessageParams,
 		async resolve(p: MessageParamsT) {
 			const r: Resolved = {};

@@ -7,7 +7,7 @@
  * - 场景 A：示例工作流（中文任务名）→ 常驻 widget + /wf-config 完整面板
  * - 场景 B：空工作流 → 面板不崩溃、显示「无任务」引导
  * - 场景 C：全部任务 done → 面板显示完成态
- * - 流程：wf_start → wf_done 自动推进 → state.json 落盘可复查
+ * - 流程：wf_switch 推进（完成当前 + 开始下一个）→ state.json 落盘可复查
  * - 开关：/wf-config toggle → widget 移除 + config.json 持久化
  *
  * 原理：node 无法直接 import 无扩展名相对路径（"../shared/config"），故先用

@@ -675,7 +675,7 @@ const opencodeGoAdapter: BalanceAdapter = {
 	async fetch(ctx) {
 		const auth = await ctx.modelRegistry.getProviderAuth("opencode-go");
 		const key = auth?.auth.apiKey ?? auth?.auth.headers?.Authorization?.replace(/^Bearer\s+/i, "");
-		if (!key) throw new Error("未配置 API key（请先执行 /connect 添加 OpenCode Go）");
+		if (!key) throw new Error("未配置 API key（请先执行 /login opencode-go）");
 
 		const res = await fetch("https://opencode.ai/zen/go/v1/usage", {
 			headers: { Authorization: `Bearer ${key}` },

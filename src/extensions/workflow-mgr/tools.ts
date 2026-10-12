@@ -776,7 +776,7 @@ export function registerTools(pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: `任务 ${taskId} 已标记阻塞：${params.reason}\n解除后调用 wf_start ${taskId} 继续。`,
+						text: `任务 ${taskId} 已标记阻塞：${params.reason}\n解除后调用 wf_switch（taskId=${taskId}）继续。`,
 					},
 				],
 				details: { kind: "blocked", state: lightState(state) },

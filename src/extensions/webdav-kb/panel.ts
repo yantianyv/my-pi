@@ -330,7 +330,7 @@ export function registerKbPanel(pi: ExtensionAPI): void {
 				const idxEmpty = getIndex(mirrorDir).size === 0;
 				ctx.ui.notify(
 					idxEmpty
-						? "知识库为空（尚未同步或同步失败）：先跑 /kb sync；还没配置则用 /kb-config 设置 WebDAV。"
+						? "知识库为空（尚未同步或同步失败）：先跑 /kb sync，或用 /kb-config 检查配置。"
 						: `知识库未找到与「${query}」相关的内容。可试试更短的关键词或换个说法，或用 kb_list 浏览目录。`,
 					"info",
 				);

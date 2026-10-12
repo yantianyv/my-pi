@@ -5,9 +5,9 @@
  * 子代理使用 pi 官方只读工具集（read / ls / grep / find）自主决定探索路径，
  * 完成后返回结构化报告，主上下文不加载原始文件内容。
  *
- * 相比旧版改进（借鉴 pi-subagents scout）：
+ * 设计要点（借鉴 pi-subagents scout）：
  * - 低思考等级：探索任务不需要深度推理，用 low thinking 节省 token
- * - 结构化输出：Files Retrieved → Key Code → Architecture → Start Here
+ * - 结构化输出：检索到的文件 / 关键代码 / 架构说明 / 下一步建议
  * - 探索纪律：先路径发现再定向搜索，避免无范围 grep 和大文件全读
  *
  * 实现要点：

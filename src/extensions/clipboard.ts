@@ -21,7 +21,7 @@
  *
  * 安全性：剪贴板常存用户刚复制的敏感内容（密码/密钥/链接）。clipboard_set
  * 返回时报告被覆盖旧内容摘要（长度+前 40 字符），让 AI 与用户感知覆盖了什么；
- * 工具描述与 promptGuidelines 提示 AI：写入前如有疑虑先 clipboard_get 看旧内容。
+ * 工具描述提示 AI：写入前如有疑虑先 clipboard_get 看旧内容。
  */
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -222,7 +222,7 @@ function normalizeNewlines(s: string): string {
 		label: "写入剪贴板",
 		description:
 			"把文本写入系统剪贴板（覆盖现有内容），供用户直接 Ctrl+V 粘贴；空字符串 = 清空。"
-			+ "剪贴板可能存有敏感内容（密码/密钥）：写入前有疑虑先 clipboard_get 查看；返回时会报告被覆盖的旧内容摘要。",
+			+ "剪贴板可能存有敏感内容（密码/密钥）：写入前有疑虑先 clipboard_get 查看。",
 		promptSnippet: "写入剪贴板：clipboard_set(文本) → 覆盖当前剪贴板",
 		renderCall: (args, theme) => {
 			const c = typeof args?.content === "string" ? args.content : "";

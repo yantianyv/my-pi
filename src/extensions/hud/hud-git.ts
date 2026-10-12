@@ -452,7 +452,7 @@ export function registerGitModelConfigCommand(pi: ExtensionAPI): void {
 	};
 
 	pi.registerCommand("git-config", {
-		description: "Git 面板的 AI 模型：无参开选择浮层；commit|conflict <auto|provider/modelId> 直设",
+		description: "Git 面板 AI 模型（commit/conflict 两槽；无参开浮层，带参直设）",
 		handler: async (args: string, ctx: ExtensionContext) => {
 			const [key, ...rest] = args.trim().split(/\s+/);
 			const value = rest.join(" ").trim();

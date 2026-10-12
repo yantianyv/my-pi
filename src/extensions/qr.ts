@@ -288,10 +288,10 @@ export default function (pi: ExtensionAPI) {
 		annotations: { readOnlyHint: false },
 		label: "生成二维码",
 		description:
-			"把文本（URL/Wi-Fi 配置/名片等）编码成二维码并显示到用户界面（图形终端 PNG 真图、普通终端字符绘制，可直接扫码），默认同时保存 PNG（save=false 则不落盘）。",
+			"把文本（URL/Wi-Fi 配置/名片等）编码成二维码并显示到用户界面（可直接扫码）。",
 		promptSnippet: "生成二维码：qr_encode(text) → 显示在用户界面 + PNG 路径",
 		promptGuidelines: [
-			"需要给用户二维码时用 qr_encode（直接显示在终端，可扫）；需要图片文件时用 save 参数",
+			"需要给用户二维码时用 qr_encode；只要 PNG 图片文件时用 save 参数",
 		],
 		renderCall: (args, theme) => {
 			const a = args as { text?: string };

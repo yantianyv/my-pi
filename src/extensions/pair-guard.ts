@@ -443,8 +443,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"给当前会话设置工作标题，讲述整个工作在干啥（如「重构 HUD 余额模块」）。同步为会话显示名，" +
 			"用户在 /resume 恢复会话时直接看到，也写入会话注册表供同项目的其他并发 pi 会话互见；" +
-			"开始一项新工作时设置一次，工作转向时更新；执行中的具体步骤展示由 status-beacon 自动完成，无需自报步骤。" +
-			"传空字符串清除标题。",
+			"开始一项新工作时设置一次，工作转向时更新；执行中的步骤进度无需自报。传空字符串清除标题。",
 		promptSnippet:
 			"自报工作标题：set_title({title?}) → title=整体工作标题（/resume 可见，并发会话互见）",
 		parameters: Type.Object({

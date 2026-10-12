@@ -13,8 +13,8 @@
  * - .pi/workflow/state.json     进度状态（currentTaskId/tasks/milestones/decisions/log）
  * - .pi/workflow/config.json    面板开关等 UI 配置
  *
- * 工具：wf_workflow（list/add/edit/remove/archive/reset）、wf_status、wf_start、wf_done、
- *       wf_block、wf_rollback、wf_decision、wf_milestone。
+ * 工具：wf_workflow（list/add/edit/remove/archive/reset/import/bind）、wf_status、wf_switch、
+ *       wf_block、wf_rollback、wf_note、wf_milestone。
  * 命令：/wf-config 轻量功能浮窗（显示详细信息/常驻面板开关）、/wf resume、/wf
  *       恢复历史会话（工作流弹窗「从 resume 中加载」入口，复用官方会话选择器）。
  * 事件：session_start 加载+刷新+notify；before_agent_start 向 systemPrompt 追加
