@@ -84,6 +84,13 @@ export function toCells(values: Array<Array<string | number | boolean | null>>):
 	return JSON.stringify(cells);
 }
 
+/** create-with-data 的 --values：原始二维 JSON；超安全整数的长整数按文本写（防精度丢失，浮点保持数字） */
+export function toSheetValues(values: Array<Array<string | number | boolean | null>>): string {
+	return JSON.stringify(
+		values.map((row) => row.map((v) => (typeof v === "number" && Number.isInteger(v) && !Number.isSafeInteger(v) ? String(v) : v))),
+	);
+}
+
 /* ============================== 消息附件落盘 ============================== */
 
 /** 消息附件（图片/语音/文件）默认落盘目录：工作目录内相对路径 */
@@ -600,18 +607,19 @@ export function buildFile(p: FileParamsT, r: Resolved): Built {
 /* ============================== 文档 / 表格域 ============================== */
 
 export const DocParams = Type.Object({
-	action: Action(["read", "search", "create", "append", "replace", "wikiList", "sheetRead", "sheetWrite", "sheetAppend", "tableQuery", "tableAdd", "tableUpdate", "tableDelete"]),
+	action: Action(["read", "search", "create", "append", "replace", "wikiList", "sheetCreate", "sheetRead", "sheetWrite", "sheetAppend", "tableQuery", "tableAdd", "tableUpdate", "tableDelete"]),
 	doc: Type.Optional(Type.String({ description: "文档/表格：标题、链接或节点 ID（read/append/replace/sheet* 用；只给标题时插件先搜索）" })),
-	title: Type.Optional(Type.String({ description: "（create）新文档标题" })),
+	title: Type.Optional(Type.String({ description: "（create/sheetCreate）新文档/表格标题" })),
 	content: Type.Optional(Type.String({ description: "（create/append/replace）正文（Markdown）" })),
 	old: Type.Optional(Type.String({ description: "（replace）只替换掉这段原文，而不是整篇覆盖" })),
 	query: Type.Optional(Type.String({ description: "（search/wikiList/tableQuery）关键词" })),
 	workspace: Type.Optional(Type.String({ description: "知识库名称或 ID（wikiList 用）" })),
 	sheetId: Type.Optional(Type.String({ description: "工作表 ID 或名称（sheet* 用；不给则由插件取第一个工作表）" })),
+	folder: Type.Optional(Type.String({ description: "（sheetCreate）目标文件夹：钉盘文件夹名称、链接或 ID；缺省=我的文档根目录" })),
 	range: Type.Optional(Type.String({ description: "（sheetRead/sheetWrite）区域，如 A1:C3" })),
 	values: Type.Optional(
 		Type.Array(Type.Array(Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()])), {
-			description: "（sheetWrite/sheetAppend）二维数据，按行给；单元格里数字会自动按数字写",
+			description: "（sheetCreate/sheetWrite/sheetAppend）二维数据，按行给；单元格里数字会自动按数字写，身份证号/手机号等长数字必须按字符串传（JSON 数字超 15 位丢精度）",
 		}),
 	),
 	base: Type.Optional(Type.String({ description: "多维表 base 名称或 ID（table* 用）" })),
@@ -667,6 +675,15 @@ export function buildDoc(p: DocParamsT, r: Resolved): Built {
 			if (!r.ids?.workspace) return err("wikiList 需要 workspace（知识库名称或 ID）");
 			const args = ["wiki", "+node-list", "--workspace", r.ids.workspace, "--limit", limit];
 			if (p.query) args.push("--query", p.query);
+			return { args };
+		}
+		case "sheetCreate": {
+			if (!p.title) return err("sheetCreate 需要 title（表名）");
+			// 有初始数据走 create-with-data（创建+写入+回读一体）；空表才用 create
+			const args = p.values?.length
+				? ["sheet", "create-with-data", "--name", p.title, "--values", toSheetValues(p.values as Array<Array<string | number | boolean | null>>)]
+				: ["sheet", "create", "--name", p.title];
+			if (r.ids?.folder) args.push("--folder", r.ids.folder);
 			return { args };
 		}
 		case "sheetRead": {

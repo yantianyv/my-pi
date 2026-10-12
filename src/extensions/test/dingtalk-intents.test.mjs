@@ -159,6 +159,12 @@ console.log("G、文档表格域");
 		&& argv(buildDoc({ action: "tableUpdate", records: [{ recordId: "r1", cells: { 状态: "已完成" } }] }, { ids: { baseId: "b1", tableId: "t1" } })).includes("aitable +record-update")
 		&& argv(buildDoc({ action: "tableDelete", recordIds: ["r1"] }, { ids: { baseId: "b1", tableId: "t1" } })).includes("aitable +record-delete --base-id b1 --table-id t1 --record-ids r1"));
 	check("G: 缺 doc/base 时不猜", typeof buildDoc({ action: "read" }, {}).error === "string" && typeof buildDoc({ action: "tableQuery" }, {}).error === "string");
+	// sheetCreate：在线表格创建（values 原始 JSON 协议，区别于 sheetWrite 的 cell object）
+	check("G: 空表走 create", argv(buildDoc({ action: "sheetCreate", title: "空表" }, {})) === "sheet create --name 空表");
+	check("G: 有数据走 create-with-data + 裸二维 JSON", (() => { const a = argv(buildDoc({ action: "sheetCreate", title: "意向表", values: [["姓名", "手机"], ["张三", "13800000000"]] }, {})); return a === 'sheet create-with-data --name 意向表 --values [["姓名","手机"],["张三","13800000000"]]'; })());
+	check("G: sheetCreate 带文件夹", argv(buildDoc({ action: "sheetCreate", title: "t", values: [[1]] }, { ids: { folder: "f1" } })).endsWith("--folder f1"));
+	check("G: 超安全整数按文本写、浮点保持数字", (() => { const a = argv(buildDoc({ action: "sheetCreate", title: "t", values: [[9007199254740993, 1.5, 42]] }, {})); return a.includes('--values [["9007199254740992",1.5,42]]'); })()); // 字面量入参即被 JSON 舍入为 …992，此处只保证不安全整数转文本、浮点不动
+	check("G: sheetCreate 缺 title 报错", typeof buildDoc({ action: "sheetCreate" }, {}).error === "string");
 }
 
 const failed = results.filter((r) => !r.ok);

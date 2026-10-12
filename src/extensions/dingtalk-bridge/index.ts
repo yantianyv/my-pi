@@ -919,6 +919,17 @@ export function formatDraft(
 	return lines.join("\n");
 }
 
+/**
+ * 表格创建（sheet create / create-with-data）非原子（创建→探活→写入→回读多步）：
+ * 失败/超时后引导读回现状、只补失败步骤，绝不要整体重跑（会造出重复文档）。
+ */
+export function sheetCreateFailureNote(args: string[], output: string): string {
+	if (args[0] !== "sheet" || (args[1] !== "create-with-data" && args[1] !== "create")) return "";
+	const nodeId = /"nodeId"\s*:\s*"([^"]+)"/.exec(output)?.[1];
+	if (nodeId) return `\n\n⚠️ 表格创建非原子，绝不要重跑 sheetCreate（会造重复文档）——文档已创建，先 dingtalk_doc action="sheetRead" doc="${nodeId}" 读回现状，缺的用 sheetWrite 补。`;
+	return "\n\n⚠️ 表格创建非原子，绝不要直接重跑 sheetCreate（可能已建出文档）——先 dingtalk_doc action=\"search\" 查同名文档确认现状，再决定补救。";
+}
+
 /** 查询类结果附当前系统时间（防沿用对话记忆中的旧日期锚点） */
 export function annotateQuery(args: string[], stdout: string, now: Date): string {
 	if (!matchPrefix(args, QUERY_PREFIXES)) return stdout;
@@ -2463,7 +2474,7 @@ ${res.failed.map((f) => `- ${f.name}：${f.why}`).join("\n")}` : "";
 			}
 			if (r.timedOut)
 				return text(
-					`dws 执行超时（${Math.round(execTimeoutOf(cfg, args) / 1e3)}s）${isDownloadCommand(args) ? "：下载可能只是没跑完，目标目录里已落盘的文件仍然有效，别整条重跑" : "，命令可能未生效——如涉及发送，先用只读查询确认，绝不要直接重跑"}`,
+					`dws 执行超时（${Math.round(execTimeoutOf(cfg, args) / 1e3)}s）${isDownloadCommand(args) ? "：下载可能只是没跑完，目标目录里已落盘的文件仍然有效，别整条重跑" : "，命令可能未生效——如涉及发送，先用只读查询确认，绝不要直接重跑"}${sheetCreateFailureNote(args, r.stdout + r.stderr)}`,
 					{ kind: "error" },
 				);
 			let out = r.stdout.trim();
@@ -2472,7 +2483,7 @@ ${res.failed.map((f) => `- ${f.name}：${f.why}`).join("\n")}` : "";
 				if (dryRun && matchPrefix(args, BROADCAST_PREFIXES)) {
 					return text(await broadcastProbeReport(cfg, args, "没有一位收件人解析成功"), { kind: "blocked" });
 				}
-				return text(`dws 失败（exit ${r.code}）：${errTail || out}`, { kind: "error" });
+				return text(`dws 失败（exit ${r.code}）：${errTail || out}${sheetCreateFailureNote(args, errTail + out)}`, { kind: "error" });
 			}
 			if (dryRun && matchPrefix(args, BROADCAST_PREFIXES)) {
 				const plan = parseBroadcastPreflight(out);
@@ -3111,7 +3122,7 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 	registerSemanticTool({
 		name: "dingtalk_doc",
 		label: "编辑钉钉文档表格",
-		description: "钉钉文档/知识库/表格/多维表：读/搜/新建/追加/覆盖或精确替换/表格区域读写/多维表记录增删改查。文档与表格可用标题、链接或 ID 指定。",
+		description: "钉钉文档/知识库/表格/多维表：读/搜/新建（文档或在线表格）/追加/覆盖或精确替换/表格区域读写/多维表记录增删改查。文档与表格可用标题、链接或 ID 指定。",
 		params: DocParams,
 		async resolve(p: DocParamsT) {
 			const r: Resolved = { ids: { now: new Date().toISOString() } };
@@ -3120,6 +3131,11 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 				const d = await resolveDocNode(p.doc);
 				if (!("ok" in d)) return d;
 				ids.doc = d.ok;
+			}
+			if (p.action === "sheetCreate" && p.folder) {
+				const f = await resolveDriveNode(p.folder);
+				if (!("ok" in f)) return f;
+				ids.folder = f.ok;
 			}
 			if (p.action === "wikiList" && p.workspace) {
 				const data = await callJson(["wiki", "space", "list", "--type", "orgWikiSpace"]);

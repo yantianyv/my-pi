@@ -49,7 +49,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, parseCanonicalPath, matchToolByPath, localAliases, formalFlagError, reviewKind, isIdLike, matchGroupsByName, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, parseCanonicalPath, matchToolByPath, localAliases, formalFlagError, reviewKind, isIdLike, matchGroupsByName, sheetCreateFailureNote, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -268,6 +268,11 @@ console.log("U、群与本人解析");
 	// 回归：base64 填充符 == 曾使 isIdLike 拒收真实 cid
 	check("带 == 的 cid 视为 ID", isIdLike("cidGcszODYFzAG2T9Ho4vjuaQ==") === true);
 	check("中文群名不视为 ID", isIdLike("乌鲁木齐市第八中学") === false);
+	// sheetCreate 失败续做契约：非原子，禁整体重跑
+	const withNode = sheetCreateFailureNote(["sheet", "create-with-data", "--name", "t"], '{"nodeId":"n9","error":"write failed"}');
+	check("失败带 nodeId → 引导 sheetRead/sheetWrite 续做", withNode.includes("n9") && withNode.includes("sheetRead") && withNode.includes("sheetWrite") && withNode.includes("绝不要重跑"));
+	check("失败无 nodeId → 引导 search 确认", sheetCreateFailureNote(["sheet", "create", "--name", "t"], "boom").includes("search"));
+	check("非表格创建命令不附提示", sheetCreateFailureNote(["doc", "+create"], "boom") === "");
 }
 
 console.log("V、钉盘/云盘分享解析");
