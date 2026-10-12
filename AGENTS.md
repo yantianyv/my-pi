@@ -85,6 +85,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 - `src/config/tsconfig.json` 是 install.js 生成物（gitignore）：按 `__PI_PKG_*` / `__PI_TYPES__` 占位符逐个解析 pi 各包 .d.ts（托管安装与 npm 全局、嵌套与提升布局都认）；探测不到 pi 安装目录才跳过生成并给出提示。换机器/pi 升级重跑 `node install.js` 即可。
 - **pi 用自带安装器时为「托管安装」**（`~/.pi/agent/install/releases/<版本>/node_modules` + 启动器 `~/.pi/agent/bin/pi`，环境变量 `PI_MANAGED_INSTALL_ROOT`），此时 `npm root -g` 下没有 pi：install.js、补丁脚本、relink-deps 均按托管安装优先探测，不要再假设 npm 全局。
 - **`tool_result` 钩子改写 content 必须透传 `structuredContent`**（`structuredContent: event.structuredContent`）：pi ≥ 0.99 的 runner 见到 content 被替换而未带 structuredContent 会丢弃它。img-slim / pair-guard 已遵此约束。
+- **`@earendil-works/pi-ai` 只能从根入口或 `compat` / `oauth` / `providers/all` 导入**：pi 加载扩展走 jiti 别名表，深路径（如 `pi-ai/utils/transcript`）在 node ESM 下能解析、在 pi 里加载即报错（keep 曾因此加载失败）。
 - **`navigateTree` 只返回 `{cancelled}`**：编辑框文本回填由 interactive-mode 内部完成，扩展侧拿不到 editorText（claude-it `/rewind` 依赖此行为）。
 - `claude-it.ts` 会拦截裸输入 `exit`（不带 `/`）直接退出 pi，属刻意设计。
 - `fullscreen` 渲染模式已定稿（旧 regular 模式的滚动冻结补丁已移除）；其余三补丁与渲染模式无关。

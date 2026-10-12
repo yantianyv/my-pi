@@ -98,6 +98,7 @@
 - `context` 过滤：`keep-verdict` 任何位置都不进请求（纯展示）；`keep-go` 只在末尾「活尾巴」保留（当前轮的续跑指令）；旧版 in-transcript 的 `keep-ask`/回答记录一并滤掉（历史会话兼容）。
 - **前缀复刻与缓存**：provider 前缀缓存按 `tools → system → messages` 逐字节匹配，三者齐了才命中；命中与否只影响花费（未命中 = 全量按非缓存计价）。
   - 前缀取 **`context_with_system`** 事件捕获的主会话真实请求（该事件在所有 `context` 处理后触发，`messages` 含系统消息与工具声明）——其它扩展对请求的改写（如 time.ts 的时间戳前缀）也已包含，故逐字节一致；工具集从捕获消息里用 `getCurrentTools` 取出，执行体换空实现（误调无副作用）。捕获缺席时回退自拼（systemPrompt + 会话消息 + `getActiveTools()`/`getAllTools()` 重建工具），代价是 miss。
+  - **导入陷阱**：`getCurrentTools` 只能从 `@earendil-works/pi-ai/compat`（或根入口）导入——pi 加载扩展走的 jiti 别名表只挂 `compat`/`oauth`/`providers/all` 与根入口，深路径 `pi-ai/utils/transcript` 在 node ESM 下能解析、在 pi 里加载即报错（keep 曾因此加载失败）。
   - 实测教训：自拼前缀（systemPrompt + `buildSessionContext()` 消息）只命中 ~8.5k/250k——系统提示词一致但消息序列在首条 user 消息处就分叉（其它扩展的请求改写不在自拼内容里），每次停点全量重付 250k tokens。
   - 观测口径：`.pi/keep-cache.log` 每次自检追加 `src=stash|fallback msgs tools cls input cacheRead ms ans=`（`ans` 为回答前 120 字符，用于诊断解析失败）。
 - 续跑必须带注入（pi 边界校验在 entries 落账后重算，custom_message 使 transcript 末尾为 user 角色才合法）。防失控：续跑轮仍无 toolCall 直接停 + 每次 `before_agent_start` 重置的预算 16。
