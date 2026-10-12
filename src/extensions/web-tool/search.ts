@@ -158,7 +158,7 @@ export async function searchNpm(query: string): Promise<SearchResult[]> {
 }
 
 /** GitHub 仓库搜索 JSON API（垂类：仓库名/语言/星数；未认证限流 10 次/分钟，超限返回
- *  { message } 而非 items；api.github.com 被墙时代理兑底——GitHub 会对 Node 的 TLS 指纹
+ *  { message } 而非 items；api.github.com 被墙时代理兜底——GitHub 会对 Node 的 TLS 指纹
  *  判死 400，代理隧道走不通时换 curl（schannel 指纹）拿） */
 export async function searchGithub(query: string): Promise<SearchResult[]> {
 	const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&per_page=${MAX_RESULTS}`;

@@ -23,7 +23,7 @@
  * turndown-plugin-gfm 由 build.js（esbuild）内联进单文件产物——build.js 的
  * external 白名单只保留 @earendil-works/* 与 typebox，产物仍是零外部依赖单文件。
  *
- * 抓不到的站点（GitHub 等被墙、反爬挑战页）如实报错，提示改用 web_search 查摘要。
+ * 抓不到的站点（被墙、反爬验证页等）如实报错，由 agent 自行决定下一步。
  */
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -126,7 +126,7 @@ export default function (pi: ExtensionAPI) {
 		annotations: { readOnlyHint: true },
 		label: "抓取网页",
 		description:
-			"抓取网页 URL 转 markdown（正文提取 + 去导航广告 + 截断）。适合深读文档/README；失败时改用 web_search 查摘要。",
+			"抓取网页 URL 转 markdown（正文提取 + 去导航广告 + 截断）。适合深读文档/README。",
 		promptSnippet: "抓取网页转 markdown：web_fetch(URL[, maxChars]) → 正文",
 		renderCall: (args, theme) =>
 			renderToolCall("🌐", typeof args?.url === "string" ? args.url : undefined, theme, "web_fetch"),
@@ -165,7 +165,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: `抓取失败：${msg}\n提示：目标站点可能被墙或反爬；可改用 web_search 搜该页面关键词查摘要。`,
+							text: `抓取失败：${msg}`,
 						},
 					],
 					details: { error: msg },

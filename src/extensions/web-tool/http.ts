@@ -51,7 +51,7 @@ export function browserHeaders(ua: string): Record<string, string> {
 export function httpStatusHint(status: number, retried: boolean): string {
 	const reason: Record<number, string> = {
 		401: "（站点要求身份验证，可能需登录）",
-		403: "（站点拒绝本次访问——可能要求登录、地区限制或不同意程序化访问，建议改用 web_search 查摘要）",
+		403: "（站点拒绝本次访问——可能要求登录、地区限制或不同意程序化访问）",
 		404: "（页面不存在，URL 可能已失效）",
 		406: "（站点不接受当前请求特征）",
 		429: "（请求过于频繁，建议稍后再试）",
@@ -343,7 +343,7 @@ export async function httpGet(url: string, timeoutMs: number): Promise<string> {
 	return decodeBody(buf, res.headers.get("content-type") ?? "");
 }
 
-/** GET 文本（curl 通道）：Node TLS 指纹被站点判死（GitHub 等）时的兑底；有代理自动走代理 */
+/** GET 文本（curl 通道）：Node TLS 指纹被站点判死（GitHub 等）时的兜底；有代理自动走代理 */
 export async function httpGetCurl(url: string, timeoutMs: number, maxBytes: number): Promise<string> {
 	const res = await curlFetch(url, timeoutMs, maxBytes);
 	const buf = await resBytes(res);
