@@ -305,6 +305,7 @@ async function runTriage(
 		let text = "";
 		let thinking = "";
 		let types = "";
+		let stopReason = "";
 		let usage: { input?: number; cacheRead?: number } | undefined;
 		for (let i = out.length - 1; i >= 0; i--) {
 			const m = out[i] as Msg;
@@ -315,6 +316,7 @@ async function runTriage(
 				text = parts.text;
 				thinking = parts.thinking;
 				types = parts.types;
+				stopReason = (m as { stopReason?: string }).stopReason ?? "";
 			}
 			if (!usage && u) usage = u;
 			if (types && usage) break;
@@ -330,6 +332,7 @@ async function runTriage(
 			active: pi.getActiveTools().length,
 			gap: requestCapturedAt ? Math.round((started - requestCapturedAt) / 1000) : -1,
 			blocks: types || "-",
+			stop: stopReason || "-",
 			cls: triage?.cls ?? "-",
 			input: usage?.input,
 			cacheRead: usage?.cacheRead,
