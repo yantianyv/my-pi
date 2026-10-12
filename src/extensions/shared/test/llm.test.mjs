@@ -19,7 +19,7 @@ import { build } from "esbuild";
 import * as fs from "node:fs";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { readdirSync, readFileSync } from "node:fs";
 
 const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
@@ -64,7 +64,7 @@ const chainOf = (...models) => {
 };
 
 try {
-	const { aiComplete, extractAiText, piAttributionHeaders } = await import(BUNDLE);
+	const { aiComplete, extractAiText, piAttributionHeaders } = await import(pathToFileURL(BUNDLE).href);
 
 	// ---- extractAiText ----
 	const blocks = [
