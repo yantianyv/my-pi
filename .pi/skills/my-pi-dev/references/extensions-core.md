@@ -28,6 +28,7 @@
 - 断点续跑：`<key>.md` 已完成则直接复用（不花 token）；`fresh: true` 强制现跑；有 partial 时读作起点续跑（要求在其基础上继续、不重复已验证检索、过时结论可复核）；成功写 md + `status: done` 并删 partial；失败/中断保留 partial（json 标 `failed`/`interrupted`）且结果附 partial 相对路径。
 - 上下文兜底：单任务最多 40 轮；超限时压缩过程记录后继续（≤2 次）；轮数用尽/无正文 → 用过程记录整理成报告。最多 32 个任务、自适应并发上限 8、可重试错误指数退避（单任务最多重试 2 次）、单任务超时 15min。
 - 跨扩展契约 `__PI_EXPLORE_API__`（键名/版本/类型在 `shared/explore-api.ts` 单点定义）：发布 `createSubagentTool(ctx, { alwaysFresh })`，`alwaysFresh` 变体去掉 `fresh` 参数并强制现跑。
+- 描述字节稳定（缓存纪律）：工具集是请求前缀的第一段，描述/schema 一变整段前缀缓存失效，因此**只在扩展加载时注册一次**，读图说明用与模型无关的常量措辞（`VISION_NOTE`）——不得再按模型能力/设置变更运行中重注册（曾经在 session_start / execute / 设置变更时重注册）。
 
 ## btw（`btw/`，产物 `btw.ts`）
 

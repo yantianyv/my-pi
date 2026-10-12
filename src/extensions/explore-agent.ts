@@ -22,11 +22,8 @@
  *
  * 工具说明引导：任务数 = 子代理数，一次调用至少 2 个任务（含拒绝引导，避免
  * 主 agent 先派 1 个试探失败再补派）；描述保持简洁，不含过程性说明。
- * 视觉能力动态标注：子模型支持读图（Model.input 含 "image"）时，在工具描述/
- * 指南中标出「可派发截图/图片分析任务」。判定依赖模型注册表（注册时拿不到 ctx），
- * 故在拿到 ctx 的时机（session_start / /explore-config 变更后 / execute 内）
- * 重新注册同名工具覆盖描述（同扩展 tools Map.set 覆盖 + refreshTools 下 turn 生效），
- * 幂等防抖避免无意义刷新。
+ * 工具描述字节稳定（缓存纪律）：工具集是请求前缀的第一段，描述/参数 schema 一变，
+ * 整段前缀缓存即失效，故能力说明一律用与模型无关的常量措辞，不做运行中重注册。
  */
 import type {
 	AgentToolResult,
@@ -51,7 +48,6 @@ import * as path from "node:path";
 import { Type } from "typebox";
 import { registerModelConfigCommand, type AnyModel } from "./shared/model-select";
 import { createModelSetting, type ModelSetting } from "./shared/model-setting";
-import { modelHasVision } from "./shared/model-util";
 import { convertToLlm, createPiStreamFn, systemMessage } from "./shared/agent";
 import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
 import { EXPLORE_API_VERSION, publishExploreApi } from "./shared/explore-api";
@@ -96,11 +92,6 @@ const exploreModelSetting: ModelSetting = createModelSetting({
 /** 解析当前子代理模型（每轮调用前重新解析，面板改完立即生效） */
 function pickExploreModel(ctx: ExtensionContext): AnyModel | undefined {
 	return exploreModelSetting.resolve(ctx).model;
-}
-
-/** 当前子模型（按设置解析后）是否支持读图 */
-function detectExploreVision(ctx: ExtensionContext): boolean {
-	return modelHasVision(pickExploreModel(ctx));
 }
 
 // ---------------------------------------------------------------------------
@@ -174,9 +165,6 @@ function isRetryable(error: string | undefined): boolean {
 // 工具定义（描述按视觉能力动态拼装）
 // ---------------------------------------------------------------------------
 
-/** 已注册的工具定义是否带视觉标注（幂等防抖） */
-let registeredWithVision = false;
-
 /** 任务参数说明（不含缓存口径：口径随调用方策略不同，见下面两个常量） */
 const TASK_PARAM_DESC =
 	"每个任务派一个子代理（任务数 = 子代理数）。任务可按探索问题拆分，也可把大量文件/目录按批次分治，" +
@@ -209,12 +197,13 @@ const EXPLORE_PARAMS_ALWAYS_FRESH = Type.Object({
 	}),
 });
 
+/** 读图说明：常量措辞，与当前模型能力无关（能否读图由子代理自行判断/说明） */
+const VISION_NOTE = "派发截图/图片/图表分析任务亦可（能否读图取决于子代理模型）。";
+
 function buildExploreToolDefinition(
 	pi: ExtensionAPI,
-	hasVision: boolean,
 	alwaysFresh = false,
 ): ToolDefinition<any, ExploreDetails> {
-	const visionNote = hasVision ? "子代理模型支持读图，可派发截图/图片/图表分析任务。" : "";
 	return {
 		name: "explore",
 		annotations: { readOnlyHint: true },
@@ -222,7 +211,7 @@ function buildExploreToolDefinition(
 		description:
 			`并行派出 2~${MAX_TASKS} 个只读子代理探索代码库并返回结构化报告（一个任务 = 一个子代理）。` +
 			"每个子代理拥有 read/ls/grep/find 工具，自主决定阅读哪些文件，你只负责分配任务；任务描述要具体可回答。" +
-			visionNote +
+			VISION_NOTE +
 			"适合：了解陌生模块结构、定位功能实现、梳理调用链——比主 agent 逐文件 read 更省上下文、更快、更便宜。" +
 			"子代理不能修改文件。探索过程会边跑边写 .pi/explore/report.md（单任务成果在 .pi/explore/tasks/），" +
 			"可随时重读；中断过的任务再次调用会带着已有发现续跑，不受重复消耗。",
@@ -235,15 +224,11 @@ function buildExploreToolDefinition(
 			"explore 报告抽样验证后再采信：关键路径可用 read 抽查是否真实存在，再据此派工修改。",
 			"explore 成果会边跑边落盘：报告 .pi/explore/report.md、单任务 .pi/explore/tasks/<key>.md；" +
 				"同一任务文本再次调用会复用上次成果（不花 token），中断的任务会带半成品续跑；要强制重跑传 fresh=true。",
-			...(hasVision
-				? ["explore 子代理支持读图（视觉模型）：涉及截图/图片/图表文件时，可直接让子代理读图分析。"]
-				: []),
+			VISION_NOTE,
 		],
 		parameters: alwaysFresh ? EXPLORE_PARAMS_ALWAYS_FRESH : EXPLORE_PARAMS,
 		executionMode: "parallel",
 		execute: (_toolCallId, params: { tasks: string[]; fresh?: boolean }, signal, onUpdate, ctx): Promise<AgentToolResult<ExploreDetails>> => {
-			// 兜底收敛：模型实际能力与已注册标注不一致时重注册（下个 turn 生效）
-			registerExploreTool(pi, modelHasVision(pickExploreModel(ctx)));
 			return executeExplore(ctx, params, signal, onUpdate);
 		},
 	};
@@ -276,13 +261,11 @@ function toSubagentTool(
 }
 
 /**
- * 注册/重注册 explore 工具：同名 Map.set 覆盖 + refreshTools（下个 turn 起描述生效）。
- * 幂等：标注状态未变时不重复刷新。
+ * 注册 explore 工具。只在扩展加载时注册一次：工具描述不含能力判定（常量措辞），
+ * 中途重注册会让请求前缀的工具段变化、整段前缀缓存失效。
  */
-function registerExploreTool(pi: ExtensionAPI, hasVision: boolean): void {
-	if (hasVision === registeredWithVision) return;
-	registeredWithVision = hasVision;
-	pi.registerTool(buildExploreToolDefinition(pi, hasVision));
+function registerExploreTool(pi: ExtensionAPI): void {
+	pi.registerTool(buildExploreToolDefinition(pi));
 }
 
 // ---------------------------------------------------------------------------
@@ -786,19 +769,14 @@ export default function (pi: ExtensionAPI) {
 		version: EXPLORE_API_VERSION,
 		createSubagentTool: (ctx, options) =>
 			toSubagentTool(
-				buildExploreToolDefinition(pi, modelHasVision(pickExploreModel(ctx)), options?.alwaysFresh === true),
+				buildExploreToolDefinition(pi, options?.alwaysFresh === true),
 				ctx,
 				options?.alwaysFresh === true,
 			),
 	});
 
 	pi.on("session_shutdown", async () => clearStatusTimers());
-	// 初始注册（未知视觉能力时不标注）；有 ctx 的时机再收敛
-	registerExploreTool(pi, false);
-	// 会话开始时探测当前子模型视觉能力并重注册标注（下个 turn 生效）
-	pi.on("session_start", async (_event, ctx) => {
-		registerExploreTool(pi, detectExploreVision(ctx));
-	});
+	registerExploreTool(pi);
 
 	// /explore-config：配置 explore 子代理使用的模型
 	registerModelConfigCommand(pi, {
@@ -807,8 +785,6 @@ export default function (pi: ExtensionAPI) {
 			"explore 子模型：auto（由 model-config 管理）或 provider/modelId（无参开浮层）",
 		displayName: "explore 子模型",
 		setting: exploreModelSetting,
-		// 设置变更后立即按新模型重注册视觉标注
-		onSettingChanged: (ctx) => registerExploreTool(pi, detectExploreVision(ctx)),
 	});
 }
 
