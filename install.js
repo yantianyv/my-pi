@@ -226,13 +226,61 @@ function missingBuildDeps() {
 	}
 }
 
+/** 本机 libc（仅 Linux 有意义）：有 glibc 运行时版本号即 glibc，否则按 musl；探测不到返回 null（不参与比对）。 */
+function currentLibc() {
+	if (process.platform !== "linux") return null;
+	try {
+		return process.report?.getReport?.().header?.glibcVersionRuntime ? "glibc" : "musl";
+	} catch {
+		return null;
+	}
+}
+
+/** npm 的 os/cpu/libc 约束是否命中给定值（支持 "!win32" 取反写法；无约束视为命中）。 */
+function constraintMatches(list, value) {
+	if (!Array.isArray(list) || list.length === 0) return true;
+	if (list.includes(`!${value}`)) return false;
+	if (list.some((v) => typeof v === "string" && !v.startsWith("!"))) return list.includes(value);
+	return true; // 只有取反项且未命中 → 适用本机
+}
+
+/** 本机平台的原生可选依赖（package-lock 里带 os/cpu/libc 约束且命中本机的条目）在 src/node_modules 里缺失的清单。
+ *  只看包名与否查不出这类问题：双系统共享同一份 node_modules 时，另一平台的 @esbuild/<平台> 还在、本机的那个没有，
+ *  构建会以「原生二进制平台不符」全量失败（且 esbuild 不报编译诊断，错误信息看起来是空的）。
+ *  补装只增不删，两个平台的包可共存：两个系统各跑一次 install.js 后，来回切换都不再需要重装。 */
+function missingNativeDeps() {
+	let lock;
+	try {
+		lock = JSON.parse(fs.readFileSync(path.join(SRC_DIR, "package-lock.json"), "utf8"));
+	} catch {
+		return []; // 无锁文件/解析失败：退回包名检测口径，不误报
+	}
+	const libc = currentLibc();
+	const missing = [];
+	for (const [rel, meta] of Object.entries(lock.packages ?? {})) {
+		if (!rel.startsWith("node_modules/") || !meta) continue;
+		if (!meta.os && !meta.cpu && !meta.libc) continue; // 与平台无关的普通包
+		if (!constraintMatches(meta.os, process.platform)) continue;
+		if (!constraintMatches(meta.cpu, process.arch)) continue;
+		if (libc && !constraintMatches(meta.libc, libc)) continue;
+		if (fs.existsSync(path.join(SRC_DIR, rel))) continue;
+		missing.push({ name: rel.replace(/^.*?node_modules\//, ""), version: meta.version ?? null });
+	}
+	return missing;
+}
+
 /** 确保构建依赖已安装：按 src/package.json 清单与 src/node_modules 实况全量比对
  *  （不只查 esbuild 一个包），任一依赖缺失即交互确认后 npm install 补装——
- *  覆盖克隆后首次、以及 node_modules 不完整（如 install 中途中断、包被手删）的情形。 */
+ *  覆盖克隆后首次、node_modules 不完整（如 install 中途中断、包被手删）、以及双系统换系统后
+ *  本机原生包（@esbuild/<平台>）缺席的情形。 */
 async function ensureDeps() {
 	const missing = missingBuildDeps();
-	if (missing.length === 0) return;
-	log(`构建依赖缺失（${missing.length}）：${missing.join(", ")}`);
+	const native = missingNativeDeps();
+	if (missing.length === 0 && native.length === 0) return;
+	if (missing.length > 0) log(`构建依赖缺失（${missing.length}）：${missing.join(", ")}`);
+	if (native.length > 0) {
+		log(`本机原生依赖缺失（${native.length}）：${native.map((d) => d.name).join(", ")}（本机 ${process.platform}-${process.arch}）`);
+	}
 	if (!(await confirm("  是否自动执行 npm install 拉取构建依赖？（Y/n）"))) {
 		console.error("已取消。请手动执行 cd src && npm install 后重新运行 install.js。");
 		process.exit(1);
@@ -245,10 +293,24 @@ async function ensureDeps() {
 		console.error("\nnpm install 失败（需要网络）。请手动执行 cd src && npm install 后重新运行 install.js。");
 		process.exit(1);
 	}
+	// npm 对「已装另一平台同名可选包」的树偶尔判定无需变更而跳过补装：按锁文件版本点名补一次
+	const stillNative = missingNativeDeps();
+	if (stillNative.length > 0) {
+		log(`单独补装本机原生依赖：${stillNative.map((d) => d.name).join(", ")}`);
+		try {
+			const specs = stillNative.map((d) => (d.version ? `${d.name}@${d.version}` : d.name)).join(" ");
+			execSync(`npm install --no-save ${specs}`, { cwd: SRC_DIR, stdio: "inherit" });
+		} catch {
+			/* 补装失败由下方复查统一报错退出 */
+		}
+	}
 	// 补装后复查：仍缺说明 npm 源异常或 package.json 与锁文件不一致，明示给用户
-	const still = missingBuildDeps();
+	const still = [...missingBuildDeps(), ...missingNativeDeps().map((d) => d.name)];
 	if (still.length > 0) {
 		console.error(`\n✗ 仍有依赖未安装成功：${still.join(", ")}。请检查网络重试；若刚改过 package.json，先 npm install 更新锁文件。`);
+		if (missingNativeDeps().length > 0) {
+			console.error(`   本机原生依赖（${process.platform}-${process.arch}）仍缺席：npm 源可能不提供该平台包，或 src/node_modules 不可写。`);
+		}
 		process.exit(1);
 	}
 }
@@ -839,7 +901,7 @@ async function main() {
 	console.log(`  node ${node.version} ${node.ok ? "✓" : `✗（pi 要求 ≥ ${NODE_MIN}，建议先升级 node 再启动 pi）`}`);
 	const piRootBefore = findPiGlobalRoot();
 	console.log(`  pi 本体 ${piRootBefore ? `✓ ${piRootBefore}` : `✗ 未安装（${PI_PACKAGE}）`}`);
-	const buildDepsMissing = missingBuildDeps();
+	const buildDepsMissing = [...missingBuildDeps(), ...missingNativeDeps().map((d) => d.name)];
 	console.log(`  构建依赖 ${buildDepsMissing.length === 0 ? "✓" : `✗ 缺 ${buildDepsMissing.length} 个（${buildDepsMissing.join(", ")}）`}`);
 	console.log(`  rtk（可选，pi-rtk-optimizer 命令改写）${rtkOnPath() ? "✓" : "✗ 未安装（稍后可选自动安装）"}`);
 	console.log("");

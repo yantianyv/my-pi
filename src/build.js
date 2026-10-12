@@ -27,6 +27,8 @@ const SRC = path.join(ROOT, "src");
 const DIST = path.join(ROOT, "dist");
 // 被 install.js 调用时传入（此时不打印“去运行 install.js”之类的提示，避免误导）
 const fromInstall = process.argv.includes("--from-install");
+// 非编译类错误的原文（原生依赖平台不符时 21 个入口会报同一句），去重后只提示一次
+const reportedErrors = new Set();
 
 // esbuild 是 src/package.json 的 devDependency，安装在 src/node_modules——
 // 本脚本就在 src/ 内，require 从 src/ 向上解析自然命中，无需 createRequire hack
@@ -36,6 +38,23 @@ try {
 } catch {
 	console.error("未找到 esbuild（构建依赖）。首次使用请先执行：cd src && npm install\n");
 	process.exit(1);
+}
+
+/** 打印 esbuild 抛出的非编译诊断错误（原生二进制平台不符、子进程启动失败等，此时 err.errors 为空）。
+ *  同一句只提示一次：平台不符会让全部入口以同一原因失败，逐条重复只会淹没真正有用的那行提示。 */
+function reportNonCompileError(entry, err) {
+	const first = String(err?.message ?? err).trim().split("\n")[0];
+	if (reportedErrors.has(first)) return;
+	reportedErrors.add(first);
+	console.error(`✗ ${path.relative(ROOT, entry.src)} 构建失败：`);
+	console.error(`  ${first}`);
+	if (/another platform than the one you're currently using/.test(first)) {
+		console.error(
+			`  提示：本机是 ${process.platform}-${process.arch}，而 src/node_modules 里的原生依赖（esbuild）属于其他平台。` +
+				"双系统共享同一份 node_modules 时，换系统后需各自补装本机二进制：cd src && npm install（或仓库根目录 node install.js）。" +
+				"补装不会删掉另一平台的包，两个系统来回切换各装一次即可长期可用。",
+		);
+	}
 }
 
 /** 收集扩展构建入口：src/extensions/ 顶层 *.ts + 子目录 index.ts/index.js（多文件扩展），排除 shared/ 等无入口目录 */
@@ -77,13 +96,17 @@ async function buildExtension(entry) {
 		console.log(`✓ ${path.relative(ROOT, entry.src)} → ${path.relative(ROOT, entry.out)}（${size} KB）`);
 		return true;
 	} catch (err) {
-		console.error(`✗ ${path.relative(ROOT, entry.src)} 构建失败：`);
-		for (const e of err.errors ?? []) {
-			console.error(`  ${path.relative(ROOT, e.location?.file ?? entry.src)}:${e.location?.line ?? "?"}: ${e.text}`);
-		}
-		// 依赖缺失（npm install 不完整/未装）是最常见的构建失败原因，给出可直接照做的补救提示
-		if ((err.errors ?? []).some((e) => /Could not resolve/.test(e.text ?? ""))) {
-			console.error("  提示：Could not resolve 多为 npm 构建依赖缺失。在仓库根目录运行 node install.js（自动检测并补装依赖），或 cd src && npm install 后重试。");
+		const errors = err.errors ?? [];
+		if (errors.length === 0) reportNonCompileError(entry, err);
+		else {
+			console.error(`✗ ${path.relative(ROOT, entry.src)} 构建失败：`);
+			for (const e of errors) {
+				console.error(`  ${path.relative(ROOT, e.location?.file ?? entry.src)}:${e.location?.line ?? "?"}: ${e.text}`);
+			}
+			// 依赖缺失（npm install 不完整/未装）是最常见的构建失败原因，给出可直接照做的补救提示
+			if (errors.some((e) => /Could not resolve/.test(e.text ?? ""))) {
+				console.error("  提示：Could not resolve 多为 npm 构建依赖缺失。在仓库根目录运行 node install.js（自动检测并补装依赖），或 cd src && npm install 后重试。");
+			}
 		}
 		return false;
 	}

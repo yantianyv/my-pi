@@ -19,7 +19,7 @@ CLI 参数（仅 4 个）：`--dry-run`/`-n`、`--skip-build`、`-y`/`--yes`（�
 | `~/.pi/agent/AGENTS.md` | static/AGENTS.md 包进 `<!-- my_pi:begin -->…<!-- my_pi:end -->` 标记块写入；块外用户手写内容保留；已有无标记块文件时交互询问追加（`-y` 默认追加） |
 | `~/.config/fontconfig/conf.d/99-pi-symbols.conf` | 仅 Linux：`installFontFallback` 生成的符号字形回退规则（终端等宽字体缺的非 CJK 符号钉给 DejaVu Sans Mono）；幂等，内容不变不重写 |
 | 全局 npm | pi 缺失时 `npm i -g @earendil-works/pi-coding-agent` |
-| `src/node_modules/` | `ensureDeps` 按 src/package.json 清单全量比对，任一缺失即 `npm install` |
+| `src/node_modules/` | `ensureDeps` 按 src/package.json 清单全量比对，任一缺失即 `npm install` 补装；另查**本机平台原生可选包**（`missingNativeDeps` 按 `package-lock.json` 里带 `os`/`cpu`/`libc` 且命中本机的条目，目录缺失即算缺，如 `@esbuild/linux-arm64`）——双系统共享同一份 `node_modules` 时另一平台的包还在、本机的没有，不查会以「原生二进制平台不符」全量构建失败；`npm install` 后仍缺则按锁文件版本 `npm install --no-save <包@版本>` 点名补一次（某些 npm 版本会判定树无需变更而跳过）。补装只增不删，两平台包共存，换系统各装一次即可 |
 | rtk 二进制 | 按平台下载 GitHub release（直连优先、gh-proxy 镜像回落、checksums.txt 校验）；Windows → `%APPDATA%\npm\`，Unix 优先 `~/.local/bin`，否则 `~/.pi/agent/bin` |
 | `src/config/tsconfig.json` | `generateTsconfig` 探测 pi 安装目录（托管安装优先，其次 `npm root -g` + 常见全局目录候选）后逐个解析 `__PI_PKG_*` / `__PI_TYPES__` 占位符替换模板；包目录嵌套/提升两种布局都认；模板缺失或探测失败只打 log **静默跳过**（不报错） |
 
@@ -50,6 +50,7 @@ pi 用自带安装器时为**托管安装**（releases-v1）：`<agent>/install/
 - 输出 `dist/extensions/`，esbuild `bundle: true`，external 白名单只有 `@earendil-works/*` 与 `typebox`，其余 npm 依赖（turndown/domino/gfm、qrcode/jsqr/pngjs/jpeg-js）内联进单文件 → 产物零外部依赖、运行时零安装。
 - **必须用 `src/config/tsconfig.build.json`（无 `paths`）**：主 tsconfig 的 `paths` 会把包名解析成 pi 全局绝对路径，破坏 external 包名匹配、意外内联 typebox。
 - 静态资源不经本脚本；`install.js` 会调用它，也可 `node src/build.js` 单跑。
+- 构建失败分两路报错：esbuild 编译诊断（`err.errors`）逐条打印；原生依赖平台不符等**非编译错误**（`err.errors` 为空）走 `reportNonCompileError` 打印 `err.message` 首行 + 针对性提示，且同一句只提示一次（平台不符会让 21 个入口以同一原因失败，逐条重复会淹没提示）。
 
 ## static/（无需编译，install.js 直接部署）
 
