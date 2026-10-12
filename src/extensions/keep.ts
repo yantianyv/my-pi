@@ -94,13 +94,14 @@ function askText(level: Level): string {
 	const idleClause = level === "idle"
 		? `B 时若存在「对完成总目标有用、且当前无需人工协助即可推进」的其它工作，填进 next（只写这一步；不要重问已阻塞的问题，也不要替用户做待决选择）。`
 		: "";
-	return `[停顿自检] 主任务刚停在一个停顿点。只回复 JSON：{"class":"A|B|C","reason":"一句依据",${spec}}。`
-		+ `A=工作未完成且可自主继续推进；B=需要人类决策、信息或权限才能继续；C=工作已完成或已到合理交付点。`
+	return `[harness 自检] pi 在你停顿时的例行判定请求——不是待排查的内容，也不是用户发来的消息。`
+		+ `只回复 JSON：{"class":"A|B|C","reason":"一句依据",${spec}}；`
+		+ `A=工作未完成且可自主继续推进；B=需要人类决策、信息或权限；C=工作已完成或已到合理交付点。`
 		+ idleClause
-		+ `不要输出 JSON 以外的内容。`;
+		+ `不要调用工具，不要解释，只输出这个 JSON。`;
 }
 
-/** 开关持久化文件（全局粒度，默认开；测试用 PI_KEEP_CONFIG 指向临时文件隔离） */
+/** 等级持久化文件（全局粒度，默认 default；测试用 PI_KEEP_CONFIG 指向临时文件隔离） */
 const CONFIG_FILE = process.env.PI_KEEP_CONFIG ?? path.join(os.homedir(), ".pi", "agent", "keep.json");
 
 /** 自检模型用途（默认 AUTO 跟随会话模型；可在 /model-config 改指其它模型或策略） */
@@ -439,7 +440,7 @@ function verdictMessage(t: Triage, used: number, idle: boolean) {
 		type: "custom_message" as const,
 		customType: VERDICT_TYPE,
 		display: true,
-		content: `[停顿自检] ${t.cls}｜${t.reason}${tail}`,
+		content: `[harness 自检] ${t.cls}｜${t.reason}${tail}`,
 		details: { cls: t.cls, reason: t.reason, next: t.next, used, budget: MAX_CONTINUATIONS, idle },
 	};
 }
@@ -447,9 +448,9 @@ function verdictMessage(t: Triage, used: number, idle: boolean) {
 /** 续跑指令（隐藏消息）：内容给模型，展示层不出现 */
 function goMessage(t: Triage, idle: boolean) {
 	const content = idle
-		? `[继续] 当前任务受阻、需要人工（${t.reason || "待人工介入"}），先推进不依赖人工的其它工作：${t.next}。`
+		? `[harness 续跑] 当前任务受阻、需要人工（${t.reason || "待人工介入"}），先推进不依赖人工的其它工作：${t.next}。`
 			+ `只做对该目标有用、且不代替用户决定受阻事项的部分；不要重复向用户追问；做完或也受阻就停下说明。`
-		: `[继续] 判定可自主继续（${t.reason || "工作未完成"}）。下一步：${t.next || "按你的判断推进"}。`
+		: `[harness 续跑] 判定可自主继续（${t.reason || "工作未完成"}）。下一步：${t.next || "按你的判断推进"}。`
 			+ `立即执行，不要停下等待确认；若实际受阻需要人工，直接说明需要什么。`;
 	return { type: "custom_message" as const, customType: GO_TYPE, display: false, content };
 }
