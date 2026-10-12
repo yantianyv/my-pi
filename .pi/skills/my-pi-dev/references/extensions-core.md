@@ -103,7 +103,8 @@
   - 实测教训：自拼前缀（systemPrompt + `buildSessionContext()` 消息）只命中 ~8.5k/250k——系统提示词一致但消息序列在首条 user 消息处就分叉（其它扩展的请求改写不在自拼内容里），每次停点全量重付 250k tokens。
   - 观测口径：`.pi/keep-cache.log` 每次自检追加 `src=stash|fallback msgs tools cls input cacheRead ms ans=`（`ans` 为回答前 120 字符，用于诊断解析失败）。
 - 续跑必须带注入（pi 边界校验在 entries 落账后重算，custom_message 使 transcript 末尾为 user 角色才合法）。防失控：续跑轮仍无 toolCall 直接停 + 每次 `before_agent_start` 重置的预算 16。
-- 模型：用途 `keep-triage`（默认策略 AUTO = 跟随会话模型，可在 `/model-config` 改指）。命令 `/keep` 无参切换（全局持久 `~/.pi/agent/keep.json`，默认开；测试用 `PI_KEEP_CONFIG` 隔离配置文件）；状态 key `keep`（priority 66：`🔁 停顿自检中` / `🔁 续航 n/16`）。回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx + `PI_KEEP_TRIAGE` 测试桩，全离线）。
+- **介入等级**（`keep.json` 的 `level` 键）：`off` 不介入 / `default` 停顿点就地续航 / `idle` 在其上——B（阻塞需人工）时若模型给出「对总目标有用、且当前无需人工协助即可推进」的其它工作，转为先做它（`next` 口径随等级在自检问题里展开：default 只对 A 有效，idle 时 B 也可带活）。**default 档下 B 一律停**（即使模型写了 other work 也不动），守住「需人工」这道闸；idle 的空档活同样吃预算 16 与续跑空转保护，做完仍受阻就停。
+- 模型：用途 `keep-triage`（默认策略 AUTO = 跟随会话模型，可在 `/model-config` 改指）。命令 `/keep` 无参开等级选择面板（`ctx.ui.select` 三档，当前档带 ✓；Esc/非 TUI 不改档），`/keep off|default|idle` 直设（非法值给用法提示）；全局持久 `~/.pi/agent/keep.json`，默认 `default`。状态 key `keep`（priority 66：`🔁 停顿自检中` / `🔁 续航 n/16` / `⏳ 空档推进 n/16`）；判定块档位：`↻ 可继续` / `⏳ 空档推进` / `⚠ 需要人工` / `✓ 已完成`。回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx + `PI_KEEP_TRIAGE` 测试桩，全离线）。
 - 解析兑底（不为弱遵从模型打提示词补丁）：平衡括号扫描从散文/围栏里捞第一个 class 合法的 JSON；捞不到 = 未判定 → 停下并 warning（回答是面向用户的自然语言时，总结≈C / 求助≈B，停下语义自洽）。
 
 ## crash-log.ts

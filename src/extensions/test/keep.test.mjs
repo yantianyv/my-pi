@@ -35,7 +35,12 @@ const writeTool = (name) => ({ name, description: "", parameters: {}, annotation
 
 let importCount = 0;
 /** 每个场景独立 import（模块级状态与 PI_KEEP_TRIAGE 不串场；URL 查询串绕过模块缓存） */
-async function makeHarness({ tools = [], configPath, stub = '{"class":"A","reason":"还差测试","next":"跑测试"}' } = {}) {
+async function makeHarness({
+	tools = [],
+	configPath,
+	stub = '{"class":"A","reason":"还差测试","next":"跑测试"}',
+	pick,
+} = {}) {
 	process.env.PI_KEEP_CONFIG = configPath ?? path.join(os.tmpdir(), `keep-test-${process.pid}-${importCount}.json`);
 	if (stub === null) delete process.env.PI_KEEP_TRIAGE;
 	else process.env.PI_KEEP_TRIAGE = stub;
@@ -55,11 +60,17 @@ async function makeHarness({ tools = [], configPath, stub = '{"class":"A","reaso
 		sendMessage: (message, options) => sent.push({ message, options }),
 	};
 	const statuses = [];
+	const selects = [];
 	const ctx = {
 		cwd: process.cwd(),
 		ui: {
 			notify: (text, level) => notifies.push([level, text]),
 			setStatus: (key, text) => statuses.push([key, text]),
+			// 面板：返回 pick 匹配项（测试预设）；未预设时模拟 Esc/非 TUI
+			select: (title, items) => {
+				selects.push({ title, items });
+				return Promise.resolve(pick ? items.find((t) => t.includes(pick)) : undefined);
+			},
 		},
 		sessionManager: { buildSessionContext: () => ({ messages: [] }) },
 	};
@@ -71,7 +82,7 @@ async function makeHarness({ tools = [], configPath, stub = '{"class":"A","reaso
 	const filter = (messages) => handlers["context"]({ messages }, ctx).messages;
 	const work = (toolName = "edit") => handlers["tool_execution_end"]({ toolName }, ctx);
 	const newRun = (systemPrompt = "SYS") => handlers["before_agent_start"]({ systemPrompt }, ctx);
-	return { handlers, commands, notifies, statuses, sent, ctx, turnEnd, filter, work, newRun, renderers, pi };
+	return { handlers, commands, notifies, statuses, selects, sent, ctx, turnEnd, filter, work, newRun, renderers, pi };
 }
 
 async function main() {
@@ -223,32 +234,32 @@ async function main() {
 	// ---- 开关 ----
 	{
 		const h = await makeHarness();
-		await h.commands["keep"].handler("", h.ctx); // 默认开 → 此调为关
+		await h.commands["keep"].handler("off", h.ctx); // 直设等级：关闭
 		h.newRun();
 		h.work();
 		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
 		check("/keep 关闭后不自检", r === undefined && h.sent.length === 0);
-		check("开关已写盘", JSON.parse(readFileSync(process.env.PI_KEEP_CONFIG, "utf8")).enabled === false);
+		check("等级已写盘", JSON.parse(readFileSync(process.env.PI_KEEP_CONFIG, "utf8")).level === "off");
 		const h2 = await makeHarness({ configPath: process.env.PI_KEEP_CONFIG });
 		h2.newRun();
 		h2.work();
 		const r2 = await h2.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
-		check("持久化：reload 后仍为关", r2 === undefined);
-		await h2.commands["keep"].handler("", h2.ctx);
+		check("持久化：reload 后仍为 off", r2 === undefined);
+		await h2.commands["keep"].handler("default", h2.ctx);
 		const h3 = await makeHarness({ configPath: process.env.PI_KEEP_CONFIG });
 		h3.newRun();
 		h3.work();
 		const r3 = await h3.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
-		check("持久化：开回后 reload 仍为开", r3?.continue === true);
+		check("持久化：改回 default 后 reload 仍续航", r3?.continue === true);
 	}
 	{
 		const h = await makeHarness();
 		await h.commands["keep"].handler("多余的参数", h.ctx);
-		check("带参调用给用法提示", h.notifies.some(([k]) => k === "warning"));
+		check("非法等级给用法提示", h.notifies.some(([k]) => k === "warning"));
 		h.newRun();
 		h.work();
 		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
-		check("带参调用不改变开关（仍为开）", r?.continue === true);
+		check("非法等级不改变当前档（仍为 default）", r?.continue === true);
 	}
 
 	// ---- 渲染 ----
@@ -284,6 +295,65 @@ async function main() {
 		check("过滤：无 keep 消息原样通过", plain.length === 2);
 		const legacy = h.filter([user(), oldAsk(), oldAnswer(), assistant()]);
 		check("过滤：旧版追问记录被滤掉", legacy.length === 2);
+	}
+
+	// ---- 等级面板 ----
+	{
+		const h = await makeHarness({ pick: "空档" });
+		await h.commands["keep"].handler("", h.ctx);
+		check("面板列出三档", h.selects.length === 1 && h.selects[0].items.length === 3);
+		check("面板选择写入 idle", JSON.parse(readFileSync(process.env.PI_KEEP_CONFIG, "utf8")).level === "idle");
+	}
+	{
+		const h = await makeHarness(); // 未预设 pick = Esc / 非 TUI
+		await h.commands["keep"].handler("", h.ctx);
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("面板取消不改档（仍是 default：续航生效）", r?.continue === true);
+	}
+
+	// ---- idle 档：阻塞时先推进其它可自主工作 ----
+	{
+		// default 档：B 带 next 也必须停下（守住需人工这道闸）
+		const h = await makeHarness({ stub: '{"class":"B","reason":"要用户选方案","next":"先补个测试"}' });
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("default 档：B 带 next 也停下（不空档推进）",
+			r === undefined && h.sent.length === 1 && h.sent[0].message.details.idle === false);
+	}
+	{
+		const h = await makeHarness({ stub: '{"class":"B","reason":"要用户选方案","next":"先补个测试"}' });
+		await h.commands["keep"].handler("idle", h.ctx);
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("idle 档：B 带 next → 注入空档推进并 continue",
+			r?.continue === true && r.entries[0].details.idle === true && r.entries[1].customType === "keep-go");
+		check("idle 档：续跑指令点明「先推进不依赖人工的其它工作」",
+			r.entries[1].content.includes("先推进不依赖人工的其它工作"));
+		check("idle 档：状态行显示空档推进", h.statuses.some(([, t]) => t?.includes("空档推进 1/16")));
+	}
+	{
+		const h = await makeHarness({ stub: '{"class":"B","reason":"要用户选方案","next":""}' });
+		await h.commands["keep"].handler("idle", h.ctx);
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("idle 档：B 无可先行的活 → 停下",
+			r === undefined && h.sent.length === 1 && h.sent[0].message.details.idle === false);
+	}
+	{
+		const h = await makeHarness({ stub: '{"class":"B","reason":"要用户选方案","next":"先补个测试"}' });
+		await h.commands["keep"].handler("idle", h.ctx);
+		const theme = { fg: (_c, t) => t, bg: (_c, t) => t };
+		const comp = h.renderers["keep-verdict"](
+			{ details: { cls: "B", reason: "要用户选方案", next: "先补个测试", used: 1, budget: 16, idle: true } },
+			{ expanded: false, outputPad: 1 },
+			theme,
+		);
+		check("渲染器：空档推进档位可用", !!comp && typeof comp.render === "function");
 	}
 
 	const failed = results.filter((r) => !r.ok);

@@ -6,6 +6,9 @@
  *    复刻主会话请求前缀（捕获的系统提示词 + 过滤后的会话消息 + 复刻的工具集），末尾追加自检问题，
  *    跑一次 agentLoop（限 1 轮）拿 A/B/C 判定——提问与回答都不进主记录，也不进后续请求。
  * 2. A：注入判定块（展示）+ keep-go（隐藏指令）并 continue 续跑；B/C：把判定块挂到本轮末尾后停下。
+ *    介入等级（/keep 选择，存 keep.json 的 level 键）：off 不介入 / default 就地续航 / idle 在其上——
+ *    B（阻塞、需人工）时若存在「对总目标有用、且当前无需人工协助即可推进」的其它工作，转为先做它
+ *    （同一套预算与防失控阀；default 档下即使模型写了这类活也不动，守住需人工这道闸）。
  * 3. 判定块 keep-verdict 是自定义消息：带底色 + 判定配色，纯展示、永不进模型请求（过滤器一律滤掉）。
  *
  * 复刻前缀的目的与边界：
@@ -27,7 +30,7 @@
  * 1. 续跑轮（keep-go 后）仍无 toolCall → 直接停，不再自检；
  * 2. 每次用户输入重置的续航预算 MAX_CONTINUATIONS（一次自检消耗 1），用完强制停。
  *
- * 命令：/keep 无参切换开关（全局持久于 ~/.pi/agent/keep.json，默认开，走 shared/config 原子写）。
+ * 命令：/keep 无参开等级选择面板，/keep off|default|idle 直设（全局持久于 ~/.pi/agent/keep.json，默认 default）。
  * 状态 key：keep（hud-core STATUS_STYLE 已登记）。自检模型：用途 keep-triage，默认 AUTO（跟随会话模型）。
  */
 import * as fs from "node:fs";
@@ -65,11 +68,37 @@ const ASK_TYPE = "keep-ask";
  */
 const BUILTIN_WORK_TOOLS = new Set(["bash", "write", "edit", "codemode"]);
 
-/** 三选一自检问题（旁支调用的 user 消息；回答格式要求写死便于解析） */
-const ASK_TEXT =
-	`[停顿自检] 主任务刚停在一个停顿点。只回复 JSON：{"class":"A|B|C","reason":"一句依据","next":"仅A：具体下一步"}。`
-	+ `A=工作未完成且可自主继续推进；B=需要人类决策、信息或权限才能继续；C=工作已完成或已到合理交付点。`
-	+ `不要输出 JSON 以外的内容。`;
+/**
+ * 介入等级：off 不介入 / default 停顿点就地续航 / idle 再叠一层「阻塞时先推进其它可自主工作」。
+ * 等级只影响自检问法与 B 的处理：default 下 B 一律停；idle 下 B 若给出可先行的活才继续。
+ */
+type Level = "off" | "default" | "idle";
+const LEVELS: Level[] = ["off", "default", "idle"];
+const LEVEL_LABEL: Record<Level, string> = { off: "关闭", default: "默认", idle: "空档" };
+const LEVEL_DESC: Record<Level, string> = {
+	off: "不介入停顿点",
+	default: "停顿点就地续航（可自主继续就继续，需人工就停）",
+	idle: "在默认之上：阻塞时先推进其它可自主的工作",
+};
+
+function isLevel(v: unknown): v is Level {
+	return v === "off" || v === "default" || v === "idle";
+}
+
+/** 三选一自检问题（旁支调用的 user 消息；回答格式要求写死便于解析）。
+ *  next 的口径随等级展开：default 只对 A 有效；idle 时 B 也可带「可先行推进的其它工作」。 */
+function askText(level: Level): string {
+	const spec = level === "idle"
+		? `"next":"A：具体下一步；B：可先行的其它工作（没有则留空）"`
+		: `"next":"仅A：具体下一步"`;
+	const idleClause = level === "idle"
+		? `B 时若存在「对完成总目标有用、且当前无需人工协助即可推进」的其它工作，填进 next（只写这一步；不要重问已阻塞的问题，也不要替用户做待决选择）。`
+		: "";
+	return `[停顿自检] 主任务刚停在一个停顿点。只回复 JSON：{"class":"A|B|C","reason":"一句依据",${spec}}。`
+		+ `A=工作未完成且可自主继续推进；B=需要人类决策、信息或权限才能继续；C=工作已完成或已到合理交付点。`
+		+ idleClause
+		+ `不要输出 JSON 以外的内容。`;
+}
 
 /** 开关持久化文件（全局粒度，默认开；测试用 PI_KEEP_CONFIG 指向临时文件隔离） */
 const CONFIG_FILE = process.env.PI_KEEP_CONFIG ?? path.join(os.homedir(), ".pi", "agent", "keep.json");
@@ -285,7 +314,7 @@ async function runTriage(
 		...(systemPrompt ? [systemMessage(systemPrompt)] : []),
 		...filterKeepMessages(sessionMessages(ctx)),
 	];
-	const ask: AgentMessage = { role: "user", content: ASK_TEXT, timestamp: Date.now() };
+	const ask: AgentMessage = { role: "user", content: askText(level), timestamp: Date.now() };
 	const messages = [...history, ...(stopMessage ? [stopMessage] : []), ask];
 	const tools = (base ? declaredTools(base) : null) ?? requestTools(pi);
 	const started = Date.now();
@@ -380,12 +409,17 @@ function logTriage(ctx: ExtensionContext, row: Record<string, unknown>): void {
 // 扩展本体
 // ---------------------------------------------------------------------------
 
-function loadEnabled(): boolean {
-	return loadJsonConfig(CONFIG_FILE, { enabled: true }, (v): v is { enabled: boolean } =>
-		typeof v === "object" && v !== null && typeof (v as { enabled?: unknown }).enabled === "boolean").enabled;
+function loadLevel(): Level {
+	const cfg = loadJsonConfig<{ level?: unknown }>(CONFIG_FILE, {}, (v): v is { level?: unknown } =>
+		typeof v === "object" && v !== null);
+	return isLevel(cfg.level) ? cfg.level : "default";
 }
 
-let enabled = loadEnabled();
+function saveLevel(l: Level): void {
+	saveJsonConfig(CONFIG_FILE, { level: l });
+}
+
+let level = loadLevel();
 let budgetLeft = MAX_CONTINUATIONS; // 本次用户输入还剩几次自检额度
 let awaitingGo = false; // 已注入 keep-go，等续跑轮验证有没有实际动作
 let runDidWork = false; // 本轮（自上次用户输入起）出现过改写类工具调用
@@ -399,38 +433,44 @@ function clearStatus(ctx: ExtensionContext): void {
 }
 
 /** 判定块（自定义消息）：内容仅供记录，展示完全由渲染器按 details 重绘 */
-function verdictMessage(t: Triage, used: number) {
+function verdictMessage(t: Triage, used: number, idle: boolean) {
+	const tail = idle && t.next ? `｜先做：${t.next}` : t.cls === "A" && t.next ? `｜下一步：${t.next}` : "";
 	return {
 		type: "custom_message" as const,
 		customType: VERDICT_TYPE,
 		display: true,
-		content: `[停顿自检] ${t.cls}｜${t.reason}${t.next ? `｜下一步：${t.next}` : ""}`,
-		details: { cls: t.cls, reason: t.reason, next: t.next, used, budget: MAX_CONTINUATIONS },
+		content: `[停顿自检] ${t.cls}｜${t.reason}${tail}`,
+		details: { cls: t.cls, reason: t.reason, next: t.next, used, budget: MAX_CONTINUATIONS, idle },
 	};
 }
 
 /** 续跑指令（隐藏消息）：内容给模型，展示层不出现 */
-function goMessage(t: Triage) {
-	return {
-		type: "custom_message" as const,
-		customType: GO_TYPE,
-		display: false,
-		content: `[继续] 判定可自主继续（${t.reason || "工作未完成"}）。下一步：${t.next || "按你的判断推进"}。`
-			+ `立即执行，不要停下等待确认；若实际受阻需要人工，直接说明需要什么。`,
-	};
+function goMessage(t: Triage, idle: boolean) {
+	const content = idle
+		? `[继续] 当前任务受阻、需要人工（${t.reason || "待人工介入"}），先推进不依赖人工的其它工作：${t.next}。`
+			+ `只做对该目标有用、且不代替用户决定受阻事项的部分；不要重复向用户追问；做完或也受阻就停下说明。`
+		: `[继续] 判定可自主继续（${t.reason || "工作未完成"}）。下一步：${t.next || "按你的判断推进"}。`
+			+ `立即执行，不要停下等待确认；若实际受阻需要人工，直接说明需要什么。`;
+	return { type: "custom_message" as const, customType: GO_TYPE, display: false, content };
 }
 
 export default function (pi: ExtensionAPI) {
 	// 判定块的定制渲染：自定义消息才有底色（customMessageBg），配色按判定分档
 	pi.registerMessageRenderer(VERDICT_TYPE, (m, { outputPad }, theme) => {
-		const d = (m.details ?? {}) as { cls?: string; reason?: string; next?: string; used?: number; budget?: number };
+		type Details = { cls?: string; reason?: string; next?: string; used?: number; budget?: number; idle?: boolean };
+		const d = (m.details ?? {}) as Details;
 		const cls = d.cls === "A" || d.cls === "B" || d.cls === "C" ? d.cls : "C";
-		const icon = cls === "A" ? "↻" : cls === "B" ? "⚠" : "✓";
-		const label = cls === "A" ? "可继续" : cls === "B" ? "需要人工" : "已完成";
+		const idle = cls === "B" && d.idle === true; // 阻塞但先推进其它工作
+		const icon = cls === "A" ? "↻" : cls === "B" ? (idle ? "⏳" : "⚠") : "✓";
+		const label = cls === "A" ? "可继续" : cls === "B" ? (idle ? "空档推进" : "需要人工") : "已完成";
 		const color = cls === "A" ? "accent" : cls === "B" ? "warning" : "success";
-		const counter = cls === "A" && d.used ? theme.fg("muted", ` · 续航 ${d.used}/${d.budget ?? MAX_CONTINUATIONS}`) : "";
+		const counter = (cls === "A" || idle) && d.used
+			? theme.fg("muted", ` · 续航 ${d.used}/${d.budget ?? MAX_CONTINUATIONS}`)
+			: "";
 		const reason = d.reason ? theme.fg("muted", ` —— ${d.reason}`) : "";
-		const next = cls === "A" && d.next ? `\n${theme.fg("dim", `  下一步：${d.next}`)}` : "";
+		const next = d.next && (cls === "A" || idle)
+			? `\n${theme.fg("dim", `  ${idle ? "先做" : "下一步"}：${d.next}`)}`
+			: "";
 		const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 		box.addChild(new Text(theme.fg(color, `${icon} ${label}`) + counter + reason + next, 0, 0));
 		return box;
@@ -442,24 +482,35 @@ export default function (pi: ExtensionAPI) {
 		requestCapturedAt = Date.now();
 	});
 
+	/** 切等级：写盘 + 复位续跑状态（非 off 时重置续航预算） */
+	const applyLevel = (next: Level, ctx: ExtensionContext): void => {
+		level = next;
+		saveLevel(next);
+		awaitingGo = false;
+		if (next === "off") clearStatus(ctx);
+		else budgetLeft = MAX_CONTINUATIONS;
+		ctx.ui.notify(`keep：${LEVEL_LABEL[next]}（${LEVEL_DESC[next]}）`, "info");
+	};
+
 	pi.registerCommand("keep", {
-		description: "停顿点续航开关（无参切换，默认开）",
+		description: "keep 介入等级（无参选择：关闭/默认/空档）",
 		handler: async (args, ctx) => {
-			if (args?.trim()) {
-				ctx.ui.notify("用法：/keep（输一次开、再输一次关）", "warning");
+			const arg = (args ?? "").trim().toLowerCase();
+			if (arg) {
+				if (!isLevel(arg)) {
+					ctx.ui.notify(
+						`keep：未知等级「${arg}」。用法：/keep 打开选择，或 /keep off|default|idle（当前：${LEVEL_LABEL[level]}）`,
+						"warning",
+					);
+					return;
+				}
+				applyLevel(arg, ctx);
 				return;
 			}
-			enabled = !enabled;
-			saveJsonConfig(CONFIG_FILE, { enabled });
-			awaitingGo = false;
-			if (enabled) budgetLeft = MAX_CONTINUATIONS;
-			else clearStatus(ctx);
-			ctx.ui.notify(
-				enabled
-					? `keep 已开启：停顿点自动三选一自检（预算 ${MAX_CONTINUATIONS} 次/轮）`
-					: "keep 已关闭",
-				"info",
-			);
+			const items = LEVELS.map((l) => `${l === level ? "✓ " : "  "}${LEVEL_LABEL[l]}（${LEVEL_DESC[l]}）`);
+			const pick = await ctx.ui.select("keep 介入等级", items);
+			const chosen = pick ? LEVELS[items.indexOf(pick)] : undefined;
+			if (chosen) applyLevel(chosen, ctx);
 		},
 	});
 
@@ -487,7 +538,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_end", async (event: TurnEndEvent, ctx): Promise<TurnEndEventResult | void> => {
-		if (!enabled || event.outcome !== "completed") return;
+		if (level === "off" || event.outcome !== "completed") return;
 		const msg = event.message as Msg;
 		if (hasToolCalls(msg)) {
 			awaitingGo = false; // 有实际动作：续跑轮干活 = 正常
@@ -517,11 +568,13 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		const used = MAX_CONTINUATIONS - budgetLeft;
+		// 空档推进只属于 idle 档：default 档下即使模型写了 B 的「其它工作」也不动（守住需人工这道闸）
+		const idleWork = triage.cls === "B" && level === "idle" && !!triage.next;
 
-		if (triage.cls !== "A") {
+		if (triage.cls !== "A" && !idleWork) {
 			// B/C 都停下：判定块挂到本轮末尾（triggerTurn:false = 不触发新轮）
 			clearStatus(ctx);
-			const block = verdictMessage(triage, used);
+			const block = verdictMessage(triage, used, false);
 			pi.sendMessage({ customType: block.customType, content: block.content, display: true, details: block.details }, {
 				triggerTurn: false,
 			});
@@ -529,8 +582,13 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		awaitingGo = true;
-		setStatusWithTTL(ctx, STATUS_KEY, `🔁 续航 ${used}/${MAX_CONTINUATIONS}`, 600_000);
-		return { continue: true, entries: [verdictMessage(triage, used), goMessage(triage)] };
+		setStatusWithTTL(
+			ctx,
+			STATUS_KEY,
+			idleWork ? `⏳ 空档推进 ${used}/${MAX_CONTINUATIONS}` : `🔁 续航 ${used}/${MAX_CONTINUATIONS}`,
+			600_000,
+		);
+		return { continue: true, entries: [verdictMessage(triage, used, idleWork), goMessage(triage, idleWork)] };
 	});
 
 	// 模型上下文过滤：keep 的消息不进 LLM 请求（会话记录保留，判定块在界面上可见）
