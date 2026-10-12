@@ -45,6 +45,7 @@
 - 群发逐人个性化：`dingtalk_msg` 的 `vars` 参数（`{收件人: 值}` 或 `{收件人: {变量: 值}}`）映射到管线的私有 `--vars`，正文含 `{{变量}}` 时由管线逐人渲染发送；缺变量表在草稿前拦下。
 - 查消息连附件一起落盘：`dingtalk_msg action="read"` 默认附 `--download-resources --output-dir <outDir>`（缺省 `.tmp/dingtalk-media`），dws 把命中消息的 mediaId/fileId 全下到该目录（非 NTFS 卷自动重定向），结果里回显目录与 localPath（模型可直接 read）；`downloadResources=false` 只查文字，`outDir` 改目录（必须是工作目录内相对路径，插件先拦盘符/前导斜杠/`..`）。
 - 会话参数可写人名：`inGroup` / `destGroup`（转发目标）先当群找，找不到就按人找单聊（`aisearch person` 取 openDingTalkId → `+conversation-info --open-dingtalk-id` 取单聊会话 ID），重名走候选流程；已是 `cid` 的不再猜人。
+- 群解析（`resolveGroup`）：`isIdLike` 判为 cid 就直通（字符类含 `=`，base64 填充合法）；否则 `+chat-search` 后由 `matchGroupsByName` 按 name **全等**过滤——`parseGroups` 输出键是 `{cid,name,extra}`，改这里别再按上游原始键 `title`/`openConversationId` 读（曾因键名错配导致群名解析恒空）。全员群/内部群在搜索范围内，多候选强制人工挑 cid。
 - 模型侧不出现 dws 命令路径：错误与提示一律指向插件动作（如“用 action=\"send\" to=[…] 重发”），不写「逃生舱 chat +xxx」——模型会照做去 bash 里敲原生命令，绕开全部门禁与 exFAT 兜底。
 - 群发 `chat +broadcast`：草稿前先跑只读 dry-run 预检收件人，有人未唯一解析就整体拦下（不半批次发送）；正文含 `{{变量}}` 时改走逐人单聊（`sendPersonalized`，每人一份变量表 + 确定性幂等键，重跑自动跳过）。
 - 分享链接落地走 `dingtalk_file action="fetch"`（link 或 spaceId+nodeId；文件直下、文件夹递归镜像，非 NTFS 卷自动改到系统临时区下载再搬回）。
