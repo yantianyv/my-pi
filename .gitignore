@@ -20,6 +20,13 @@ src/extensions/test/.tmp-*
 .pi/*.log
 # 工作流会话绑定表（workflow-mgr：sessionId→槽，本机会话级运行时数据）
 .pi/workflow/bindings.json
+# 工作流槽位的进行中状态（归档快照 .pi/workflow/**/archive/** 仍照常入库）
+.pi/workflow/state.json
+.pi/workflow/workflow.json
+.pi/workflow/config.json
+.pi/workflow/slots/*/state.json
+.pi/workflow/slots/*/workflow.json
+.pi/workflow/slots/*/config.json
 
 # explore 子代理的运行产物（渐进报告 + 单任务成果缓存）：与具体仓库内容无关，不入库
 .pi/explore/
