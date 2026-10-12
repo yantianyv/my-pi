@@ -40,7 +40,9 @@
 - 语义层设计：`intents.ts` 一动作一行纯映射；`index.ts` 负责解析（姓名→userId、DING 另补 openDingTalkId、群名→openConversationId、消息关键词+会话→msgId、文档标题→nodeId、多维表名→baseId/tableId、钉盘名→nodeId、完整手机号→账号、本人 userId）后调 `runGuarded`——**与内部执行管线共用同一条门禁链**（换行归一→分档→参数自检→两阶段→人工面板→台账→结果注解），语义层绕不开任何一道拦截。
 - **同名/同名群不弹人工确认**：把候选（含部门/职务/工号与账号 ID）作为结果回给 AI，由 AI 自己挑定后把该项换成候选 ID 重调（提示词第 3 条明确要求）；查无此人时改用手机号即可（插件走 `contact user search-mobile`）。
 - **AI 角标由插件带**：发送类映射统一加 `--ai-tag`（dws 原生角标），模型不必在正文写【AI发送】；正文里的字面反斜杠-n 仍自动归一为真换行。
-- 覆盖范围即上表六个域的主用动作；在线表格创建走 `dingtalk_doc action="sheetCreate"`（有 values → `sheet create-with-data` 创建+写入+回读一体，空表 → `sheet create`；长整数自动转文本防精度丢失；失败/超时时结果里附续做指引——读回现状只补失败步骤，禁止整体重跑）。长尾（听记/考勤/邮箱/组织/表格结构/多维表视图等）**AI 做不了**：先回报用户缺什么、常用的话建议补进插件，`dws_skill` 只为这份回报评估可行性而读，禁止照文档换参数/换格式自己继续试；需要时按动作表补进插件。
+- 在线表格创建走 `dingtalk_doc action="sheetCreate"`（有 values → `sheet create-with-data` 创建+写入+回读一体，空表 → `sheet create`；长整数自动转文本防精度丢失；失败/超时时结果里附续做指引——读回现状只补失败步骤，禁止整体重跑）。
+- 表格下拉列表三件套：`sheetSetDropdown`（options 与 sourceRange 二选一、选项禁英文逗号、sourceRange 只收 A1 区域不带表前缀；set 成功后结果附 get-dropdown 只读核验指引）/ `sheetGetDropdown` / `sheetDeleteDropdown`；缺 sheetId 时 resolve 用 `+list-sheets` 取首个工作表（禁止猜 Sheet1/0）。
+- 覆盖范围即上表六个域的主用动作；长尾（听记/考勤/邮箱/组织/表格结构/多维表视图等）**AI 做不了**：先回报用户缺什么、常用的话建议补进插件，`dws_skill` 只为这份回报评估可行性而读，禁止照文档换参数/换格式自己继续试；需要时按动作表补进插件。
 - 安全门禁（`decideExec` + `runGuarded`）：读直通 / 写两阶段（草稿 + confirm）/ 敏感档人工面板（`shared/review-panel.ts`，面板只写人话、无 argv/ID，无界面会话直接拒绝）；面板「当前工作区不再询问」写 `remembered`（cli_path，destructive 不可记）。分档由 dws schema 元数据的 `effect`/`availability` 决定（缓存 `~/.pi/agent/dingtalk-bridge-schema.json` + 手写表兜底）：上游标 `availability≠available` 的命令直接报不可用与原因，不掩成内容错；命令路径（canonical/点分/本地旧写法）统一归一到可执行 cli_path。
 - 群发逐人个性化：`dingtalk_msg` 的 `vars` 参数（`{收件人: 值}` 或 `{收件人: {变量: 值}}`）映射到管线的私有 `--vars`，正文含 `{{变量}}` 时由管线逐人渲染发送；缺变量表在草稿前拦下。
 - 查消息连附件一起落盘：`dingtalk_msg action="read"` 默认附 `--download-resources --output-dir <outDir>`（缺省 `.tmp/dingtalk-media`），dws 把命中消息的 mediaId/fileId 全下到该目录（非 NTFS 卷自动重定向），结果里回显目录与 localPath（模型可直接 read）；`downloadResources=false` 只查文字，`outDir` 改目录（必须是工作目录内相对路径，插件先拦盘符/前导斜杠/`..`）。
