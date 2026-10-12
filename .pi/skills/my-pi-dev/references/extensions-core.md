@@ -97,7 +97,7 @@
 - **in-transcript 追问 + context 过滤**（不用侧路 aiComplete）：provider 前缀缓存从第 0 个 token 起匹配，侧路调用系统提示词不同必然 0 命中（usage 实测主会话每轮增量仅几百 tokens）；自问自答两轮都是主会话正常 turn、缓存全吃。问答留在会话记录（`display: true` 可见可审计），`context` 事件把 keep-ask/keep-go 与「紧跟 keep-ask 的无工具调用 assistant 消息」从 LLM 请求滤掉——无状态规则（靠 customType），/reload 后仍生效；带工具调用的回答必须保留（工具配对）。
 - 过滤必留末尾「活尾巴」（进行中的问答/刚注入的指令是当前轮输入）；续跑必须带注入（pi 边界校验在 entries 落账后重算，custom_message 使 transcript 末尾为 user 角色才合法；自然停点的 `canContinue` 恒 false，不能拿它当守卫）。
 - 命令 `/keep` 无参切换（全局持久 `~/.pi/agent/keep.json`，默认开；测试用 `PI_KEEP_CONFIG` 环境变量隔离配置文件）；状态 key `keep`（priority 66）；回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx 驱动）。
-- UI 层：keep-ask 不占聊天流（`display:false`，只靠 HUD 行「🔁 停顿自检中」提示，无自订渲染器）；keep-go 经 `registerMessageRenderer` 渲染（details 传 reason/next/used/budget → 续航计数行 + 下一步）；自检回答的生 JSON 在 `message_end` 换成「图标 + 加粗判定 + 模型理由」（`↻/⚠/✓ **可继续/需要人工/已完成** —— 理由`，无固定前缀）——**替换会毁掉原文 JSON**，解析结果经 `pendingTriage` 预存带给紧随的 `turn_end`（实机抓到的 bug：turn_end 收到替换后文本必然解析失败，A 续跑会被掐死）；常规 notify 全删，只留异常类（解析失败/预算耗尽/空转）。
+- UI 层：keep-ask 与 keep-go 都不占聊天流（`display:false`，只靠 HUD 行「🔁 停顿自检中」/「🔁 续航 n/16」提示；已无自订渲染器）；自检回答的生 JSON 在 `message_end` 换成「图标 + 加粗判定 + 模型理由」，A 把续航计数与下一步并进同一行（`↻ **可继续** · 续航 3/16 —— 理由` + 换行 `· 下一步：…`）——**替换会毁掉原文 JSON**，解析结果经 `pendingTriage` 预存带给紧随的 `turn_end`（实机抓到的 bug：turn_end 收到替换后文本必然解析失败，A 续跑会被掐死）；常规 notify 全删，只留异常类（解析失败/预算耗尽/空转）。
 - 解析兑底（不为弱遵从模型打提示词补丁）：平衡括号扫描从散文/围栏里捞第一个 class 合法的 JSON；捞不到 = 回答是面向用户的自然语言（总结≈C / 求助≈B），语义自洽的兑底就是停下，想继续的模型更常见的表现是直接发工具调用（已被 hasToolCalls 视同 A）。
 
 ## crash-log.ts

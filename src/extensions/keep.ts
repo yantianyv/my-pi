@@ -29,15 +29,13 @@
  *
  * 命令：/keep 无参切换开关（全局持久于 ~/.pi/agent/keep.json，默认开）。状态 key：keep（hud-core STATUS_STYLE 已登记）。
  *
- * 展示：keep-ask 不占聊天流（display:false，仅 HUD 行「🔁 停顿自检中」提示）；自检回答经
- * message_end 换成「图标 + 加粗判定 + 模型理由」；keep-go 经 registerMessageRenderer 渲染
- * 续航计数与下一步。展示层不影响模型收到的内容。
+ * 展示：keep-ask 与 keep-go 都不占聊天流（display:false，靠 HUD 行提示）；自检回答经 message_end
+ * 换成「图标 + 加粗判定 + 理由」，A 再把续航计数与下一步并进同一行。展示层不影响模型收到的内容。
  */
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext, TurnEndEvent, TurnEndEventResult } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { Box, Text } from "@earendil-works/pi-tui";
 import { loadJsonConfig, saveJsonConfig } from "./shared/config";
 import { clearStatusTimers, setStatusWithTTL } from "./shared/status";
 
@@ -198,25 +196,17 @@ function keepMessage(customType: string, content: string, details?: Record<strin
 	return { type: "custom_message" as const, customType, display, content, ...(details ? { details } : {}) };
 }
 
-/** 自检回答的展示版（message_end 替换生 JSON；固定前缀不入展示，只留判定与模型的理由） */
-function triageDisplay(t: Triage): string {
+/** 自检回答的展示版（message_end 替换生 JSON；固定前缀不入展示，A 的续航计数与下一步并进来） */
+function triageDisplay(t: Triage, used: number): string {
 	const icon = t.cls === "A" ? "↻" : t.cls === "B" ? "⚠" : "✓";
 	const label = t.cls === "A" ? "可继续" : t.cls === "B" ? "需要人工" : "已完成";
-	return `${icon} **${label}**${t.reason ? ` —— ${t.reason}` : ""}`;
+	const counter = t.cls === "A" ? ` · 续航 ${used}/${MAX_CONTINUATIONS}` : "";
+	const reason = t.reason ? ` —— ${t.reason}` : "";
+	const next = t.cls === "A" && t.next ? `\n· 下一步：${t.next}` : "";
+	return `${icon} **${label}**${counter}${reason}${next}`;
 }
 
 export default function (pi: ExtensionAPI) {
-	// keep-go 的定制渲染：details 传结构化判定，渲染成续航计数 + 下一步（keep-ask 走 HUD 不占聊天流）
-	pi.registerMessageRenderer("keep-go", (m, { outputPad }, theme) => {
-		const d = (m.details ?? {}) as { reason?: string; next?: string; used?: number; budget?: number };
-		const head = theme.fg("accent", `↻ 续航${d.used ? ` ${d.used}/${d.budget ?? ""}` : ""} · 可继续`);
-		const reason = d.reason ? theme.fg("muted", ` —— ${d.reason}`) : "";
-		const next = d.next ? theme.fg("dim", `\n  下一步：${d.next}`) : "";
-		const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
-		box.addChild(new Text(head + reason + next, 0, 0));
-		return box;
-	});
-
 	// 自检回答（生 JSON）替换成一行人话；仅换显示，角色不变、context 过滤规则不受影响
 	pi.on("message_end", (event) => {
 		if (!awaitingTriage) return;
@@ -225,7 +215,8 @@ export default function (pi: ExtensionAPI) {
 		const t = parseTriage(assistantText(msg));
 		pendingTriage = t; // 替换会破坏原文，把解析结果带给紧随其后的 turn_end
 		if (!t) return; // 无法解析的回答是面向用户的自然语言，原样保留
-		return { message: { ...msg, content: [{ type: "text", text: triageDisplay(t) }] } as AgentMessage };
+		const replaced = { ...msg, content: [{ type: "text", text: triageDisplay(t, MAX_CONTINUATIONS - budgetLeft) }] } as AgentMessage;
+		return { message: replaced };
 	});
 
 	pi.registerCommand("keep", {
@@ -309,7 +300,8 @@ export default function (pi: ExtensionAPI) {
 							"keep-go",
 							`[继续] 判定可自主继续（${t.reason || "工作未完成"}）。下一步：${t.next || "按你的判断推进"}。`
 							+ `立即执行，不要停下等待确认；若实际受阻需要人工，直接说明需要什么。`,
-							{ reason: t.reason, next: t.next, used, budget: MAX_CONTINUATIONS },
+							undefined,
+							false,
 						),
 					],
 				};

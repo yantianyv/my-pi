@@ -127,9 +127,11 @@ async function main() {
 		const r1 = h.turnEnd(answerText("做到这里先停了"));
 		check("默认开：自然停点 → 注入 keep-ask（display:false，不进聊天流）并 continue",
 			r1?.continue === true && r1.entries?.[0]?.customType === "keep-ask" && r1.entries[0].display === false);
-		const r2 = h.triageTurn(answerText('{"class":"A","reason":"还差测试","next":"跑测试"}')).r;
-		check("答 A → 注入 keep-go 并 continue（经 message_end 替换后仍识别）",
-			r2?.continue === true && r2.entries?.[0]?.customType === "keep-go");
+		const a2 = h.triageTurn(answerText('{"class":"A","reason":"还差测试","next":"跑测试"}'));
+		check("答 A → 判定行并入续航计数与下一步",
+			a2.pretty?.message?.content?.[0]?.text === "↻ **可继续** · 续航 1/16 —— 还差测试\n· 下一步：跑测试");
+		check("答 A → 注入 keep-go（display:false）并 continue（经 message_end 替换后仍识别）",
+			a2.r?.continue === true && a2.r.entries?.[0]?.customType === "keep-go" && a2.r.entries[0].display === false);
 		const r3 = h.turnEnd(answerText("我想了想还是不干了"));
 		check("续跑轮仍无 toolCall → 直接停（防死循环）", r3 === undefined);
 		check("空转停下有通知", h.notifies.some(([, t]) => t.includes("无实际动作")));
@@ -179,8 +181,7 @@ async function main() {
 		h.work();
 		h.turnEnd(answerText("停"));
 		check("无法解析的回答原样保留", h.messageEnd(answerText("我觉得可能是 A")) === undefined);
-		check("渲染器只注册 keep-go（ask 走 HUD 不占聊天流）",
-			typeof h.renderers["keep-go"] === "function" && h.renderers["keep-ask"] === undefined);
+		check("三块都不占聊天流（不注册任何消息渲染器）", Object.keys(h.renderers).length === 0);
 	}
 	{
 		const h = await makeHarness();
