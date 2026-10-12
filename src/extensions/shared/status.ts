@@ -48,6 +48,19 @@ export function setStatusWithTTL(
 	);
 }
 
+/**
+ * 登记「正在等什么」到 status-beacon（Working 行说明 + 阻塞等人告警链），缺席静默。
+ * 弹阻塞式 UI（问卷 / 复核 / 在场探测）前传描述、关闭后传 null。
+ */
+export function setWaiting(text: string | null): void {
+	try {
+		((globalThis as Record<string, unknown>).__PI_STATUS_BEACON_API__ as { wait?: (t: string | null) => void } | undefined)
+			?.wait?.(text);
+	} catch {
+		/* 联动是增强，缺席不影响调用方 */
+	}
+}
+
 /** 清空所有 TTL 定时器（reload / quit / session 替换前由各调用方在 session_shutdown 里调用） */
 export function clearStatusTimers(): void {
 	for (const timer of timers.values()) clearTimeout(timer);

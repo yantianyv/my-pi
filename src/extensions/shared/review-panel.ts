@@ -15,6 +15,7 @@
 import { Key, matchesKey, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { TUI } from "@earendil-works/pi-tui";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { setWaiting } from "./status";
 import { choiceKey, clampScroll, createBoxRenderer, dividerScrollNote, renderChoiceList, scrollByPage, wrapIndented } from "./ui";
 
 /** 分区语气 → 主题颜色 */
@@ -68,10 +69,6 @@ const outcomeOf = (choice: string | null): ReviewOutcome =>
 
 /** 面板串行链：并行工具批里多个待审请求依次弹，避免对话框打架 */
 let panelChain: Promise<unknown> = Promise.resolve();
-
-/** 状态行等待文本（status-beacon 桥；缺席静默）*/
-const waitApi = (): { wait?: (t: string | null) => void } | undefined =>
-	(globalThis as Record<string, unknown>).__PI_STATUS_BEACON_API__ as { wait?: (t: string | null) => void } | undefined;
 
 /** 把名单排成 columns 列：返回若干整行（列宽按最长项自适应，纯函数便于测试） */
 export function layoutList(items: string[], columns: number, maxWidth: number): string[] {
@@ -218,7 +215,7 @@ export async function askReview(ctx: Pick<ExtensionContext, "hasUI" | "ui">, req
 	if (!ctx.hasUI) return { kind: "no-ui" };
 	return new Promise<ReviewOutcome>((resolve) => {
 		panelChain = panelChain.then(async () => {
-			waitApi()?.wait?.(`等待确认：${req.verb} ${req.object}`.slice(0, 40));
+			setWaiting(`等待确认：${req.verb} ${req.object}`.slice(0, 40));
 			let choice: string | null;
 			try {
 				choice = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => new ReviewPanel(tui, theme, req, done), {
@@ -226,7 +223,7 @@ export async function askReview(ctx: Pick<ExtensionContext, "hasUI" | "ui">, req
 					overlayOptions: { width: "78%", minWidth: 56, maxHeight: "72%" },
 				});
 			} finally {
-				waitApi()?.wait?.(null);
+				setWaiting(null);
 			}
 			resolve(outcomeOf(choice));
 		});

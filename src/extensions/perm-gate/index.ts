@@ -56,6 +56,7 @@ import { LOCAL_AUTO, createModelSetting, type ModelSetting } from "../shared/mod
 import { PermGateConfigOverlay } from "./config-panel";
 export { compilePatternError, patternHits } from "./config-panel";
 import { splitShellSegments } from "../shared/shell-split";
+import { setWaiting } from "../shared/status";
 import { aiComplete, type AiModelChain } from "../shared/llm";
 
 // ---------------------------------------------------------------------------
@@ -877,11 +878,7 @@ export default function (pi: ExtensionAPI) {
 		// 串行化面板
 		return new Promise<{ block: true; reason: string } | undefined>((resolve) => {
 			panelChain = panelChain.then(async () => {
-				// 登记 Working 行等待文本（status-beacon 桥，缺席静默）
-				const waitApi = (globalThis as Record<string, unknown>).__PI_STATUS_BEACON_API__ as
-					| { wait?: (t: string | null) => void }
-					| undefined;
-				waitApi?.wait?.(`确认命令：${command.trim().split("\n")[0]!.slice(0, 40)}`);
+				setWaiting(`确认命令：${command.trim().split("\n")[0]!.slice(0, 40)}`);
 				let choice: string | null;
 				try {
 					choice = await ctx.ui.custom<string | null>(
@@ -889,7 +886,7 @@ export default function (pi: ExtensionAPI) {
 						{ overlay: true, overlayOptions: { width: "92%", minWidth: 60, maxHeight: "80%" } },
 					);
 				} finally {
-					waitApi?.wait?.(null);
+					setWaiting(null);
 				}
 				switch (choice) {
 					case "允许一次":
@@ -955,19 +952,16 @@ export default function (pi: ExtensionAPI) {
 			return fail(`当前无 UI，无法弹窗请求 sudo 授权。请用户手动执行：sudo bash -c '${command.replace(/'/g, "'\\''")}'`);
 		}
 
-		const waitApi = (globalThis as Record<string, unknown>).__PI_STATUS_BEACON_API__ as
-			| { wait?: (t: string | null) => void }
-			| undefined;
 		const waitText = `sudo 授权：${command.trim().split("\n")[0]!.slice(0, 40)}`;
 
 		// 免密账户：确认弹窗即授权（仍满足「每次调用都需用户确认」）
 		if (await checkSudoNopasswd()) {
-			waitApi?.wait?.(waitText);
+			setWaiting(waitText);
 			let ok = false;
 			try {
 				ok = await ctx.ui.confirm("🔐 sudo 授权（免密账户）", `AI 请求以 root 身份执行：\n${command}\n\n本次授权仅对这一次执行有效。`);
 			} finally {
-				waitApi?.wait?.(null);
+				setWaiting(null);
 			}
 			if (!ok) return fail("用户拒绝了本次 sudo 授权，命令未执行。如需提权，请与用户确认能否换一种做法。");
 			const r = await runSudoCommand(command, null, timeoutMs, signal);
@@ -975,7 +969,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		for (let attempt = 1; attempt <= SUDO_MAX_ATTEMPTS; attempt++) {
-			waitApi?.wait?.(waitText);
+			setWaiting(waitText);
 			let password: string | null;
 			try {
 				password = await ctx.ui.custom<string | null>(
@@ -983,7 +977,7 @@ export default function (pi: ExtensionAPI) {
 					{ overlay: true, overlayOptions: { width: "92%", minWidth: 60, maxHeight: "80%" } },
 				);
 			} finally {
-				waitApi?.wait?.(null);
+				setWaiting(null);
 			}
 			if (password == null) return fail("用户拒绝了本次 sudo 授权，命令未执行。如需提权，请与用户确认能否换一种做法。");
 			const r = await runSudoCommand(command, password, timeoutMs, signal);

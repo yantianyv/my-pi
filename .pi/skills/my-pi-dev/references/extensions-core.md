@@ -95,18 +95,23 @@
 ## keep.ts
 
 - 停顿点续航（旁支自检，主记录零污染）：`turn_end` 时本轮 assistant 消息无 toolCall、`outcome === "completed"`、无排队消息、预算未用完、**且本轮出现过改写类工具调用**（内建集合 bash/write/edit/codemode → `readOnlyHint` 注解（`pi.getAllTools()`，MCP/扩展声明）→ 无注解按只读（安全默认）；零工具与只读工具的收尾是问答/调研的天然终点，不自检。全仓插件工具已逐个声明 `annotations: { readOnlyHint }`，钉钉工具组按能力统一标 false）→ **发起旁支自检**：复刻主会话请求前缀（`before_agent_start` 捕获的 systemPrompt + `filterKeepMessages(buildSessionContext().messages)` + 按 `getActiveTools()` 顺序复刻的工具集、执行体换空实现）+ 末尾追加自检问题，跑一次限 1 轮的 `runAgentLoop`（走 `shared/agent` 的 `createPiStreamFn`），拿 A/B/C 判定——提问与回答都不进主记录。
-- 展示与续跑：A → `turn_end` entries 注入 `keep-verdict`（display:true，自定义消息带底色）+ `keep-go`（display:false，续跑指令）并 continue；B/C → `pi.sendMessage(verdict, { triggerTurn:false })` 挂到本轮末尾后停下（运行中入 `_pendingCustomMessages`，run 收尾 flush）。判定块经 `registerMessageRenderer` 按 details 重绘（customMessageBg 底 + accent/warning/success 配色 + 下一步）。
+- 展示与续跑：A → `turn_end` entries 注入 `keep-verdict`（display:true，自定义消息带底色）+ `keep-go`（display:false，续跑指令）并 continue；B（各档一律）与 default 档的 C → `pi.sendMessage(verdict, { triggerTurn:false })` 挂到本轮末尾后停下（运行中入 `_pendingCustomMessages`，run 收尾 flush）。判定块经 `registerMessageRenderer` 按 details 重绘（customMessageBg 底 + accent/warning/success 配色 + 下一步）。
 - `context` 过滤：`keep-verdict` 任何位置都不进请求（纯展示）；`keep-go` 只在末尾「活尾巴」保留（当前轮的续跑指令）；旧版 in-transcript 的 `keep-ask`/回答记录一并滤掉（历史会话兼容）。
 - **前缀复刻与缓存**：provider 前缀缓存按 `tools → system → messages` 逐字节匹配，三者齐了才命中；命中与否只影响花费（未命中 = 全量按非缓存计价）。
   - 前缀取 **`context_with_system`** 事件捕获的主会话真实请求（该事件在所有 `context` 处理后触发，`messages` 含系统消息与工具声明）——其它扩展对请求的改写（如 time.ts 的时间戳前缀）也已包含，故逐字节一致；工具集从捕获消息里用 `getCurrentTools` 取出，执行体换空实现（误调无副作用）。捕获缺席时回退自拼（systemPrompt + 会话消息 + `getActiveTools()`/`getAllTools()` 重建工具），代价是 miss。
   - **导入陷阱**：`getCurrentTools` 只能从 `@earendil-works/pi-ai/compat`（或根入口）导入——pi 加载扩展走的 jiti 别名表只挂 `compat`/`oauth`/`providers/all` 与根入口，深路径 `pi-ai/utils/transcript` 在 node ESM 下能解析、在 pi 里加载即报错（keep 曾因此加载失败）。
   - 实测教训：自拼前缀（systemPrompt + `buildSessionContext()` 消息）只命中 ~8.5k/250k——系统提示词一致但消息序列在首条 user 消息处就分叉（其它扩展的请求改写不在自拼内容里），每次停点全量重付 250k tokens。
-  - 观测口径：`.pi/keep-cache.log` 每次自检追加 `src=stash|fallback msgs tools cls input cacheRead ms ans=`（`ans` 为回答前 120 字符，用于诊断解析失败）。
+  - 观测口径：`.pi/keep-cache.log` 每次自检追加 `src=stash|fallback msgs tools active gap blocks stop cls input cacheRead ms ans=`（`ans` 为回答前 120 字符，用于诊断解析失败）。
 - 续跑必须带注入（pi 边界校验在 entries 落账后重算，custom_message 使 transcript 末尾为 user 角色才合法）。防失控：续跑轮仍无 toolCall 直接停 + 每次 `before_agent_start` 重置的预算 16。
-- **介入等级**（`keep.json` 的 `level` 键）：`off` 不介入 / `default` 停顿点就地续航 / `idle` 在其上——B（阻塞需人工）时若模型给出「对总目标有用、且当前无需人工协助即可推进」的其它工作，转为先做它（`next` 口径随等级在自检问题里展开：default 只对 A 有效，idle 时 B 也可带活）。**default 档下 B 一律停**（即使模型写了 other work 也不动），守住「需人工」这道闸；idle 的空档活同样吃预算 16 与续跑空转保护，做完仍受阻就停。
+- **介入等级**（`keep.json` 的 `level` 键）：`off` 不介入 / `default` 停顿点就地续航 / `idle` 在 default 之上加「脱机挂机」。**三态判定与档位解耦**：各档共用同一套问法与 schema（`ASK_TEXT`）、同一套续跑指令，档位差异全在 `turn_end` 的停点处理里，切档不改动自检前缀。
+  - `B`（需人工）各档一律停，不去动别的活（`next` 只在 A 时有意义）；`off` 直接不介入。
+  - `idle` 只在 `C`（完成/到交付点）时多一步：先弹一次**在场探测面板**（`ProbePanel` 自绘 + 倒计时；任意键 = 在场，`c` = 立即挂机，超时 = 脱机）。有回应按 default 停；无回应则 `away = true` → 注入 `[harness 挂机]` 指令续跑。
+  - 探测**每个用户输入只做一次**（`away` 在 `before_agent_start`/切档时复位），其后每个停点直接续下一件挂机工作；用户插消息或 Esc 自然回到正常循环。
+  - 挂机指令带白名单 `IDLE_WORK`（补文档/补测试核验/备料/记清单）+ 硬约束（只做新增性工作、不改既有行为、需拍板的事只记录）；「没有合适的活」由既有的**续跑空转保护**收口（挂机轮无 toolCall → 停），不另设协议。挂机同样吃预算 16。
+  - 面板只在 TUI 弹（`ctx.mode !== "tui"` 视作在场、按 default 停），弹前经 `setWaiting()` 登记 Working 行。**不要把「是否在场」寄托在 `ui.confirm/select` 的 `timeout` 上**：它们超时与用户按 Esc 都返回 `undefined`，区分不了「脱机」与「人在按 Esc」，语义会反。
 - **自指场景的预期失败**（别为它加机制）：若会话记录本身在讨论 keep 的提问原文（开发 keep 的会话必然如此），模型会把追加的自检提问读成「对话内容/被粘贴的历史」，起手调工具去查证而不是作答 → 无 JSON → 停。实测 4 次（`blocks=thinking+toolCall`、`ans=` 是排查开场白）全发生在 keep 开发会话里。处理口径：提问措辞标明来源与角色（`[harness 自检]` + 「你是被提问方，直接给出 JSON 结论」），失败即停下（**不加重试机制**——那是拿机制复杂度换边角场景；非自指会话里暂未观察到该形态）。
 - 表述风格：注入给模型的自检提问/续跑指令用**正向框架**（说明「是什么、该做什么」），避免「不是…不要…」式否定句——否定式说明容易被读成「需要留意的例外」。
-- 模型：用途 `keep-triage`（默认策略 AUTO = 跟随会话模型，可在 `/model-config` 改指）。命令 `/keep` 无参开等级选择面板（`ctx.ui.select` 三档，当前档带 ✓；Esc/非 TUI 不改档），`/keep off|default|idle` 直设（非法值给用法提示）；全局持久 `~/.pi/agent/keep.json`，默认 `default`。状态 key `keep`（priority 66：`🔁 停顿自检中` / `🔁 续航 n/16` / `⏳ 空档推进 n/16`）；判定块档位：`↻ 可继续` / `⏳ 空档推进` / `⚠ 需要人工` / `✓ 已完成`。回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx + `PI_KEEP_TRIAGE` 测试桩，全离线）。
+- 模型：用途 `keep-triage`（默认策略 AUTO = 跟随会话模型，可在 `/model-config` 改指）。命令 `/keep` 无参开等级选择面板（`ctx.ui.select` 三档，当前档带 ✓；Esc/非 TUI 不改档），`/keep off|default|idle` 直设（非法值给用法提示）；全局持久 `~/.pi/agent/keep.json`，默认 `default`。状态 key `keep`（priority 66：`🔁 停顿自检中` / `🔁 续航 n/16` / `⏳ 探测在场中` / `⏳ 挂机 n/16`）；判定块：`↻ 可继续` / `⚠ 需要人工` / `✓ 已完成`（挂机时带 ` · 挂机 n/16`，`details.idle = true` 标的就是这件事）。回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx + `PI_KEEP_TRIAGE` 测试桩，全离线；假 `ui.custom` 按 `probe=stop|idle|key:<键>|timeout` 驱动真组件的按键/超时路径）。
 - 解析兑底（不为弱遵从模型打提示词补丁）：平衡括号扫描从散文/围栏里捞第一个 class 合法的 JSON；捞不到 = 未判定 → 停下并 warning（回答是面向用户的自然语言时，总结≈C / 求助≈B，停下语义自洽）。
 
 ## crash-log.ts

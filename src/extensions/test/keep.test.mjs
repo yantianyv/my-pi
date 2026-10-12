@@ -12,6 +12,7 @@
  * - 降级：无法解析、预算耗尽、排队消息、aborted、续跑空转
  * - 过滤：判定块任何位置都不进请求；续跑指令只在末尾活尾巴保留；旧版追问记录被滤掉
  * - 开关：默认开、切换写盘、跨 reload 持久化、带参提示
+ * - 挂机（idle）：C 时探一次在场——有回应即停、无回应/按 c 转挂机；挂机轮不再重复探测
  */
 import { build } from "esbuild";
 import { readFileSync, rmSync } from "node:fs";
@@ -40,6 +41,8 @@ async function makeHarness({
 	configPath,
 	stub = '{"class":"A","reason":"还差测试","next":"跑测试"}',
 	pick,
+	mode,
+	probe = "stop",
 } = {}) {
 	process.env.PI_KEEP_CONFIG = configPath ?? path.join(os.tmpdir(), `keep-test-${process.pid}-${importCount}.json`);
 	if (stub === null) delete process.env.PI_KEEP_TRIAGE;
@@ -61,8 +64,12 @@ async function makeHarness({
 	};
 	const statuses = [];
 	const selects = [];
+	const probes = [];
+	const theme = { fg: (_c, t) => t, bg: (_c, t) => t, bold: (t) => t };
 	const ctx = {
 		cwd: process.cwd(),
+		mode,
+		hasUI: Boolean(mode),
 		ui: {
 			notify: (text, level) => notifies.push([level, text]),
 			setStatus: (key, text) => statuses.push([key, text]),
@@ -71,6 +78,15 @@ async function makeHarness({
 				selects.push({ title, items });
 				return Promise.resolve(pick ? items.find((t) => t.includes(pick)) : undefined);
 			},
+			// 在场探测：probe=stop|idle 直接给定结果；key:<键> 走组件真实按键路径；timeout 只留最后 1 秒
+			custom: (factory) =>
+				new Promise((resolve) => {
+					probes.push(1);
+					const comp = factory({ requestRender: () => {} }, theme, {}, resolve);
+					if (probe === "timeout") comp.left = 1;
+					else if (probe.startsWith("key:")) comp.handleInput(probe.slice(4));
+					else resolve(probe);
+				}),
 		},
 		sessionManager: { buildSessionContext: () => ({ messages: [] }) },
 	};
@@ -82,7 +98,7 @@ async function makeHarness({
 	const filter = (messages) => handlers["context"]({ messages }, ctx).messages;
 	const work = (toolName = "edit") => handlers["tool_execution_end"]({ toolName }, ctx);
 	const newRun = (systemPrompt = "SYS") => handlers["before_agent_start"]({ systemPrompt }, ctx);
-	return { handlers, commands, notifies, statuses, selects, sent, ctx, turnEnd, filter, work, newRun, renderers, pi };
+	return { handlers, commands, notifies, statuses, selects, probes, sent, ctx, turnEnd, filter, work, newRun, renderers, pi, theme };
 }
 
 async function main() {
@@ -313,47 +329,88 @@ async function main() {
 		check("面板取消不改档（仍是 default：续航生效）", r?.continue === true);
 	}
 
-	// ---- idle 档：阻塞时先推进其它可自主工作 ----
+	// ---- 挂机（idle）档：完成时探一次在场，脱机才推进挂机工作 ----
 	{
-		// default 档：B 带 next 也必须停下（守住需人工这道闸）
+		// 人工闸门各档一致：B 带 next 也停
 		const h = await makeHarness({ stub: '{"class":"B","reason":"要用户选方案","next":"先补个测试"}' });
 		h.newRun();
 		h.work();
 		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
-		check("default 档：B 带 next 也停下（不空档推进）",
+		check("default 档：B 带 next 也停下（人工闸门）",
 			r === undefined && h.sent.length === 1 && h.sent[0].message.details.idle === false);
 	}
 	{
-		const h = await makeHarness({ stub: '{"class":"B","reason":"要用户选方案","next":"先补个测试"}' });
+		const h = await makeHarness({
+			stub: '{"class":"B","reason":"要用户选方案","next":"先补个测试"}',
+			mode: "tui",
+			probe: "idle",
+		});
 		await h.commands["keep"].handler("idle", h.ctx);
 		h.newRun();
 		h.work();
 		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
-		check("idle 档：B 带 next → 注入空档推进并 continue",
-			r?.continue === true && r.entries[0].details.idle === true && r.entries[1].customType === "keep-go");
-		check("idle 档：续跑指令点明「先推进不依赖人工的其它工作」",
-			r.entries[1].content.includes("先推进不依赖人工的其它工作"));
-		check("idle 档：状态行显示空档推进", h.statuses.some(([, t]) => t?.includes("空档推进 1/16")));
+		check("idle 档：B 也一律停（next 不再触发挂机，也不探测）",
+			r === undefined && h.sent.length === 1 && h.probes.length === 0);
 	}
 	{
-		const h = await makeHarness({ stub: '{"class":"B","reason":"要用户选方案","next":""}' });
+		// 在场回应（任意键）→ 视为在场，按 default 停
+		const h = await makeHarness({ stub: '{"class":"C","reason":"全部完成"}', mode: "tui", probe: "key:x" });
 		await h.commands["keep"].handler("idle", h.ctx);
 		h.newRun();
 		h.work();
-		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
-		check("idle 档：B 无可先行的活 → 停下",
-			r === undefined && h.sent.length === 1 && h.sent[0].message.details.idle === false);
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "完了" }], timestamp: 5 });
+		check("idle 档：C + 在场回应 → 探测一次后停下",
+			r === undefined && h.probes.length === 1 && h.sent.length === 1
+			&& h.sent[0].message.details.cls === "C" && h.sent[0].message.details.idle === false);
 	}
 	{
-		const h = await makeHarness({ stub: '{"class":"B","reason":"要用户选方案","next":"先补个测试"}' });
+		// 探测超时（脱机）→ 注入挂机指令续跑
+		const h = await makeHarness({ stub: '{"class":"C","reason":"全部完成"}', mode: "tui", probe: "timeout" });
 		await h.commands["keep"].handler("idle", h.ctx);
-		const theme = { fg: (_c, t) => t, bg: (_c, t) => t };
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "完了" }], timestamp: 5 });
+		const go = r?.entries?.[1];
+		check("idle 档：C + 探测超时 → 注入挂机指令并 continue",
+			r?.continue === true && r.entries[0].details.idle === true && go?.customType === "keep-go");
+		check("挂机指令：点明白名单与硬约束",
+			go?.content.includes("补文档或注释") && go.content.includes("不改变既有行为"));
+		check("挂机：状态行显示挂机计数", h.statuses.some(([, t]) => t?.includes("挂机 1/16")));
+
+		// 挂机轮再停（仍 C）：不再重复探测，直接续下一件
+		h.work();
+		await h.turnEnd({ role: "assistant", content: [{ type: "toolCall", id: "1", name: "edit", arguments: {} }], timestamp: 5 }); // 挂机轮干活（清 awaitingGo）
+		const r2 = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "这件做完了" }], timestamp: 5 });
+		check("挂机阶段：再停不再探测，直接续下一件",
+			r2?.continue === true && h.probes.length === 1 && r2.entries[0].details.idle === true);
+	}
+	{
+		// c 键：离开前主动放行
+		const h = await makeHarness({ stub: '{"class":"C","reason":"全部完成"}', mode: "tui", probe: "key:c" });
+		await h.commands["keep"].handler("idle", h.ctx);
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "完了" }], timestamp: 5 });
+		check("探测面板：c 键立即转挂机", r?.continue === true && r.entries[0].details.idle === true);
+	}
+	{
+		// default 档：C 不探测，直接停
+		const h = await makeHarness({ stub: '{"class":"C","reason":"全部完成"}', mode: "tui", probe: "idle" });
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "完了" }], timestamp: 5 });
+		check("default 档：C 不探测，直接停", r === undefined && h.probes.length === 0);
+	}
+	{
+		// 渲染器：C + 挂机标记 → 显示挂机计数
+		const h = await makeHarness();
 		const comp = h.renderers["keep-verdict"](
-			{ details: { cls: "B", reason: "要用户选方案", next: "先补个测试", used: 1, budget: 16, idle: true } },
+			{ details: { cls: "C", reason: "全部完成", next: "", used: 1, budget: 16, idle: true } },
 			{ expanded: false, outputPad: 1 },
-			theme,
+			h.theme,
 		);
-		check("渲染器：空档推进档位可用", !!comp && typeof comp.render === "function");
+		const text = typeof comp?.render === "function" ? comp.render(80).join("\n") : "";
+		check("渲染器：判定块显示「已完成 · 挂机 1/16」", text.includes("已完成") && text.includes("挂机 1/16"));
 	}
 
 	const failed = results.filter((r) => !r.ok);

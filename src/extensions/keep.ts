@@ -6,10 +6,13 @@
  *    复刻主会话请求前缀（捕获的系统提示词 + 过滤后的会话消息 + 复刻的工具集），末尾追加自检问题，
  *    跑一次 agentLoop（限 1 轮）拿 A/B/C 判定——提问与回答都不进主记录，也不进后续请求。
  * 2. A：注入判定块（展示）+ keep-go（隐藏指令）并 continue 续跑；B/C：把判定块挂到本轮末尾后停下。
- *    介入等级（/keep 选择，存 keep.json 的 level 键）：off 不介入 / default 就地续航 / idle 在其上——
- *    B（阻塞、需人工）时若存在「对总目标有用、且当前无需人工协助即可推进」的其它工作，转为先做它
- *    （同一套预算与防失控阀；default 档下即使模型写了这类活也不动，守住需人工这道闸）。
- * 3. 判定块 keep-verdict 是自定义消息：带底色 + 判定配色，纯展示、永不进模型请求（过滤器一律滤掉）。
+ *    三态判定与档位解耦：各档共用同一套问法与 schema，档位差异全在停点处理里。
+ * 3. 介入等级（/keep 选择，存 keep.json 的 level 键）：
+ *    - default：只做上面的就地续航（B 一律停，守住需人工这道闸）。
+ *    - idle（挂机）：完成（C）时先弹一次在场探测——有回应即视为在场、按 default 停；无回应判定脱机，
+ *      改为注入挂机指令续跑，只做白名单里的新增性工作（补文档/补测试/备料/记清单），不改变既有行为。
+ *      同一用户输入内只探一次，此后每个停点直接续下一件挂机工作。
+ * 4. 判定块 keep-verdict 是自定义消息：带底色 + 判定配色，纯展示、永不进模型请求（过滤器一律滤掉）。
  *
  * 复刻前缀的目的与边界：
  * - provider 前缀缓存按「工具集 → 系统提示词 → 消息序列」逐字节匹配，三者齐了才命中；
@@ -38,14 +41,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { runAgentLoop } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext, TurnEndEvent, TurnEndEventResult } from "@earendil-works/pi-coding-agent";
+import { Box, Text, type TUI } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, Theme, TurnEndEvent, TurnEndEventResult } from "@earendil-works/pi-coding-agent";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { getCurrentTools } from "@earendil-works/pi-ai/compat";
-import { Box, Text } from "@earendil-works/pi-tui";
 import { createPiStreamFn, systemMessage } from "./shared/agent";
 import { loadJsonConfig, saveJsonConfig } from "./shared/config";
 import { createModelSetting } from "./shared/model-setting";
-import { clearStatusTimers, setStatusWithTTL } from "./shared/status";
+import { clearStatusTimers, setStatusWithTTL, setWaiting } from "./shared/status";
+import { createBoxRenderer, keyHintRow } from "./shared/ui";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -53,6 +57,15 @@ import { clearStatusTimers, setStatusWithTTL } from "./shared/status";
 
 /** 每次用户输入后的自检预算（一次三选一自检消耗 1；用完强制停） */
 const MAX_CONTINUATIONS = 16;
+/** 挂机在场探测的超时：无回应即判定脱机（毫秒） */
+const PROBE_MS = 30_000;
+/** 挂机工作白名单：只做不改变既有行为的新增性工作，每次自选一件（没有合适的就停） */
+const IDLE_WORK = [
+	"补文档或注释：描述现状，不改代码语义",
+	"补测试或跑核验（typecheck / 测试 / lint），结果写进回复",
+	"准备后续材料：查资料、写方案草稿、列清单",
+	"把发现的问题记成清单，不擅自修",
+];
 /** 状态 key（hud-core STATUS_STYLE 已登记） */
 const STATUS_KEY = "keep";
 /** 判定块（自定义消息，带底色展示）与续跑指令（隐藏消息）的 customType */
@@ -69,36 +82,29 @@ const ASK_TYPE = "keep-ask";
 const BUILTIN_WORK_TOOLS = new Set(["bash", "write", "edit", "codemode"]);
 
 /**
- * 介入等级：off 不介入 / default 停顿点就地续航 / idle 再叠一层「阻塞时先推进其它可自主工作」。
- * 等级只影响自检问法与 B 的处理：default 下 B 一律停；idle 下 B 若给出可先行的活才继续。
+ * 介入等级：off 不介入 / default 停顿点就地续航 / idle 在 default 之上加「脱机挂机」。
+ * 等级只影响停点处理，不影响自检问法与三态判定（各档同一套 schema）。
  */
 type Level = "off" | "default" | "idle";
 const LEVELS: Level[] = ["off", "default", "idle"];
 const LEVEL_LABEL: Record<Level, string> = { off: "关闭", default: "默认", idle: "空档" };
 const LEVEL_DESC: Record<Level, string> = {
 	off: "不介入停顿点",
-	default: "停顿点就地续航（可自主继续就继续，需人工就停）",
-	idle: "在默认之上：阻塞时先推进其它可自主的工作",
+	default: "停顿点就地续航：可自主继续就继续，需人工就停",
+	idle: "在默认之上：完成后探一次在场，脱机就做安全的挂机工作",
 };
 
 function isLevel(v: unknown): v is Level {
 	return v === "off" || v === "default" || v === "idle";
 }
 
-/** 三选一自检问题（旁支调用的 user 消息；回答格式要求写死便于解析）。
- *  next 的口径随等级展开：default 只对 A 有效；idle 时 B 也可带「可先行推进的其它工作」。 */
-function askText(level: Level): string {
-	const spec = level === "idle"
-		? `"next":"A：具体下一步；B：可先行的其它工作（没有则留空）"`
-		: `"next":"仅A：具体下一步"`;
-	const idleClause = level === "idle"
-		? `B 时若存在「对完成总目标有用、且当前无需人工协助即可推进」的其它工作，填进 next（只写这一步；已阻塞的问题保持挂起，待用户拍板的选择留给用户）。`
-		: "";
-	return `[harness 自检] pi 的例行停顿判定，你是被提问方，直接给出 JSON 结论即可：`
-		+ `{"class":"A|B|C","reason":"一句依据",${spec}}。`
-		+ `A=工作未完成且可自主继续推进；B=需要人类决策、信息或权限；C=工作已完成或已到合理交付点。`
-		+ idleClause;
-}
+/**
+ * 三选一自检问题（旁支调用的 user 消息；回答格式写死便于解析）。
+ * 各档共用同一套：档位差异在停点处理里，提问不随档位变（切档也不会改动这段前缀）。
+ */
+const ASK_TEXT = `[harness 自检] pi 的例行停顿判定，你是被提问方，直接给出 JSON 结论即可：`
+	+ `{"class":"A|B|C","reason":"一句依据","next":"仅A：具体下一步"}。`
+	+ `A=工作未完成且可自主继续推进；B=需要人类决策、信息或权限；C=工作已完成或已到合理交付点。`;
 
 /** 等级持久化文件（全局粒度，默认 default；测试用 PI_KEEP_CONFIG 指向临时文件隔离） */
 const CONFIG_FILE = process.env.PI_KEEP_CONFIG ?? path.join(os.homedir(), ".pi", "agent", "keep.json");
@@ -314,7 +320,7 @@ async function runTriage(
 		...(systemPrompt ? [systemMessage(systemPrompt)] : []),
 		...filterKeepMessages(sessionMessages(ctx)),
 	];
-	const ask: AgentMessage = { role: "user", content: askText(level), timestamp: Date.now() };
+	const ask: AgentMessage = { role: "user", content: ASK_TEXT, timestamp: Date.now() };
 	const messages = [...history, ...(stopMessage ? [stopMessage] : []), ask];
 	const tools = (base ? declaredTools(base) : null) ?? requestTools(pi);
 	const started = Date.now();
@@ -406,6 +412,84 @@ function logTriage(ctx: ExtensionContext, row: Record<string, unknown>): void {
 }
 
 // ---------------------------------------------------------------------------
+// 挂机在场探测
+// ---------------------------------------------------------------------------
+
+type ProbeResult = "stop" | "idle";
+
+/**
+ * 在场探测面板：任意键回应 = 在场（返回 stop，按 default 停）；c = 立即挂机（离开前主动放行）；
+ * 倒计时归零无回应 = 脱机（返回 idle，转挂机工作）。
+ */
+class ProbePanel {
+	focused = false;
+
+	private left: number;
+	private timer: ReturnType<typeof setInterval> | undefined;
+	private decided = false;
+
+	constructor(
+		private tui: TUI,
+		private theme: Theme,
+		private done: (r: ProbeResult) => void,
+		ms: number,
+	) {
+		this.left = Math.ceil(ms / 1000);
+		this.timer = setInterval(() => {
+			this.left--;
+			this.tui.requestRender();
+			if (this.left <= 0) this.finish("idle");
+		}, 1000);
+	}
+
+	/** 组件接口要求；本面板无缓存，重绘即最新 */
+	invalidate(): void {}
+
+	dispose(): void {
+		if (this.timer) clearInterval(this.timer);
+	}
+
+	handleInput(data: string): void {
+		this.finish(data.toLowerCase() === "c" ? "idle" : "stop");
+	}
+
+	render(width: number): string[] {
+		const th = this.theme;
+		const { row, topBorder, bottomBorder } = createBoxRenderer(th, Math.max(10, width - 2));
+		return [
+			topBorder(` ${th.fg("dim", "停顿点")} `),
+			row(`${th.fg("success", "✓ 已完成")}   ${th.fg("muted", `${this.left} 秒后自动开始挂机工作`)}`),
+			row(keyHintRow(th, "任意键 保持停下 · c 立即开始挂机")),
+			bottomBorder(),
+		];
+	}
+
+	private finish(r: ProbeResult): void {
+		if (this.decided) return;
+		this.decided = true;
+		if (this.timer) clearInterval(this.timer);
+		this.done(r);
+	}
+}
+
+/**
+ * 弹一次在场探测。只有 TUI 能弹自绘面板，其余模式（print/json/rpc）按在场处理（返回 stop），
+ * 避免“探测不到人”就成了擅自进入挂机的理由。
+ */
+async function probePresence(ctx: ExtensionContext): Promise<ProbeResult> {
+	if (ctx.mode !== "tui") return "stop";
+	setWaiting(`停顿点：${PROBE_MS / 1000} 秒内无回应就转挂机工作`);
+	try {
+		return await ctx.ui.custom<ProbeResult>((tui, theme, _kb, done) => new ProbePanel(tui, theme, done, PROBE_MS), {
+			overlay: true,
+			overlayOptions: { width: "62%", minWidth: 48 },
+		});
+	} finally {
+		setWaiting(null);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 扩展本体
 // ---------------------------------------------------------------------------
 
@@ -421,6 +505,7 @@ function saveLevel(l: Level): void {
 
 let level = loadLevel();
 let budgetLeft = MAX_CONTINUATIONS; // 本次用户输入还剩几次自检额度
+let away = false; // 本次用户输入内是否已判定用户脱机（进入挂机阶段）
 let awaitingGo = false; // 已注入 keep-go，等续跑轮验证有没有实际动作
 let runDidWork = false; // 本轮（自上次用户输入起）出现过改写类工具调用
 let capturedPrompt = ""; // 主会话系统提示词（before_agent_start 捕获，回退路径拼前缀用）
@@ -434,7 +519,7 @@ function clearStatus(ctx: ExtensionContext): void {
 
 /** 判定块（自定义消息）：内容仅供记录，展示完全由渲染器按 details 重绘 */
 function verdictMessage(t: Triage, used: number, idle: boolean) {
-	const tail = idle && t.next ? `｜先做：${t.next}` : t.cls === "A" && t.next ? `｜下一步：${t.next}` : "";
+	const tail = t.cls === "A" && t.next ? `｜下一步：${t.next}` : "";
 	return {
 		type: "custom_message" as const,
 		customType: VERDICT_TYPE,
@@ -445,12 +530,19 @@ function verdictMessage(t: Triage, used: number, idle: boolean) {
 }
 
 /** 续跑指令（隐藏消息）：内容给模型，展示层不出现 */
-function goMessage(t: Triage, idle: boolean) {
-	const content = idle
-		? `[harness 续跑] 当前任务受阻、需要人工（${t.reason || "待人工介入"}），先推进不依赖人工的其它工作：${t.next}。`
-			+ `做法：只做对该目标有用、且不代替用户决定受阻事项的部分；已挂起的人工事项保持挂起；做完或也受阻就停下说明。`
-		: `[harness 续跑] 判定可自主继续（${t.reason || "工作未完成"}）。下一步：${t.next || "按你的判断推进"}。`
-			+ `做法：直接执行到底；确实受阻需要人工时，说明需要什么即可。`;
+function goMessage(t: Triage) {
+	const content = `[harness 续跑] 判定可自主继续（${t.reason || "工作未完成"}）。下一步：${t.next || "按你的判断推进"}。`
+		+ `做法：直接执行到底；确实受阻需要人工时，说明需要什么即可。`;
+	return { type: "custom_message" as const, customType: GO_TYPE, display: false, content };
+}
+
+/** 挂机指令（判定脱机后注入）：只做白名单里的新增性工作，没有合适的就停 */
+function idleGoMessage(t: Triage) {
+	const work = IDLE_WORK.map((w, i) => `${i + 1}) ${w}`).join("；");
+	const content = `[harness 挂机] 用户不在场（判定：${t.reason || "已到交付点"}），这段时间用来推进安全的后备工作，`
+		+ `从下列各类里自选一件去做（做完停下即可，会继续挑下一件）：${work}。`
+		+ `硬约束：只做新增性的文档/测试/草稿，不改变既有行为与对外约定；需要拍板的事项只记录、不擅自决定；`
+		+ `没有合适的就停下说明，不要为找活而发散。`;
 	return { type: "custom_message" as const, customType: GO_TYPE, display: false, content };
 }
 
@@ -460,17 +552,15 @@ export default function (pi: ExtensionAPI) {
 		type Details = { cls?: string; reason?: string; next?: string; used?: number; budget?: number; idle?: boolean };
 		const d = (m.details ?? {}) as Details;
 		const cls = d.cls === "A" || d.cls === "B" || d.cls === "C" ? d.cls : "C";
-		const idle = cls === "B" && d.idle === true; // 阻塞但先推进其它工作
-		const icon = cls === "A" ? "↻" : cls === "B" ? (idle ? "⏳" : "⚠") : "✓";
-		const label = cls === "A" ? "可继续" : cls === "B" ? (idle ? "空档推进" : "需要人工") : "已完成";
+		const idle = cls === "C" && d.idle === true; // 已完成，转去挂机工作
+		const icon = cls === "A" ? "↻" : cls === "B" ? "⚠" : "✓";
+		const label = cls === "A" ? "可继续" : cls === "B" ? "需要人工" : "已完成";
 		const color = cls === "A" ? "accent" : cls === "B" ? "warning" : "success";
 		const counter = (cls === "A" || idle) && d.used
-			? theme.fg("muted", ` · 续航 ${d.used}/${d.budget ?? MAX_CONTINUATIONS}`)
+			? theme.fg("muted", ` · ${idle ? "挂机" : "续航"} ${d.used}/${d.budget ?? MAX_CONTINUATIONS}`)
 			: "";
 		const reason = d.reason ? theme.fg("muted", ` —— ${d.reason}`) : "";
-		const next = d.next && (cls === "A" || idle)
-			? `\n${theme.fg("dim", `  ${idle ? "先做" : "下一步"}：${d.next}`)}`
-			: "";
+		const next = cls === "A" && d.next ? `\n${theme.fg("dim", `  下一步：${d.next}`)}` : "";
 		const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 		box.addChild(new Text(theme.fg(color, `${icon} ${label}`) + counter + reason + next, 0, 0));
 		return box;
@@ -487,6 +577,7 @@ export default function (pi: ExtensionAPI) {
 		level = next;
 		saveLevel(next);
 		awaitingGo = false;
+		away = false;
 		if (next === "off") clearStatus(ctx);
 		else budgetLeft = MAX_CONTINUATIONS;
 		ctx.ui.notify(`keep：${LEVEL_LABEL[next]}（${LEVEL_DESC[next]}）`, "info");
@@ -518,6 +609,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event) => {
 		budgetLeft = MAX_CONTINUATIONS;
 		awaitingGo = false;
+		away = false;
 		runDidWork = false;
 		hintCache = null;
 		if (event?.systemPrompt) capturedPrompt = event.systemPrompt;
@@ -537,6 +629,15 @@ export default function (pi: ExtensionAPI) {
 		if (BUILTIN_WORK_TOOLS.has(name) || readOnlyHints().get(name) === false) runDidWork = true;
 	});
 
+	/** 停：判定块挂到本轮末尾（triggerTurn:false = 不触发新轮），并清掉状态行 */
+	const stopHere = (ctx: ExtensionContext, triage: Triage, used: number, idle: boolean): void => {
+		clearStatus(ctx);
+		const block = verdictMessage(triage, used, idle);
+		pi.sendMessage({ customType: block.customType, content: block.content, display: true, details: block.details }, {
+			triggerTurn: false,
+		});
+	};
+
 	pi.on("turn_end", async (event: TurnEndEvent, ctx): Promise<TurnEndEventResult | void> => {
 		if (level === "off" || event.outcome !== "completed") return;
 		const msg = event.message as Msg;
@@ -545,7 +646,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (awaitingGo) {
-			// 续跑轮仍无实际动作：判 A 失误，直接停（防空转死循环）
+			// 续跑轮仍无实际动作：判 A 失误（或挂机时没有合适的活），直接停
 			awaitingGo = false;
 			clearStatus(ctx);
 			ctx.ui.notify("keep：续跑后仍无实际动作，保持停下（需要时手动指示）", "info");
@@ -568,27 +669,34 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		const used = MAX_CONTINUATIONS - budgetLeft;
-		// 空档推进只属于 idle 档：default 档下即使模型写了 B 的「其它工作」也不动（守住需人工这道闸）
-		const idleWork = triage.cls === "B" && level === "idle" && !!triage.next;
 
-		if (triage.cls !== "A" && !idleWork) {
-			// B/C 都停下：判定块挂到本轮末尾（triggerTurn:false = 不触发新轮）
-			clearStatus(ctx);
-			const block = verdictMessage(triage, used, false);
-			pi.sendMessage({ customType: block.customType, content: block.content, display: true, details: block.details }, {
-				triggerTurn: false,
-			});
+		// B 一律停（各档一致）：需要人工决策/权限时不去动别的活，守住这道闸
+		if (triage.cls === "B") {
+			stopHere(ctx, triage, used, false);
 			return;
 		}
-
+		// A 就地续航
+		if (triage.cls === "A") {
+			awaitingGo = true;
+			setStatusWithTTL(ctx, STATUS_KEY, `🔁 续航 ${used}/${MAX_CONTINUATIONS}`, 600_000);
+			return { continue: true, entries: [verdictMessage(triage, used, false), goMessage(triage)] };
+		}
+		// C 已完成：default 直接停；idle 先探一次在场（同一用户输入内只探一次），脱机才转挂机
+		if (level !== "idle") {
+			stopHere(ctx, triage, used, false);
+			return;
+		}
+		if (!away) {
+			setStatusWithTTL(ctx, STATUS_KEY, "⏳ 探测在场中", PROBE_MS + 60_000);
+			if ((await probePresence(ctx)) === "stop") {
+				stopHere(ctx, triage, used, false);
+				return;
+			}
+			away = true;
+		}
 		awaitingGo = true;
-		setStatusWithTTL(
-			ctx,
-			STATUS_KEY,
-			idleWork ? `⏳ 空档推进 ${used}/${MAX_CONTINUATIONS}` : `🔁 续航 ${used}/${MAX_CONTINUATIONS}`,
-			600_000,
-		);
-		return { continue: true, entries: [verdictMessage(triage, used, idleWork), goMessage(triage, idleWork)] };
+		setStatusWithTTL(ctx, STATUS_KEY, `⏳ 挂机 ${used}/${MAX_CONTINUATIONS}`, 600_000);
+		return { continue: true, entries: [verdictMessage(triage, used, true), idleGoMessage(triage)] };
 	});
 
 	// 模型上下文过滤：keep 的消息不进 LLM 请求（会话记录保留，判定块在界面上可见）

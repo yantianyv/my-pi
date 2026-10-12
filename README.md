@@ -33,7 +33,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `qr.ts` — 二维码：`qr_encode` 编码（显示到 UI + PNG 落盘）+ `qr_decode` 解码 + `/qr` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `img-slim.ts` — 图片请求体预算：新图按类型瘦身（照片→JPEG、图形→优先 PNG、动图 WebP 转静态）+ 每轮请求前按总量预算省略最旧历史图片（防 DeepSeek 等上游 48MiB 请求体 413）（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `crash-log.ts` — 崩溃黑匣子：崩溃堆栈同步落盘 `~/.pi/agent/pi-crash.log`，`/crash-log` 报告最近一条崩溃与取证路径（见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `keep.ts` — 停顿点续航：工作型停点（本轮有 bash/write/edit/codemode 调用且收尾无 toolCall）经**旁支自检**（复刻主会话前缀跑一次限 1 轮的 agentLoop，提问与回答都不进主记录）拿三选一判定（A 继续 / B 需人工 / C 已完成），A 则注入下一步续跑；判定以带底色自定义块展示（纯展示、永不进模型请求）；介入等级 `/keep`（off/default/idle：idle 档在阻塞时先推进其它可自主的工作） | `~/.pi/agent/extensions/` |
+| `extensions/` | `keep.ts` — 停顿点续航：工作型停点（本轮有 bash/write/edit/codemode 调用且收尾无 toolCall）经**旁支自检**（复刻主会话前缀跑一次限 1 轮的 agentLoop，提问与回答都不进主记录）拿三选一判定（A 继续 / B 需人工 / C 已完成），A 则注入下一步续跑；判定以带底色自定义块展示（纯展示、永不进模型请求）；介入等级 `/keep`（off/default/idle：idle 在完成后探一次在场，无人回应就做白名单内的安全挂机工作） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `mimo-omni.ts` — 媒体兼容层（过渡件）：`mimo_transcribe` 解析音频/视频（逐字稿或按需求解析）+ `mimo_speak` 文字合成语音，`/mimo-config` 面板配置（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `dingtalk-bridge/` — 钉钉受控桥接：业务语义工具（消息/待办/日程/审批/文件/文档表格，AI 不碰 dws 命令）+ 唯一逃生舱 `dws_skill`（只给知识）+ 两阶段确认/人工面板/防重发（见下） | `~/.pi/agent/extensions/` |
@@ -144,7 +144,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | | `workflow-mgr` | 工作流摘要 / 完成信号审计 | `📋 进度 3/12 · 当前：2.1 重构锁等待` | 72 |
 | | `model-switch` | 模型切换（3s TTL） | `⇄ deepseek-chat` | 70 |
 | | `explore` | 探索子代理进度 | `🔎 探索 3/8 · 并发 4` | 68 |
-| | `keep` | 停顿点续航判断 / 续跑计数 | `🔁 续航 3/16` | 66 |
+| | `keep` | 停顿点续航判断 / 续航与挂机计数 | `🔁 续航 3/16` `⏳ 挂机 3/16` | 66 |
 | | `qr` | 二维码生成 / 解码 | `🔳 生成中` → `✓ 二维码已显示` | 64 |
 | | `kb-vault` | vault 解锁 / 口令错误 | `🔓 vault 已解锁` | 62 |
 | | `clipboard` | 剪贴板读写 | `📋 读取中` → `✓ 已读取` | 61 |
