@@ -110,11 +110,14 @@ function hasToolCalls(m: Msg | undefined): boolean {
 	return contentBlocks(m).some((b) => b?.type === "toolCall");
 }
 
-function assistantText(m: Msg): string {
-	return contentBlocks(m)
-		.filter((b) => b?.type === "text")
-		.map((b) => b.text ?? "")
-		.join("\n");
+/** 回答正文 / 思维链 / 块类型（思维链仅作诊断与兜底：部分推理模型把内容全写进 thinking） */
+function assistantParts(m: Msg): { text: string; thinking: string; types: string } {
+	const blocks = contentBlocks(m) as Array<{ type?: string; text?: string; thinking?: string }>;
+	return {
+		text: blocks.filter((b) => b?.type === "text").map((b) => b.text ?? "").join("\n").trim(),
+		thinking: blocks.filter((b) => b?.type === "thinking").map((b) => b.thinking ?? "").join("\n").trim(),
+		types: blocks.map((b) => b?.type ?? "?").join("+"),
+	};
 }
 
 /** 旧版追问的回答：紧跟 keep-ask 的无工具调用 assistant 消息（历史记录专用） */
@@ -300,34 +303,47 @@ async function runTriage(
 			createPiStreamFn(ctx),
 		);
 		let text = "";
+		let thinking = "";
+		let types = "";
 		let usage: { input?: number; cacheRead?: number } | undefined;
 		for (let i = out.length - 1; i >= 0; i--) {
 			const m = out[i] as Msg;
 			if (m.role !== "assistant") continue;
 			const u = (m as { usage?: { input?: number; cacheRead?: number } }).usage;
-			if (!text) text = assistantText(m);
+			if (!types) {
+				const parts = assistantParts(m);
+				text = parts.text;
+				thinking = parts.thinking;
+				types = parts.types;
+			}
 			if (!usage && u) usage = u;
-			if (text && usage) break;
+			if (types && usage) break;
 		}
-		const triage = parseTriage(text);
+		// 正文为空时回退用思维链解析：部分推理模型（实测 deepseek-v4.1-flash）把内容全写在 thinking 里
+		const triage = parseTriage(text || thinking);
 		logTriage(ctx, {
 			model: `${resolved.model.provider}/${resolved.model.id}`,
 			ms: Date.now() - started,
 			src: base ? "stash" : "fallback",
 			msgs: messages.length,
 			tools: tools.length,
+			active: pi.getActiveTools().length,
+			gap: requestCapturedAt ? Math.round((started - requestCapturedAt) / 1000) : -1,
+			blocks: types || "-",
 			cls: triage?.cls ?? "-",
 			input: usage?.input,
 			cacheRead: usage?.cacheRead,
-			ans: text.slice(0, 120).replace(/\s+/g, " "),
+			ans: (text || thinking).slice(0, 120).replace(/\s+/g, " "),
 		});
-		return { triage, note: triage ? "" : text ? "回答无法解析" : "回答为空" };
+		return { triage, note: triage ? "" : text ? "回答无法解析" : thinking ? "回答仅在思维链里" : "回答为空" };
 	} catch (e) {
 		logTriage(ctx, {
 			model: `${resolved.model.provider}/${resolved.model.id}`,
 			ms: Date.now() - started,
 			src: base ? "stash" : "fallback",
 			msgs: messages.length,
+			active: pi.getActiveTools().length,
+			gap: requestCapturedAt ? Math.round((started - requestCapturedAt) / 1000) : -1,
 			cls: "err",
 			error: e instanceof Error ? e.message : String(e),
 		});
@@ -372,6 +388,7 @@ let awaitingGo = false; // 已注入 keep-go，等续跑轮验证有没有实际
 let runDidWork = false; // 本轮（自上次用户输入起）出现过改写类工具调用
 let capturedPrompt = ""; // 主会话系统提示词（before_agent_start 捕获，回退路径拼前缀用）
 let requestMessages: AgentMessage[] | null = null; // 主会话真实请求（context_with_system 捕获：含系统消息与工具声明）
+let requestCapturedAt = 0; // 捕获时刻（诊断缓存冷热：与自检发起的间隔）
 let hintCache: Map<string, boolean | undefined> | null = null; // 工具注解缓存（随 before_agent_start 重建）
 
 function clearStatus(ctx: ExtensionContext): void {
@@ -419,6 +436,7 @@ export default function (pi: ExtensionAPI) {
 	// 捕获主会话真实请求（在所有 context 处理后触发）：旁支自检的前缀直接取它，逐字节一致
 	pi.on("context_with_system", (event) => {
 		requestMessages = [...event.messages];
+		requestCapturedAt = Date.now();
 	});
 
 	pi.registerCommand("keep", {
