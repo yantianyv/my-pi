@@ -165,6 +165,16 @@ console.log("G、文档表格域");
 	check("G: sheetCreate 带文件夹", argv(buildDoc({ action: "sheetCreate", title: "t", values: [[1]] }, { ids: { folder: "f1" } })).endsWith("--folder f1"));
 	check("G: 超安全整数按文本写、浮点保持数字", (() => { const a = argv(buildDoc({ action: "sheetCreate", title: "t", values: [[9007199254740993, 1.5, 42]] }, {})); return a.includes('--values [["9007199254740992",1.5,42]]'); })()); // 字面量入参即被 JSON 舍入为 …992，此处只保证不安全整数转文本、浮点不动
 	check("G: sheetCreate 缺 title 报错", typeof buildDoc({ action: "sheetCreate" }, {}).error === "string");
+	// 下拉列表：二选一、逗号坑、多选、sourceRange 校验
+	check("G: Inline 下拉", (() => { const a = argv(buildDoc({ action: "sheetSetDropdown", range: "D2:D200", options: ["线下班", "网络班"] }, { ids: { doc: "n1", sheetId: "s1" } })); return a === 'sheet set-dropdown --node n1 --sheet-id s1 --range D2:D200 --options [{"value":"线下班"},{"value":"网络班"}]'; })());
+	check("G: 多选下拉带 --multi-select", argv(buildDoc({ action: "sheetSetDropdown", range: "A1", options: ["x"], multiSelect: true }, { ids: { doc: "n1", sheetId: "s1" } })).endsWith("--multi-select"));
+	check("G: SourceRange 下拉", (() => { const a = argv(buildDoc({ action: "sheetSetDropdown", range: "C2:C100", sourceRange: "T1:T3", sourceSheetId: "s2" }, { ids: { doc: "n1", sheetId: "s1" } })); return a === "sheet set-dropdown --node n1 --sheet-id s1 --range C2:C100 --source-sheet-id s2 --source-range T1:T3"; })());
+	check("G: options 与 sourceRange 二选一", typeof buildDoc({ action: "sheetSetDropdown", range: "A1" }, { ids: { doc: "n1", sheetId: "s1" } }).error === "string" && typeof buildDoc({ action: "sheetSetDropdown", range: "A1", options: ["a"], sourceRange: "B1", sourceSheetId: "s2" }, { ids: { doc: "n1", sheetId: "s1" } }).error === "string");
+	check("G: 选项含英文逗号拦截", typeof buildDoc({ action: "sheetSetDropdown", range: "A1", options: ["a,b"] }, { ids: { doc: "n1", sheetId: "s1" } }).error === "string");
+	check("G: sourceRange 拒工作表前缀", typeof buildDoc({ action: "sheetSetDropdown", range: "A1", sourceRange: "Sheet2!T1:T3", sourceSheetId: "s2" }, { ids: { doc: "n1", sheetId: "s1" } }).error === "string");
+	check("G: sourceRange 缺 sourceSheetId 报错", typeof buildDoc({ action: "sheetSetDropdown", range: "A1", sourceRange: "T1:T3" }, { ids: { doc: "n1", sheetId: "s1" } }).error === "string");
+	check("G: 查/删下拉", argv(buildDoc({ action: "sheetGetDropdown", range: "D2:D200" }, { ids: { doc: "n1", sheetId: "s1" } })) === "sheet get-dropdown --node n1 --sheet-id s1 --range D2:D200" && argv(buildDoc({ action: "sheetDeleteDropdown", range: "D2:D200" }, { ids: { doc: "n1", sheetId: "s1" } })).startsWith("sheet delete-dropdown"));
+	check("G: 下拉缺 sheetId 时不猜", typeof buildDoc({ action: "sheetSetDropdown", range: "A1", options: ["a"] }, { ids: { doc: "n1" } }).error === "string");
 }
 
 const failed = results.filter((r) => !r.ok);

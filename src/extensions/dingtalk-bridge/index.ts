@@ -919,6 +919,32 @@ export function formatDraft(
 	return lines.join("\n");
 }
 
+/** +list-sheets 结果 → 第一个工作表的 sheetId（有 index 按升序；禁止猜 Sheet1/0） */
+export function parseFirstSheetId(text: string): string | null {
+	try {
+		const data: unknown = JSON.parse(text);
+		const sheets: { id: string; index: number }[] = [];
+		const walk = (v: unknown): void => {
+			if (Array.isArray(v)) return v.forEach(walk);
+			if (!v || typeof v !== "object") return;
+			const o = v as Record<string, unknown>;
+			const id = ci(o, "sheetId");
+			if (typeof id === "string" && id) {
+				const idx = ci(o, "index");
+				sheets.push({ id, index: typeof idx === "number" ? idx : sheets.length });
+				return;
+			}
+			Object.values(o).forEach(walk);
+		};
+		walk(data);
+		if (!sheets.length) return null;
+		sheets.sort((a, b) => a.index - b.index);
+		return sheets[0]!.id;
+	} catch {
+		return null;
+	}
+}
+
 /**
  * 表格创建（sheet create / create-with-data）非原子（创建→探活→写入→回读多步）：
  * 失败/超时后引导读回现状、只补失败步骤，绝不要整体重跑（会造出重复文档）。
@@ -2564,6 +2590,10 @@ openTaskId：${taskId}（要用它时可交给 dingtalk_msg action="sendStatus"�
 			if (dryRun) out += "\n\n（--dry-run 预演：未发送任何消息，也未记入防重发台账）";
 			out = annotateQuery(args, out, /* @__PURE__ */ new Date());
 			if (!matchPrefix(args, SEND_PREFIXES) && !matchPrefix(args, RECALL_PREFIXES)) {
+				if (args[0] === "sheet" && args[1] === "set-dropdown") {
+					const fv = (n: string) => flagValues(args, new Set([n]))[0] ?? "";
+					out += `\n\n核验（只读）：dingtalk_doc action=\"sheetGetDropdown\" doc=\"${fv("--node")}\" sheetId=\"${fv("--sheet-id")}\" range=\"${fv("--range")}\"`;
+				}
 				out += formatDriveRefs(parseDriveRefs(out));
 				out += formatFieldSpellingNote(out);
 				// 附件的落地情况回给模型：省一轮「先看有什么、再单独下」，也避免拿不到文件时反复重试
@@ -3136,6 +3166,12 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 				const f = await resolveDriveNode(p.folder);
 				if (!("ok" in f)) return f;
 				ids.folder = f.ok;
+			}
+			if (["sheetSetDropdown", "sheetGetDropdown", "sheetDeleteDropdown"].includes(p.action) && !p.sheetId && ids.doc) {
+				const data = await callJson(["sheet", "+list-sheets", "--node", ids.doc]);
+				const sid = data ? parseFirstSheetId(JSON.stringify(data)) : null;
+				if (!sid) return { error: "没取到工作表清单——sheetId 请显式给出（可用 sheetRead 确认）" };
+				ids.sheetId = sid;
 			}
 			if (p.action === "wikiList" && p.workspace) {
 				const data = await callJson(["wiki", "space", "list", "--type", "orgWikiSpace"]);

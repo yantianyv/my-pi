@@ -49,7 +49,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, parseCanonicalPath, matchToolByPath, localAliases, formalFlagError, reviewKind, isIdLike, matchGroupsByName, sheetCreateFailureNote, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, parseCanonicalPath, matchToolByPath, localAliases, formalFlagError, reviewKind, isIdLike, matchGroupsByName, sheetCreateFailureNote, parseFirstSheetId, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -273,6 +273,10 @@ console.log("U、群与本人解析");
 	check("失败带 nodeId → 引导 sheetRead/sheetWrite 续做", withNode.includes("n9") && withNode.includes("sheetRead") && withNode.includes("sheetWrite") && withNode.includes("绝不要重跑"));
 	check("失败无 nodeId → 引导 search 确认", sheetCreateFailureNote(["sheet", "create", "--name", "t"], "boom").includes("search"));
 	check("非表格创建命令不附提示", sheetCreateFailureNote(["doc", "+create"], "boom") === "");
+	// 工作表清单 → 首个 sheetId（禁止猜 Sheet1）
+	check("list-sheets 取首个 sheetId", parseFirstSheetId(JSON.stringify({ sheets: [{ title: "汇总", sheetId: "sA", index: 0 }, { title: "明细", sheetId: "sB", index: 1 }] })) === "sA");
+	check("list-sheets 按 index 排序", parseFirstSheetId(JSON.stringify({ sheets: [{ title: "b", sheetId: "sB", index: 1 }, { title: "a", sheetId: "sA", index: 0 }] })) === "sA");
+	check("list-sheets 坏输入不抛", parseFirstSheetId("nope") === null && parseFirstSheetId("{}") === null);
 }
 
 console.log("V、钉盘/云盘分享解析");

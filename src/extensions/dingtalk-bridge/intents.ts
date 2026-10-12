@@ -607,7 +607,7 @@ export function buildFile(p: FileParamsT, r: Resolved): Built {
 /* ============================== 文档 / 表格域 ============================== */
 
 export const DocParams = Type.Object({
-	action: Action(["read", "search", "create", "append", "replace", "wikiList", "sheetCreate", "sheetRead", "sheetWrite", "sheetAppend", "tableQuery", "tableAdd", "tableUpdate", "tableDelete"]),
+	action: Action(["read", "search", "create", "append", "replace", "wikiList", "sheetCreate", "sheetRead", "sheetWrite", "sheetAppend", "sheetSetDropdown", "sheetGetDropdown", "sheetDeleteDropdown", "tableQuery", "tableAdd", "tableUpdate", "tableDelete"]),
 	doc: Type.Optional(Type.String({ description: "文档/表格：标题、链接或节点 ID（read/append/replace/sheet* 用；只给标题时插件先搜索）" })),
 	title: Type.Optional(Type.String({ description: "（create/sheetCreate）新文档/表格标题" })),
 	content: Type.Optional(Type.String({ description: "（create/append/replace）正文（Markdown）" })),
@@ -616,7 +616,11 @@ export const DocParams = Type.Object({
 	workspace: Type.Optional(Type.String({ description: "知识库名称或 ID（wikiList 用）" })),
 	sheetId: Type.Optional(Type.String({ description: "工作表 ID 或名称（sheet* 用；不给则由插件取第一个工作表）" })),
 	folder: Type.Optional(Type.String({ description: "（sheetCreate）目标文件夹：钉盘文件夹名称、链接或 ID；缺省=我的文档根目录" })),
-	range: Type.Optional(Type.String({ description: "（sheetRead/sheetWrite）区域，如 A1:C3" })),
+	range: Type.Optional(Type.String({ description: "（sheetRead/sheetWrite/sheet*Dropdown）区域，如 A1:C3" })),
+	options: Type.Optional(Type.Array(Type.String(), { description: "（sheetSetDropdown）Inline 候选项（与 sourceRange 二选一）；单项不能含英文逗号" })),
+	sourceRange: Type.Optional(Type.String({ description: "（sheetSetDropdown）引用区域来源，如 T1:T3（与 options 二选一，需配 sourceSheetId；不要带工作表前缀）" })),
+	sourceSheetId: Type.Optional(Type.String({ description: "（sheetSetDropdown）sourceRange 来源工作表 ID" })),
+	multiSelect: Type.Optional(Type.Boolean({ description: "（sheetSetDropdown）允许多选，默认单选" })),
 	values: Type.Optional(
 		Type.Array(Type.Array(Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()])), {
 			description: "（sheetCreate/sheetWrite/sheetAppend）二维数据，按行给；单元格里数字会自动按数字写，身份证号/手机号等长数字必须按字符串传（JSON 数字超 15 位丢精度）",
@@ -705,6 +709,31 @@ export function buildDoc(p: DocParamsT, r: Resolved): Built {
 			if (!doc || !p.sheetId) return err("sheetAppend 需要 doc + sheetId");
 			if (!p.values?.length) return err("sheetAppend 需要 values（二维数据）");
 			return { args: ["sheet", "append", "--node", doc, "--sheet-id", p.sheetId, "--values", toCells(p.values as Array<Array<string | number | null>>)] };
+		}
+		case "sheetSetDropdown": {
+			if (!doc || !p.range) return err("sheetSetDropdown 需要 doc + range");
+			const sid = r.ids?.sheetId ?? p.sheetId;
+			if (!sid) return err("sheetSetDropdown 需要 sheetId（插件没解析出工作表）");
+			const hasOptions = !!p.options?.length;
+			const hasSource = !!p.sourceRange;
+			if (hasOptions === hasSource) return err("options 与 sourceRange 必须且只能二选一");
+			if (hasOptions && p.options!.some((o) => o.includes(","))) return err("下拉选项不能含英文逗号（dws 解析坑）");
+			if (hasSource) {
+				if (!p.sourceSheetId) return err("sourceRange 模式需要 sourceSheetId");
+				if (/[!,=]/.test(p.sourceRange!)) return err("sourceRange 只接受 A1 区域（如 T1:T3），不带工作表前缀/公式/多区域");
+			}
+			const args = ["sheet", "set-dropdown", "--node", doc, "--sheet-id", sid, "--range", p.range];
+			if (hasOptions) args.push("--options", JSON.stringify(p.options!.map((v) => ({ value: v }))));
+			else args.push("--source-sheet-id", p.sourceSheetId!, "--source-range", p.sourceRange!);
+			if (p.multiSelect) args.push("--multi-select");
+			return { args, note: "会覆盖目标范围内已有下拉配置；结构操作后 sourceRange 需回读 sourceRangeStatus" };
+		}
+		case "sheetGetDropdown":
+		case "sheetDeleteDropdown": {
+			if (!doc || !p.range) return err(`${p.action} 需要 doc + range`);
+			const sid = r.ids?.sheetId ?? p.sheetId;
+			if (!sid) return err(`${p.action} 需要 sheetId（插件没解析出工作表）`);
+			return { args: ["sheet", p.action === "sheetGetDropdown" ? "get-dropdown" : "delete-dropdown", "--node", doc, "--sheet-id", sid, "--range", p.range] };
 		}
 		case "tableQuery": {
 			if (!r.ids?.baseId || !r.ids?.tableId) return err("tableQuery 需要 base + table（插件没解析出唯一的多维表）");
