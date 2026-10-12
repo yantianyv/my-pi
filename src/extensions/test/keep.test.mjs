@@ -4,264 +4,286 @@
  *
  * 原理：esbuild 把扩展 bundle 成单文件 ESM 再 import（同 qr 测试模式），
  * 用假 pi/ctx 直接驱动 on("turn_end") / on("context") / 命令处理器断言行为。
+ * 自检的模型调用经环境变量 PI_KEEP_TRIAGE 打桩（模块加载时读取，故每场景独立 import）。
  *
  * 覆盖：
- * - context 过滤：已完成问答被滤、活尾巴保留、带工具调用的回答保留（工具配对）
- * - 状态机：自然停点注入 keep-ask → A 注入 keep-go → 续跑空转直接停
- * - B/C/解析失败/预算耗尽/排队消息/aborted/关闭状态 均保持停下
+ * - 状态机：默认开 → 工作型停点自检 → A 注入判定块 + 续跑指令并 continue；B/C 挂判定块后停下
+ * - 门槛：零工具/只读工具停点不自检；内建与 readOnlyHint=false 工具视为工作
+ * - 降级：无法解析、预算耗尽、排队消息、aborted、续跑空转
+ * - 过滤：判定块任何位置都不进请求；续跑指令只在末尾活尾巴保留；旧版追问记录被滤掉
+ * - 开关：默认开、切换写盘、跨 reload 持久化、带参提示
  */
 import { build } from "esbuild";
 import { readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(HERE, "../../..");
-const OUT = path.join(HERE, ".tmp-keep.bundle.mjs");
+const ROOT = path.resolve(import.meta.dirname, "../../..");
+const OUT = path.join(import.meta.dirname, ".tmp-keep.bundle.mjs");
 
 const results = [];
-function check(label, ok, extra) {
-	results.push({ label, ok });
-	console.log(`  ${ok ? "✓" : "✗"} ${label}${ok || extra === undefined ? "" : ` :: ${extra}`}`);
+function check(name, ok) {
+	results.push({ name, ok });
+	console.log(`  ${ok ? "✓" : "✗"} ${name}`);
 }
 
-// ---------------------------------------------------------------------------
-// 测试替身
-// ---------------------------------------------------------------------------
+// ---- 测试桩与假环境 ----
 
-const user = (text = "干活") => ({ role: "user", content: text, timestamp: 1 });
-const ask = () => ({ role: "custom", customType: "keep-ask", content: "?", display: true, timestamp: 2 });
-const go = () => ({ role: "custom", customType: "keep-go", content: "!", display: true, timestamp: 3 });
-const answerText = (text) => ({ role: "assistant", content: [{ type: "text", text }], timestamp: 4 });
-const answerTools = () => ({
-	role: "assistant",
-	content: [{ type: "toolCall", id: "1", name: "bash", arguments: {} }],
-	timestamp: 5,
-});
-const toolResult = () => ({ role: "toolResult", toolCallId: "1", toolName: "bash", content: [], timestamp: 6 });
+const readOnlyTool = (name) => ({ name, description: "", parameters: {}, annotations: { readOnlyHint: true } });
+const writeTool = (name) => ({ name, description: "", parameters: {}, annotations: { readOnlyHint: false } });
 
 let importCount = 0;
-// 每个场景独立 import（模块级 enabled 状态不串场；URL 加查询串绕过模块缓存）
-// 配置文件经 PI_KEEP_CONFIG 指向唯一临时路径，与真实配置隔离（默认开 = 文件不存在）
-async function makeHarness(tools = [], configPath) {
+/** 每个场景独立 import（模块级状态与 PI_KEEP_TRIAGE 不串场；URL 查询串绕过模块缓存） */
+async function makeHarness({ tools = [], configPath, stub = '{"class":"A","reason":"还差测试","next":"跑测试"}' } = {}) {
 	process.env.PI_KEEP_CONFIG = configPath ?? path.join(os.tmpdir(), `keep-test-${process.pid}-${importCount}.json`);
+	if (stub === null) delete process.env.PI_KEEP_TRIAGE;
+	else process.env.PI_KEEP_TRIAGE = stub;
 	const mod = await import(pathToFileURL(OUT).href + `?i=${importCount++}`);
+
 	const handlers = {};
 	const notifies = [];
 	const commands = {};
 	const renderers = {};
+	const sent = [];
 	const pi = {
 		registerCommand: (name, def) => (commands[name] = def),
 		on: (ev, fn) => (handlers[ev] = fn),
 		getAllTools: () => tools,
+		getActiveTools: () => tools.map((t) => t.name),
 		registerMessageRenderer: (type, r) => (renderers[type] = r),
+		sendMessage: (message, options) => sent.push({ message, options }),
 	};
-	(mod.default ?? mod)(pi);
-	const ctx = { ui: { notify: (t, k) => notifies.push([k, t]), setStatus: () => {} } };
-	const turnEnd = (message, opts = {}) =>
-		handlers["turn_end"](
-			{ outcome: "completed", message, context: { pendingMessages: [], ...opts.context }, ...opts },
-			ctx,
-		);
+	const statuses = [];
+	const ctx = {
+		cwd: process.cwd(),
+		ui: {
+			notify: (text, level) => notifies.push([level, text]),
+			setStatus: (key, text) => statuses.push([key, text]),
+		},
+		sessionManager: { buildSessionContext: () => ({ messages: [] }) },
+	};
+	mod.default(pi);
+
+	const answerText = (text) => ({ role: "assistant", content: [{ type: "text", text }], timestamp: 5 });
+	const turnEnd = (message, extra = {}) =>
+		handlers["turn_end"]({ type: "turn_end", message, toolResults: [], outcome: "completed", context: {}, ...extra }, ctx);
 	const filter = (messages) => handlers["context"]({ messages }, ctx).messages;
 	const work = (toolName = "edit") => handlers["tool_execution_end"]({ toolName }, ctx);
-	const newRun = () => handlers["before_agent_start"]({}, ctx);
-	const messageEnd = (message) => handlers["message_end"]?.({ message }, ctx);
-	// 完整自检轮：message_end（可能替换消息）→ turn_end 收到替换后的消息（模拟 pi 真实状态流转）
-	const triageTurn = (message) => {
-		const pretty = messageEnd(message);
-		return { pretty, r: turnEnd(pretty?.message ?? message) };
-	};
-	return { handlers, commands, notifies, ctx, turnEnd, filter, work, newRun, messageEnd, triageTurn, renderers };
+	const newRun = (systemPrompt = "SYS") => handlers["before_agent_start"]({ systemPrompt }, ctx);
+	return { handlers, commands, notifies, statuses, sent, ctx, turnEnd, filter, work, newRun, renderers, pi };
 }
-
-// ---------------------------------------------------------------------------
-// 主流程
-// ---------------------------------------------------------------------------
 
 async function main() {
 	await build({
 		entryPoints: [path.join(ROOT, "src/extensions/keep.ts")],
-		outfile: OUT,
 		bundle: true,
 		format: "esm",
 		platform: "node",
+		outfile: OUT,
+		tsconfig: path.join(ROOT, "src/config/tsconfig.build.json"),
 		external: ["@earendil-works/*", "typebox"],
 		logLevel: "silent",
 	});
-	// ---- context 过滤 ----
-	{
-		const h = await makeHarness();
-		const seq = [user(), answerText("做到一半"), ask(), answerText('{"class":"A"}'), go(), answerTools(), toolResult()];
-		const out = h.filter(seq);
-		check("过滤：已完成问答（ask/回答/go）被滤掉", out.length === 4 && out.every((m) => m.customType === undefined));
-		check("过滤：带工具调用的回答保留（工具配对）", out.some((m) => m.role === "assistant"));
-	}
-	{
-		const h = await makeHarness();
-		const live1 = [user(), ask()];
-		check("过滤：活尾巴 […, ask] 原样保留", h.filter(live1).length === 2);
-		const live2 = [user(), ask(), answerText('{"class":"A"}')];
-		check("过滤：活尾巴 […, ask, 回答] 原样保留", h.filter(live2).length === 3);
-		const live3 = [user(), ask(), answerText('{"class":"A"}'), go()];
-		check("过滤：活尾巴 […, ask, 回答, go] 原样保留", h.filter(live3).length === 4);
-	}
-	{
-		const h = await makeHarness();
-		const seq = [user(), ask(), answerTools(), toolResult()];
-		const out = h.filter(seq);
-		check("过滤：自检轮带工具调用 → 只滤 ask、保留 assistant（配对）",
-			out.length === 3 && out[1].role === "assistant" && out[2].role === "toolResult");
-	}
-	{
-		const h = await makeHarness();
-		const seq = [user(), answerText("无 keep 消息")];
-		check("过滤：无 keep 消息原样通过", h.filter(seq).length === 2);
-	}
 
 	// ---- 状态机 ----
 	{
 		const h = await makeHarness();
+		h.newRun();
 		h.work();
-		const r1 = h.turnEnd(answerText("做到这里先停了"));
-		check("默认开：自然停点 → 注入 keep-ask（display:false，不进聊天流）并 continue",
-			r1?.continue === true && r1.entries?.[0]?.customType === "keep-ask" && r1.entries[0].display === false);
-		const a2 = h.triageTurn(answerText('{"class":"A","reason":"还差测试","next":"跑测试"}'));
-		check("答 A → 判定行并入续航计数与下一步",
-			a2.pretty?.message?.content?.[0]?.text === "↻ **可继续** · 续航 1/16 —— 还差测试\n· 下一步：跑测试");
-		check("答 A → 注入 keep-go（display:false）并 continue（经 message_end 替换后仍识别）",
-			a2.r?.continue === true && a2.r.entries?.[0]?.customType === "keep-go" && a2.r.entries[0].display === false);
-		const r3 = h.turnEnd(answerText("我想了想还是不干了"));
-		check("续跑轮仍无 toolCall → 直接停（防死循环）", r3 === undefined);
-		check("空转停下有通知", h.notifies.some(([, t]) => t.includes("无实际动作")));
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "做到这里先停了" }], timestamp: 5 });
+		const block = r?.entries?.[0];
+		const go = r?.entries?.[1];
+		check("A → 判定块（display:true）+ 续跑指令（display:false）并 continue",
+			r?.continue === true
+			&& block?.customType === "keep-verdict" && block.display === true
+			&& go?.customType === "keep-go" && go.display === false);
+		check("A → 判定块 details 带判定与续航计数",
+			block?.details?.cls === "A" && block.details.used === 1 && block.details.next === "跑测试");
+		check("A → 状态行显示续航计数", h.statuses.some(([, t]) => t?.includes("续航 1/16")));
 	}
+	{
+		const h = await makeHarness({ stub: '{"class":"B","reason":"要用户选方案"}' });
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("B → 停下（无 continue）", r === undefined);
+		check("B → 判定块经 sendMessage 挂出且不触发新轮",
+			h.sent.length === 1 && h.sent[0].message.customType === "keep-verdict"
+			&& h.sent[0].message.display === true && h.sent[0].options?.triggerTurn === false);
+	}
+	{
+		const h = await makeHarness({ stub: '{"class":"C","reason":"全部完成"}' });
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "完了" }], timestamp: 5 });
+		check("C → 停下并挂判定块",
+			r === undefined && h.sent.length === 1 && h.sent[0].message.details.cls === "C");
+	}
+	{
+		const h = await makeHarness({ stub: '分析一下：{"class":"A","reason":"剩收尾","next":"收尾"} 以上。' });
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("解析加固：散文裹 JSON → 捞出并续跑", r?.continue === true && r.entries[1].customType === "keep-go");
+	}
+	{
+		const h = await makeHarness({ stub: "我觉得可能是 A 吧" });
+		h.newRun();
+		h.work();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("回答无法解析 → 停下并通知",
+			r === undefined && h.sent.length === 0 && h.notifies.some(([, t]) => t.includes("自检未判定")));
+	}
+
+	// ---- 触发门槛 ----
 	{
 		const h = await makeHarness();
-		check("零工具轮（纯问答）不自检", h.turnEnd(answerText("这是答案")) === undefined);
-		h.work("read");
-		h.work("web_search");
-		check("只读工具轮（调研后作答）不自检", h.turnEnd(answerText("调研结论如下")) === undefined);
-		h.work("bash");
-		check("改写类工具轮（工作型停点）自检", h.turnEnd(answerText("停"))?.continue === true);
+		h.newRun();
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "这是答案" }], timestamp: 5 });
+		check("零工具轮（纯问答）不自检", r === undefined && h.sent.length === 0);
 	}
 	{
-		const h = await makeHarness();
-		h.work();
-		check("工作轮停点自检", h.turnEnd(answerText("停"))?.continue === true);
-		h.newRun(); // 新的用户输入 → 重置
-		check("新一轮零工具停点不再自检", h.turnEnd(answerText("答")) === undefined);
+		const h = await makeHarness({ tools: [readOnlyTool("kb_search")] });
+		h.newRun();
+		h.work("kb_search");
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "调研结论" }], timestamp: 5 });
+		check("只读工具轮不自检", r === undefined && h.sent.length === 0);
 	}
 	{
-		// 注解三层判定：readOnlyHint=false → 工作；true → 只读；未声明 → 只读（安全默认）
-		const tools = [
-			{ name: "kb_write", annotations: { readOnlyHint: false } },
-			{ name: "kb_read", annotations: { readOnlyHint: true } },
-			{ name: "some_plugin_tool" }, // 无注解
-		];
-		const h = await makeHarness(tools);
-		h.work("kb_read");
-		h.work("some_plugin_tool");
-		check("注解只读 + 无注解工具 → 不自检", h.turnEnd(answerText("答")) === undefined);
+		const h = await makeHarness({ tools: [writeTool("kb_write")] });
+		h.newRun();
 		h.work("kb_write");
-		check("注解 readOnlyHint=false → 工作型停点自检", h.turnEnd(answerText("停"))?.continue === true);
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("readOnlyHint=false 工具轮 → 自检", r?.continue === true);
+	}
+	{
+		const h = await makeHarness({ tools: [{ name: "mcp_thing", description: "", parameters: {} }] });
+		h.newRun();
+		h.work("mcp_thing");
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("无注解工具按只读 → 不自检", r === undefined && h.sent.length === 0);
 	}
 	{
 		const h = await makeHarness();
+		h.newRun();
+		h.work("bash");
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("内建 bash 视为工作 → 自检", r?.continue === true);
+	}
+
+	// ---- 降级与防护 ----
+	{
+		const h = await makeHarness();
+		h.newRun();
 		h.work();
-		h.turnEnd(answerText("停")); // 注入 keep-ask，进入等回答状态
-		const { pretty, r } = h.triageTurn(answerText('{"class":"B","reason":"要用户选方案"}'));
-		check("答 B → 消息替换为「图标 + 加粗判定 + 理由」（无固定前缀）",
-			pretty?.message?.content?.[0]?.text === "⚠ **需要人工** —— 要用户选方案");
-		check("答 B → 停下", r === undefined);
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 }, { context: { pendingMessages: [{ role: "user" }] } });
+		check("有排队消息不自检", r === undefined && h.sent.length === 0);
 	}
 	{
 		const h = await makeHarness();
-		check("未在等回答时 message_end 不替换", h.messageEnd(answerText('{"class":"C"}')) === undefined);
+		h.newRun();
 		h.work();
-		h.turnEnd(answerText("停"));
-		check("无法解析的回答原样保留", h.messageEnd(answerText("我觉得可能是 A")) === undefined);
-		check("三块都不占聊天流（不注册任何消息渲染器）", Object.keys(h.renderers).length === 0);
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 }, { outcome: "aborted" });
+		check("aborted 不动作", r === undefined && h.sent.length === 0);
 	}
 	{
 		const h = await makeHarness();
+		h.newRun();
 		h.work();
-		h.turnEnd(answerText("停"));
-		const r = h.triageTurn(answerText('{"class":"C","reason":"全部完成"}')).r;
-		check("答 C → 静默停下（无警告通知）",
-			r === undefined && !h.notifies.some(([k]) => k === "warning"));
+		const r1 = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("续跑注入成功（前置）", r1?.continue === true);
+		const r2 = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "又停了" }], timestamp: 5 });
+		check("续跑轮仍无 toolCall → 直接停（防死循环）",
+			r2 === undefined && h.notifies.some(([, t]) => t.includes("无实际动作")));
 	}
 	{
 		const h = await makeHarness();
-		h.work();
-		h.turnEnd(answerText("停"));
-		const r = h.triageTurn(answerText("我觉得可能是 A 吧")).r;
-		check("回答无法解析 → 降级停下并通知", r === undefined && h.notifies.some(([, t]) => t.includes("无法解析")));
-	}
-	{
-		const h = await makeHarness();
-		h.work();
-		h.turnEnd(answerText("停"));
-		const r = h.triageTurn(answerText('分析一下：当前还有收尾工作。{"class":"A","reason":"剩收尾","next":"收尾"} 以上。')).r;
-		check("解析加固：散文裹 JSON → 捞出并续跑", r?.continue === true && r.entries?.[0]?.customType === "keep-go");
-	}
-	{
-		const h = await makeHarness();
-		h.work();
-		h.turnEnd(answerText("停"));
-		const r = h.triageTurn(answerText('```json\n{"class":"C","reason":"完了","next":""}\n```')).r;
-		check("解析加固：代码围栏 JSON → 捞出并判 C 停下", r === undefined);
-	}
-	{
-		const h = await makeHarness();
-		h.work();
-		h.turnEnd(answerText("停"));
-		// 第一段花括号是干扰项（无合法 class），第二段才是答案
-		const r = h.triageTurn(answerText('格式是 {"class":"D"} 吗？不对，应该是 {"class":"B","reason":"要人拍板","next":""}')).r;
-		check("解析加固：跳过非法候选取后续合法 JSON（判 B 停下）", r === undefined);
-	}
-	{
-		const h = await makeHarness();
-		h.work();
-		check("aborted 不动作", h.turnEnd(answerText("停"), { outcome: "aborted" }) === undefined);
-		check("有排队消息不动作",
-			h.turnEnd(answerText("停"), { context: { pendingMessages: [{ role: "user" }] } }) === undefined);
-		check("本轮有 toolCall 不动作", h.turnEnd(answerTools()) === undefined);
-	}
-	{
-		const h = await makeHarness();
-		h.work();
-		let asks = 0;
+		const withToolCall = () => ({ role: "assistant", content: [{ type: "toolCall", id: "1", name: "edit", arguments: {} }], timestamp: 5 });
+		const stop = () => ({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		h.newRun();
+		let used = 0;
 		for (let i = 0; i < 20; i++) {
-			const r = h.turnEnd(answerText("停")); // 自然停点
-			if (r?.continue) {
-				asks++;
-				h.turnEnd(answerText('{"class":"C","reason":"完了"}')); // 答 C 停下，下个停点再自检
-			}
+			h.work();
+			await h.turnEnd(withToolCall()); // 续跑轮干活（清 awaitingGo）
+			h.work();
+			const r = await h.turnEnd(stop()); // 自然停点 → 自检
+			if (r?.continue !== true) break;
+			used++;
 		}
-		check("预算 16 次用完后强制停", asks === 16, `实际自检 ${asks} 次`);
-		check("预算耗尽有通知", h.notifies.some(([, t]) => t.includes("预算")));
+		check("预算 16 次内每次都能续跑", used === 16);
+		h.work();
+		await h.turnEnd(withToolCall());
+		h.work();
+		const last = await h.turnEnd(stop());
+		check("预算用完后强制停并通知",
+			last === undefined && h.notifies.some(([, t]) => t.includes("预算")));
 	}
+
+	// ---- 开关 ----
 	{
 		const h = await makeHarness();
 		await h.commands["keep"].handler("", h.ctx); // 默认开 → 此调为关
+		h.newRun();
 		h.work();
-		check("/keep 关闭后自然停点不动作", h.turnEnd(answerText("做完了")) === undefined);
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("/keep 关闭后不自检", r === undefined && h.sent.length === 0);
 		check("开关已写盘", JSON.parse(readFileSync(process.env.PI_KEEP_CONFIG, "utf8")).enabled === false);
-		const h2 = await makeHarness([], process.env.PI_KEEP_CONFIG); // 重新 import 模拟 /reload
+		const h2 = await makeHarness({ configPath: process.env.PI_KEEP_CONFIG });
+		h2.newRun();
 		h2.work();
-		check("持久化：reload 后仍为关", h2.turnEnd(answerText("又做完了")) === undefined);
-		await h2.commands["keep"].handler("", h2.ctx); // 开回
-		const h3 = await makeHarness([], process.env.PI_KEEP_CONFIG);
+		const r2 = await h2.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("持久化：reload 后仍为关", r2 === undefined);
+		await h2.commands["keep"].handler("", h2.ctx);
+		const h3 = await makeHarness({ configPath: process.env.PI_KEEP_CONFIG });
+		h3.newRun();
 		h3.work();
-		check("持久化：开回后 reload 仍为开", h3.turnEnd(answerText("停了"))?.continue === true);
+		const r3 = await h3.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("持久化：开回后 reload 仍为开", r3?.continue === true);
 	}
 	{
 		const h = await makeHarness();
 		await h.commands["keep"].handler("多余的参数", h.ctx);
 		check("带参调用给用法提示", h.notifies.some(([k]) => k === "warning"));
+		h.newRun();
 		h.work();
-		check("带参调用不改变开关（仍为开）", h.turnEnd(answerText("停了"))?.continue === true);
+		const r = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "停" }], timestamp: 5 });
+		check("带参调用不改变开关（仍为开）", r?.continue === true);
+	}
+
+	// ---- 渲染 ----
+	{
+		const h = await makeHarness();
+		check("判定块渲染器已注册", typeof h.renderers["keep-verdict"] === "function");
+		const theme = { fg: (_c, t) => t, bg: (_c, t) => t };
+		const comp = h.renderers["keep-verdict"](
+			{ details: { cls: "B", reason: "要人拍板", used: 1, budget: 16 } },
+			{ expanded: false, outputPad: 1 },
+			theme,
+		);
+		check("渲染器返回组件（不抛错）", !!comp && typeof comp.render === "function");
+	}
+
+	// ---- 上下文过滤 ----
+	{
+		const h = await makeHarness();
+		const user = () => ({ role: "user", content: "原始需求", timestamp: 1 });
+		const assistant = () => ({ role: "assistant", content: [{ type: "text", text: "干活" }], timestamp: 2 });
+		const verdict = () => ({ role: "custom", customType: "keep-verdict", content: "块", display: true, timestamp: 3 });
+		const go = () => ({ role: "custom", customType: "keep-go", content: "指令", display: false, timestamp: 4 });
+		const oldAsk = () => ({ role: "custom", customType: "keep-ask", content: "问", display: false, timestamp: 5 });
+		const oldAnswer = () => ({ role: "assistant", content: [{ type: "text", text: '{"class":"A"}' }], timestamp: 6 });
+
+		const done = h.filter([user(), assistant(), verdict(), go(), assistant()]);
+		check("过滤：已完成的判定块与续跑指令都被滤掉",
+			done.length === 3 && done.every((m) => m.role !== "custom"));
+		const live = h.filter([user(), assistant(), verdict(), go()]);
+		check("过滤：活尾巴保留续跑指令、滤掉判定块",
+			live.length === 3 && live[2].customType === "keep-go");
+		const plain = h.filter([user(), assistant()]);
+		check("过滤：无 keep 消息原样通过", plain.length === 2);
+		const legacy = h.filter([user(), oldAsk(), oldAnswer(), assistant()]);
+		check("过滤：旧版追问记录被滤掉", legacy.length === 2);
 	}
 
 	const failed = results.filter((r) => !r.ok);

@@ -93,12 +93,13 @@
 
 ## keep.ts
 
-- 停顿点续航：`turn_end` 时本轮 assistant 消息无 toolCall、`outcome === "completed"`、无排队消息、预算未用完、**且本轮出现过改写类工具调用**（`WORK_TOOLS` 内建集合 bash/write/edit/codemode → `readOnlyHint` 注解（`pi.getAllTools()`，MCP/扩展声明）→ 无注解按只读（安全默认）；零工具与只读工具的收尾是问答/调研的天然终点，不自检。全仓插件工具已逐个声明 `annotations: { readOnlyHint }`（AGENTS.md 约定新工具注册必带），钉钉工具组按能力统一标 false）→ 注入 custom_message（`keep-ask` 三选一自检）并 continue；自检轮回复 JSON（A/B/C），A 再注入 `keep-go`（下一步指示）continue，B 通知、C 静默、解析失败降级停。防失控：续跑轮仍无 toolCall 直接停 + 每次 `before_agent_start` 重置的预算 16。
-- **in-transcript 追问 + context 过滤**（不用侧路 aiComplete）：provider 前缀缓存从第 0 个 token 起匹配，侧路调用系统提示词不同必然 0 命中（usage 实测主会话每轮增量仅几百 tokens）；自问自答两轮都是主会话正常 turn、缓存全吃。问答留在会话记录（`display: true` 可见可审计），`context` 事件把 keep-ask/keep-go 与「紧跟 keep-ask 的无工具调用 assistant 消息」从 LLM 请求滤掉——无状态规则（靠 customType），/reload 后仍生效；带工具调用的回答必须保留（工具配对）。
-- 过滤必留末尾「活尾巴」（进行中的问答/刚注入的指令是当前轮输入）；续跑必须带注入（pi 边界校验在 entries 落账后重算，custom_message 使 transcript 末尾为 user 角色才合法；自然停点的 `canContinue` 恒 false，不能拿它当守卫）。
-- 命令 `/keep` 无参切换（全局持久 `~/.pi/agent/keep.json`，默认开；测试用 `PI_KEEP_CONFIG` 环境变量隔离配置文件）；状态 key `keep`（priority 66）；回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx 驱动）。
-- UI 层：keep-ask 与 keep-go 都不占聊天流（`display:false`，只靠 HUD 行「🔁 停顿自检中」/「🔁 续航 n/16」提示；已无自订渲染器）；自检回答的生 JSON 在 `message_end` 换成「图标 + 加粗判定 + 模型理由」，A 把续航计数与下一步并进同一行（`↻ **可继续** · 续航 3/16 —— 理由` + 换行 `· 下一步：…`）——**替换会毁掉原文 JSON**，解析结果经 `pendingTriage` 预存带给紧随的 `turn_end`（实机抓到的 bug：turn_end 收到替换后文本必然解析失败，A 续跑会被掐死）；常规 notify 全删，只留异常类（解析失败/预算耗尽/空转）。
-- 解析兑底（不为弱遵从模型打提示词补丁）：平衡括号扫描从散文/围栏里捞第一个 class 合法的 JSON；捞不到 = 回答是面向用户的自然语言（总结≈C / 求助≈B），语义自洽的兑底就是停下，想继续的模型更常见的表现是直接发工具调用（已被 hasToolCalls 视同 A）。
+- 停顿点续航（旁支自检，主记录零污染）：`turn_end` 时本轮 assistant 消息无 toolCall、`outcome === "completed"`、无排队消息、预算未用完、**且本轮出现过改写类工具调用**（内建集合 bash/write/edit/codemode → `readOnlyHint` 注解（`pi.getAllTools()`，MCP/扩展声明）→ 无注解按只读（安全默认）；零工具与只读工具的收尾是问答/调研的天然终点，不自检。全仓插件工具已逐个声明 `annotations: { readOnlyHint }`，钉钉工具组按能力统一标 false）→ **发起旁支自检**：复刻主会话请求前缀（`before_agent_start` 捕获的 systemPrompt + `filterKeepMessages(buildSessionContext().messages)` + 按 `getActiveTools()` 顺序复刻的工具集、执行体换空实现）+ 末尾追加自检问题，跑一次限 1 轮的 `runAgentLoop`（走 `shared/agent` 的 `createPiStreamFn`），拿 A/B/C 判定——提问与回答都不进主记录。
+- 展示与续跑：A → `turn_end` entries 注入 `keep-verdict`（display:true，自定义消息带底色）+ `keep-go`（display:false，续跑指令）并 continue；B/C → `pi.sendMessage(verdict, { triggerTurn:false })` 挂到本轮末尾后停下（运行中入 `_pendingCustomMessages`，run 收尾 flush）。判定块经 `registerMessageRenderer` 按 details 重绘（customMessageBg 底 + accent/warning/success 配色 + 下一步）。
+- `context` 过滤：`keep-verdict` 任何位置都不进请求（纯展示）；`keep-go` 只在末尾「活尾巴」保留（当前轮的续跑指令）；旧版 in-transcript 的 `keep-ask`/回答记录一并滤掉（历史会话兼容）。
+- **前缀复刻与缓存**：provider 前缀缓存按 `tools → system → messages` 逐字节匹配，三者齐了才命中；命中与否只影响花费（未命中 = 全量按非缓存计价）。观测口径：`.pi/keep-cache.log` 每次自检追加 `cacheRead/input/ms/decision`。已知不可控项：工具声明可能被 `prepareLoadout` 钩子改写、`constrainedSampling` 未在 `getAllTools()` 暴露——不一致只导致 miss，不影响正确性。
+- 续跑必须带注入（pi 边界校验在 entries 落账后重算，custom_message 使 transcript 末尾为 user 角色才合法）。防失控：续跑轮仍无 toolCall 直接停 + 每次 `before_agent_start` 重置的预算 16。
+- 模型：用途 `keep-triage`（默认策略 AUTO = 跟随会话模型，可在 `/model-config` 改指）。命令 `/keep` 无参切换（全局持久 `~/.pi/agent/keep.json`，默认开；测试用 `PI_KEEP_CONFIG` 隔离配置文件）；状态 key `keep`（priority 66：`🔁 停顿自检中` / `🔁 续航 n/16`）。回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx + `PI_KEEP_TRIAGE` 测试桩，全离线）。
+- 解析兑底（不为弱遵从模型打提示词补丁）：平衡括号扫描从散文/围栏里捞第一个 class 合法的 JSON；捞不到 = 未判定 → 停下并 warning（回答是面向用户的自然语言时，总结≈C / 求助≈B，停下语义自洽）。
 
 ## crash-log.ts
 
