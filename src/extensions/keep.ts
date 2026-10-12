@@ -57,8 +57,14 @@ import { createBoxRenderer, keyHintRow } from "./shared/ui";
 
 /** 每次用户输入后的自检预算（一次三选一自检消耗 1；用完强制停） */
 const MAX_CONTINUATIONS = 16;
-/** 挂机在场探测的超时：无回应即判定脱机（毫秒） */
-const PROBE_MS = 30_000;
+/**
+ * 挂机在场探测的超时：无回应即判定脱机（毫秒）。
+ * 给到 3 分钟是「读完一轮回复再决定离开」的余量；探测期间 AI 是停住的，
+ * 所以这个值直接等于一次探测的等待成本，不宜再长。
+ */
+const PROBE_MS = 3 * 60_000;
+/** 探测时长的展示文案（整分钟用分钟） */
+const PROBE_LABEL = PROBE_MS % 60_000 === 0 ? `${PROBE_MS / 60_000} 分钟` : `${PROBE_MS / 1000} 秒`;
 /** 挂机工作白名单：只做不改变既有行为的新增性工作，每次自选一件（没有合适的就停） */
 const IDLE_WORK = [
 	"补文档或注释：描述现状，不改代码语义",
@@ -478,7 +484,7 @@ class ProbePanel {
  */
 async function probePresence(ctx: ExtensionContext): Promise<ProbeResult> {
 	if (ctx.mode !== "tui") return "stop";
-	setWaiting(`停顿点：${PROBE_MS / 1000} 秒内无回应就转挂机工作`);
+	setWaiting(`停顿点：${PROBE_LABEL}内无回应就转挂机工作`);
 	try {
 		return await ctx.ui.custom<ProbeResult>((tui, theme, _kb, done) => new ProbePanel(tui, theme, done, PROBE_MS), {
 			overlay: true,
@@ -541,7 +547,8 @@ function idleGoMessage(t: Triage) {
 	const work = IDLE_WORK.map((w, i) => `${i + 1}) ${w}`).join("；");
 	const content = `[harness 挂机] 用户不在场（判定：${t.reason || "已到交付点"}），这段时间用来推进安全的后备工作，`
 		+ `从下列各类里自选一件去做（做完停下即可，会继续挑下一件）：${work}。`
-		+ `硬约束：只做新增性的文档/测试/草稿，不改变既有行为与对外约定；需要拍板的事项只记录、不擅自决定；`
+		+ `硬约束：只做新增性的文档/测试/草稿，不改变既有行为与对外约定；需要拍板的事只记录、不擅自决定；`
+		+ `不要执行需要人工确认的命令、也不要发起需要回应的提问（人不在场，没人能确认，会白白挂着）；`
 		+ `没有合适的就停下说明，不要为找活而发散。`;
 	return { type: "custom_message" as const, customType: GO_TYPE, display: false, content };
 }

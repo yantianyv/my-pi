@@ -81,8 +81,8 @@ async function makeHarness({
 			// 在场探测：probe=stop|idle 直接给定结果；key:<键> 走组件真实按键路径；timeout 只留最后 1 秒
 			custom: (factory) =>
 				new Promise((resolve) => {
-					probes.push(1);
 					const comp = factory({ requestRender: () => {} }, theme, {}, resolve);
+					probes.push(comp);
 					if (probe === "timeout") comp.left = 1;
 					else if (probe.startsWith("key:")) comp.handleInput(probe.slice(4));
 					else resolve(probe);
@@ -383,6 +383,18 @@ async function main() {
 		const r2 = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "这件做完了" }], timestamp: 5 });
 		check("挂机阶段：再停不再探测，直接续下一件",
 			r2?.continue === true && h.probes.length === 1 && r2.entries[0].details.idle === true);
+	}
+	{
+		// 探测面板：倒计时按 PROBE_MS 起算（3 分钟），文案点明两种出口
+		const h = await makeHarness({ stub: '{"class":"C","reason":"全部完成"}', mode: "tui", probe: "stop" });
+		await h.commands["keep"].handler("idle", h.ctx);
+		h.newRun();
+		h.work();
+		await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "完了" }], timestamp: 5 });
+		const lines = h.probes[0].render(70).join("\n");
+		check("探测面板：倒计时从 180 秒（3 分钟）起算", h.probes[0].left === 180);
+		check("探测面板：文案点明自动挂机与 c 快捷键",
+			lines.includes("秒后自动开始挂机工作") && lines.includes("c 立即开始挂机"));
 	}
 	{
 		// c 键：离开前主动放行
