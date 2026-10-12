@@ -5,7 +5,7 @@
  * 1. turn_end 边界：本轮 assistant 消息无 toolCall、运行正常完成、无排队消息且预算未用完
  *    → 注入 custom_message（keep-ask，三选一自检问题）并 continue 一轮；
  * 2. 自检轮模型只回复 JSON（A 可自主继续 / B 需人工 / C 已完成），turn_end 解析：
- *    A → 再注入 custom_message（keep-go，下一步指示）continue；B → 停下并通知；C → 静默；
+ *    A → 再注入 custom_message（keep-go，下一步指示）continue；B/C → 停下（判定行即展示）；
  * 3. 问答留在会话记录里（用户可见、可审计），但 context 事件把它们从 LLM 请求里滤掉——
  *    模型后续看不到，既不污染上下文，两轮又都是主会话正常 turn、前缀缓存全命中。
  *
@@ -28,6 +28,10 @@
  * 2. 每次用户输入重置的续航预算 MAX_CONTINUATIONS（一次自检消耗 1），用完强制停。
  *
  * 命令：/keep 无参切换开关（全局持久于 ~/.pi/agent/keep.json，默认开）。状态 key：keep（hud-core STATUS_STYLE 已登记）。
+ *
+ * 展示：keep-ask 不占聊天流（display:false，仅 HUD 行「🔁 停顿自检中」提示）；自检回答经
+ * message_end 换成「图标 + 加粗判定 + 模型理由」；keep-go 经 registerMessageRenderer 渲染
+ * 续航计数与下一步。展示层不影响模型收到的内容。
  */
 import * as os from "node:os";
 import * as path from "node:path";
@@ -190,27 +194,22 @@ function clearStatus(ctx: ExtensionContext): void {
 	setStatusWithTTL(ctx, STATUS_KEY, undefined, 0);
 }
 
-function keepMessage(customType: string, content: string, details?: Record<string, unknown>) {
-	return { type: "custom_message" as const, customType, display: true, content, ...(details ? { details } : {}) };
+function keepMessage(customType: string, content: string, details?: Record<string, unknown>, display = true) {
+	return { type: "custom_message" as const, customType, display, content, ...(details ? { details } : {}) };
 }
 
-/** 自检回答的展示版（message_end 替换生 JSON；context 过滤本就不让它进模型视野，替换纯为显示） */
+/** 自检回答的展示版（message_end 替换生 JSON；固定前缀不入展示，只留判定与模型的理由） */
 function triageDisplay(t: Triage): string {
 	const icon = t.cls === "A" ? "↻" : t.cls === "B" ? "⚠" : "✓";
 	const label = t.cls === "A" ? "可继续" : t.cls === "B" ? "需要人工" : "已完成";
-	return `${icon} 自检判定：${label}${t.reason ? ` —— ${t.reason}` : ""}`;
+	return `${icon} **${label}**${t.reason ? ` —— ${t.reason}` : ""}`;
 }
 
 export default function (pi: ExtensionAPI) {
-	// 注入块的定制渲染：一行摘要代替原文大段展示（完整内容本来就是给模型看的，用户只需摘要）
-	pi.registerMessageRenderer("keep-ask", (_m, { outputPad }, theme) => {
-		const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
-		box.addChild(new Text(theme.fg("dim", "↻ 停顿自检：A 继续 / B 需人工 / C 完成"), 0, 0));
-		return box;
-	});
+	// keep-go 的定制渲染：details 传结构化判定，渲染成续航计数 + 下一步（keep-ask 走 HUD 不占聊天流）
 	pi.registerMessageRenderer("keep-go", (m, { outputPad }, theme) => {
 		const d = (m.details ?? {}) as { reason?: string; next?: string; used?: number; budget?: number };
-		const head = theme.fg("accent", `↻ 续航${d.used ? ` ${d.used}/${d.budget ?? ""}` : ""} · 判定可继续`);
+		const head = theme.fg("accent", `↻ 续航${d.used ? ` ${d.used}/${d.budget ?? ""}` : ""} · 可继续`);
 		const reason = d.reason ? theme.fg("muted", ` —— ${d.reason}`) : "";
 		const next = d.next ? theme.fg("dim", `\n  下一步：${d.next}`) : "";
 		const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
@@ -337,7 +336,7 @@ export default function (pi: ExtensionAPI) {
 		budgetLeft--;
 		awaitingTriage = true;
 		setStatusWithTTL(ctx, STATUS_KEY, "🔁 停顿自检中", 300_000);
-		return { continue: true, entries: [keepMessage("keep-ask", ASK_TEXT)] };
+		return { continue: true, entries: [keepMessage("keep-ask", ASK_TEXT, undefined, false)] };
 	});
 
 	// 模型上下文过滤：已完成的 keep 问答不进 LLM 请求（会话记录保留，用户可见可审计）

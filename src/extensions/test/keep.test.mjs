@@ -125,8 +125,8 @@ async function main() {
 		const h = await makeHarness();
 		h.work();
 		const r1 = h.turnEnd(answerText("做到这里先停了"));
-		check("默认开：自然停点 → 注入 keep-ask 并 continue",
-			r1?.continue === true && r1.entries?.[0]?.customType === "keep-ask");
+		check("默认开：自然停点 → 注入 keep-ask（display:false，不进聊天流）并 continue",
+			r1?.continue === true && r1.entries?.[0]?.customType === "keep-ask" && r1.entries[0].display === false);
 		const r2 = h.triageTurn(answerText('{"class":"A","reason":"还差测试","next":"跑测试"}')).r;
 		check("答 A → 注入 keep-go 并 continue（经 message_end 替换后仍识别）",
 			r2?.continue === true && r2.entries?.[0]?.customType === "keep-go");
@@ -169,7 +169,8 @@ async function main() {
 		h.work();
 		h.turnEnd(answerText("停")); // 注入 keep-ask，进入等回答状态
 		const { pretty, r } = h.triageTurn(answerText('{"class":"B","reason":"要用户选方案"}'));
-		check("答 B → 消息替换为人话行", pretty?.message?.content?.[0]?.text?.includes("需要人工") === true);
+		check("答 B → 消息替换为「图标 + 加粗判定 + 理由」（无固定前缀）",
+			pretty?.message?.content?.[0]?.text === "⚠ **需要人工** —— 要用户选方案");
 		check("答 B → 停下", r === undefined);
 	}
 	{
@@ -178,8 +179,8 @@ async function main() {
 		h.work();
 		h.turnEnd(answerText("停"));
 		check("无法解析的回答原样保留", h.messageEnd(answerText("我觉得可能是 A")) === undefined);
-		check("渲染器已注册 keep-ask / keep-go",
-			typeof h.renderers["keep-ask"] === "function" && typeof h.renderers["keep-go"] === "function");
+		check("渲染器只注册 keep-go（ask 走 HUD 不占聊天流）",
+			typeof h.renderers["keep-go"] === "function" && h.renderers["keep-ask"] === undefined);
 	}
 	{
 		const h = await makeHarness();
