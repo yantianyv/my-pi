@@ -40,7 +40,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `model-config/` — 模型管理插件：`/model-config` 面板集中设置各插件用途使用的模型（策略槽 MAX/FAST/LITE/BASE/BATCH 可重指，AUTO/FREE 固定语义），见下 | `~/.pi/agent/extensions/` |
 | `patches/` | 三个 pi 补丁：ai usage 防护 / 祖冲之汉化 / 启动垫片崩溃取证（见下；共用 `pi-root.mjs` 定位 pi 安装目录） | 打补丁到 pi 安装目录（托管安装 `~/.pi/agent/install/releases/<版本>/node_modules` 或 npm 全局 node_modules） |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
-| `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装）；`no-slop/` — AI 产出冗余审查（术语化诊断 + 最小修法） | `~/.pi/agent/skills/` |
+| `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装）；`lean-review/` — AI 产出冗余审查（术语化诊断 + 最小修法） | `~/.pi/agent/skills/` |
 | `models.json` | 模型配置模板：OpenRouter 路由（provider 级 `compat.openRouterRouting`）+ 火山方舟 Coding Plan 自定义供应商（见下；已在则深度合并，保留手改的其他 provider） | `~/.pi/agent/models.json` |
 
 ## OpenRouter 路由策略（models.json）
