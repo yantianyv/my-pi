@@ -37,7 +37,7 @@ import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { runAgentLoop } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, TurnEndEvent, TurnEndEventResult } from "@earendil-works/pi-coding-agent";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
-import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
+import { getCurrentTools } from "@earendil-works/pi-ai/compat";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { createPiStreamFn, systemMessage } from "./shared/agent";
 import { loadJsonConfig, saveJsonConfig } from "./shared/config";
