@@ -11,9 +11,11 @@
  * 复刻前缀的目的与边界：
  * - provider 前缀缓存按「工具集 → 系统提示词 → 消息序列」逐字节匹配，三者齐了才命中；
  *   命中与否只影响花费（未命中则全量按非缓存计价），不影响判定正确性。
- * - 系统提示词取自 before_agent_start 的 systemPrompt；工具集按 getActiveTools() 的顺序与集合复刻
- *   （声明内容取 getAllTools() 的 name/description/parameters），执行体换成空实现——
- *   定义用于对齐缓存前缀，空实现保证自检期间即使模型误调工具也无副作用。
+ * - 前缀取 `context_with_system` 事件捕获的主会话真实请求（该事件在所有 `context` 处理后触发，
+ *   `messages` 含系统消息与工具声明）——比自拼（捕获 systemPrompt + 会话消息 + 重建工具）更准，
+ *   因为其它扩展对请求的改写（如时间戳前缀）也已包含在内；工具集从捕获消息的工具声明里取
+ *   （`getCurrentTools`），执行体换空实现——声明用于对齐缓存前缀，空实现保证自检期间无副作用。
+ * - 捕获缺席时（如扩展刚加载）回退到自拼前缀，代价是未命中缓存，不影响正确性。
  * - 是否命中由 .pi/keep-cache.log 的 cacheRead 观测（keep 每次自检追加一行）。
  *
  * 触发门槛：仅「工作型停点」——本轮（自上次用户输入起）出现过改写类工具调用。
@@ -35,6 +37,7 @@ import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { runAgentLoop } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, TurnEndEvent, TurnEndEventResult } from "@earendil-works/pi-coding-agent";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
+import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { createPiStreamFn, systemMessage } from "./shared/agent";
 import { loadJsonConfig, saveJsonConfig } from "./shared/config";
@@ -208,17 +211,19 @@ interface TriageRun {
 	note: string;
 }
 
+/** 空实现：自检期间模型即使误调工具也不产生副作用 */
+const stubExecute = async (): Promise<{ content: Array<{ type: "text"; text: string }>; details: undefined; isError: true }> => ({
+	content: [{ type: "text", text: "自检期间不执行工具。" }],
+	details: undefined,
+	isError: true,
+});
+
 /**
- * 复刻主会话声明的工具集：集合与顺序取 getActiveTools()，声明内容取 getAllTools()，
+ * 复刻主会话声明的工具集（回退路径）：集合与顺序取 getActiveTools()，声明内容取 getAllTools()，
  * 执行体换空实现（对齐缓存前缀用，模型若误调也不产生副作用）。
  */
 function requestTools(pi: ExtensionAPI): AgentTool[] {
 	const infos = new Map(pi.getAllTools().map((t) => [t.name, t]));
-	const stub = async (): Promise<{ content: Array<{ type: "text"; text: string }>; details: undefined; isError: true }> => ({
-		content: [{ type: "text", text: "自检期间不执行工具。" }],
-		details: undefined,
-		isError: true,
-	});
 	return pi.getActiveTools()
 		.map((name) => infos.get(name))
 		.filter((t): t is NonNullable<typeof t> => !!t)
@@ -227,8 +232,25 @@ function requestTools(pi: ExtensionAPI): AgentTool[] {
 			label: t.name,
 			description: t.description,
 			parameters: t.parameters,
-			execute: stub,
+			execute: stubExecute,
 		}));
+}
+
+/** 从捕获的请求里取当前工具声明（与 provider 收到的工具参数一致），执行体换空实现 */
+function declaredTools(messages: AgentMessage[]): AgentTool[] | null {
+	try {
+		const declared = getCurrentTools(messages as never) as Array<{ name: string; description?: string; parameters?: unknown }>;
+		if (declared.length === 0) return null;
+		return declared.map((t) => ({
+			name: t.name,
+			label: t.name,
+			description: t.description ?? "",
+			parameters: t.parameters as never,
+			execute: stubExecute,
+		}));
+	} catch {
+		return null;
+	}
 }
 
 /** 会话消息（与主会话请求同源：SessionManager 的投影，含压缩结果） */
@@ -242,20 +264,32 @@ function sessionMessages(ctx: ExtensionContext): AgentMessage[] {
 }
 
 /**
- * 跑一次旁支自检：复刻前缀 + 追加问题，限 1 轮（模型若发起工具调用也会在空实现上终止，
- * 拿不到文本即视为未判定）。观测数据（cacheRead 等）追加到 .pi/keep-cache.log。
+ * 跑一次旁支自检：复刻前缀（优先用捕获的主会话真实请求）+ 追加停点消息与自检问题，
+ * 限 1 轮（模型若发起工具调用也会在空实现上终止，拿不到文本即视为未判定）。
+ * 观测数据（cacheRead、回答片段等）追加到 .pi/keep-cache.log。
  */
-async function runTriage(ctx: ExtensionContext, pi: ExtensionAPI, systemPrompt: string): Promise<TriageRun> {
+async function runTriage(
+	ctx: ExtensionContext,
+	pi: ExtensionAPI,
+	systemPrompt: string,
+	stopMessage: AgentMessage | undefined,
+): Promise<TriageRun> {
 	if (TRIAGE_STUB !== undefined) return { triage: parseTriage(TRIAGE_STUB), note: "测试桩" };
 	const resolved = triageModel.resolve(ctx);
 	if (!resolved.model) return { triage: null, note: "无可用模型" };
-	const history = filterKeepMessages(sessionMessages(ctx));
+	const base = requestMessages;
+	const history = base ?? [
+		...(systemPrompt ? [systemMessage(systemPrompt)] : []),
+		...filterKeepMessages(sessionMessages(ctx)),
+	];
 	const ask: AgentMessage = { role: "user", content: ASK_TEXT, timestamp: Date.now() };
+	const messages = [...history, ...(stopMessage ? [stopMessage] : []), ask];
+	const tools = (base ? declaredTools(base) : null) ?? requestTools(pi);
 	const started = Date.now();
 	try {
 		const out = await runAgentLoop(
-			[ask],
-			{ messages: [...(systemPrompt ? [systemMessage(systemPrompt)] : []), ...history], tools: requestTools(pi) },
+			[],
+			{ messages, tools },
 			{
 				model: resolved.model,
 				convertToLlm,
@@ -279,18 +313,21 @@ async function runTriage(ctx: ExtensionContext, pi: ExtensionAPI, systemPrompt: 
 		logTriage(ctx, {
 			model: `${resolved.model.provider}/${resolved.model.id}`,
 			ms: Date.now() - started,
-			msgs: history.length,
-			sys: systemPrompt ? systemPrompt.length : 0,
+			src: base ? "stash" : "fallback",
+			msgs: messages.length,
+			tools: tools.length,
 			cls: triage?.cls ?? "-",
 			input: usage?.input,
 			cacheRead: usage?.cacheRead,
+			ans: text.slice(0, 120).replace(/\s+/g, " "),
 		});
-		return { triage, note: triage ? "" : "回答无法解析" };
+		return { triage, note: triage ? "" : text ? "回答无法解析" : "回答为空" };
 	} catch (e) {
 		logTriage(ctx, {
 			model: `${resolved.model.provider}/${resolved.model.id}`,
 			ms: Date.now() - started,
-			msgs: history.length,
+			src: base ? "stash" : "fallback",
+			msgs: messages.length,
 			cls: "err",
 			error: e instanceof Error ? e.message : String(e),
 		});
@@ -333,7 +370,8 @@ let enabled = loadEnabled();
 let budgetLeft = MAX_CONTINUATIONS; // 本次用户输入还剩几次自检额度
 let awaitingGo = false; // 已注入 keep-go，等续跑轮验证有没有实际动作
 let runDidWork = false; // 本轮（自上次用户输入起）出现过改写类工具调用
-let capturedPrompt = ""; // 主会话系统提示词（before_agent_start 捕获，复刻前缀用）
+let capturedPrompt = ""; // 主会话系统提示词（before_agent_start 捕获，回退路径拼前缀用）
+let requestMessages: AgentMessage[] | null = null; // 主会话真实请求（context_with_system 捕获：含系统消息与工具声明）
 let hintCache: Map<string, boolean | undefined> | null = null; // 工具注解缓存（随 before_agent_start 重建）
 
 function clearStatus(ctx: ExtensionContext): void {
@@ -376,6 +414,11 @@ export default function (pi: ExtensionAPI) {
 		const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 		box.addChild(new Text(theme.fg(color, `${icon} ${label}`) + counter + reason + next, 0, 0));
 		return box;
+	});
+
+	// 捕获主会话真实请求（在所有 context 处理后触发）：旁支自检的前缀直接取它，逐字节一致
+	pi.on("context_with_system", (event) => {
+		requestMessages = [...event.messages];
 	});
 
 	pi.registerCommand("keep", {
@@ -446,7 +489,7 @@ export default function (pi: ExtensionAPI) {
 
 		budgetLeft--;
 		setStatusWithTTL(ctx, STATUS_KEY, "🔁 停顿自检中", 300_000);
-		const { triage, note } = await runTriage(ctx, pi, capturedPrompt);
+		const { triage, note } = await runTriage(ctx, pi, capturedPrompt, msg);
 		if (!triage) {
 			clearStatus(ctx);
 			ctx.ui.notify(`keep：自检未判定（${note}），保持停下（需要时手动指示）`, "warning");
