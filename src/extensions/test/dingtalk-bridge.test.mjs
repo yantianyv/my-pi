@@ -49,7 +49,7 @@ await build({
 	logLevel: "silent",
 });
 const mod = await import(pathToFileURL(OUT).href);
-const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, parseCanonicalPath, matchToolByPath, localAliases, formalFlagError, reviewKind, isIdLike, matchGroupsByName, sheetCreateFailureNote, parseFirstSheetId, __test__ } = mod;
+const { decideExec, newExecState, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, failingName, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, targetSummary, buildReview, parseSelf, isSelfToken, searchFailedNote, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, parseCanonicalPath, matchToolByPath, localAliases, formalFlagError, reviewKind, isIdLike, matchGroupsByName, sheetCreateFailureNote, parseFirstSheetId, __test__ } = mod;
 const CFG = { requireAiTag: true };
 const NOW = Date.parse("2026-10-02T22:00:00+08:00");
 const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
@@ -255,8 +255,20 @@ console.log("U、群与本人解析");
 	const g = parseGroups(JSON.stringify({ chats: [{ name: "教研室", openConversationId: "cidA", memberCount: 7 }, { title: "教研组", openConversationId: "cidB" }] }));
 	check("群候选提取", g.length === 2 && g[0].cid === "cidA" && g[0].extra.includes("7"));
 	const me = parseSelf(JSON.stringify({ ok: true, data: { name: "严天宇", userId: "u1", dept: "教研室" } }));
-	check("本人身份提取", me && me.name === "严天宇" && me.userId === "u1");
+	check("本人身份提取", me && me.name === "严天宇" && me.userId === "u1" && me.openId === undefined);
+	// 自指收件人（我/自己）要 openDingTalkId 才能直接发；只认本人对象自己那棵子树
+	const meFlat = parseSelf(JSON.stringify({ data: { name: "严天宇", userId: "u1", openDingTalkId: "Dme0" } }));
+	check("本人 openDingTalkId 提取", meFlat?.openId === "Dme0");
+	const meSub = parseSelf(JSON.stringify({ data: { user: { name: "严天宇", userId: "u1", profile: { openDingTalkId: "Dme1" } } } }));
+	check("本人子树里的 openDingTalkId 也认", meSub?.openId === "Dme1");
+	// 安全：旁支（部门/主管）的 openDingTalkId 是别人的，宁可留空退回姓名解析，也不能拿去发消息
+	const meSibling = parseSelf(JSON.stringify({ data: { user: { name: "严天宇", userId: "u1" }, leader: { openDingTalkId: "D别人" } } }));
+	check("不取旁支的 openDingTalkId", meSibling?.openId === undefined && meSibling?.userId === "u1");
 	check("坏输入不抛", parseSelf("nope") === null && parseGroups("nope").length === 0);
+	check("自指词识别", ["我", "自己", "本人", "me", "SELF"].every(isSelfToken) && !isSelfToken("严天宇") && !isSelfToken("我我"));
+	// 解析失败（上游超时/出错）必须与「查无此人」分开说：否则模型会把超时读成名字写错
+	const note = searchFailedNote("严天宇", "请求超时（dws 没在限定时间内返回）");
+	check("解析失败不说成查无此人", note.includes("不是查无此人") && note.includes("请求超时") && note.includes("原样重试") && !note.includes("核对用字"));
 	// 回归：群名→cid 链路（resolveGroup 曾按 title/openConversationId 键过滤 parseGroups 结果，永远 0 命中）
 	const search = parseGroups(JSON.stringify({ chats: [
 		{ name: "乌鲁木齐市第八中学", title: "乌鲁木齐市第八中学", openConversationId: "cidGcszODYFzAG2T9Ho4vjuaQ==", groupType: "INTERNAL_GROUP", memberCount: 388 },
@@ -267,6 +279,11 @@ console.log("U、群与本人解析");
 	check("部分同名不误配", matchGroupsByName(search, "第八中学").length === 0);
 	// 回归：base64 填充符 == 曾使 isIdLike 拒收真实 cid
 	check("带 == 的 cid 视为 ID", isIdLike("cidGcszODYFzAG2T9Ho4vjuaQ==") === true);
+	// 回归：真实会话 ID / messageId 里还有 / 与 +（cid…/…+…=），漏了就会被当成名字去搜
+	check("带 / 的 cid 视为 ID", isIdLike("cidKI5Xy3llME3Ktv8egWRVNiKN7m3/P8swwU+nUbkeeh4=") === true);
+	check("带 / 的 messageId 视为 ID", isIdLike("msg3YDaXMO4GnH1YQh0MS89/A==") === true);
+	// 故意不收 .：文档标题常是纯 ASCII 带点，得继续走搜索而不是当 nodeId 直发
+	check("带点的 ASCII 标题仍当名字", isIdLike("report.docx") === false);
 	check("中文群名不视为 ID", isIdLike("乌鲁木齐市第八中学") === false);
 	// sheetCreate 失败续做契约：非原子，禁整体重跑
 	const withNode = sheetCreateFailureNote(["sheet", "create-with-data", "--name", "t"], '{"nodeId":"n9","error":"write failed"}');

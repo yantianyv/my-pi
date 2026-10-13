@@ -39,6 +39,7 @@
 - **模型侧只有 7 个工具**：语义层 6 个（`dingtalk_msg` / `dingtalk_todo` / `dingtalk_calendar` / `dingtalk_approval` / `dingtalk_file` / `dingtalk_doc`）+ 唯一逃生舱 `dws_skill`（只给官方技能正文当知识，**没有任何命令执行通道**）；命令 `/dws`（状态 + forget/refresh）。
 - 语义层设计：`intents.ts` 一动作一行纯映射；`index.ts` 负责解析（姓名→userId、DING 另补 openDingTalkId、群名→openConversationId、消息关键词+会话→msgId、文档标题→nodeId、多维表名→baseId/tableId、钉盘名→nodeId、完整手机号→账号、本人 userId）后调 `runGuarded`——**与内部执行管线共用同一条门禁链**（换行归一→分档→参数自检→两阶段→人工面板→台账→结果注解），语义层绕不开任何一道拦截。
 - **同名/同名群不弹人工确认**：把候选（含部门/职务/工号与账号 ID）作为结果回给 AI，由 AI 自己挑定后把该项换成候选 ID 重调（提示词第 3 条明确要求）；查无此人时改用手机号即可（插件走 `contact user search-mobile`）。
+- **「查询失败」与「查无此人」分开报，自指词直连本人**：姓名搜索统一走 `searchPeople`（`aisearch` 只有 ~3 秒预算，网关 `request_timeout` 在审计日志里每天都出现，失败自动重试一次，只读幂等）；两次都失败时报 `searchFailedNote`（真实原因 + 「原样重试」，不再说成「核对用字」）——压成后者会把一次超时误判成「搜不到某人」。「我/自己/本人/me」与本人的姓名、userId 一律走 `contact +me`（`isSelfToken`，结果含 openDingTalkId）拿账号，不依赖语义搜索是否把自己排进结果。
 - **AI 角标由插件带**：发送类映射统一加 `--ai-tag`（dws 原生角标），模型不必在正文写【AI发送】；正文里的字面反斜杠-n 仍自动归一为真换行。
 - 在线表格创建走 `dingtalk_doc action="sheetCreate"`（有 values → `sheet create-with-data` 创建+写入+回读一体，空表 → `sheet create`；长整数自动转文本防精度丢失；失败/超时时结果里附续做指引——读回现状只补失败步骤，禁止整体重跑）。
 - 表格下拉列表三件套：`sheetSetDropdown`（options 与 sourceRange 二选一、选项禁英文逗号、sourceRange 只收 A1 区域不带表前缀；set 成功后结果附 get-dropdown 只读核验指引）/ `sheetGetDropdown` / `sheetDeleteDropdown`；缺 sheetId 时 resolve 用 `+list-sheets` 取首个工作表（禁止猜 Sheet1/0）。

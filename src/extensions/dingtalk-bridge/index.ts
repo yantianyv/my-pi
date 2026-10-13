@@ -622,8 +622,12 @@ export function mediaKind(args: string[]): string | undefined {
 
 const hasCJK = (s: string): boolean => /[㐀-鿿豈-﫿]/.test(s);
 
-/** 某个 token 像稳定 ID（无中文且够长；cid 等 base64 串常带 = 填充符）还是像姓名 */
-export const isIdLike = (s: string): boolean => !hasCJK(s) && /^[0-9A-Za-z_+\-=]{6,}$/.test(s.trim());
+/**
+ * 某个 token 像稳定 ID（无中文且够长）还是像姓名。
+ * `/` 与 `+` 也出现在真实会话 ID / messageId 里（`cid…/…+…=`），不在字符类里就会被当成名字去搜，报“没找到群”；
+ * 故意不收 `.`：文档标题常是纯 ASCII 带点（`report.docx`），收进来会当 nodeId 直发而不去搜索。
+ */
+export const isIdLike = (s: string): boolean => !hasCJK(s) && /^[0-9A-Za-z_+\-=/]{6,}$/.test(s.trim());
 
 /** 取 flag→值 配对（报错文案需区分是姓名还是群名） */
 function flagPairs(args: string[], flags: Set<string>): { flag: string; value: string }[] {
@@ -1310,14 +1314,37 @@ export function failingName(raw: string): string {
 	return (cut > 0 ? raw.slice(0, cut) : raw).trim();
 }
 
-/** 从 contact +me 输出取本人身份（发后核验命令需要「自己姓名」作 --sender） */
-export function parseSelf(text: string): { name: string; userId: string } | null {
+/**
+ * 从 contact +me 输出取本人身份：发后核验用姓名，自指收件人（我/自己）用 userId 与 openDingTalkId。
+ * openDingTalkId 只在本人那个对象及其子树里找——旁支（部门/主管等）的 openDingTalkId 是别人的，
+ * 拿错就等于把消息发给别人；找不到就留空，调用方退回按姓名解析。
+ */
+export function parseSelf(text: string): { name: string; userId: string; openId?: string } | null {
 	try {
 		const found = parsePeopleLike(JSON.parse(text), (o) => typeof ci(o, "userId") === "string" && typeof ci(o, "name") === "string");
-		return found.length ? { name: String(ci(found[0]!, "name")), userId: String(ci(found[0]!, "userId")) } : null;
+		if (!found.length) return null;
+		const me = found[0]!;
+		const open = parsePeopleLike(me, (o) => pickStr(ci(o, "openDingTalkId")) !== "")[0];
+		return {
+			name: String(ci(me, "name")),
+			userId: String(ci(me, "userId")),
+			openId: open ? pickStr(ci(open, "openDingTalkId")) || undefined : undefined,
+		};
 	} catch {
 		return null;
 	}
+}
+
+/** 自指词（本人）：这些不是合法查询值，走 contact +me 直接拿本人身份，不走搜索 */
+const SELF_TOKENS = /^(我|自己|本人|me|myself|self)$/i;
+export const isSelfToken = (token: string): boolean => SELF_TOKENS.test(token.trim());
+
+/**
+ * 名字解析失败（≠ 查无此人）的回报文案：给出真实原因，并说明「原样重试」才是对的下一步，
+ * 免得把上游超时读成「名字写错了」而改字或换人。
+ */
+export function searchFailedNote(scope: string, why: string): string {
+	return `搜索「${scope}」失败——这不是查无此人，是查询本身没成功：${why}\n稍后原样重试即可（名字不用改）；连续失败说明 dws 或网络有问题，回报用户，别改名字去猜。`;
 }
 
 /** 从 chat +chat-search 输出提取群候选（openConversationId 为稳定 ID） */
@@ -1821,9 +1848,9 @@ function wantsOverwrite(args: string[]): boolean {
 	return args.some((a) => a === "--overwrite" || a.startsWith("--overwrite="));
 }
 
-let cachedSelf: { name: string; userId: string } | null | undefined;
-/** 本人身份（惰性获取并缓存）：发后核验命令需要自己的姓名作 --sender */
-async function whoAmI(cfg: BridgeConfig): Promise<{ name: string; userId: string } | null> {
+let cachedSelf: ReturnType<typeof parseSelf> | undefined;
+/** 本人身份（惰性获取并缓存）：发后核验用姓名，自指收件人（我/自己）用 userId 与 openDingTalkId */
+async function whoAmI(cfg: BridgeConfig): Promise<ReturnType<typeof parseSelf>> {
 	if (cachedSelf !== undefined) return cachedSelf;
 	try {
 		const r = await runDws(cfg, ["contact", "+me", "--format", "json"]);
@@ -2027,6 +2054,14 @@ async function orgInfoOf(cfg: BridgeConfig, userIds: string[]): Promise<Map<stri
 	} catch {
 		return new Map();
 	}
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
+
+/** dws 非零退出的原因行（stderr 优先，退到 stdout）——报错要说清是「执行失败」而不是「没有这个东西」 */
+function dwsErrorLine(r: RunResult): string {
+	const line = (r.stderr.trim() || r.stdout.trim()).split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+	return line.slice(0, 160) || `dws 退出码 ${r.code}`;
 }
 
 /**
@@ -2693,35 +2728,76 @@ ${out}`;
 		return hit;
 	};
 
-	/** 调 dws 并解析 JSON（失败 / 非 JSON 返回 null） */
-	const callJson = async (args: string[]): Promise<unknown | null> => {
+	/**
+	 * 调 dws 并解析 JSON：拿不到可读结果时把失败原因交回来，
+	 * 由调用方区分「查询失败」与「确实没有这样的人/群」。
+	 */
+	const callJsonOr = async (args: string[]): Promise<{ data: unknown } | { error: string }> => {
 		try {
 			const r = await runDws(cfg, [...args, "--format", "json"]);
-			if (r.code !== 0 || r.timedOut) return null;
+			if (r.timedOut) return { error: "请求超时（dws 没在限定时间内返回）" };
+			if (r.code !== 0) return { error: dwsErrorLine(r) };
 			const raw = r.stdout.trim() || r.stderr.trim();
 			const i = raw.indexOf("{");
-			return i >= 0 ? (JSON.parse(raw.slice(i)) as unknown) : null;
-		} catch {
-			return null;
+			if (i < 0) return { error: `dws 没有返回可读结果：${raw.split("\n")[0]?.trim().slice(0, 120) || "（空输出）"}` };
+			try {
+				return { data: JSON.parse(raw.slice(i)) as unknown };
+			} catch (e) {
+				return { error: `dws 返回的不是合法 JSON：${String(e).slice(0, 100)}` };
+			}
+		} catch (e) {
+			return { error: `dws 进程启动失败：${String((e as Error).message ?? e).slice(0, 120)}` };
 		}
 	};
 
-	/** 人员解析：姓名走 aisearch；已是稳定 ID 时只补姓名用于面板展示 */
-const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] } | { error: string } | { choice: string }> => {
+	/** 调 dws 并解析 JSON（失败 / 非 JSON 返回 null） */
+	const callJson = async (args: string[]): Promise<unknown | null> => {
+		const r = await callJsonOr(args);
+		return "data" in r ? r.data : null;
+	};
+
+	/**
+	 * 搜人（aisearch person）：CLI 给这条接口的预算只有 ~3 秒，网关偶发 request_timeout
+	 * 是常态（审计日志里这类超时每天都有），所以失败重试一次（只读幂等）；
+	 * 两次都失败才把原因交上去。零命中是成功的响应，不在这里重试。
+	 */
+	const searchPeople = async (query: string): Promise<{ hits: PersonHit[] } | { error: string }> => {
+		let why = "";
+		for (let attempt = 0; attempt < 2; attempt++) {
+			if (attempt) await sleep(600);
+			const r = await callJsonOr(["aisearch", "person", "--query", query, "--dimension", "name"]);
+			if ("data" in r) return { hits: parsePeople(JSON.stringify(r.data)) };
+			why = r.error;
+		}
+		return { error: why };
+	};
+
+	/** 人员解析：姓名走 aisearch，自指词与本人姓名/ID 直连 contact +me；已是稳定 ID 时只补姓名用于面板展示 */
+	const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] } | { error: string } | { choice: string }> => {
 		const ok: ResolvedPerson[] = [];
 		for (const token of [...new Set(tokens.map((t) => t.trim()).filter(Boolean))]) {
 			// 完整手机号：通讯录反查（唯一命中才放行）
 			if (/^1[3-9]\d{9}$/.test(token)) {
-				const data = await callJson(["contact", "user", "search-mobile", "--mobile", token]);
-				const uid = data ? findScalar(data, ["userId"]) : undefined;
+				const r = await callJsonOr(["contact", "user", "search-mobile", "--mobile", token]);
+				if ("error" in r) return { error: searchFailedNote(token, r.error) };
+				const uid = findScalar(r.data, ["userId"]);
 				if (!uid) return { error: `手机号 ${token} 没反查到账号` };
 				const orgs = await orgInfoOf(cfg, [uid]);
 				ok.push({ token, userId: uid, name: orgs.get(uid)?.name || undefined });
 				continue;
 			}
+			// 本人：自指词（我/自己/本人/me）与本人的姓名、userId 一律直连 contact +me——
+			// 搜索接口是语义检索，本人不一定被排进结果，直连才确定
+			const self = await whoAmI(cfg);
+			if (isSelfToken(token) && !self) return { error: `「${token}」需要本人身份，但 contact +me 没返回；请直接给本人的姓名或账号 ID` };
+			if (self && (isSelfToken(token) || token === self.name || token === self.userId)) {
+				ok.push({ token, userId: self.userId, openId: self.openId, name: self.name });
+				continue;
+			}
 			if (!isIdLike(token)) {
-				const data = await callJson(["aisearch", "person", "--query", token, "--dimension", "name"]);
-				const hits = data ? parsePeople(JSON.stringify(data)) : [];
+				const found = await searchPeople(token);
+				if ("error" in found) return { error: searchFailedNote(token, found.error) };
+				const hits = found.hits;
 				if (!hits.length) return { error: `没找到「${token}」：核对用字，或直接给这个人的完整手机号` };
 				if (hits.length > 1) {
 					const lines = await personLines(cfg, hits);
@@ -2754,8 +2830,9 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 				name = orgs.get(p.userId)?.name;
 			}
 			if (!name) return { error: `没查到 ${p.token} 对应的姓名，无法取 DING 所需的 openDingTalkId` };
-			const hits = parsePeople(JSON.stringify(await callJson(["aisearch", "person", "--query", name, "--dimension", "name"])));
-			const hit = hits.find((h) => h.userId === p.userId) ?? hits.find((h) => h.openId);
+			const found = await searchPeople(name);
+			if ("error" in found) return { error: searchFailedNote(name, found.error) };
+			const hit = found.hits.find((h) => h.userId === p.userId) ?? found.hits.find((h) => h.openId);
 			if (!hit?.openId) return { error: `没取到「${name}」的 openDingTalkId，DING 发不出去` };
 			out.push({ ...p, name, openId: hit.openId });
 		}
@@ -2971,7 +3048,7 @@ const resolvePeople = async (tokens: string[]): Promise<{ ok: ResolvedPerson[] }
 		name: "dingtalk_msg",
 		label: "收发钉钉消息",
 		description:
-			"钉钉消息：单聊/群消息/多人单聊/引用回复/转发/转 DING/撤回/查消息。收件人写姓名或账号 ID，会话写群名、会话 ID 或单聊对方姓名。" +
+			"钉钉消息：单聊/群消息/多人单聊/引用回复/转发/转 DING/撤回/查消息。收件人写姓名或账号 ID（写「我」即本人），会话写群名、会话 ID 或单聊对方姓名。" +
 			"发文件时本条不含说明正文，说明要另发一条文本。" +
 			"查消息默认把附件（图片/语音/文件）下载到工作目录（路径见结果，可直接 read）。",
 		params: MessageParams,
