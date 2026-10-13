@@ -75,6 +75,63 @@ pi 用自带安装器时为**托管安装**（releases-v1）：`<agent>/install/
 |---|---|---|---|
 | `apply-pi-ai-usage-guard.mjs` | pi-ai `dist/utils/estimate.js` 的 `calculateContextTokens` 对缺 usage 的消息抛 TypeError（模型偶发无文字回答会导致后续调用瞬时失败）；顺带把 `dist/api/anthropic-messages.js` 的 `message_start` usage 解析改可选链 | 活动安装的 `@earendil-works/pi-ai/dist/`（原地 patch） | 无参数；源码含 `PATCH(usage-guard)` 标记即跳过；目标旧串匹配不上 `exit(1)` 拒绝执行 |
 | `apply-zuchongzhi-zh.mjs` | 祖冲之汉化：直接替换 pi 全局 dist 编译产物里硬编码的英文 UI 文案（`dist/modes/interactive/` 10 个文件 + `pi-tui` 的 settings-list + `dist/bundle/chunks/*.js` 并集，仅带引号条目扩散到压缩产物） | 同上（dist 与 pi-tui dist） | `--dry-run`/`-n`、`--restore`（从 `~/.pi/agent/tmp/zuchongzhi/backup/` 还原，还原前校验 `version.json` 的 pi 版本戳，不符拒绝）；`state.json` 记 SHA256，pi 升级哈希变化 → 自动废弃旧备份、重新备份重打；写盘前 `node --check` 语法校验。处数口径以脚本实跑输出为准（文档里的数字已过时） |
-| `apply-pi-launch-report.mjs` | 启动垫片取证 v2：给 pi 启动器注入 `--max-old-space-size=8192 --report-on-fatalerror --report-directory=~/.pi/agent/reports`、stderr 追加落盘 `~/.pi/agent/pi-stderr.log`、记 `[START]/[EXIT]`。托管安装启动器（`<agent>/bin/pi` sh）在调用行前 export NODE_OPTIONS、行尾 `2>>` 重定向、去掉 `exec` 以便记退出码；npm 侧 Windows `pi.cmd`/`pi.ps1`，POSIX 旧式 sh 垫片走 NODE_OPTIONS（cmd 因 SETLOCAL 回收环境变量改为调用行内联 node 旗标）；npm 11 起 POSIX 全局 bin 是符号链接（pi → 包内 ESM 垫片），补丁把它改写为 spawn wrapper 拉起 `cli-runtime.js` + 信号/退出码转发 + 保留 NODE_COMPILE_CACHE | pi 启动器（实际在用 / 托管 / npm 全局里第一个存在的启动器目录；**不写 node_modules**），并建 `~/.pi/agent/reports` | 无参数；含 `PI-CRASH-FORENSICS` 标记跳过；每次运行先 strip 旧注入；注入失败（启动器形态不认识）只警告不写盘；崩溃取证史见文件头注释（不写入本文档） |
+| `apply-pi-launch-report.mjs` | 启动垫片取证 v2：给 pi 启动器注入 `--max-old-space-size=8192 --report-on-fatalerror --report-directory=~/.pi/agent/reports`、stderr 追加落盘 `~/.pi/agent/pi-stderr.log`、记 `[START]/[EXIT]`。托管安装的 `pi-launcher.js`（Windows 的 `pi.cmd`/`pi.ps1` 与部分布局的 `pi` sh 都只是转发到它）在 spawnSync 的 node 旗标位前插取证旗标 + stderr 落盘；托管安装 `<agent>/bin/pi` sh 在调用行前 export NODE_OPTIONS、行尾 `2>>` 重定向、去掉 `exec` 以便记退出码；npm 侧 Windows `pi.cmd`/`pi.ps1`，POSIX 旧式 sh 垫片走 NODE_OPTIONS（cmd 因 SETLOCAL 回收环境变量改为调用行内联 node 旗标）；npm 11 起 POSIX 全局 bin 是符号链接（pi → 包内 ESM 垫片），补丁把它改写为 spawn wrapper 拉起 `cli-runtime.js` + 信号/退出码转发 + 保留 NODE_COMPILE_CACHE | pi 启动器（实际在用 / 托管 / npm 全局里第一个存在的启动器目录；**不写 node_modules**），并建 `~/.pi/agent/reports` | 无参数；含 `PI-CRASH-FORENSICS` 标记跳过；每次运行先 strip 旧注入；注入失败（启动器形态不认识）只警告不写盘；薄转发垫片（内容含 `pi-launcher.js`）不报错、只提示取证由其承担；崩溃取证史见文件头注释（不写入本文档） |
 
-三个补丁都与渲染模式无关；`fullscreen` 渲染已是定稿默认，旧的滚动冻结补丁（`apply-pi-tui-scroll-freeze.mjs`）已随定稿移除。pi 升级（`pi update` / `npm i -g`）会重写 dist 与启动器，故都需重跑（祖冲之脚本重跑即自动收敛）。
+## pi 升级收尾清单
+
+触发：`pi update` / `npm i -g`（或换机器）——它会重写 pi 自身 dist、启动器与 node_modules，而**这三样正是本仓库的下游**。逐项重做，别只跑其中一个。
+
+**1. 重建、重装、重生成**
+
+```bash
+node install.js -y                                    # 重建 dist + 重装 + 重生成 src/config/tsconfig.json
+grep -o "releases/[0-9.]*" src/config/tsconfig.json   # 指向的版本应是新装的那个
+node src/extensions/test/relink-deps.mjs              # 测试依赖副本换成新 pi（依赖树踩坑见 tests.md）
+cd src && npm run typecheck                           # 对新 pi 的 .d.ts 应为 0 报错，报错即扩展用到了变动的 API
+```
+
+然后是 35 个回归测试（无 runner，逐个跑）：
+
+```bash
+for f in $(ls src/extensions/*/test/*.test.mjs src/extensions/test/*.test.mjs | sort -u); do node "$f" >/dev/null 2>&1 || echo "FAIL $f"; done
+```
+
+**2. 三个补丁（`install.js` 不代跑）**
+
+```bash
+node static/patches/apply-pi-ai-usage-guard.mjs
+node static/patches/apply-zuchongzhi-zh.mjs
+node static/patches/apply-pi-launch-report.mjs
+```
+
+看什么算成功：usage-guard 看 `PATCH(usage-guard)` 标记或“已应用”；祖冲之看末尾的“未找到目标串”告警——**有告警说明 pi 改了该文案，要同步补丁表**（正常现象，不清就会留一句英文）；启动垫片看“共补丁 N 个垫片”，托管安装在 Windows 下应为 `1`（`pi-launcher.js`），报**0** 就是启动器形态又变了，需适配（垫片形态与各分支见上表）。补丁改的是 pi 自身 dist，**生效要重启 pi，`/reload` 不够**。
+
+**3. 主题与配置 schema**
+
+pi 在启动期也会校验主题（内置主题不校验），改主题后用 pi 自带的校验器验一遍（比对比对 schema 键名更真）：
+
+```bash
+cd ~/.pi/agent/install/releases/<版本>/node_modules && node --input-type=module -e "
+import { validateThemeJson } from './@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme-schema.js';
+import fs from 'node:fs';
+validateThemeJson('matrix', JSON.parse(fs.readFileSync(process.env.USERPROFILE + '/.pi/agent/themes/matrix.json', 'utf8')));
+console.log('主题校验通过');"
+```
+
+主题 `$schema` 指向 `https://pi.dev/schemas/theme.schema.json`（旧的 GitHub raw 路径已废弃）。`settings.json` / `models.json` 的 schema 只服务编辑器提示，用户文件里多出的键不会导致启动失败（两个 schema 都没开 `additionalProperties: false`）。
+
+**4. 新版本 breaking change 与扩展的对照**
+
+```bash
+cd ~/.pi/agent/install/releases && diff -u <旧>/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts <新>/.../index.d.ts | head -60
+```
+
+顶层导出的增减就是扩展能碰到的 API 面；再读新版本 `CHANGELOG.md` 的 Breaking Changes 段逐条落到扩展的事件/API 用法上。历史上真影响过本仓库的点：`before_agent_start` 事件对象变成 `messageType` 联合并对 `sendMessage({triggerTurn:true})` 触发的 run 也触发（只读 `systemPrompt`/`systemPromptOptions` 的 handler 无需改）；运行启动期即算 busy（`ctx.isIdle()` 此时为 false、`pi.sendUserMessage()` 需 `deliverAs`）；`tool_result` 改写 content 必须透传 `structuredContent`；主题 schema 迁移与启动期校验。
+
+**5. 汉化覆盖自查（可选，用祖冲之脚本的数据）**
+
+拿旧版与新版的 interactive dist 对比引号字符串差集，只挑含空格的句子（`"[A-Z][A-Za-z0-9 ,.'\`\-/()%:•→…]{14,110}"` 这类启发式），剔除只在主题 schema 里当描述的条目（除非 pi 新开了主题编辑 UI，这些不需要译）——1.2.0 新增的 62 条里 60 条属此类，只有 `Show hardware cursor` 的描述变了需要换表。
+
+---
+
+三个补丁都与渲染模式无关；`fullscreen` 渲染已是定稿默认，旧的滚动冻结补丁（apply-pi-tui-scroll-freeze.mjs）已随定稿移除。pi 升级（`pi update` / `npm i -g`）会重写 dist 与启动器，故都需重跑（祖冲之脚本重跑即自动收敛）。

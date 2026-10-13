@@ -26,8 +26,10 @@
  * SET NODE_OPTIONS 走不通，故 cmd 把 node 旗标内联在调用行；ps1/sh 用进程环境变量。
  *
  * POSIX 三种形态：
- * - 托管安装启动器（<agent>/bin/pi，自带安装器生成）：调用行前 export NODE_OPTIONS，
+ * - 托管安装启动器（<agent>/bin/pi sh，自带安装器生成）：调用行前 export NODE_OPTIONS，
  *   调用行尾 2>> 重定向，前后插 [START]/[EXIT] 追加行（去掉 exec 才能在退出后记账）
+ * - 托管安装的 pi-launcher.js（Windows 的 pi.cmd / pi.ps1 与部分布局的 pi sh 都转发到它）：
+ *   在 spawnSync 的 node 旗标位前插取证旗标、stderr 落盘、前后记 [START]/[EXIT]
  * - 旧式 npm sh 垫片（npm ≤10）：脚本内 export NODE_OPTIONS + 调用行尾 2>> 重定向
  * - npm 11 起全局 bin 是符号链接（pi → 包内 dist/bundle/cli.js 的 ESM 垫片）：垫片
  *   自身无法改启动旗标，补丁把它改写为 spawn wrapper——用 node 旗标拉起 cli-runtime.js，
@@ -100,7 +102,9 @@ try {
 		// + 行尾挂 stderr 追加重定向 + 统一回 CRLF（批处理 LF-only 有 GOTO 标签风险）
 		s = s.replace(/("%_prog%")([^&\r\n]*%*)(\r?\n)$/, `$1${CMD_FLAGS}$2 2>>"${ERRLOG}"$3`);
 		if (!s.includes(CMD_FLAGS)) {
-			console.error(`[跳过] ${cmdPath} 调用行注入失败（垫片形态不认识），请人工核对`);
+			// 托管安装的 pi.cmd 只有两行转发 pi-launcher.js，取证由那边承担
+			if (s.includes("pi-launcher.js")) console.log(`[跳过] ${cmdPath}（薄转发垫片，取证由 pi-launcher.js 承担）`);
+			else console.error(`[跳过] ${cmdPath} 调用行注入失败（垫片形态不认识），请人工核对`);
 		} else {
 			if (!s.includes("\r\n")) s = s.replace(/\n/g, "\r\n");
 			writeFileSync(cmdPath, s);
@@ -142,7 +146,8 @@ try {
 			)
 			.join("\n");
 		if (!s.includes("2>> $piStderr")) {
-			console.error(`[跳过] ${ps1Path} 调用行注入失败（垫片形态不认识），请人工核对`);
+			if (s.includes("pi-launcher.js")) console.log(`[跳过] ${ps1Path}（薄转发垫片，取证由 pi-launcher.js 承担）`);
+			else console.error(`[跳过] ${ps1Path} 调用行注入失败（垫片形态不认识），请人工核对`);
 		} else {
 			writeFileSync(ps1Path, s);
 			patched++;
@@ -152,6 +157,46 @@ try {
 } catch (e) {
 	if (e.code === "ENOENT") console.log(`[跳过] ${ps1Path} 不存在（非 Windows 环境）`);
 	else console.error(`[失败] ${ps1Path}: ${e.message}`);
+}
+
+// --- pi-launcher.js（托管安装：Windows 的 pi.cmd/pi.ps1 与部分布局的 pi sh 都转发到这里） ---
+const launcherPath = join(BIN, "pi-launcher.js");
+try {
+	let s = readFileSync(launcherPath, "utf8");
+	const SPAWN_HEAD = "const result = spawnSync(process.execPath, [cliPath, ...process.argv.slice(2)], {";
+	const SPAWN_STDIO = '\tstdio: "inherit",';
+	const SPAWN_ERR = "if (result.error) throw result.error;";
+	if (s.includes(MARKER)) {
+		console.log(`[跳过] ${launcherPath} 已是 v2`);
+	} else if (s.includes(SPAWN_HEAD) && s.includes(SPAWN_STDIO) && s.includes(SPAWN_ERR)) {
+		const report = JSON.stringify(REPORT_DIR);
+		const errlog = JSON.stringify(ERRLOG);
+		const startLines = [
+			`const __pfErr = fs.openSync(${errlog}, "a");  // ${MARKER}`,
+			`fs.appendFileSync(${errlog}, \`[START \${new Date().toISOString()} args=\${process.argv.slice(2).join(" ")}]\\n\`);  // ${MARKER}`,
+		].join("\n");
+		s = s.replace(
+			SPAWN_HEAD,
+			`${startLines}\nconst result = spawnSync(process.execPath, ["--max-old-space-size=8192", "--report-on-fatalerror", "--report-directory=" + ${report}, cliPath, ...process.argv.slice(2)], {`,
+		);
+		s = s.replace(SPAWN_STDIO, '\tstdio: ["inherit", "inherit", __pfErr],');
+		s = s.replace(
+			SPAWN_ERR,
+			`fs.appendFileSync(${errlog}, \`[EXIT \${new Date().toISOString()} code=\${result.status ?? "error"}]\\n\`);  // ${MARKER}\n${SPAWN_ERR}`,
+		);
+		if (!s.includes(MARKER)) {
+			console.error(`[跳过] ${launcherPath} 注入失败（启动器形态不认识），请人工核对`);
+		} else {
+			writeFileSync(launcherPath, s);
+			patched++;
+			console.log(`[完成] ${launcherPath}（托管安装启动器，覆盖 pi.cmd/pi.ps1/pi）`);
+		}
+	} else {
+		console.error(`[跳过] ${launcherPath} 调用行注入失败（启动器形态不认识），请人工核对`);
+	}
+} catch (e) {
+	if (e.code === "ENOENT") console.log(`[跳过] ${launcherPath} 不存在（非本安装布局）`);
+	else console.error(`[失败] ${launcherPath}: ${e.message}`);
 }
 
 // --- pi (sh：托管安装启动器 / 旧式垫片 / npm 11 符号链接) ---
@@ -243,7 +288,8 @@ try {
 			patched++;
 			console.log(`[完成] ${target}（经符号链接 ${shPath}）`);
 		} else {
-			console.error(`[警告] ${shPath} 无法识别（既非旧式 sh 垫片也非 npm 11 符号链接），请人工核对`);
+			if (raw.includes("pi-launcher.js")) console.log(`[跳过] ${shPath}（薄转发垫片，取证由 pi-launcher.js 承担）`);
+			else console.error(`[警告] ${shPath} 无法识别（既非旧式 sh 垫片也非 npm 11 符号链接），请人工核对`);
 		}
 	}
 } catch (e) {
