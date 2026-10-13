@@ -29,6 +29,8 @@ const mod = await import(pathToFileURL(bundle).href);
 
 重建（换机器 / pi 升级后）：`node src/extensions/test/relink-deps.mjs`（仓库根执行）。脚本把 pi 安装的 node_modules 树扁平搬运过来（第三方 + `@earendil-works/*` + pi 本体；托管安装依赖提升在 releases 层、npm 全局可能嵌套在 pi 包内，两处都扫、同名先到先得），优先 symbolic link / junction，不支持链接的文件系统（如 D:）回退为递归复制（约 270MB）。**各 test 子目录里不要再放 node_modules**——空壳会挡在解析路径上。
 
+每个条目写入前先删后写，否则换布局时（npm 全局嵌套 → 托管安装提升）旧包自带的嵌套 `node_modules` 会残留下来，与新树合并出跨版本混合树（表现为 `pi-coding-agent/dist/core/model-config.js` 去解析它自己那份旧 `pi-ai` 的 `providers/compat-schema.js` 报 ERRMODULE_NOT_FOUND）。删除用手写递归（`unlinkSync`/`rmdirSync`）而非 `fs.rmSync`：本机实测 `rmSync` 在含中文的路径下报成功却不删，删不掉直接报错退出。
+
 - `hud/test/` 与 `shared/test/` 不需要（前者用 esbuild `alias` 把 pi / pi-ai 别名到内联的 `.tmp-pi-mock.mjs` 并需补齐用到的导出，后者零外部依赖）
 - `webdav-kb/test/node_modules/` 另有真实 npm 依赖树（跑 `npm install` 即可）
 
@@ -59,6 +61,7 @@ const mod = await import(pathToFileURL(bundle).href);
 | `shared/test/model-setting.test.mjs` | 两层模型设置的解析链：本地固定优先于中心、中心缺记录用注册默认策略、未映射槽回落会话模型、FREE 只在免费池取且带链、不可用回落 AUTO、本地键读改写保留同文件其它键、旧值 auto-not-free 归一化、用途声明去重（沙箱 HOME，不碰真实 `~/.pi/agent`） |
 | `shared/test/model-util.test.mjs` | 价格口径与筛选：目录 0 价的高速档不判免费（`COST_OVERRIDES`）、有效价参与排序、真 0 价仍免费、动态定价与无价排最后、`excludeFree` 不吃高速档 |
 | `shared/test/shell-split.test.mjs` | 20 场景（顶层分隔符 / 引号转义 / 子 shell / 权限门关键样本 / heredoc） |
+| `shared/test/fs-safe.test.mjs` | `shared/fs-safe` 的 `removePath`：**探针建在含中文的临时目录**（本机 `fs.rmSync` 在此静默不删——改用 rmSync 实现本测试即失败）、中文路径下删文件与目录树、目标不存在返回 true、删链接不跟进目标 |
 | `workflow-mgr/test/render.test.mjs` | 渲染 16 场景 A~R（R=多槽绑定），含 `__PI_HUD_API__` 注册/通知/注销 |
 | `workflow-mgr/test/stale-ctx.test.mjs` | session 替换后 getStore 不崩（固化 cwd）+ cwd 变化重建 |
 | `webdav-kb/test/*.test.mjs`（9 个） | client / sync / tools / commands / search / crypto / lfs / panel / panel-config，全部离线：`mock-dav.mjs` 是进程内 HTTP mock（PROPFIND/GET/PUT/MKCOL/DELETE/MOVE + Basic 认证，Nextcloud/Apache 双命名空间），不联网 |

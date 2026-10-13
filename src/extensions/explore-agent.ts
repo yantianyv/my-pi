@@ -51,6 +51,7 @@ import { createModelSetting, type ModelSetting } from "./shared/model-setting";
 import { convertToLlm, createPiStreamFn, systemMessage } from "./shared/agent";
 import { setStatusWithTTL, clearStatusTimers } from "./shared/status";
 import { EXPLORE_API_VERSION, publishExploreApi } from "./shared/explore-api";
+import { removePath } from "./shared/fs-safe";
 
 // ---------------------------------------------------------------------------
 // 可调配置
@@ -942,11 +943,7 @@ async function executeExplore(
 					state.status = "done";
 					writeAtomic(a.finalPath, `# ${task}\n\n${reportText}\n`);
 					writeMeta(a, { task, status: "done", model: modelName, tools: toolCallCounts[i] });
-					try {
-						fs.rmSync(a.partialPath, { force: true }); // 完整成果已落盘，半成品退役
-					} catch {
-						/* 忽略 */
-					}
+					removePath(a.partialPath); // 完整成果已落盘，半成品退役
 					return r;
 				}
 				// 失败/中断：保留半成品（下次续跑的起点），报告里标状态

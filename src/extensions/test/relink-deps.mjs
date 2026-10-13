@@ -6,7 +6,7 @@
  * 目标是把 pi 的 node_modules 树"扁平化搬运"过来：
  *   src/extensions/node_modules/<第三方>                    ← 依赖来源之一
  *   src/extensions/node_modules/@earendil-works/<包>         ← 同上（pi-ai/pi-tui…）
- *   src/extensions/node_modules/@earendil-works/pi-coding-agent ← pi 本体（含它自己的 node_modules）
+ *   src/extensions/node_modules/@earendil-works/pi-coding-agent ← pi 本体（自带嵌套 node_modules 的布局下一并搬）
  *
  * 依赖位置随安装布局不同（托管安装提升到 node_modules 根，npm 全局可能嵌套在 pi 包内），
  * 两处都扫、同名先到先得；pi 安装位置探测见 static/patches/pi-root.mjs。
@@ -31,11 +31,41 @@ try {
 	process.exit(1);
 }
 
+/**
+ * 删除目标（pi 升级前后布局不同时，旧包里会留下源里没有的嵌套 node_modules）。
+ * 必须删干净：残留会让 copyDir 与旧树合并，测试依赖里混进上一个 pi 版本的包。
+ * 不用 fs.rmSync：本机实测它在含中文的路径下报成功却不删（unlinkSync/rmdirSync 正常），
+ * 故手写递归删除，结束时复核，删不掉直接报错（免得默默合出一棵混合树）。
+ */
 function remove(target) {
+	let st;
 	try {
-		fs.rmSync(target, { recursive: true, force: true, maxRetries: 2 });
+		st = fs.lstatSync(target);
 	} catch {
-		/* 链接/只读文件删除失败时继续下一步 */
+		return; // 不存在
+	}
+	if (st.isDirectory() && !st.isSymbolicLink()) {
+		for (const name of fs.readdirSync(target)) remove(path.join(target, name));
+		try {
+			fs.rmdirSync(target);
+		} catch {
+			/* 下面统一复核 */
+		}
+	} else {
+		// 符号链接/junction/普通文件：只删它自己，不跟进目标
+		try {
+			fs.unlinkSync(target);
+		} catch {
+			try {
+				fs.rmdirSync(target);
+			} catch {
+				/* 下面统一复核 */
+			}
+		}
+	}
+	if (fs.existsSync(target)) {
+		console.error(`✗ 删除失败（文件被占用或只读）：${target}\n  请手动删除后重跑本脚本`);
+		process.exit(1);
 	}
 }
 

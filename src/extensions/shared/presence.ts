@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { removePath } from "./fs-safe";
 import type { Readable } from "node:stream";
 
 /** 在场状态文件目录（一实例一文件；PI_PRESENCE_DIR 可覆盖，测试用） */
@@ -91,11 +92,7 @@ export function markUserInput(): void {
 /** 本实例退出时删除自己的在场文件 */
 export function disposePresence(): void {
 	if (!selfPath) return;
-	try {
-		fs.rmSync(selfPath, { force: true });
-	} catch {
-		/* 忽略 */
-	}
+	removePath(selfPath);
 	selfPath = null;
 	selfState = null;
 }
@@ -116,7 +113,7 @@ function pruneStale(): void {
 			const rec = JSON.parse(fs.readFileSync(full, "utf8")) as InstanceFile;
 			const stale = now - (rec.updatedAt ?? 0) > INSTANCE_STALE_MS;
 			const dead = !pidAlive(rec.pid ?? 0) && now - (rec.updatedAt ?? 0) > 60_000;
-			if (stale || dead) fs.rmSync(full, { force: true });
+			if (stale || dead) removePath(full);
 		} catch {
 			/* 半个文件（写入中被读）→ 下次再清 */
 		}
@@ -359,7 +356,7 @@ export function claimSoundSlot(dedupeMs: number): boolean {
 	try {
 		const prev = Number(fs.readFileSync(file, "utf8").trim());
 		if (Number.isFinite(prev) && now - prev < dedupeMs) return false;
-		fs.rmSync(file, { force: true });
+		removePath(file);
 		return tryClaim();
 	} catch {
 		return false;

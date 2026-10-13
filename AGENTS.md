@@ -87,6 +87,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 - **`tool_result` 钩子改写 content 必须透传 `structuredContent`**（`structuredContent: event.structuredContent`）：pi ≥ 0.99 的 runner 见到 content 被替换而未带 structuredContent 会丢弃它。img-slim / pair-guard 已遵此约束。
 - **`@earendil-works/pi-ai` 只能从根入口或 `compat` / `oauth` / `providers/all` 导入**：pi 加载扩展走 jiti 别名表，深路径（如 `pi-ai/utils/transcript`）在 node ESM 下能解析、在 pi 里加载即报错（keep 曾因此加载失败）。
 - **`navigateTree` 只返回 `{cancelled}`**：编辑框文本回填由 interactive-mode 内部完成，扩展侧拿不到 editorText（claude-it `/rewind` 依赖此行为）。
+- **`fs.rmSync` 在含中文的路径下会静默不删**（报成功但文件仍在；`unlinkSync` / `rmdirSync` 正常）：运行时扩展的删除一律走 `shared/fs-safe.ts` 的 `removePath()`，脚本侧用同款手写递归（build.js 清旧产物、relink-deps 换布局），不要依赖 `rmSync`。先删后写的覆盖类操作尤其危险：删不掉的旧目录会被新文件就地合并，两版内容混成一棵树。
 - `claude-it.ts` 会拦截裸输入 `exit`（不带 `/`）直接退出 pi，属刻意设计。
 - `fullscreen` 渲染模式已定稿（旧 regular 模式的滚动冻结补丁已移除）；其余三补丁与渲染模式无关。
 - `docs/`（本地参考资料，版权归第三方）、`scratch/`、`.tmp*`、`dist/`、`.pi/` 下运行时数据均不入库或已被 gitignore；根目录没有 `build.js`（构建脚本在 `src/`）。

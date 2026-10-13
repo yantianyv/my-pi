@@ -40,6 +40,7 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { loadJsonConfig, saveJsonConfig } from "../shared/config";
+import { removePath } from "../shared/fs-safe";
 import { askReview, fitItems, layoutList, reviewActions } from "../shared/review-panel";
 import {
 	buildApproval,
@@ -1769,7 +1770,7 @@ export function relocateLocalPaths(stdout: string, tempRoot: string, targets: Re
 function cleanPartFiles(dir: string): void {
 	try {
 		for (const f of fs.readdirSync(dir)) {
-			if (/\.part-\d+$/.test(f)) fs.rmSync(path.join(dir, f), { force: true });
+			if (/\.part-\d+$/.test(f)) removePath(path.join(dir, f));
 		}
 	} catch {
 		/* 目录不可读就算了 */
@@ -1811,7 +1812,7 @@ async function runDwsRedirected(
 		const stdout = relocateLocalPaths(result.stdout, tempRoot, targets, baseDir);
 		return { result: { ...result, stdout }, copied, skipped, targets: targets.map((t) => t.targetAbs) };
 	} finally {
-		fs.rmSync(tempRoot, { recursive: true, force: true });
+		removePath(tempRoot);
 	}
 }
 

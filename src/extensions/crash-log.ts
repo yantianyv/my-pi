@@ -21,6 +21,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadJsonConfig, saveJsonConfig } from "./shared/config";
+import { removePath } from "./shared/fs-safe";
 
 // ------------------------------------------------------------------
 // 可调配置
@@ -174,13 +175,10 @@ export default function (pi: ExtensionAPI) {
 		description: "查看崩溃黑匣子：最近一条崩溃/异常记录与日志路径（无参数报告；clear 清空日志）",
 		handler: async (args: string, ctx) => {
 			if (args.trim().toLowerCase() === "clear") {
-				try {
-					fs.rmSync(LOG_FILE, { force: true });
-					fs.rmSync(ACK_FILE, { force: true });
-					ctx.ui.notify(`已清空崩溃日志 ${LOG_FILE}`, "info");
-				} catch (e) {
-					ctx.ui.notify(`清空失败：${e instanceof Error ? e.message : String(e)}`, "error");
-				}
+				const logGone = removePath(LOG_FILE);
+				const ackGone = removePath(ACK_FILE);
+				if (logGone && ackGone) ctx.ui.notify(`已清空崩溃日志 ${LOG_FILE}`, "info");
+				else ctx.ui.notify(`清空失败：${LOG_FILE} 仍在（文件被占用或只读）`, "error");
 				return;
 			}
 			const recent = lastCrashSummary();

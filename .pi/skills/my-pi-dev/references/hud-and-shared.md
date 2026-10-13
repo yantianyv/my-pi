@@ -59,6 +59,7 @@ hud 自己只推 `hud-bash` / `balance-error` / `model-switch` 三个 key，其�
 |---|---|---|
 | `agent.ts` | `convertToLlm`（只放行 system/user/assistant/toolResult，**system 必须放行**：0.86 起系统提示词以前导 system 消息挂在 messages 里）、`systemMessage`、`createPiStreamFn(ctx)`（走 pi 已登录通道，每次调用前取最新认证，头管道复用 `llm.ts` 的 `piAttributionHeaders`；**单次调用需求走 `llm.ts` 的 `aiComplete`，不要用它做一次性调用**） | context-init、btw、workflow-mgr 审计、explore-agent |
 | `config.ts` | `loadJsonConfig`（缺失/校验不过回默认；JSON 损坏则改名 `.corrupt-<时间戳>` 隔离留证；顺带清理 `.tmp-<pid>` 残档）、`saveJsonConfig`（临时文件 + rename 原子写）、`isModelConfig` | 几乎所有扩展 |
+| `fs-safe.ts` | `removePath(target)`：删文件/目录树，返回目标是否已不存在（不抛错，调用方按返回值提示失败）。手写递归（`unlinkSync` + `rmdirSync`）+ 结尾复核，符号链接/junction 只删链接本身——本机 `fs.rmSync` 在**含中文的路径**下报成功却不删，项目目录下的清理会“看着成功、实际什么都没删” | crash-log、explore-agent、dingtalk-bridge、presence |
 | `status.ts` | `setStatusWithTTL(ctx,key,text,ttl)`（同 key 重置定时器；text=undefined 只清）、`clearStatusTimers()`；对失效 ctx 抛错有 try/catch 兜底 | hud-core、explore-agent、web-tool、webdav-kb、clipboard、qr 等 |
 | `ui.ts` | `createBoxRenderer`（╭╮│╰╯ 全封闭浮层边框 + `…` 截断，可选 borderMuted）、`editInput`（输入编辑键统一：backspace/delete/home/end/ctrl+u/ctrl+←→按词移动/ctrl+w 删词/粘贴，grapheme 安全步进）、`renderScrollingInput`、`renderInputWithCursor`、`charIndexAtWidth`/`sliceByWidth` | 所有浮层面板 |
 | `markdown.ts` | `wrapText`、`renderAnswer`（行内样式 / 代码块 / 标题 / 列表 / 表格整块渲染避免换行拆散对齐，列宽自适应超宽压缩），原 `btw/render.ts` 上提；`btw/render.ts` 保留同名转发 | ask 说明题、btw |
