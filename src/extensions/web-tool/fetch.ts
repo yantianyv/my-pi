@@ -9,7 +9,11 @@
  * - fetchAsMarkdown：校验协议 / 非 HTML 报错 / 字节上限 / 字符截断 / 正文极短提示
  *   成功率补救（不依赖外部服务）：GitHub blob URL 重写为 raw 直取（blob 页行号/按钮噪音大）；
  *   正文极短（JS 空壳判定）时用 Googlebot UA 重试一次——不少 SPA 只对搜索引擎爬虫做预渲染；
- *   正文极短且命中 Cloudflare 等挑战特征时明确报「反爬验证页」（不误判为抓取成功）。
+ *   仍极短且像未渲染的空壳时，用无头渲染兜一次（render-cdp.ts，零依赖 CDP）——
+ *   渲染换来的结果只在新结果更长时才采用（可能渲染出 cookie 横幅/登录页）；渲染失败或
+ *   机器上没有 Chromium 时静默回落，行为与以前一致；
+ *   正文极短且命中 Cloudflare 等挑战特征时明确报「反爬验证页」（不误判为抓取成功，
+ *   也不浪费一次渲染：挑战页要过 JS 校验，无头浏览器同样会被拦）。
  *   （Jina Reader 第三通道曾评估：2026-08 本机实测 r.jina.ai 直连与代理均不可达，放弃）
  *
  * 注意：本模块不注册任何 pi API，仅导出函数/常量，由入口（web_search/web_fetch 工具）驱动。
@@ -35,6 +39,7 @@ import {
 	curlFetch,
 } from "./http";
 import { makeTimeoutSignal } from "../shared/net";
+import { renderPage, rendererReady } from "./render-cdp";
 
 /** domino 的 createWindow（any 桥接，见上方 @ts-ignore 说明） */
 const createWindow = _createWindow as (html?: string) => any;
@@ -69,6 +74,31 @@ const FETCH_MAX_BYTES = 3 * 1024 * 1024;
 export const DEFAULT_MAX_CHARS = 12_000;
 /** fetch 返回 markdown 硬上限（防撑爆上下文） */
 export const MAX_CHARS_LIMIT = 60_000;
+
+/** SPA 挂载点特征：命中且正文很薄，基本可判定为未渲染的空壳 */
+const SHELL_MARKERS = [
+	"__NEXT_DATA__", "window.__INITIAL_STATE__", "window.__NUXT__", "window.__APOLLO_STATE__",
+	'id="root"', "id='root'", 'id="app"', "id='app'", "ng-version",
+];
+
+/** 是否值得付出一次无头渲染（冷启动约 0.85s，复用会话约 0.33s） */
+export function looksLikeUnrenderedShell(html: string, markdown: string): boolean {
+	const text = markdown.trim();
+	if (text.length < 80) return true; // 空壳/被墙/纯 JS 页
+	if (text.length < 400 && html.length > 20_000) return true; // HTML 很厚、正文很薄
+	return text.length < 600 && SHELL_MARKERS.some((m) => html.includes(m));
+}
+
+/** 按行边界截断（太靠前的行边界就硬切），与字节截断共同维护 truncated 标记 */
+function cutToLimit(text: string, limit: number): { text: string; cut: boolean } {
+	if (text.length <= limit) return { text, cut: false };
+	let cut = text.lastIndexOf("\n", limit);
+	if (cut < limit * 0.7) cut = limit;
+	return { text: text.slice(0, cut).trimEnd(), cut: true };
+}
+
+/** 抓取进度回调（目前只在启用渲染兜底时回报一次，由入口推状态行） */
+export type FetchProgress = (text: string, ttlMs: number) => void;
 
 // ---------------------------------------------------------------------------
 // HTML → markdown
@@ -221,7 +251,18 @@ export async function fetchAsMarkdown(
 	url: string,
 	maxChars: number,
 	signal?: AbortSignal,
-): Promise<{ markdown: string; title: string; finalUrl: string; bytes: number; truncated: boolean }> {
+	onProgress?: FetchProgress,
+): Promise<{
+	markdown: string;
+	title: string;
+	finalUrl: string;
+	bytes: number;
+	truncated: boolean;
+	/** 本次正文是否来自无头渲染（true 时正文可能含登录页/横幅，已按长度比对筛过） */
+	rendered: boolean;
+	/** 渲染说明（供回执展示，如「持久化 profile，840ms」），未渲染时为空串 */
+	renderNote: string;
+}> {
 	let u: URL;
 	try {
 		u = new URL(rewriteUrl(url));
@@ -246,23 +287,22 @@ export async function fetchAsMarkdown(
 	const html = decodeBody(buf.subarray(0, bytes), res.headers.get("content-type") ?? "");
 	// text/plain（如 GitHub raw 直取的源码）不能走 HTML→markdown：源码里的 <...> 会被当标签吞掉，原文直出
 	const isPlainText = ctype.includes("text/plain");
-	const { markdown, title } = isPlainText
+	let { markdown, title } = isPlainText
 		? { markdown: html, title: u.pathname.split("/").pop() ?? "" }
 		: htmlToMarkdown(html, u.href);
 	let out = markdown;
 	let truncated = bytes < buf.byteLength; // 字节被截断
-	if (out.length > maxChars) {
-		// 尽量在 maxChars 附近的行边界截断（太靠前的行边界就硬切）
-		let cut = out.lastIndexOf("\n", maxChars);
-		if (cut < maxChars * 0.7) cut = maxChars;
-		out = out.slice(0, cut).trimEnd();
-		truncated = true;
-	}
+	const clipped = cutToLimit(out, maxChars);
+	out = clipped.text;
+	truncated = truncated || clipped.cut;
 	// 正文极短：先判反爬验证页（Cloudflare 等——不是抓取成功，也无重试价值）；
 	// 再按 JS 空壳处理：用 Googlebot UA 重试一次（不少 SPA 只对搜索引擎爬虫预渲染）；
 	// 仍极短才如实提示，避免误判为抓取成功
 	if (out.trim().length < 80 && isAntibotPage(html)) {
-		throw new Error("目标站点返回反爬验证页（Cloudflare 等），零依赖抓取无法绕过，未获取到内容");
+		throw new Error(
+			"目标站点返回反爬验证页（Cloudflare 等），零依赖抓取无法绕过：可换源搜索同类内容，" +
+				"或对需要登录的站点用 /web-render-login 登录后重试",
+		);
 	}
 	if (out.trim().length < 80) {
 		const retry = await directFetch(
@@ -277,17 +317,40 @@ export async function fetchAsMarkdown(
 			const rmd = htmlToMarkdown(rhtml, u.href);
 			if (rmd.markdown.trim().length > out.trim().length) {
 				out = rmd.markdown;
-				if (out.length > maxChars) {
-					let cut = out.lastIndexOf("\n", maxChars);
-					if (cut < maxChars * 0.7) cut = maxChars;
-					out = out.slice(0, cut).trimEnd();
-					truncated = true;
-				}
+				const rc = cutToLimit(out, maxChars);
+				out = rc.text;
+				truncated = truncated || rc.cut;
 			}
 		}
 	}
-	if (out.trim().length < 80) {
-		out += "\n\n> ⚠️ 页面正文极短——可能需登录、JS 渲染或页面已失效，内容可信度有限。";
+
+	// 正文仍极短且像未渲染的空壳：用无头浏览器渲染一次。
+	// 这是最后一道兜底，任何失败（无 Chromium、启动超时、页面被拦）都静默回落。
+	let rendered = false;
+	let renderNote = "";
+	if (!isPlainText && out.trim().length < 80 && looksLikeUnrenderedShell(html, out) && rendererReady()) {
+		onProgress?.("🖥 渲染中", 30_000);
+		try {
+			const r = await renderPage(u.href, { timeoutMs: 15_000, quietMs: 800, proxyUrl: getProxyUrl() });
+			const rmd = htmlToMarkdown(r.html, r.finalUrl);
+			// 只在新结果更长时才替换：渲染可能换来 cookie 横幅或登录页，别把好结果换坏
+			if (rmd.markdown.trim().length > out.trim().length) {
+				out = rmd.markdown;
+				const rc = cutToLimit(out, maxChars);
+				out = rc.text;
+				truncated = truncated || rc.cut;
+				rendered = true;
+				renderNote = `${r.persistent ? "持久化" : "临时"} profile，${r.ms}ms`;
+				if (title.trim().length < 2) title = rmd.title;
+			}
+		} catch {
+			/* 渲染不可用不是抓取失败：按原逻辑走短正文提示 */
+		}
 	}
-	return { markdown: out, title, finalUrl: res.url || u.href, bytes: buf.byteLength, truncated };
+	if (out.trim().length < 80) {
+		out += rendered
+			? "\n\n> ⚠️ 已用浏览器渲染，正文仍极短——可能需登录或页面已失效。"
+			: "\n\n> ⚠️ 页面正文极短——可能需登录、JS 渲染或页面已失效，内容可信度有限。";
+	}
+	return { markdown: out, title, finalUrl: res.url || u.href, bytes: buf.byteLength, truncated, rendered, renderNote };
 }

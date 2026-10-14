@@ -31,6 +31,7 @@ import { Type } from "typebox";
 import { setStatusWithTTL, clearStatusTimers } from "../shared/status";
 import { searchWeb, searchNpm, searchGithub, formatSearchResults, type SearchResult } from "./search";
 import { fetchAsMarkdown, DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT } from "./fetch";
+import { clearProfile, openLoginWindow, profileDir, rendererReady, shutdownRenderer } from "./render-cdp";
 import { loadDislikeData, saveDislikeData, dislikeKey, DISLIKE_BAN_THRESHOLD } from "./dislike";
 import { getProxyUrl, setProxySetting, validateProxy } from "./http";
 import { ProxyConfigOverlay } from "./panel";
@@ -49,8 +50,12 @@ function renderToolCall(icon: string, arg: string | undefined, theme: Theme, fal
 }
 
 export default function (pi: ExtensionAPI) {
-	// reload / session 替换前清掉 TTL 定时器（旧 ctx 已失效，到期回调会抛 stale 错误）
-	pi.on("session_shutdown", async () => clearStatusTimers());
+	// reload / session 替换前清掉 TTL 定时器（旧 ctx 已失效，到期回调会抛 stale 错误）；
+	// 渲染用的无头浏览器也要在这里收尾，免得留下孤儿进程占着 profile
+	pi.on("session_shutdown", async () => {
+		clearStatusTimers();
+		await shutdownRenderer();
+	});
 	pi.registerTool({
 		name: "web_search",
 		annotations: { readOnlyHint: true },
@@ -126,7 +131,8 @@ export default function (pi: ExtensionAPI) {
 		annotations: { readOnlyHint: true },
 		label: "抓取网页",
 		description:
-			"抓取网页 URL 转 markdown（正文提取 + 去导航广告 + 截断）。适合深读文档/README。",
+			"抓取网页 URL 转 markdown（正文提取 + 去导航广告 + 截断）。适合深读文档/README。"
+			+ "JS 渲染的页面（正文极短、内容靠脚本注入）会自动用无头浏览器兜一次，无需换工具。",
 		promptSnippet: "抓取网页转 markdown：web_fetch(URL[, maxChars]) → 正文",
 		renderCall: (args, theme) =>
 			renderToolCall("🌐", typeof args?.url === "string" ? args.url : undefined, theme, "web_fetch"),
@@ -148,15 +154,22 @@ export default function (pi: ExtensionAPI) {
 			onUpdate?.({ content: [{ type: "text", text: `正在抓取：${params.url}` }], details: { progress: 10 } });
 			try {
 				const maxChars = Math.min(params.maxChars ?? DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT);
-				const { markdown, title, finalUrl, bytes, truncated } = await fetchAsMarkdown(params.url, maxChars, signal);
+				const { markdown, title, finalUrl, bytes, truncated, rendered, renderNote } = await fetchAsMarkdown(
+					params.url,
+					maxChars,
+					signal,
+					push,
+				);
 				push("✓ 抓取完成", 6_000);
 				const header: string[] = [];
 				if (title) header.push(`标题: ${title}`);
 				header.push(`源: ${finalUrl}`);
-				header.push(`（HTML 约 ${(bytes / 1024).toFixed(0)} KB，正文 ${markdown.length} 字符${truncated ? "，已截断" : ""}）`);
+				header.push(
+					`（HTML 约 ${(bytes / 1024).toFixed(0)} KB，正文 ${markdown.length} 字符${truncated ? "，已截断" : ""}${rendered ? `，无头渲染 ${renderNote}` : ""}）`,
+				);
 				return {
 					content: [{ type: "text", text: `${header.join("\n")}\n---\n${markdown}` }],
-					details: { bytes, chars: markdown.length, truncated },
+					details: { bytes, chars: markdown.length, truncated, rendered },
 				};
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
@@ -276,6 +289,35 @@ export default function (pi: ExtensionAPI) {
 			if (result === null) return; // 取消
 			setProxySetting(result);
 			ctx.ui.notify(result ? `代理已设为 ${result}（被墙时自动经此重试）` : "已清除代理设置，web_fetch/web_search 恢复直连", "info");
+		},
+	});
+
+	// ---- /web-render-login：无头渲染的登录态（无头浏览器里没法扫码，只能开有界面的窗口登一次） ----
+	pi.registerCommand("web-render-login", {
+		description: "无头渲染登录：开带界面的窗口登一次目标站点（会话存入渲染 profile）；clear 清空 profile",
+		handler: async (args, ctx) => {
+			const arg = (args ?? "").trim();
+			if (!rendererReady()) {
+				ctx.ui.notify("未找到 Chromium，无法渲染（可设 PI_WEB_RENDER_CHROME 指定 chrome 路径）", "warning");
+				return;
+			}
+			if (arg === "clear" || arg === "reset") {
+				const dir = await clearProfile();
+				ctx.ui.notify(`已清空渲染 profile（连同登录态）：${dir}`, "info");
+				return;
+			}
+			// 先关掉无头渲染器放锁：有界面窗口用的是同一个 profile 目录
+			await shutdownRenderer();
+			try {
+				const url = arg && /^https?:\/\//.test(arg) ? arg : "about:blank";
+				const { profile } = openLoginWindow(url);
+				ctx.ui.notify(
+					`已打开登录窗口（profile: ${profile}）：登录目标站点后直接关窗即可，之后 web_fetch 的渲染兜底会复用该会话`,
+					"info",
+				);
+			} catch (e) {
+				ctx.ui.notify(`打开登录窗口失败：${e instanceof Error ? e.message : String(e)}`, "warning");
+			}
 		},
 	});
 }

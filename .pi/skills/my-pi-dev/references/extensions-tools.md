@@ -2,13 +2,22 @@
 
 ## web-tool（`web-tool/`，产物 `web-tool.ts`）
 
-- 文件：`http.ts`（网络层/代理）、`search.ts`（多源搜索 + 评分）、`fetch.ts`（抓取转 md）、`dislike.ts`（差评）、`panel.ts`（配置面板）、`index.ts`。
-- 工具 `web_search` / `web_dislike` / `web_fetch`；命令 `/web-tool-config`（代理设置 + 搜索结果黑名单查看/删除选中项）；状态 key `web-search`、`web-fetch`。
+- 文件：`http.ts`（网络层/代理）、`search.ts`（多源搜索 + 评分）、`fetch.ts`（抓取转 md + 渲染兜底接入）、`render-cdp.ts`（无头渲染引擎）、`dislike.ts`（差评）、`panel.ts`（配置面板）、`index.ts`。
+- 工具 `web_search` / `web_dislike` / `web_fetch`；命令 `/web-tool-config`（代理设置 + 搜索结果黑名单查看/删除选中项）、`/web-render-login`（无头渲染的登录态；`clear` 清空 profile）；状态 key `web-search`、`web-fetch`。
 - `web_search`：bing + 360 + baidu 三源并行（另含 npm / GitHub 仓库两个垂类 JSON API，`source` 参数选用；GitHub 源在 httpGet 失败后自动换 curl 兑底——GitHub 对 Node TLS 指纹判死 400，隧道走得通也拿不到结果），结果逐条评分后合并去重取前 15（标题/URL/摘要权重 + 完整短语命中加成，评分 0 滤除）；零 key 零费用、无 AI 总结。第三源选型实测否决 DDG 202 反爬 / Jina 不可达 / Mojeek 403（见 `search.ts` 头注释）。
 - `web_dislike`：AI 对低质量域名记差评，×0.6/次、5 次滤除，跨会话持久化 `~/.pi/agent/web-search-blacklist.json`。
-- `web_fetch`：正文提取（turndown/domino/gfm 由 build.js 内联）+ 截断；GitHub blob URL 重写为 raw 直取（防源码被当标签吞）；正文极短（JS 空壳）时用 Googlebot UA 重试一次；极短且命中 Cloudflare 等挑战特征时明确报「反爬验证页」而非误判抓取成功。
+- `web_fetch`：正文提取（turndown/domino/gfm 由 build.js 内联）+ 截断；GitHub blob URL 重写为 raw 直取（防源码被当标签吞）；正文极短（JS 空壳）时用 Googlebot UA 重试一次；仍极短且像未渲染空壳时走无头渲染兜底；极短且命中 Cloudflare 等挑战特征时报「反爬验证页」并给下一步（换源搜索同类内容 / 需登录的站点用 `/web-render-login` 登录后重试；挑战页要过 JS 校验，无头同样被拦，所以不浪费一次渲染）。回执末尾标注「无头渲染 <持久化|临时> profile，<毫秒>」，`details.rendered` 供渲染/状态判断。
+- **渲染兜底（`render-cdp.ts`）**：零依赖——`child_process.spawn` 起 headless shell + Node 内置 WebSocket 直连 CDP（只碰 Target/Page/Runtime）。选它而非 playwright-core 的理由：内联 playwright-core 会让产物从 615KB 涨到 5.2MB（esbuild 实测 4.62MB，且 `chromium-bidi/*` 必须外部化），外置破坏单文件约定，且本机缓存是 chromium-1228 而 1.58.2 期望 1208。实测冷启动约 0.85s、复用会话约 0.33s（navigate 5~20ms）。**每次渲染独占一个标签页**（`Target.createTarget` + attach，用完 `Target.closeTarget`；建+挂实测 100~480ms），浏览器进程仍然复用——并发的两个调用各拿各的页面，不会串页。启动参数由导出纯函数 `buildLaunchArgs({profile, proxyUrl, headless})` 拼装（可不起浏览器就断言代理/profile/headless 分支），**渲染走同一条代理**（`fetch.ts` 调用点传 `proxyUrl: getProxyUrl()`，引擎拼 `--proxy-server`）。
+- 触发条件 `looksLikeUnrenderedShell(html, markdown)`（在 `fetch.ts`）：正文 <80 字符、或正文 <400 且 HTML >20KB、或正文 <600 且命中 `__NEXT_DATA__`/`id="root"`/`ng-version` 等挂载点标记。渲染结果**只在新结果更长时**才替换（可能渲染出 cookie 横幅/登录页）；渲染不可用或失败一律静默回落，不改既有行为。
+- 浏览器与 profile：`findChromePath()` 扫 `ms-playwright/chromium*` 取最大 revision（版本号不写死；**环境变量 `PI_WEB_RENDER_CHROME` 指向不存在的路径时返回 null**，否则 `rendererReady()` 会撒谎白试一次启动）；持久化 profile 在 `~/.pi/agent/web-render-profile/`（`PI_WEB_RENDER_PROFILE` 可覆盖，测试隔离用），首次渲染时懒启动、空闲 60s 自动关、`session_shutdown` 里 `shutdownRenderer()` 兜底（幂等）。无头浏览器里无法扫码登录，登录走 `/web-render-login`：先关无头渲染器放锁，再用带界面的 chrome 打开同一 profile 供人工登录。
+- 三个必须守住的坑：① headless shell **不拦同一 user-data-dir 的第二实例**，两个进程共用一份 cookie 库会互相覆盖，所以持久化 profile 用 `.pi-render.lock`（`{pid,at}`，pid 存活且锁新鲜即视为被占）互斥，被占时本次退回临时 profile；浏览器自己退出时也要放锁，否则死 pid 占死 profile。② 模块级 `session` 必须真正复用，漏赋值会每次新起浏览器、旧进程仍活着共用同一 profile，表现为 navigate 从 5ms 劣化到 **1470ms**（profile 争用）。③ **标签页必须一次渲染一个**：共用一个页面时同一进程内的并发调用互相抢导航，实测并发 A 拿到 B 页的正文（比报错更坏）；`renderPage` 返回的 `phases.{launch,target,navigate,settle,grab}` 就是为定位这类问题留的（`target` = 建/挂标签页），`PI_WEB_RENDER_DEBUG=1` 打到 stderr。
 - 代理配置 `~/.pi/agent/web-fetch-proxy.json`；直连与降级（系统 curl 自动带代理 / 无 curl 退 Node CONNECT 隧道）**并行竞速**，谁先成功用谁，404 等确定性错误立即判死。HTTP 层复用 `shared/net`；curl 通道（`hasCurl`/`curlFetch`/`httpGetCurl`）收在 `http.ts` 供 fetch 与 GitHub 源共用。
-- 无测试文件。
+- 测试：`test/render.test.mjs`（**42 项 A~K**：触发判定、壳页自动兜底、静态页不启动浏览器、启动失败静默回落、超时页面、profile 锁三态、空闲回收后自启、分段耗时；本轮新增 **I** 反爬挑战页报错带指引且不渲染、**J** `buildLaunchArgs` 纯函数（代理/profile/headless）、**K** 并发渲染各拿各的页面）。注意测试用**单入口 bundle**（临时入口同时 re-export `fetch.ts` 与 `render-cdp.ts`）——两个独立 bundle 会各持一份模块状态、各起一个浏览器共用同一 profile，自己就会踩到 profile 争用导致导航 1.5s。
+- **真实站点实测（2026-10-14，源码 bundle + 本机代理）**：excalidraw.com 触发渲染（3.9s，拿到渲染后的中文界面文案）、app.diagrams.net 触发渲染（11.2s、正文 12k 字符）、figma.com / react.dev **未**触发（SSR 直出 11.8k 字符，判定没误伤）、wikipedia 静态页未触发；web.telegram.org/k、youtube.com、reddit.com 在 **HTTP 层**就失败（超时/连接重置）——渲染兜底接在「抓取成功但正文极短」之后，HTTP 全失败时它根本不会被触发。代理有效性单独对照：坏代理渲染 example.com 全程取不到正文（settle 烧完 20s 预算，html 39 字节），真代理 1.2s 出正文（证明 `--proxy-server` 真的生效）。
+- **已知缺口（均为已拍板维持现状或人工步骤，已实测/读码核实）**：
+  - **强杀不留收尾**（拍板不做）：`session_shutdown` 之外的退出（pi 崩溃 / 被 SIGKILL）不带走浏览器子进程，会留一个占着 profile 的 chrome；下次渲染因锁被占回退临时 profile（功能不坏，丢登录态），进程残留到重启。启动时清扫（按 pid + `--user-data-dir` 匹配残留进程）暂缓，等真实遇到再评估。
+  - **极小页面也触发渲染**（拍板维持现状）：判定只看正文 <80 字符，一行公告这类合法小页面也会白付一次约 0.85s；宁可多付也不漏真 SPA。
+  - **未实测项**：`openLoginWindow()`（会弹真实窗口，只验证过 `findChromePath({headed:true})` 选到 chrome.exe 而非 headless shell）；mac/Linux 的浏览器路径候选表（Windows 已实测）。
 
 ## webdav-kb（`webdav-kb/`，产物 `webdav-kb.ts`）
 
