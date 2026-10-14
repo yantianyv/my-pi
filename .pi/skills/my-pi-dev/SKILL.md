@@ -10,7 +10,7 @@ AGENTS.md 只保留每轮都用得上的信息（命令、目录职责、不变�
 | 要动的东西 | 读 |
 |---|---|
 | hud 三行渲染、STATUS_STYLE 状态样式表、余额/定价/汇率、速率曲线 | `references/hud-and-shared.md` |
-| 会话/状态/权限/子代理类扩展：claude-it、explore-agent、btw、ask、perm-gate、pair-guard、status-beacon、clipboard、crash-log、img-slim | `references/extensions-core.md` |
+| 会话/状态/权限/子代理类扩展：claude-it、explore-agent、btw、ask、perm-gate、pair-guard、status-beacon、clipboard、crash-log、img-slim、keep、time、model-config、secret | `references/extensions-core.md` |
 | 外部能力类扩展：web-tool、webdav-kb、workflow-mgr、dingtalk-bridge、mimo-omni、qr | `references/extensions-tools.md` |
 | install.js 安装行为与它会改的全局文件、src/build.js、static/（主题/音效/skill/models.json/三个补丁）、pi 升级收尾清单 | `references/install-and-static.md` |
 | 回归测试怎么跑、各测试覆盖什么、live 联调脚本 | `references/tests.md` |

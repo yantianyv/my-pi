@@ -30,11 +30,11 @@ src/                  # 全部源码 + npm 生态 + 构建脚本（build.js 的�
   extensions/         #   扩展源码（产物 dist/extensions/）
     shared/           #     共享模块：只被扩展 import、不直接部署，build.js 内联进各产物
     hud/              #     3 行 HUD（多文件，入口 index.ts → 产物 hud.ts）
-    ask/ btw/ web-tool/ webdav-kb/ workflow-mgr/ model-config/ perm-gate/ dingtalk-bridge/   # 多文件扩展（入口 index.ts）
-    context-init / claude-it / explore-agent / status-beacon / pair-guard / crash-log / clipboard / img-slim / mimo-omni / qr / keep   # 单文件扩展
-    test/             #     跨扩展回归测试（status-keys / explore / perm-gate / presence / dingtalk-bridge / dingtalk-intents / mimo-omni + *-live.mjs 联调）
+    ask/ btw/ web-tool/ webdav-kb/ workflow-mgr/ model-config/ perm-gate/ dingtalk-bridge/ secret/   # 多文件扩展（入口 index.ts）
+    claude-it / context-init / crash-log / clipboard / explore-agent / img-slim / keep / mimo-omni / pair-guard / qr / status-beacon / time   # 单文件扩展
+    test/             #     跨扩展回归测试（status-keys / explore / perm-gate / presence / dingtalk-bridge / dingtalk-intents / mimo-omni / context-init / crash-log / keep / time + *-live.mjs 联调）
   vendor/             #   社区插件源码收录区（当前仅 pi-rtk-optimizer）+ README.md（出处表/收录原则/回退记录）
-static/               # 静态部署物（无需编译）：AGENTS.md / themes/ / sounds/(5 音效) / skills/markitdown/ / models.json / deps.json(复杂外部依赖清单) / patches/(3 个 pi 补丁，install.js 代跑)
+static/               # 静态部署物（无需编译）：AGENTS.md / themes/ / sounds/(5 音效) / skills/(markitdown、lean-review) / models.json / deps.json(复杂外部依赖清单) / patches/(3 个 pi 补丁，install.js 代跑)
 dist/                 # 扩展产物（gitignore 不入库，install.js 每次重建）
 .pi/                  # 项目级运行时数据：explore/ / questionnaires/ / sessions/（工作流数据在全局 ~/.pi/agent/workflow/，见「工作流数据按会话隔离」）
 ```

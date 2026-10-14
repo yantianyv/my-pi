@@ -8,8 +8,7 @@
  * - markdown 表格整体渲染（在 wrap 之前识别整块，避免换行拆散对齐；列宽自适应，超宽压缩）
  *
  * 首行缩进由调用方通过 opts.indent 指定（btw 默认两空格；ask 的说明块自带「│ 」左边线，
- * 传空串后自行拼前缀）。本模块不注册任何 pi API，仅导出纯函数。
- * 原为 btw/render.ts，ask 说明题复用后上提到 shared（btw/render.ts 保留同名转发）。
+ * 传空串后自行拼前缀）。本模块不注册任何 pi API，仅导出纯函数；btw/render.ts 保留同名转发。
  */
 import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";

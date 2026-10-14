@@ -25,6 +25,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `context-init.ts` — `/init` 生成/维护项目唯一的 `AGENTS.md`：内容两问 + 信息四去向（`AGENTS.md` / skill / `STATUS.md` / 知识库）+ 目录对齐 + 审计复核（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `ask/` — 整屏问卷：`ask` 工具批量提问（七题型、最多 12 题）+ `/answer` 续答已搁置问卷；必答未完成时连按两次 Enter 可跳过未答直接提交 | `~/.pi/agent/extensions/` |
 | `extensions/` | `status-beacon.ts` — 全链路状态感知：执行中标题进度（spinner+工具活动）+ 五状态五音效 + 状态栏闪烁 + 提醒标题动画（见下；前身 task-alert） | `~/.pi/agent/extensions/` |
+| `extensions/` | `pair-guard.ts` — 并发会话感知：项目级会话注册表（判活双保险）、变化驱动广播（peer 加入/离开/近窗口文件/标签）、写 peer 近期文件时软警告、`/pair` 查看详情与设置标签 | `~/.pi/agent/extensions/` |
 | `extensions/` | `perm-gate.ts` — bash 命令权限门：硬拒绝 / 关注项 / 已记住的操作（意图缓存）+ AI 审核与人工确认面板（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `secret/` — 密钥不外发：会话级内存库（掩码录入 / 粘贴捕获 / 形态识别）+ `{{sec:名字}}` 引用（bash 走按次环境变量注入，真值不进 argv）+ 四道出口脱敏网 + 跨会话长期指纹表；`secret_list` / `secret_prompt` 工具、`/secret` 面板（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
@@ -36,11 +37,12 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `crash-log.ts` — 崩溃黑匣子：崩溃堆栈同步落盘 `~/.pi/agent/pi-crash.log`，`/crash-log` 报告最近一条崩溃与取证路径（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `keep.ts` — 停顿点续航：工作型停点（本轮有 bash/write/edit/codemode 调用且收尾无 toolCall）经**旁支自检**（复刻主会话前缀跑一次限 1 轮的 agentLoop，提问与回答都不进主记录）拿三选一判定（A 继续 / B 需人工 / C 已完成），A 则注入下一步续跑；判定以带底色自定义块展示（纯展示、永不进模型请求）；介入等级 `/keep`（off/default/idle：idle 在完成后探一次在场，无人回应就做白名单内的安全挂机工作） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `workflow-mgr/` — 会话任务面板：AI 规划阶段→任务（含人机分工），常驻面板显示当前任务与进度，数据按会话隔离（全局 `~/.pi/agent/workflow/`，见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `mimo-omni.ts` — 媒体兼容层（过渡件）：`mimo_transcribe` 解析音频/视频（逐字稿或按需求解析）+ `mimo_speak` 文字合成语音，`/mimo-config` 面板配置（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `dingtalk-bridge/` — 钉钉受控桥接：业务语义工具（消息/待办/日程/审批/文件/文档表格，AI 不碰 dws 命令）+ 唯一逃生舱 `dws_skill`（只给知识）+ 两阶段确认/人工面板/防重发（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `model-config/` — 模型管理插件：`/model-config` 面板集中设置各插件用途使用的模型（策略槽 MAX/FAST/LITE/BASE/BATCH 可重指，AUTO/FREE 固定语义），见下 | `~/.pi/agent/extensions/` |
 | `patches/` | 三个 pi 补丁：ai usage 防护 / 祖冲之汉化 / 启动垫片崩溃取证（见下；共用 `pi-root.mjs` 定位 pi 安装目录）。install.js 每次安装代跑（幂等、单个失败只告警不阻塞） | 打补丁到 pi 安装目录（托管安装 `~/.pi/agent/install/releases/<版本>/node_modules` 或 npm 全局 node_modules） |
-| `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
+| `sounds/` | 5 个提示音：`task_complete` / `subagent_complete` / `attention` / `error` / `idle_prompt`（播放时机见下「全链路状态感知」） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装）；`lean-review/` — AI 产出冗余审查（术语化诊断 + 最小修法） | `~/.pi/agent/skills/` |
 | `models.json` | 模型配置模板：OpenRouter 路由（provider 级 `compat.openRouterRouting`）+ 火山方舟 Coding Plan 自定义供应商（见下；已在则深度合并，保留手改的其他 provider） | `~/.pi/agent/models.json` |
 | `deps.json` | 复杂外部依赖清单：装不起 skill、要 CLI + MCP + 自带 skill 的那类工具（REA 逆向分析）。install.js 逐项确认后执行：npm 全局按版本安装 → 选架构相符的 node → 复制包内自带 skill → 写 `~/.pi/agent/mcp.json`（按 `exposure: codemode` 接进 pi，工具不进系统提示词）；已就绪的项跳过，失败不阻塞 | 不复制文件（读取执行） |
@@ -517,15 +519,8 @@ node static/patches/apply-pi-launch-report.mjs   # 打补丁/升级（幂等）�
 
 ```bash
 rm ~/.pi/agent/themes/matrix.json
-rm ~/.pi/agent/extensions/hud.ts
-rm ~/.pi/agent/extensions/claude-it.ts
-rm ~/.pi/agent/extensions/context-init.ts
-rm ~/.pi/agent/extensions/status-beacon.ts
-rm ~/.pi/agent/extensions/web-tool.ts
-rm ~/.pi/agent/extensions/webdav-kb.ts
-rm ~/.pi/agent/extensions/workflow-mgr.ts
-rm ~/.pi/agent/extensions/ask.ts
-rm ~/.pi/agent/sounds/task_complete.wav
+rm ~/.pi/agent/extensions/{hud,ask,btw,claude-it,clipboard,context-init,crash-log,dingtalk-bridge,explore-agent,img-slim,keep,mimo-omni,model-config,pair-guard,perm-gate,qr,secret,status-beacon,time,web-tool,webdav-kb,workflow-mgr}.ts
+rm ~/.pi/agent/sounds/{task_complete,subagent_complete,attention,error,idle_prompt}.wav
 # 官方插件（vendor）：pi remove 按本地路径移除（同时清 settings.json packages 登记）
 pi remove ~/.pi/agent/vendor/pi-rtk-optimizer
 rm -rf ~/.pi/agent/vendor

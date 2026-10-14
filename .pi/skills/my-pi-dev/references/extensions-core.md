@@ -71,7 +71,7 @@
 - 工具 `set_title({title?})`（work 同步 `pi.setSessionName`（`/resume` 选择器可见）+ 注册表；标题不单独发广播，随其他事件行内捎带，`/pair` 详情完整展示）；命令 `/pair`（无参查看、`label <文本>`、`prune`）；状态 key `pair-guard`（「👥 N 并发会话」）。
 - 项目级会话注册表 `.pi/sessions/<sid>.json`（gitignore）：字段 `sessionId/pid/startedAt/lastBeat/label/work/recentFiles`；30s 心跳；判死双保险——扫描时 `process.kill(pid, 0)` 判活（关窗强杀不走 session_shutdown，pid 一死下次扫描即清，秒级）+ 5min 心跳超时兜底；`session_shutdown` 按 reason 分流（reload 保留注册表，quit/new/resume/fork 才注销，否则每次 `/reload` 冲掉标题与标签）；`write/edit` 记录最近在改哪些文件（10min 滚动窗口）。
 - 并发广播：peer 加入/离开/新触碰文件/标签变化以定制消息注入（变化驱动、事件键去重、极简直播格式、协作约定仅首批附带；绝对时间戳、尾部追加不破坏前缀缓存）。投递两路——agent 运行中 `sendMessage(deliverAs: "steer")` 实时送达，空闲攒到 `before_agent_start` 排空；检测走 `turn_start`（每个模型调用边界扫一次）+ `before_agent_start`（注入前先扫）+ 30s 心跳；写 peer 近窗口文件时 `tool_result` 追加 ⚠️ 软警告。
-- 任务标签仅 `/pair label` 手动设置（曾自动读 workflow-mgr 当前任务，多会话下同标签无意义已移除）；执行中 Working 行由 status-beacon 负责，本扩展不写。
+- 任务标签仅 `/pair label` 手动设置（工作流已按会话隔离，自动读取在多会话下无意义）；执行中 Working 行由 status-beacon 负责，本扩展不写。
 
 ## status-beacon.ts
 

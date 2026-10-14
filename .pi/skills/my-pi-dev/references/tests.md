@@ -54,17 +54,22 @@ const mod = await import(pathToFileURL(bundle).href);
 | `test/mimo-omni.test.mjs` | 媒体内容块构造离线 18 项；`MIMO_LIVE=1` + 传音频/视频路径才真打 API |
 | `test/context-init.test.mjs` | /init 闭环的纯逻辑（不依赖 pi 包）：`estimateTokens` 口径、`pruneOldToolResults`（超预算才剪/按重读代价排序/write-edit 与近期不剪）、`checkContextArtifacts`（各上下文文件死指针、索引与 references 对应、frontmatter、空文件、无 skill 不误报）、`CONTEXT_OVERFLOW_RE` 命中与不误判 |
 | `test/crash-log.test.mjs` | 用 `PI_CRASH_LOG_FILE` 注入临时日志 + 打两份 bundle（同进程两实例 = 模拟 /reload）：启动头/process 监听器只挂一次；同一条崩溃只提醒一次（新建崩溃再提醒）、无 UI 不提醒也不写 ack、`/crash-log` 视图即标已看、`clear` 清日志与 ack |
+| `test/keep.test.mjs` | 停顿点自检闭环（假 pi/ctx 驱动 turn_end/context）：A 注入判定块+续跑、B/C 挂块停下、零工具与只读工具停点不自检、内建与 readOnlyHint=false 视为工作、解析失败/预算耗尽/排队消息/aborted 降级、判定块不进请求与旧追问过滤、开关持久化、idle 探在场 |
+| `test/time.test.mjs` | 纯函数策略层：stamp 形状（带年/本地时区/分钟粒度）、user 贴前缀与已带前缀防重贴、非 user 角色原样、now 输出组装 |
 | `ask/test/ask.test.mjs` | A~U 场景 + 渲染不变量（U：连按两次 Enter 跳过必答直接提交 + 防误触 + 人称词提醒） |
 | `qr/test/qr.test.mjs` | A~L 共 12 场景（编码/半块渲染/PNG 往返/JPEG 往返/钳制/错误路径/`/qr` 命令） |
 | `hud/test/*` | 见 `hud-and-shared.md` |
 | `model-config/test/panel.test.mjs` | 面板主页/动作层/策略层渲染与键位：AUTO·FREE 标固定语义且 Enter 只给提示、用途行 Enter 出动作层、section 行不被选中、↑ 越界不越位、Esc 逐层退出、非交互 `renderTextSummary` 列出策略槽与全部用途 |
+| `shared/test/llm.test.mjs` | 单次 LLM 调用公共服务：多 text 块抽取与空值、aiComplete 永不抛（认证失败返回 ok:false，不网络直调）、候选链依次尝试与总时长受 timeoutMs 约束、opencode 会话头不依赖 pi 内部管道 |
 | `shared/test/model-setting.test.mjs` | 两层模型设置的解析链：本地固定优先于中心、中心缺记录用注册默认策略、未映射槽回落会话模型、FREE 只在免费池取且带链、不可用回落 AUTO、本地键读改写保留同文件其它键、旧值 auto-not-free 归一化、用途声明去重（沙箱 HOME，不碰真实 `~/.pi/agent`） |
 | `shared/test/model-util.test.mjs` | 价格口径与筛选：目录 0 价的高速档不判免费（`COST_OVERRIDES`）、有效价参与排序、真 0 价仍免费、动态定价与无价排最后、`excludeFree` 不吃高速档 |
 | `shared/test/review-panel.test.mjs` | 写操作确认面板（钉钉 / secret 共用）：长单行正文按宽度折行且 PgDn 能看全尾部（不被行截断吞掉）、正文区高度固定（空/单行/不满一页同高，超一页只多一行滚动指示）、短正文不受折行影响 |
+| `secret/test/*.test.mjs`（3 个） | core（纯逻辑 + 指纹表加解密往返与密钥丢失重建）、e2e（假 pi/ctx 驱动真实钩子链：多步浮层、真跑 shell 验证环境变量注入且 process.env 未污染、转录保持 ref、跨会话指纹、reload 保留库）、detect-bench（识别档位语料 + 编码形式 + 真实负样本不误判） |
 | `shared/test/shell-split.test.mjs` | 20 场景（顶层分隔符 / 引号转义 / 子 shell / 权限门关键样本 / heredoc） |
 | `shared/test/fs-safe.test.mjs` | `shared/fs-safe` 的 `removePath`：**探针建在含中文的临时目录**（本机 `fs.rmSync` 在此静默不删——改用 rmSync 实现本测试即失败）、中文路径下删文件与目录树、目标不存在返回 true、删链接不跟进目标 |
 | `workflow-mgr/test/render.test.mjs` | 渲染 17 场景 A~R（R = 会话隔离），含 `__PI_HUD_API__` 注册/通知/注销 |
 | `workflow-mgr/test/stale-ctx.test.mjs` | session 替换后 getStore 不崩（固化 cwd + 会话 ID）+ 会话/cwd 变化重建 |
+| `web-tool/test/render.test.mjs` | web_fetch 渲染兜底：判定函数与「不触发渲染」场景离线可跑，渲染类场景需本机 Chromium（缺浏览器自动跳过） |
 | `webdav-kb/test/*.test.mjs`（9 个） | client / sync / tools / commands / search / crypto / lfs / panel / panel-config，全部离线：`mock-dav.mjs` 是进程内 HTTP mock（PROPFIND/GET/PUT/MKCOL/DELETE/MOVE + Basic 认证，Nextcloud/Apache 双命名空间），不联网 |
 
 ## 联调脚本（不自动跑、需真实环境）
