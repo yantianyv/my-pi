@@ -41,7 +41,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { runAgentLoop } from "@earendil-works/pi-agent-core";
-import { Box, Text, type TUI } from "@earendil-works/pi-tui";
+import { Text, type TUI } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext, Theme, TurnEndEvent, TurnEndEventResult } from "@earendil-works/pi-coding-agent";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { getCurrentTools } from "@earendil-works/pi-ai/compat";
@@ -59,8 +59,9 @@ import { createBoxRenderer, keyHintRow } from "./shared/ui";
 const MAX_CONTINUATIONS = 16;
 /** 挂机（idle）专属预算：清账类是一件一件的细活，四件足以看出效果，也避免挂机段把转录撑长 */
 const IDLE_MAX = 4;
-/** 挂机产物落点（相对于项目根）：每件活追加一段，对话里只留一行指针 */
-const IDLE_LOG = ".pi/keep-idle/<日期>.md";
+/** 挂机产物目录与落点（相对于项目根）：每件活追加一段，对话里只留一行指针 */
+const IDLE_DIR = ".pi/keep-idle";
+const IDLE_LOG = `${IDLE_DIR}/<日期>.md`;
 /**
  * 挂机在场探测的超时：无回应即判定脱机（毫秒）。
  * 给到 3 分钟是「读完一轮回复再决定离开」的余量；探测期间 AI 是停住的，
@@ -78,6 +79,13 @@ const IDLE_WORK = [
 ];
 /** 状态 key（hud-core STATUS_STYLE 已登记） */
 const STATUS_KEY = "keep";
+/**
+ * 挂机/探测专用状态 key：优先级高于工具活动（仍低于完成提醒），
+ * 这样挂机期间即使模型在跑工具，状态行也说的是「挂机中」而不是具体活动。
+ */
+const IDLE_STATUS_KEY = "keep-idle";
+/** 挂机状态行 TTL：一段挂机可能长于普通活动的几分钟 */
+const IDLE_STATUS_TTL_MS = 10 * 60_000;
 /** 判定块（自定义消息，带底色展示）与续跑指令（隐藏消息）的 customType */
 const VERDICT_TYPE = "keep-verdict";
 const GO_TYPE = "keep-go";
@@ -516,6 +524,8 @@ function saveLevel(l: Level): void {
 let level = loadLevel();
 let budgetLeft = MAX_CONTINUATIONS; // 本次用户输入还剩几次自检额度
 let idleUsed = 0; // 本次用户输入已经领了几件挂机工作（上限 IDLE_MAX）
+let idleReason = ""; // 进入挂机时那次自检的理由（收尾摘要里复述任务状态）
+let pendingIdle: { used: number; reason: string } | null = null; // 用户回来待补的挂机收尾摘要
 let away = false; // 本次用户输入内是否已判定用户脱机（进入挂机阶段）
 let awaitingGo = false; // 已注入 keep-go，等续跑轮验证有没有实际动作
 let runDidWork = false; // 本轮（自上次用户输入起）出现过改写类工具调用
@@ -563,23 +573,28 @@ function idleGoMessage(t: Triage) {
 }
 
 export default function (pi: ExtensionAPI) {
-	// 判定块的定制渲染：自定义消息才有底色（customMessageBg），配色按判定分档
-	pi.registerMessageRenderer(VERDICT_TYPE, (m, { outputPad }, theme) => {
-		type Details = { cls?: string; reason?: string; next?: string; used?: number; budget?: number; idle?: boolean };
+	// 判定块与挂机收尾摘要：单行文本、不加底色块——挂机期间转录不被逐轮色块顶走，
+	// 「你的任务」那条结论由此稳定留在原处（挂机完成情况改由状态行与末尾摘要承担）
+	pi.registerMessageRenderer(VERDICT_TYPE, (m, _opts, theme) => {
+		type Details = { cls?: string; reason?: string; next?: string; used?: number; budget?: number; idle?: boolean; summary?: boolean };
 		const d = (m.details ?? {}) as Details;
+		if (d.summary) {
+			return new Text(
+				theme.fg("success", "✓ 挂机结束") +
+					theme.fg("muted", ` · 清了 ${d.used ?? 0} 处｜明细 ${IDLE_DIR}`) +
+					(d.reason ? theme.fg("muted", ` —— ${d.reason}`) : ""),
+				0,
+				0,
+			);
+		}
 		const cls = d.cls === "A" || d.cls === "B" || d.cls === "C" ? d.cls : "C";
-		const idle = cls === "C" && d.idle === true; // 已完成，转去挂机工作
 		const icon = cls === "A" ? "↻" : cls === "B" ? "⚠" : "✓";
 		const label = cls === "A" ? "可继续" : cls === "B" ? "需要人工" : "已完成";
 		const color = cls === "A" ? "accent" : cls === "B" ? "warning" : "success";
-		const counter = (cls === "A" || idle) && d.used
-			? theme.fg("muted", ` · ${idle ? "挂机" : "续航"} ${d.used}/${d.budget ?? MAX_CONTINUATIONS}`)
-			: "";
+		const counter = cls === "A" && d.used ? theme.fg("muted", ` · 续航 ${d.used}/${d.budget ?? MAX_CONTINUATIONS}`) : "";
 		const reason = d.reason ? theme.fg("muted", ` —— ${d.reason}`) : "";
-		const next = cls === "A" && d.next ? `\n${theme.fg("dim", `  下一步：${d.next}`)}` : "";
-		const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
-		box.addChild(new Text(theme.fg(color, `${icon} ${label}`) + counter + reason + next, 0, 0));
-		return box;
+		const next = cls === "A" && d.next ? theme.fg("dim", ` → 下一步：${d.next}`) : "";
+		return new Text(theme.fg(color, `${icon} ${label}`) + counter + reason + next, 0, 0);
 	});
 
 	// 捕获主会话真实请求（在所有 context 处理后触发）：旁支自检的前缀直接取它，逐字节一致
@@ -624,13 +639,24 @@ export default function (pi: ExtensionAPI) {
 
 	// 每次新的用户输入：重置预算与状态机，并捕获本轮系统提示词（复刻前缀用）
 	pi.on("before_agent_start", (event) => {
+		// 用户回来了：上一段挂机的收尾摘要记下，挂到本轮 turn_start 发
+		if (away && idleUsed > 0) pendingIdle = { used: idleUsed, reason: idleReason };
 		budgetLeft = MAX_CONTINUATIONS;
 		awaitingGo = false;
 		away = false;
 		idleUsed = 0;
+		idleReason = "";
 		runDidWork = false;
 		hintCache = null;
 		if (event?.systemPrompt) capturedPrompt = event.systemPrompt;
+	});
+
+	// 用户回来的那一轮：补发挂机收尾摘要（清了什么 + 此前的任务结论），落在转录末尾
+	pi.on("turn_start", (_event, ctx) => {
+		if (!pendingIdle) return;
+		const p = pendingIdle;
+		pendingIdle = null;
+		sendIdleSummary(ctx, p.used, p.reason, "用户回来了");
 	});
 
 	/** 工具 readOnlyHint 注解表（getAllTools 构建；缓存随每轮用户输入重建，兼顾 MCP 后连上的工具） */
@@ -656,6 +682,26 @@ export default function (pi: ExtensionAPI) {
 		});
 	};
 
+	/**
+	 * 挂机段收尾：一条单行摘要（清了件数 + 明细落点 + 挂机前的任务判定），
+	 * 并清挂机状态行。总结与「你的任务」结论同行，回来时不用往上翻。
+	 */
+	const sendIdleSummary = (ctx: ExtensionContext, used: number, taskReason: string, why: string): void => {
+		setStatusWithTTL(ctx, IDLE_STATUS_KEY, undefined, 0);
+		const content = [`[harness 挂机] 结束（${why}）：清了 ${used} 处`]
+			.concat(taskReason ? [`此前任务判定：${taskReason}`] : [])
+			.join("｜");
+		pi.sendMessage(
+			{
+				customType: VERDICT_TYPE,
+				content,
+				display: true,
+				details: { summary: true, used, reason: `${why}${taskReason ? `｜任务：${taskReason}` : ""}` },
+			},
+			{ triggerTurn: false },
+		);
+	};
+
 	pi.on("turn_end", async (event: TurnEndEvent, ctx): Promise<TurnEndEventResult | void> => {
 		if (level === "off" || event.outcome !== "completed") return;
 		const msg = event.message as Msg;
@@ -666,8 +712,12 @@ export default function (pi: ExtensionAPI) {
 		if (awaitingGo) {
 			// 续跑轮仍无实际动作：判 A 失误（或挂机时没有合适的活），直接停
 			awaitingGo = false;
-			clearStatus(ctx);
-			ctx.ui.notify("keep：续跑后仍无实际动作，保持停下（需要时手动指示）", "info");
+			if (away && idleUsed > 0) {
+				sendIdleSummary(ctx, idleUsed, idleReason, "没有可清的账");
+			} else {
+				clearStatus(ctx);
+				ctx.ui.notify("keep：续跑后仍无实际动作，保持停下（需要时手动指示）", "info");
+			}
 			return;
 		}
 		if (!runDidWork) return; // 问答/调研型停点不自检
@@ -705,22 +755,24 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (!away) {
-			setStatusWithTTL(ctx, STATUS_KEY, "⏳ 探测在场中", PROBE_MS + 60_000);
+			setStatusWithTTL(ctx, IDLE_STATUS_KEY, `⏳ 探测在场中 · ${PROBE_LABEL}`, PROBE_MS + 60_000);
 			if ((await probePresence(ctx)) === "stop") {
 				stopHere(ctx, triage, used, false);
 				return;
 			}
 			away = true;
+			idleReason = triage.reason ?? "";
 		}
 		if (idleUsed >= IDLE_MAX) {
-			stopHere(ctx, triage, IDLE_MAX, true);
+			sendIdleSummary(ctx, idleUsed, idleReason, `已做满 ${IDLE_MAX} 件`);
 			ctx.ui.notify(`keep：挂机已做满 ${IDLE_MAX} 件，保持停下（需要时手动叫起来）`, "info");
 			return;
 		}
 		idleUsed++;
 		awaitingGo = true;
-		setStatusWithTTL(ctx, STATUS_KEY, `⏳ 挂机 ${idleUsed}/${IDLE_MAX}`, 600_000);
-		return { continue: true, entries: [verdictMessage(triage, idleUsed, true), idleGoMessage(triage)] };
+		setStatusWithTTL(ctx, IDLE_STATUS_KEY, `⏳ 挂机中 · 第 ${idleUsed}/${IDLE_MAX} 件`, IDLE_STATUS_TTL_MS);
+		// 挂机轮不另发判定块：进度由状态行承担（优先级高于工具活动），转录只留 AI 的一行指针与工具调用行
+		return { continue: true, entries: [idleGoMessage(triage)] };
 	});
 
 	// 模型上下文过滤：keep 的消息不进 LLM 请求（会话记录保留，判定块在界面上可见）

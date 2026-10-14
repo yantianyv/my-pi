@@ -22,6 +22,7 @@
 
 - 输入态：`hud-bash`=100
 - 结果提醒：`task-alert-error`=92、`task-alert-wait`=91、`task-alert`=90
+- 挂机态：`keep-idle`=87（高于全部工具活动，回来时一眼看出是挂机而不是在干活）
 - 阻塞等人：`perm-gate`=86、`ask`=84
 - 进行中·具体活动：`init`=80、`balance-error`=78、`img-slim`=76、`web-search`=75、`web-fetch`=74、`kb-sync`=73、`workflow-mgr`=72、`mimo-omni`=70、`model-switch`=70、`explore`=68、`keep`=66、`qr`=64、`kb-vault`=62、`clipboard`=61、`kb-op`=61、`btw-transfer`=60
 - 进行中·通用兜底：`task-alert-run`=58

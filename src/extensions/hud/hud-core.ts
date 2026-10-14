@@ -162,6 +162,7 @@ export default async function (pi: ExtensionAPI) {
 		"task-alert-error": { color: "error", priority: 92 }, // 任务出错
 		"task-alert-wait": { color: "warning", priority: 91 }, // 等待人工干预
 		"task-alert": { color: "success", priority: 90 }, // 任务完成
+		"keep-idle": { color: "accent", priority: 87 }, // 挂机/探测中（keep；高于工具活动，回来时一眼看出是挂机而不是在干活）
 		// 阻塞等人（要你立刻响应）
 		"perm-gate": { color: "warning", priority: 86 }, // 命令审核中（perm-gate）
 		"ask": { color: "accent", priority: 84 }, // 待答问卷数（ask；常年挂着，不能被活动盖掉）

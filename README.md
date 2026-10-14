@@ -35,7 +35,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `qr.ts` — 二维码：`qr_encode` 编码（显示到 UI + PNG 落盘）+ `qr_decode` 解码 + `/qr` 命令（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `img-slim.ts` — 图片请求体预算：新图按类型瘦身（照片→JPEG、图形→优先 PNG、动图 WebP 转静态）+ 每轮请求前按总量预算省略最旧历史图片（防 DeepSeek 等上游 48MiB 请求体 413）（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `crash-log.ts` — 崩溃黑匣子：崩溃堆栈同步落盘 `~/.pi/agent/pi-crash.log`，`/crash-log` 报告最近一条崩溃与取证路径（见下） | `~/.pi/agent/extensions/` |
-| `extensions/` | `keep.ts` — 停顿点续航：工作型停点（本轮有 bash/write/edit/codemode 调用且收尾无 toolCall）经**旁支自检**（复刻主会话前缀跑一次限 1 轮的 agentLoop，提问与回答都不进主记录）拿三选一判定（A 继续 / B 需人工 / C 已完成），A 则注入下一步续跑；判定以带底色自定义块展示（纯展示、永不进模型请求）；介入等级 `/keep`（off/default/idle：idle 在完成后探一次在场，无人回应就做白名单内的安全挂机工作） | `~/.pi/agent/extensions/` |
+| `extensions/` | `keep.ts` — 停顿点续航：工作型停点（本轮有 bash/write/edit/codemode 调用且收尾无 toolCall）经**旁支自检**（复刻主会话前缀跑一次限 1 轮的 agentLoop，提问与回答都不进主记录）拿三选一判定（A 继续 / B 需人工 / C 已完成），A 则注入下一步续跑；判定与挂机收尾摘要都是**单行**文本（纯展示、永不进模型请求）；挂机进度走独立状态 key（`⏳ 挂机中 · 第 n/4 件`，优先级高于工具活动），一眼分清在干活还是在挂机；介入等级 `/keep`（off/default/idle：idle 在完成后探一次在场，无人回应就做白名单内的安全挂机工作） | `~/.pi/agent/extensions/` |
 | `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb`（含 `sync` 手动同步）与 `/kb-config` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `workflow-mgr/` — 会话任务面板：AI 规划阶段→任务（含人机分工），常驻面板显示当前任务与进度，数据按会话隔离（全局 `~/.pi/agent/workflow/`，见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `mimo-omni.ts` — 媒体兼容层（过渡件）：`mimo_transcribe` 解析音频/视频（逐字稿或按需求解析）+ `mimo_speak` 文字合成语音，`/mimo-config` 面板配置（见下） | `~/.pi/agent/extensions/` |
@@ -137,6 +137,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | 结果提醒 | `task-alert-error` | 出错终止（闪烁） | `❌ 任务出错` | 92 |
 | | `task-alert-wait` | ui_prompt 阻塞（闪烁） | `⏳ 等待人工：权限复核` | 91 |
 | | `task-alert` | 正常收尾（闪烁） | `✅ 任务完成` | 90 |
+| | `keep-idle` | 挂机 / 在场探测中（高于工具活动） | `⏳ 挂机中 · 第 3/4 件` | 87 |
 | 阻塞等人 | `perm-gate` | 命令审核中 | `🛡 正在审核命令…（≤40 秒）` | 86 |
 | | `ask` | 有问卷待答（常年挂着） | `📝 1 份问卷待答 · /answer` | 84 |
 | 具体活动 | `init` | `/init` 后台生成 AGENTS.md | `⚙ 初始化 · 5 步` | 80 |
@@ -148,7 +149,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | | `workflow-mgr` | 工作流摘要 | `📋 进度 3/12 · 当前：2.1 重构锁等待` | 72 |
 | | `model-switch` | 模型切换（3s TTL） | `⇄ deepseek-chat` | 70 |
 | | `explore` | 探索子代理进度 | `🔎 探索 3/8 · 并发 4` | 68 |
-| | `keep` | 停顿点续航判断 / 续航与挂机计数 | `🔁 续航 3/16` `⏳ 挂机 3/16` | 66 |
+| | `keep` | 停顿点续航判断 | `🔁 续航 3/16` | 66 |
 | | `qr` | 二维码生成 / 解码 | `🔳 生成中` → `✓ 二维码已显示` | 64 |
 | | `kb-vault` | vault 解锁 / 口令错误 | `🔓 vault 已解锁` | 62 |
 | | `clipboard` | 剪贴板读写 | `📋 读取中` → `✓ 已读取` | 61 |

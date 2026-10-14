@@ -54,7 +54,7 @@ const mod = await import(pathToFileURL(bundle).href);
 | `test/mimo-omni.test.mjs` | 媒体内容块构造离线 18 项；`MIMO_LIVE=1` + 传音频/视频路径才真打 API |
 | `test/context-init.test.mjs` | /init 闭环的纯逻辑（不依赖 pi 包）：`estimateTokens` 口径、`pruneOldToolResults`（超预算才剪/按重读代价排序/write-edit 与近期不剪）、`checkContextArtifacts`（各上下文文件死指针、索引与 references 对应、frontmatter、空文件、无 skill 不误报）、`CONTEXT_OVERFLOW_RE` 命中与不误判 |
 | `test/crash-log.test.mjs` | 用 `PI_CRASH_LOG_FILE` 注入临时日志 + 打两份 bundle（同进程两实例 = 模拟 /reload）：启动头/process 监听器只挂一次；同一条崩溃只提醒一次（新建崩溃再提醒）、无 UI 不提醒也不写 ack、`/crash-log` 视图即标已看、`clear` 清日志与 ack |
-| `test/keep.test.mjs` | 停顿点自检闭环（假 pi/ctx 驱动 turn_end/context）：A 注入判定块+续跑、B/C 挂块停下、零工具与只读工具停点不自检、内建与 readOnlyHint=false 视为工作、解析失败/预算耗尽/排队消息/aborted 降级、判定块不进请求与旧追问过滤、开关持久化、idle 探在场 |
+| `test/keep.test.mjs` | 停顿点自检闭环（假 pi/ctx 驱动 turn_end/context）：A 注入判定块+续跑、B/C 挂块停下、零工具与只读工具停点不自检、内建与 readOnlyHint=false 视为工作、解析失败/预算耗尽/排队消息/aborted 降级、判定块不进请求与旧追问过滤、开关持久化、idle 探在场与挂机（挂机轮只注入隐藏指令、状态行走 `keep-idle`、段末发单行收尾摘要：做满/无活可干/用户回来） |
 | `test/time.test.mjs` | 纯函数策略层：stamp 形状（带年/本地时区/分钟粒度）、user 贴前缀与已带前缀防重贴、非 user 角色原样、now 输出组装 |
 | `ask/test/ask.test.mjs` | A~U 场景 + 渲染不变量（U：连按两次 Enter 跳过必答直接提交 + 防误触 + 人称词提醒） |
 | `qr/test/qr.test.mjs` | A~L 共 12 场景（编码/半块渲染/PNG 往返/JPEG 往返/钳制/错误路径/`/qr` 命令） |
