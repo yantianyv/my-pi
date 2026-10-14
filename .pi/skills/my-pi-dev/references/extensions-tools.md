@@ -23,7 +23,7 @@
 ## webdav-kb（`webdav-kb/`，产物 `webdav-kb.ts`）
 
 - 文件：`client.ts`（WebDAV + 代理）、`tools.ts`、`commands.ts`、`panel.ts`/`panel-config.ts`、`store.ts`（配置 + 同步账本）、`sync.ts`、`search.ts`、`formats.ts`、`protocol.ts`、`secrets.ts`、`crypto.ts`（vault）、`lfs.ts`、`index.ts`。
-- 工具 14 个 `kb_*`：`kb_help/search/read/write/append/list/upload/download/lslfs/import/delete/move/status/sync`；命令 `/kb` `/kb-config` `/kb-sync`；状态 key `kb-sync`、`kb-vault`、`kb-op`（kb 工具回执合成一个键，状态行只推短摘要）。
+- 工具 14 个 `kb_*`：`kb_help/search/read/write/append/list/upload/download/lslfs/import/delete/move/status/sync`；命令 `/kb`（含 `sync` 子命令）与 `/kb-config`；状态 key `kb-sync`、`kb-vault`、`kb-op`（kb 工具回执合成一个键，状态行只推短摘要）。
 - 配置 `~/.pi/agent/kb-config.json`（`KB_CONFIG_DIR` 可覆盖，测试隔离用）：`baseUrl`/`username`/`password`/`proxyUrl`/`mirrorDir`（默认 `~/.pi/agent/kb/`）/`vault`{salt,check}/`persistVault`/`vaultKey`/`readOnly`/`allowSecretUpload`。同步账本 `.kb-sync.json` 存镜像根（远端 etag/lastModified/size + 本地 mtime 快照 = 增量依据）。
 - 同步：etag/mtime 比对，冲突以远端为准 + 本地 `.conflict-<时间戳>` 副本；`.kb-sync.lock` 互斥锁（持锁方 10s 心跳续期 + 进度上报，后到者排队等待，pid 判活/心跳 45s 超时回收残锁）；`.kb-sync-journal.json` 中断恢复（phase: plan/conflict/upload/delete，成功即删）；上传前 secret 扫描拦截（`secrets.ts` 高精度模式，`allowSecretUpload` 兜底）；`delRemote` 404 幂等；同步后清理本地空目录（`.kb-*` 与镜像根保留）。
 - 区域：vault 加密区、LFS 大文件区、`/.history` 历史副本区（改动/删除自动留档：结构镜像根、文件名加 `_yymmddhhmmss` 后缀、同秒重名叠 `_hash`、同内容跳过、自身不递归、不参与列表与检索；恢复走 WebDAV 客户端）。

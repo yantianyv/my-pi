@@ -36,7 +36,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `img-slim.ts` — 图片请求体预算：新图按类型瘦身（照片→JPEG、图形→优先 PNG、动图 WebP 转静态）+ 每轮请求前按总量预算省略最旧历史图片（防 DeepSeek 等上游 48MiB 请求体 413）（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `crash-log.ts` — 崩溃黑匣子：崩溃堆栈同步落盘 `~/.pi/agent/pi-crash.log`，`/crash-log` 报告最近一条崩溃与取证路径（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `keep.ts` — 停顿点续航：工作型停点（本轮有 bash/write/edit/codemode 调用且收尾无 toolCall）经**旁支自检**（复刻主会话前缀跑一次限 1 轮的 agentLoop，提问与回答都不进主记录）拿三选一判定（A 继续 / B 需人工 / C 已完成），A 则注入下一步续跑；判定以带底色自定义块展示（纯展示、永不进模型请求）；介入等级 `/keep`（off/default/idle：idle 在完成后探一次在场，无人回应就做白名单内的安全挂机工作） | `~/.pi/agent/extensions/` |
-| `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb` `/kb-config` `/kb-sync` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `webdav-kb/` — 知识库（WebDAV 云网盘）：14 个 `kb_*` 工具 + `/kb`（含 `sync` 手动同步）与 `/kb-config` 命令；本地镜像增量同步 + vault 加密 + LFS 大文件 + `/.history` 历史副本（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `workflow-mgr/` — 会话任务面板：AI 规划阶段→任务（含人机分工），常驻面板显示当前任务与进度，数据按会话隔离（全局 `~/.pi/agent/workflow/`，见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `mimo-omni.ts` — 媒体兼容层（过渡件）：`mimo_transcribe` 解析音频/视频（逐字稿或按需求解析）+ `mimo_speak` 文字合成语音，`/mimo-config` 面板配置（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `dingtalk-bridge/` — 钉钉受控桥接：业务语义工具（消息/待办/日程/审批/文件/文档表格，AI 不碰 dws 命令）+ 唯一逃生舱 `dws_skill`（只给知识）+ 两阶段确认/人工面板/防重发（见下） | `~/.pi/agent/extensions/` |
@@ -359,7 +359,7 @@ AI 是流程指挥者（拆解、排序、验证、推进），用户是执行�
 
 ## 知识库（src/extensions/webdav-kb/）
 
-给 AI 用的云网盘（WebDAV 驱动）：AI 自发沉淀有用的东西（技术笔记、踩坑记录、参考资料摘录），需要时自发检索；本地镜像离线可用，人类用 `/kb` 面板查询引用。14 个 `kb_*` 工具 + `/kb`（检索/引用）、`/kb-config`（WebDAV/vault 口令配置）、`/kb-sync`（手动同步）三个命令。
+给 AI 用的云网盘（WebDAV 驱动）：AI 自发沉淀有用的东西（技术笔记、踩坑记录、参考资料摘录），需要时自发检索；本地镜像离线可用，人类用 `/kb` 面板查询引用。14 个 `kb_*` 工具 + `/kb`（检索/引用，`/kb sync` 手动同步）、`/kb-config`（WebDAV/vault 口令配置）两个命令。
 
 - **四命名空间**：`/notes`（永久知识）/ `/references`（文档摘录，markitdown 产出）/ `/scratch`（临时草稿，可随时清理）/ `/vault`（加密区：需口令解锁、口令只存内存、密文仅 kb 工具可读写，口令忘了=数据永久丢失）；路径必须分层 `/命名空间/用途/自由层级/文件名`（至少 4 段，禁止命名空间/用途下放裸文件）；
 - **分类层级守则（PROTOCOL.md）**：`/references` 第 2 层按文档功能**六值判定**（知识文献/规范文书/操作指南/数据名录/表单模板/素材资源，互斥判整体体裁），`/notes` 按知识主题类判定（技术笔记/研究笔记/方法总结/工作职业/生活管理/兴趣创作）；自由层级由 AI 管理（<3 个文件并入相近层、长期 <2 个文件的层并入、层级名禁项目名/来源形态/编号前缀）。守则本体 = 网盘根 `PROTOCOL.md`（跨设备同步、用户可直接编辑迭代，`kb_help` 优先读它、缺失回退内嵌默认版 protocol.ts）；`PROTOCOL.md` 对 `kb_list`/`kb_status` **不透明**（守则走 `kb_help` 专用通道，不混入内容浏览，`kb_search` 保留索引作兜底旁路）；
@@ -421,23 +421,23 @@ AI 是流程指挥者（拆解、排序、验证、推进），用户是执行�
 替代 dingtalk-* 技能的插件方案：技能是「冻结说明书 + 凭记忆拼命令」，对高风险操作（发消息）已被事故史证明不可靠；插件把机械可判的铁律变成工具层硬拦截。
 
 - **技能屏蔽**：启动时把 `dingtalk-*` 从系统提示词的技能清单过滤（不动 dws 托管的文件——它由 npm postinstall 安装、`dws upgrade` 时全量还原，改了也没用）；`/skill:dingtalk-xxx` 手动加载不受影响，留作逃生舱。
-- **`dws_schema(path?)`**：包 `dws schema --compact` 活内省（随 CLI 版本实时更新）。无参看 29 个产品概览 → 传产品 id 看工具清单 → 传 canonical_path 看参数 schema，逐层下钻。
-- **`dws_exec(args[, confirm][, formal])`**：argv 数组直传 spawn（不过 shell，免去转义坑），自动补 `--format json --yes`。发送/转发类命令（`+dm`、`+messages-send*`、`+messages-batch-send-by-bot`、`+messages-reply`、`+messages-forward*`、`+messages-update-card`、`+broadcast`、`ding send-*`）强制：
+- **命令元数据自省（插件内部，模型侧不可见）**：包 `dws schema --compact` 活内省（随 CLI 版本实时更新）解析产品/工具/参数 schema 与 effect 分档，结果落本地缓存 `~/.pi/agent/dingtalk-bridge-schema.json`，查不到用手写表兜底。
+- **受控执行管线（语义工具与内部执行器共用同一条链）**：argv 数组直传 spawn（不过 shell，免去转义坑），自动补 `--format json --yes`。发送/转发类命令（`+dm`、`+messages-send*`、`+messages-batch-send-by-bot`、`+messages-reply`、`+messages-forward*`、`+messages-update-card`、`+broadcast`、`ding send-*`）强制：
   - **两阶段确认**：首次调用只回草稿回执不发送，对话里经用户明确同意后带 `confirm` 重调才真发（草稿 10 分钟有效）
   - **【AI发送】标签强制**：缺失即拒（用户明确要求的正式通知传 `formal=true` 豁免；可在配置关闭）。转发（`+messages-forward*`）与卡片更新（`+messages-update-card`）无正文也无 `--ai-tag`，豁免此项、仍走两阶段
-  - **中文姓名目标拒执**：强制先 `dws_resolve_user` 实时解析，严禁凭记忆硬编码 userId
+  - **中文姓名目标拒执**：收件人一律经插件的姓名解析实时拿账号，严禁凭记忆硬编码 userId
   - **防重发**：相同目标+内容第二次发送直接拒——会话内存 + 跨会话台账（`~/.pi/agent/dingtalk-bridge-sent.json`，保留 `dedupMinutes` 分钟），重开会话重跑也拦得住
-- **`dws_resolve_user(name[, pick])`**：包 `aisearch person` + `contact user get`——候选带部门路径/职务/工号（重名消歧靠的就是这个），无部门/工号者标注为家长或外部联系人账号；单候选自动确认，多候选列出后带 `pick=<userId>` 确认。
-- **`dws_resolve_group(name[, pick])`**：包 `chat +chat-search` 解析群 `openConversationId`——实测搜「教研室」返回两个同名群（7 人/8 人）加一个集团群，群名作目标会被直接拦截，必须用 cid。
+- **姓名解析**：包 `aisearch person` + `contact user get`——候选带部门路径/职务/工号（重名消歧靠的就是这个），无部门/工号者标注为家长或外部联系人账号；单候选自动确认，多候选列回给 AI，由它挑定后带账号 ID 重调。
+- **群解析**：包 `chat +chat-search` 解析群 `openConversationId`——实测搜「教研室」返回两个同名群（7 人/8 人）加一个集团群，群名作目标会被直接拦截，必须用 cid。
 - **撤回也要过两阶段**：`+messages-recall` 等撤回命令同样先回草稿（预览标出「撤回后双方均不可见，不可恢复」），确认后执行，且同一 messageId 不会重复撤回。
 - **群发也要过两阶段 + 发送前预检**：`+broadcast` 首次同样只回草稿（自动附加的 `--yes` 绕不过去），且草稿前先跑一次只读 `--dry-run` 预检收件人，草稿里列出「将发给谁（含解析出的单聊 ID）」。有任何一个收件人未唯一解析（多候选/零候选）就整体拦下——不生成草稿、不做半批次发送，并把候选与稳定 ID 一并列出。消歧办法是**把重名的名字直接换成候选里的 userId，其余名字照旧**（同一条命令里姓名与 userId 可混用，实测 `--to "苗文硕,016113645862842894"` 两人都发；而把重名名字与 userId **并列**——`--to "李娜,016113645862842894"`——不解决歧义，重名那个 token 仍会被跳过）。「中文姓名目标拒执」对群发不适用（其目标按设计就是姓名），改由预检把关；转发的 `--dest-conversation-id` 会按群目标同等把关（中文群名直接拦）。
-- **预检失败不再只给一句笼统报错**：dws 在「一个都没解析出来」时会直接 exit 3 且不给计划（只有一句「没有任何人收到消息，请检查姓名是否正确」）。工具改为退回**逐名自探**：用 CLI 自己的解析链（`+messages-send --user-query`，与 broadcast 同源）拿到结构化候选，再补部门/职务/工号，输出「可发 N 人 / 有问题 N 人」（多候选附部门路径与 userId、查无此人给手机号反查入口）。每次收件人也可主动跑 `dws_exec ["chat","+broadcast",…,"--dry-run"]` 拿这份两栏预演（只读，不进两阶段）。
-- **候选带部门/职务/工号**：`dws_resolve_user` 在 aisearch 候选基础上再拉 `contact user get`（批量、失败则静默降级）补部门全路径/职务/工号；同名的两个李娜一眼分出（班主任-诚毅校区 vs 英语教研组）。**无部门且无工号会被标注为「可能是家长或外部联系人账号」**（实测家长账号 depts 为空、jobNumber 为 null）——单候选自动确认时也带着这行标注。
+- **预检失败不再只给一句笼统报错**：dws 在「一个都没解析出来」时会直接 exit 3 且不给计划（只有一句「没有任何人收到消息，请检查姓名是否正确」）。工具改为退回**逐名自探**：用 CLI 自己的解析链（`+messages-send --user-query`，与 broadcast 同源）拿到结构化候选，再补部门/职务/工号，输出「可发 N 人 / 有问题 N 人」（多候选附部门路径与 userId、查无此人给手机号反查入口）。这份两栏预演在群发草稿前自动附上（只读，不进两阶段）。
+- **候选带部门/职务/工号**：姓名解析在 aisearch 候选基础上再拉 `contact user get`（批量、失败则静默降级）补部门全路径/职务/工号；同名的两个李娜一眼分出（班主任-诚毅校区 vs 英语教研组）。**无部门且无工号会被标注为「可能是家长或外部联系人账号」**（实测家长账号 depts 为空、jobNumber 为 null）——单候选自动确认时也带着这行标注。
 - **`--dry-run` 是只读预演**：不进两阶段门（不会生成草稿待确认）、不记防重发台账（不会拦掉随后的真发），结果尾部明确标注未发送。
 - **发送后自核验入口**：结果里直接给出 `openTaskId`（查发送状态/转 DING 用）与只读核验命令（`+search-msg --sender <本人>`），叉住「输出看不清就重跑发送」的冲动。
 - **文件存在性预检**：`--file` 路径不存在时直接拦下（不再真去捅 dws）。
 - **`dws_skill([topic])`（逃生舱）**：消息收发之外的复杂操作（表格/文档/日历/审批/组织/听记等）按需拉取官方技能正文——无参给技能索引（14 个 + 一句话），传 topic 取完整 SKILL.md。技能文件不动，只是不再常驻系统提示词。
-- **`dws_fetch(link 或 spaceId+nodeId[, outDir])`**：钉盘/云盘分享落地——文件直下、文件夹递归镜像并列回文件清单（绝对路径）。**这类消息用 `+messages-resource-download` 会报 `TABLE_NOT_FOUND`**（实测：resourceRefs 给的是 `238322429838&type=file` 数字 dentryId 缺 spaceId，真正可用的 spaceId 藏在正文 yunpan 链接里），必须走 drive。只读查询结果会自动把这类引用结构化成带下载命令的指引。
+- **`dingtalk_file action="fetch"`（link 或 spaceId+nodeId[, out]）**：钉盘/云盘分享落地——文件直下、文件夹递归镜像并列回文件清单（绝对路径）。**这类消息用 `+messages-resource-download` 会报 `TABLE_NOT_FOUND`**（实测：resourceRefs 给的是 `238322429838&type=file` 数字 dentryId 缺 spaceId，真正可用的 spaceId 藏在正文 yunpan 链接里），必须走 drive。只读查询结果会自动把这类引用结构化成带下载动作的指引。
 - **「文件夹」消息无法读取（平台限制，已实测坐实）**：钉钉对这类消息只给一句 `[文件夹] 姓名`，无 resourceRefs、无 id、无 mediaId，`download-media` 也无从下手——工具会直接给出结论并提示让对方打包 zip 或逐个文件重发，避免反复尝试。
 - **字段拼写不一致自解释**：群成员等接口返回 `openDingtalkId`（小写 t），消息接口返回 `openDingTalkId`（大写 T）。插件不擅自改写返回数据，而是在结果里自动附一行提示（两种拼写都要认），内部解析一律大小写不敏感。
 - **消息发送的三处硬处理（实测沉淀）**：① 正文里的字面 `\n`（模型常把换行写成两个字符）自动归一为真换行——dws 会把它吃成空格；② 多行正文自动补 markdown **行尾双空格**硬换行——钉钉客户端把单个换行当段落内空格拼成一行（实测有效；空行分段也可但行距松，纯文本 `--text` 更会直接拼行，故多行走 `--markdown`，`--text` 多行会提示）；③ 文件/媒体消息（`--file`/`--media-id`）与正文协议层互斥，发出后明确回报「本条不含正文」（`--title` 只作文件卡标题、不显示给收件人），说明文字必须另发一条。
