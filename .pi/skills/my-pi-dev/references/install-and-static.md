@@ -2,7 +2,7 @@
 
 ## install.js（仓库根目录唯一安装入口）
 
-单文件向导，`main()` 顺序：环境检测 → `ensurePi` → `ensureDeps`+（询问后）构建 → 安装确认 → copyDir 各目录 → `installVendor` → `removeLegacyExtensions` → `applySettings` → `installModelsJson` → `installAgentsMd` → `generateTsconfig` → `installFontFallback`（仅 Linux）→ `ensureRtk`（rtk 在最后询问下载）。
+单文件向导，`main()` 顺序：环境检测 → `ensurePi` → `ensureDeps`+（询问后）构建 → 安装确认 → copyDir 各目录 → `installVendor` → `removeLegacyExtensions` → `applySettings` → `installModelsJson` → `installAgentsMd` → `generateTsconfig` → `installFontFallback`（仅 Linux）→ `installExternalDeps`（复杂外部依赖）→ `applyPatches` → `ensureRtk`（rtk 在最后询问下载）。
 所有写操作都有 `dryRun` 守卫；`confirm()` 在 `--dry-run` / `-y` / 非 TTY 三态下短路为默认值。
 
 CLI 参数（仅 4 个）：`--dry-run`/`-n`、`--skip-build`、`-y`/`--yes`（非 TTY 自动等价）、（无位置参数）。`ROOT = __dirname`，任意目录下 `node <绝对路径>/install.js` 均可。
@@ -17,6 +17,8 @@ CLI 参数（仅 4 个）：`--dry-run`/`-n`、`--skip-build`、`-y`/`--yes`（�
 | `~/.pi/agent/settings.json` | `applySettings` 写 `theme="matrix"` 与 `hideThinkingBlock=true`（硬置）；`registerVendorPackages` 写 `packages` |
 | `~/.pi/agent/models.json` | 不存在则写模板；存在则 `deepMerge(existing, repo)`（模板键为 override、只增不删，保留用户手改的其他 provider）；**用户文件 JSON 解析失败会用仓库模板覆盖**，坏内容丢失 |
 | `~/.pi/agent/AGENTS.md` | static/AGENTS.md 包进 `<!-- my_pi:begin -->…<!-- my_pi:end -->` 标记块写入；块外用户手写内容保留；已有无标记块文件时交互询问追加（`-y` 默认追加） |
+| `~/.pi/agent/mcp.json` | 复杂外部依赖的 MCP 注册（`installExternalDeps`）：条目不存在才新建，已存在则只补缺失的 env 键（其余字段与用户手改不碰）；`command` 用 `resolveDepNode()` 按 `node.arch` 选定的 node，`exposure` 默认 codemode；文件坏 JSON 时拒绝写入 |
+| pi 自身 dist 与启动器 | `applyPatches` 逐个原地跑 `static/patches/` 下三个脚本（询问后；`-y` 默认跑），脚本各自幂等，单个非 0 退出只告警；dry-run 只列脚本名 |
 | `~/.config/fontconfig/conf.d/99-pi-symbols.conf` | 仅 Linux：`installFontFallback` 生成的符号字形回退规则（终端等宽字体缺的非 CJK 符号钉给 DejaVu Sans Mono）；幂等，内容不变不重写 |
 | 全局 npm | pi 缺失时 `npm i -g @earendil-works/pi-coding-agent` |
 | `src/node_modules/` | `ensureDeps` 按 src/package.json 清单全量比对，任一缺失即 `npm install` 补装；另查**本机平台原生可选包**（`missingNativeDeps` 按 `package-lock.json` 里带 `os`/`cpu`/`libc` 且命中本机的条目，目录缺失即算缺，如 `@esbuild/linux-arm64`）——双系统共享同一份 `node_modules` 时另一平台的包还在、本机的没有，不查会以「原生二进制平台不符」全量构建失败；`npm install` 后仍缺则按锁文件版本 `npm install --no-save <包@版本>` 点名补一次（某些 npm 版本会判定树无需变更而跳过）。补装只增不删，两平台包共存，换系统各装一次即可 |
@@ -35,6 +37,34 @@ vendor 包若有运行时 `dependencies`：`npm install --omit=dev --no-audit --
 - 跳过（只打 log 不报错）：非 Linux、无 fontconfig、终端字体已是 DejaVu Sans Mono、无待钉字符；`--dry-run` 打印条数与目标路径但不写文件
 - 生效：`~/.config/fontconfig/conf.d/` 由 fontconfig 自身加载（不依赖 `/etc/fonts/fonts.conf` 的 xdg include）；运行中的终端不会重读配置，需新开窗口/标签
 - 验证/回退：`fc-match 'Ubuntu Sans Mono:charset=25b0' family` 应回 `DejaVu Sans Mono`；删掉该文件即恢复系统默认回退
+
+### installExternalDeps（复杂外部依赖）
+
+针对「装不起 skill」的第三方工具：要 npm 全局包 + MCP 注册 + 自带 skill 才能用（REA 以 139 个工具进 codemode，典型例子）。清单是 `static/deps.json`，一条一个工具：
+
+```json
+{ "name": "REA（逆向分析）", "npm": "rea-agents", "version": "6.3.0",
+  "skill": { "dir": "skills/reverse-engineer-anything" },
+  "node": { "arch": "x64", "path": "D:\\Tools\\node-x64\\…\\node.exe", "searchDirs": ["D:\\Tools\\node-x64"], "hint": "…" },
+  "mcp": { "server": "rea", "entry": "scripts/rea.mjs", "args": ["--mcp"],
+           "exposure": "codemode", "timeout": 1800, "description": "…",
+           "env": { "GHIDRA_INSTALL_DIR": "D:\\Tools\\ghidra_12.1.4_PUBLIC", "JAVA_HOME": "D:\\Tools\\jdk21-x64\\…" } } }
+```
+
+执行（逐项询问，`-y` 默认跑；dry-run 只打印待办）：
+
+1. `npm install -g <npm>@<version>`（已装同版本则跳过；版本不同则列为「升级到 x」待确认）；
+2. **选 node**：`node.arch` 声明架构要求（REA 在 Windows 上只认 x64——arm64 机器上系统 node 是 arm64，会被 REA 判 `unsupported_host`）；依次试 `node.path` → 当前 node → `searchDirs` 下一层目录 → PATH 上各个 node，取第一个架构相符者；**选不出就不写 MCP 条目**（不写一条跑不起来的），打 `node.hint` 提醒；
+3. 复制**包内自带 skill**（`skill.dir` 相对包根）到 `~/.pi/agent/skills/<目录名>`——REA 的 skill 就在包里，不用联网装、也不必收录进本仓库；已存在则保留现有；
+4. 在 `~/.pi/agent/mcp.json` 写 `mcpServers.<server>`：条目**不存在**才新建（`command` = 选定的 node、`args` = 包内入口、`exposure` 默认 `codemode`、`timeout`、`description`）；**已存在**时其余字段一律不动，只在缺 env 键时补齐（不覆盖已有值）。
+
+`env` 取值优先级：**现有条目 → deps.json 声明值 → 进程环境变量**。声明值排在前是有原因的：本机环境变量里的 `JAVA_HOME` 指向 JDK 17，而 REA 要的是 JDK 21（写在 mcp.json 里），若让环境变量优先就会把错的写进去；声明值里的绝对路径不存在时会告警提示先自备。
+
+已知约束：三项任一失败只告警不阻塞（依赖缺席时 pi 照常可用）；`mcp.json` 坏 JSON 时拒绝写入并提示先修好。
+
+**验证接好了没**（REA）：用 deps.json 里选的 node、带上 `mcp.env` 的值跑 `rea doctor --json`——Ghidra 链路正常时应全绿（version / headless / native_decompiler / java / native_authority），`hopper`、`ida-registration` 红是没装、正常；`unsupported_host` 表示 node 用错了架构；`skill:identity` 与各 `registration:*` 是 REA 在审计它自己支持的客户端（pi 不在名单），属预期噪声，不要照着 remediation 去"修"。
+
+注意 `mcp.env` 只服务 pi 启动的 MCP 进程：在终端手动跑 `rea` 不会自动读到这些变量（需要自己 export，否则 doctor 会报 provider 缺失）。
 
 ### pi 安装布局（托管安装 vs npm 全局）
 
@@ -61,7 +91,8 @@ pi 用自带安装器时为**托管安装**（releases-v1）：`<agent>/install/
 | `sounds/*.wav` | 5 个音效，**只服务 status-beacon**：`task_complete`（正常结束）/`error`（出错）/`attention`（等待人工：问卷、权限复核）/`idle_prompt`（完成提醒后 60s 无操作补一声）/`subagent_complete`（explore/subagent/Task 工具成功）。音源 ClaudeCodeInit wav/piano；播放走系统播放器（Windows SoundPlayer / afplay / paplay→aplay，全不可用退终端响铃） |
 | `skills/markitdown/SKILL.md` | 微软 MarkItDown（MIT，Python 3.10+）文档转 Markdown skill，装到 `~/.pi/agent/skills/`；skill 本身不预装工具，规定 AI 每次先 `markitdown --version`，缺失自行 `pip install 'markitdown[all]'` |
 | `models.json` | OpenRouter 路由模板（`providers.openrouter.compat.openRouterRouting`）+ 自定义 provider `volcengine-coding`（Coding Plan OpenAI 兼容端点 `/api/coding/v3`，ark-code-latest + doubao/deepseek/kimi/glm/minimax 常用档）+ `sensenova`（token-plan 端点，含 thinkingLevelMap）；深度合并，`models` 数组以模板为准 |
-| `patches/` | 3 个手工补丁脚本，**install.js 不会执行**，pi 升级后需重跑 |
+| `deps.json` | 复杂外部依赖清单（npm 全局包 + MCP 注册 + 包内自带 skill），由 `installExternalDeps` 逐项执行；目标工具自带 skill，不入库；见上文 installExternalDeps 小节 |
+| `patches/` | 3 个 pi 补丁脚本，由 install.js 每次安装代跑（幂等，失败不阻塞；`apply-zuchongzhi-zh.mjs` 另有 `--dry-run`/`--restore`），单独重跑仍可 |
 
 ## vendor
 
@@ -70,6 +101,8 @@ pi 用自带安装器时为**托管安装**（releases-v1）：`<agent>/install/
 ## static/patches/ 三个补丁
 
 共用 `pi-root.mjs` 定位 pi 安装目录（托管安装 / npm 全局，见上文），补丁目标一律是**当前活动安装**：托管安装为 `~/.pi/agent/install/releases/<版本>/node_modules/...` 与启动器 `~/.pi/agent/bin/pi`；npm 全局为 `npm root -g` 与全局 bin。
+
+**执行方式**：`install.js` 的 `applyPatches` 每次安装询问后逐个 `spawnSync(process.execPath, [脚本])`（`-y` 默认跑；dry-run 只列名字）；三个脚本都幂等，单个非 0 退出只打一行告警（增强项，失败不阻塞安装）。历史写法「手工跑」已不适用，单独重跑仍可用。
 
 | 脚本 | 作用 | 写入位置 | 参数 / 幂等 |
 |---|---|---|---|
@@ -96,7 +129,7 @@ cd src && npm run typecheck                           # 对新 pi 的 .d.ts 应�
 for f in $(ls src/extensions/*/test/*.test.mjs src/extensions/test/*.test.mjs | sort -u); do node "$f" >/dev/null 2>&1 || echo "FAIL $f"; done
 ```
 
-**2. 三个补丁（`install.js` 不代跑）**
+**2. 三个补丁（`node install.js` 已代跑，这里只在需单独重跑时用）**
 
 ```bash
 node static/patches/apply-pi-ai-usage-guard.mjs

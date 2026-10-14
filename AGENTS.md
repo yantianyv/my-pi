@@ -10,12 +10,12 @@ pi（`@earendil-works/pi-coding-agent`）的个人定制配置仓库：扩展、
 
 | 命令 | 作用 |
 |---|---|
-| `node install.js` | 交互向导：检测 node / pi 本体 / 构建依赖 / rtk → 构建 → 装到 `~/.pi/agent/`。`-y`/`--yes`（非 TTY 自动等价）非交互全自动；`--skip-build` 跳过构建；`--dry-run`/`-n` 只预览 |
+| `node install.js` | 交互向导：检测 node / pi 本体 / 构建依赖 / rtk → 构建 → 装到 `~/.pi/agent/` → 装复杂外部依赖（static/deps.json，逐项询问）→ 重打三个 pi 补丁。`-y`/`--yes`（非 TTY 自动等价）非交互全自动；`--skip-build` 跳过构建；`--dry-run`/`-n` 只预览 |
 | `node src/build.js` | 只构建（install.js 会自动调用；静态资源不经此脚本） |
 | `cd src && npm install` | 拉构建依赖（esbuild 等装入 `src/node_modules`） |
 | `cd src && npm run typecheck` | = `npx typescript -p config/tsconfig.json`，全扩展类型检查（`tsconfig.json` 是 install.js 生成物；当前 0 报错，换机器/pi 升级后重跑 `node install.js` 重新生成即可） |
 | `node src/extensions/<...>/test/<name>.test.mjs` | 回归测试（无 runner、无 test script，见「测试说明」） |
-| `node static/patches/<脚本>.mjs` | pi 安装产物补丁（3 个：usage 防护 / 祖冲之汉化 / 启动垫片取证）；install.js **不会**代跑；pi 升级后需重跑 |
+| `node static/patches/<脚本>.mjs` | pi 安装产物补丁（3 个：usage 防护 / 祖冲之汉化 / 启动垫片取证）；install.js 每次安装**代跑**（幂等、单个失败只告警）；pi 升级后重跑 `node install.js` 即可，单独重跑单个脚本仍可用 |
 
 安装后在 pi 里 `/reload` 热加载扩展生效。
 
@@ -34,7 +34,7 @@ src/                  # 全部源码 + npm 生态 + 构建脚本（build.js 的�
     context-init / claude-it / explore-agent / status-beacon / pair-guard / crash-log / clipboard / img-slim / mimo-omni / qr / keep   # 单文件扩展
     test/             #     跨扩展回归测试（status-keys / explore / perm-gate / presence / dingtalk-bridge / dingtalk-intents / mimo-omni + *-live.mjs 联调）
   vendor/             #   社区插件源码收录区（当前仅 pi-rtk-optimizer）+ README.md（出处表/收录原则/回退记录）
-static/               # 静态部署物（无需编译）：AGENTS.md / themes/ / sounds/(5 音效) / skills/markitdown/ / models.json / patches/(3 个手工补丁)
+static/               # 静态部署物（无需编译）：AGENTS.md / themes/ / sounds/(5 音效) / skills/markitdown/ / models.json / deps.json(复杂外部依赖清单) / patches/(3 个 pi 补丁，install.js 代跑)
 dist/                 # 扩展产物（gitignore 不入库，install.js 每次重建）
 .pi/                  # 项目级运行时数据：workflow/(工作流区+bindings.json) / explore/ / questionnaires/ / sessions/
 ```
@@ -81,7 +81,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 
 - **改完不重装不生效**：源码在 `src/extensions/`，运行时是 `~/.pi/agent/extensions/` 的副本（dist 产物），两处易不同步。流程：改 `src/extensions/` → `node src/build.js` → `node install.js`（或一步 `node install.js`）→ pi 内 `/reload`。只改静态资源（主题色、提示音）可 `node install.js --skip-build`。
 - **install.js 会改用户全局文件/目录**（`~/.pi/agent/` 下 settings.json 的 theme + hideThinkingBlock + packages、models.json、AGENTS.md 标记块、extensions 并删历史扩展、vendor 并删已移除包、themes/sounds/skills、rtk 二进制、全局 npm；Linux 另写 `~/.config/fontconfig/conf.d/99-pi-symbols.conf` 修符号字形回退）；先跑 `--dry-run` 预览。models.json 是深度合并（模板键为准），用户文件 JSON 解析失败会被模板覆盖。
-- `static/patches/` 三个补丁**不由 install.js 执行**，需手工 `node static/patches/<脚本>.mjs`；pi 升级后都要重跑（祖冲之脚本重跑即自动收敛）。**pi 安装目录定位统一走 `static/patches/pi-root.mjs`**（托管安装 releases-v1 与 npm 全局两种布局都认，别在各脚本里自写探测）。
+- `static/patches/` 三个补丁由 install.js 每次安装**代跑**（幂等，已打则跳过，单个失败只告警不阻塞）；单独重跑仍可 `node static/patches/<脚本>.mjs`，pi 升级后重跑 `node install.js` 就一起重打了。**pi 安装目录定位统一走 `static/patches/pi-root.mjs`**（托管安装 releases-v1 与 npm 全局两种布局都认，别在各脚本里自写探测）。
 - `src/config/tsconfig.json` 是 install.js 生成物（gitignore）：按 `__PI_PKG_*` / `__PI_TYPES__` 占位符逐个解析 pi 各包 .d.ts（托管安装与 npm 全局、嵌套与提升布局都认）；探测不到 pi 安装目录才跳过生成并给出提示。换机器/pi 升级重跑 `node install.js` 即可。
 - **pi 用自带安装器时为「托管安装」**（`~/.pi/agent/install/releases/<版本>/node_modules` + 启动器 `~/.pi/agent/bin/pi`，环境变量 `PI_MANAGED_INSTALL_ROOT`），此时 `npm root -g` 下没有 pi：install.js、补丁脚本、relink-deps 均按托管安装优先探测，不要再假设 npm 全局。
 - **`tool_result` 钩子改写 content 必须透传 `structuredContent`**（`structuredContent: event.structuredContent`）：pi ≥ 0.99 的 runner 见到 content 被替换而未带 structuredContent 会丢弃它。img-slim / pair-guard 已遵此约束。

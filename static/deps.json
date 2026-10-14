@@ -1,0 +1,28 @@
+{
+  "deps": [
+    {
+      "name": "REA（逆向分析）",
+      "npm": "rea-agents",
+      "version": "6.3.0",
+      "skill": { "dir": "skills/reverse-engineer-anything" },
+      "node": {
+        "arch": "x64",
+        "path": "D:\\Tools\\node-x64\\node-v24.13.0-win-x64\\node.exe",
+        "searchDirs": ["D:\\Tools\\node-x64"],
+        "hint": "REA 在 Windows 上只认 x64 node（arm64 node 会被判 unsupported_host）：先装一个 x64 node，再把 node.path 指到它，然后重跑 install.js。"
+      },
+      "mcp": {
+        "server": "rea",
+        "entry": "scripts/rea.mjs",
+        "args": ["--mcp"],
+        "exposure": "codemode",
+        "timeout": 1800,
+        "description": "REA 逆向分析工具（原生二进制 / JavaScript 与 Electron / .NET / 运行时行为；Ghidra 12.1.x provider）",
+        "env": {
+          "GHIDRA_INSTALL_DIR": "D:\\Tools\\ghidra_12.1.4_PUBLIC",
+          "JAVA_HOME": "D:\\Tools\\jdk21-x64\\jdk-21.0.12.1+1"
+        }
+      }
+    }
+  ]
+}

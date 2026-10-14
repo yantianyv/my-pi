@@ -38,10 +38,11 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `mimo-omni.ts` — 媒体兼容层（过渡件）：`mimo_transcribe` 解析音频/视频（逐字稿或按需求解析）+ `mimo_speak` 文字合成语音，`/mimo-config` 面板配置（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `dingtalk-bridge/` — 钉钉受控桥接：业务语义工具（消息/待办/日程/审批/文件/文档表格，AI 不碰 dws 命令）+ 唯一逃生舱 `dws_skill`（只给知识）+ 两阶段确认/人工面板/防重发（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `model-config/` — 模型管理插件：`/model-config` 面板集中设置各插件用途使用的模型（策略槽 MAX/FAST/LITE/BASE/BATCH 可重指，AUTO/FREE 固定语义），见下 | `~/.pi/agent/extensions/` |
-| `patches/` | 三个 pi 补丁：ai usage 防护 / 祖冲之汉化 / 启动垫片崩溃取证（见下；共用 `pi-root.mjs` 定位 pi 安装目录） | 打补丁到 pi 安装目录（托管安装 `~/.pi/agent/install/releases/<版本>/node_modules` 或 npm 全局 node_modules） |
+| `patches/` | 三个 pi 补丁：ai usage 防护 / 祖冲之汉化 / 启动垫片崩溃取证（见下；共用 `pi-root.mjs` 定位 pi 安装目录）。install.js 每次安装代跑（幂等、单个失败只告警不阻塞） | 打补丁到 pi 安装目录（托管安装 `~/.pi/agent/install/releases/<版本>/node_modules` 或 npm 全局 node_modules） |
 | `sounds/` | `task_complete.wav` — 任务完成提示音（钢琴音色） | `~/.pi/agent/sounds/` |
 | `skills/` | `markitdown/` — 文档转 Markdown skill（微软 MarkItDown：PDF/Office/图片等 → md，首次使用 AI 自装）；`lean-review/` — AI 产出冗余审查（术语化诊断 + 最小修法） | `~/.pi/agent/skills/` |
 | `models.json` | 模型配置模板：OpenRouter 路由（provider 级 `compat.openRouterRouting`）+ 火山方舟 Coding Plan 自定义供应商（见下；已在则深度合并，保留手改的其他 provider） | `~/.pi/agent/models.json` |
+| `deps.json` | 复杂外部依赖清单：装不起 skill、要 CLI + MCP + 自带 skill 的那类工具（REA 逆向分析）。install.js 逐项确认后执行：npm 全局按版本安装 → 选架构相符的 node → 复制包内自带 skill → 写 `~/.pi/agent/mcp.json`（按 `exposure: codemode` 接进 pi，工具不进系统提示词）；已就绪的项跳过，失败不阻塞 | 不复制文件（读取执行） |
 
 ## OpenRouter 路由策略（models.json）
 
@@ -433,6 +434,8 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 
 修「模型偶发无文字回答」（实测 deepseek-v4-flash，/btw 面板表现为 `（无文字回答）`，主会话同理可触发）。根因：pi-ai 的 `estimate.js` 估算上下文 token 时对每条 assistant 消息调 `calculateContextTokens(assistant.usage)`，**usage 为 undefined 时抛 TypeError**（`Cannot read properties of undefined (reading 'totalTokens')`）。该异常发生在每次 LLM 调用的**请求构建阶段**（`clampMaxTokensToContext` → `estimateContextTokens` → `getLastAssistantUsageInfo`），只要 history（含主会话上下文，compaction summary 消息常缺 usage）里混入一条缺 usage 的 assistant 消息，后续调用就**瞬时失败**（1~5ms 返回 `stopReason="error"`，请求根本没发出）——这也解释了为何失败总是“瞬时”。
 
+install.js 每次安装已代跑本补丁（三个补丁一起，幂等）；下列命令供单独重跑。
+
 ```bash
 node static/patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂等），重启 pi 生效
 ```
@@ -446,7 +449,7 @@ node static/patches/apply-pi-ai-usage-guard.mjs   # 打补丁/升级（幂等）
 
 ## 祖冲之汉化补丁（patches/apply-zuchongzhi-zh.mjs）
 
-pi 无官方 i18n（settings 无 language 字段，TUI 文案硬编码在 `dist/modes/interactive/` 下）；扩展 API 只有「新增渲染」钩子（renderer 按 customType 精确匹配、markdownTransformer 只作用于消息区域），没有覆盖原生 UI（footer/菜单/对话框//settings 界面）的钩子，主题又是纯颜色 schema。汉化只能直接替换 dist 编译产物里的字符串——祖冲之算 π，π 的汉化者。
+pi 无官方 i18n（settings 无 language 字段，TUI 文案硬编码在 `dist/modes/interactive/` 下）；扩展 API 只有「新增渲染」钩子（renderer 按 customType 精确匹配、markdownTransformer 只作用于消息区域），没有覆盖原生 UI（footer/菜单/对话框//settings 界面）的钩子，主题又是纯颜色 schema。汉化只能直接替换 dist 编译产物里的字符串——祖冲之算 π，π 的汉化者。install.js 每次安装已代跑；下列命令供单独重跑。
 
 ```bash
 node static/patches/apply-zuchongzhi-zh.mjs             # 应用/升级（幂等），重启 pi 生效
@@ -479,7 +482,7 @@ node static/patches/apply-zuchongzhi-zh.mjs --restore   # 从备份还原英文
 
 ## 启动垫片崩溃取证补丁（patches/apply-pi-launch-report.mjs）
 
-修「无声崩溃零痕迹」：进程直接消失、无 JS 异常、无 V8 报告时，abort 类原生死亡（node 内部断言 / V8 CHECK）只会在 stderr 留下原生调用栈——本补丁给 pi 启动器加上这整条取证通道。
+修「无声崩溃零痕迹」：进程直接消失、无 JS 异常、无 V8 报告时，abort 类原生死亡（node 内部断言 / V8 CHECK）只会在 stderr 留下原生调用栈——本补丁给 pi 启动器加上这整条取证通道。install.js 每次安装已代跑；下列命令供单独重跑。
 
 ```bash
 node static/patches/apply-pi-launch-report.mjs   # 打补丁/升级（幂等），重启 pi 生效

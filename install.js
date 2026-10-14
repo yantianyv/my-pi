@@ -14,6 +14,10 @@
  *      失败不阻塞安装，插件侧安全降级）
  *   7. 安装 vendor 第三方插件（src/vendor/ → ~/.pi/agent/vendor/，有依赖的补 npm install，
  *      并把本地路径注册进 settings.json 的 packages）；清理已被官方版替代的旧扩展文件
+ *   8. 复杂外部依赖（static/deps.json）：装不起 skill、要 CLI + MCP + 自带 skill 的那类第三方工具
+ *      （如 REA 逆向分析），逐项确认后 npm 全局安装 → 复制自带 skill → 按 codemode 曝光注册进 mcp.json
+ *   9. 重打 static/patches/ 三个 pi 补丁（usage 防护 / 祖冲之汉化 / 启动垫片取证；脚本各自幂等，
+ *      单个失败只告警不阻塞——补丁是增强，缺了 pi 照用；pi 升级会重写 dist 与启动器，故每次安装重打）
  *
  * 安装到 pi 全局配置目录：
  *   dist/extensions/   → ~/.pi/agent/extensions/  （扩展产物，零耦合单文件）
@@ -23,6 +27,7 @@
  *   static/skills/     → ~/.pi/agent/skills/      （pi skills：目录含 SKILL.md 被递归发现）
  *   static/models.json → ~/.pi/agent/models.json  （OpenRouter 路由等模型配置，已存在则深度合并）
  *   static/AGENTS.md   → ~/.pi/agent/AGENTS.md    （全局输出受众纪律：标记块合并，块外用户手写内容保留）
+ *   static/deps.json  → 读取执行，不复制文件（复杂外部依赖清单，见上第 8 步）
  * 并把 settings.json 的 theme 设为本项目主题。
  *
  * Linux 额外一步（installFontFallback）：生成 fontconfig 规则，把系统等宽字体缺的非 CJK 符号
@@ -50,6 +55,7 @@ const EXT_SRC = path.join(DIST, "extensions");
 const SOUNDS_SRC = path.join(ROOT, "static", "sounds");
 const SKILLS_SRC = path.join(ROOT, "static", "skills");
 const MODELS_SRC = path.join(ROOT, "static", "models.json");
+const DEPS_SRC = path.join(ROOT, "static", "deps.json");
 const AGENTS_SRC = path.join(ROOT, "static", "AGENTS.md");
 const VENDOR_SRC = path.join(ROOT, "src", "vendor");
 const THEMES_DST = path.join(PI_AGENT, "themes");
@@ -57,10 +63,14 @@ const EXT_DST = path.join(PI_AGENT, "extensions");
 const SOUNDS_DST = path.join(PI_AGENT, "sounds");
 const SKILLS_DST = path.join(PI_AGENT, "skills");
 const VENDOR_DST = path.join(PI_AGENT, "vendor");
+const MCP_CONFIG = path.join(PI_AGENT, "mcp.json");
 
 // 已删除的自研扩展（src/extensions/ 中删除源码后，install 时同步清理已安装的 stale 副本，
 // 避免与 vendor 版命令/工具冲突，如 /btw、bash 输出 hook）
 const LEGACY_REMOVED_EXTENSIONS = ["explore-agent.ts", "token-saver.ts", "webui.ts", "paste-image.ts", "task-alert.ts", "btf-think.ts", "mimo-media.ts"]; // task-alert.ts 改名 status-beacon.ts（全链路状态感知）；btf-think 已删除（其折叠标签动画未保留，pi 默认静态标签 + Working 行行首 pi 自带 spinner）
+
+// pi 安装产物补丁（static/patches/，不进构建）：pi 升级会重写 dist 与启动器，每次安装重打一遍
+const PATCH_SCRIPTS = ["apply-pi-ai-usage-guard.mjs", "apply-zuchongzhi-zh.mjs", "apply-pi-launch-report.mjs"];
 
 // ── 字体回退修复（仅 Linux）──
 // 系统等宽字体（如 Ubuntu Sans Mono）只有 █░▒▓ 四个块元素，sparkline 的 ▁▂▃▄▅▆▇、余额条的 ▰▱、
@@ -892,6 +902,213 @@ function installFontFallback() {
 	}
 }
 
+/** 重打 static/patches/ 的三个 pi 补丁：脚本各自幂等（已打则跳过），失败只告警不阻塞。
+ *  dry-run 只列脚本名——补丁直接写 pi 安装目录，无法在这里预览它们的行为。 */
+async function applyPatches() {
+	const dir = path.join(ROOT, "static", "patches");
+	const scripts = PATCH_SCRIPTS.map((f) => path.join(dir, f));
+	const missing = scripts.filter((f) => !fs.existsSync(f));
+	if (missing.length) {
+		log(`跳过补丁（脚本缺失: ${missing.map((f) => path.basename(f)).join(", ")}）`);
+		return;
+	}
+	if (!(await confirm("是否给 pi 打三个补丁（usage 防护 / 汉化 / 启动垫片取证）？（Y/n）"))) {
+		log("跳过补丁；需要时可手动跑 static/patches/*.mjs");
+		return;
+	}
+	for (const script of scripts) {
+		const name = path.basename(script);
+		if (dryRun) {
+			log(`补丁：node static/patches/${name}`);
+			continue;
+		}
+		log(`补丁：${name}`);
+		const r = spawnSync(process.execPath, [script], { stdio: "inherit" });
+		if (r.error || r.status !== 0) {
+			console.error(`⚠ 补丁未完成：${name}（${r.error ? r.error.message : `退出码 ${r.status}`}）；pi 仍可正常使用，可稍后单独重跑该脚本。`);
+		}
+	}
+}
+
+/** npm 全局 node_modules 根（装外部依赖、算包内路径用）：`npm root -g` 失败再用常见目录兜底。 */
+function npmGlobalRoot() {
+	try {
+		const root = execSync("npm root -g", { encoding: "utf8", windowsHide: true }).trim();
+		if (root && fs.existsSync(root)) return root;
+	} catch {}
+	const candidates = [
+		process.env.APPDATA ? path.join(process.env.APPDATA, "npm", "node_modules") : null, // Windows
+		path.join(os.homedir(), ".npm-global", "node_modules"), // nvm 常见全局前缀
+		"/usr/local/lib/node_modules", // macOS / brew
+		"/usr/lib/node_modules", // Linux 系统 npm
+	];
+	return candidates.find((c) => c && fs.existsSync(c)) || null;
+}
+
+/** mcp.json 里该服务的现状：不存在 → { exists: false, missingEnv: [] }；存在 → 算出缺少/不符的 env 键。 */
+function mcpEntryState(dep) {
+	const cfg = readJsonFile(MCP_CONFIG);
+	const entry = cfg && isPlainObject(cfg.mcpServers) ? cfg.mcpServers[dep.mcp.server] : null;
+	if (!entry) return { exists: false, missingEnv: [] };
+	const missingEnv = Object.keys(dep.mcp.env ?? {}).filter((k) => !entry.env?.[k]);
+	return { exists: true, missingEnv };
+}
+
+/** 读 JSON 文件：不存在/坏 JSON 都返回 null（坏文件一律不覆写）。 */
+function readJsonFile(file) {
+	try {
+		return JSON.parse(fs.readFileSync(file, "utf8"));
+	} catch {
+		return null;
+	}
+}
+
+/** 选 dep 能用的 node 可执行文件：`node.arch` 声明要求（如 REA 在 Windows 上只认 x64——
+ *  arm64 机器上系统 node 是 arm64，必须用另装的 x64 node，否则 REA 直接判 unsupported_host）。
+ *  依次试：显式 node.path → 当前 node → node.searchDirs 下一层目录 → PATH 上的各个 node；
+ *  都不满足就返回 null（调用方不写配置，避免写一条跑不起来的条目）。 */
+function resolveDepNode(dep) {
+	const want = dep.node?.arch;
+	const exe = process.platform === "win32" ? "node.exe" : "node";
+	const candidates = [dep.node?.path, process.execPath];
+	for (const dir of dep.node?.searchDirs ?? []) {
+		candidates.push(path.join(dir, exe));
+		try {
+			for (const f of fs.readdirSync(dir, { withFileTypes: true })) if (f.isDirectory()) candidates.push(path.join(dir, f.name, exe));
+		} catch {}
+	}
+	try {
+		const list = execSync(process.platform === "win32" ? "where node" : "which -a node", { encoding: "utf8", windowsHide: true });
+		candidates.push(...list.split(/\r?\n/).map((l) => l.trim()));
+	} catch {}
+	for (const c of candidates) {
+		if (!c || !fs.existsSync(c)) continue;
+		if (!want) return c;
+		try {
+			if (execSync(`"${c}" -p process.arch`, { encoding: "utf8", windowsHide: true }).trim() === want) return c;
+		} catch {}
+	}
+	return null;
+}
+
+/** 把一项复杂依赖接进 ~/.pi/agent/mcp.json：
+ *  - 条目不存在：新写一条（command = 选定的 node，args = 包内 MCP 入口，exposure 默认 codemode——
+ *    工具不声明给模型、不进 codemode 描述，只在脚本里按需检索，省 token；env 按下方优先级取值）；
+ *  - 条目已存在：其余字段一律不动（用户手改优先），只在缺 env 键时补上，不覆盖已有值。
+ *  env 取值优先级：现有条目 → deps.json 声明值（验证过的 Ghidra/JDK 路径）→ 进程环境变量。 */
+function ensureMcpServer(dep, pkgDir, nodeExe) {
+	const cfg = fs.existsSync(MCP_CONFIG) ? readJsonFile(MCP_CONFIG) : { mcpServers: {} };
+	if (!cfg || !isPlainObject(cfg)) {
+		console.error(`⚠ ${MCP_CONFIG} 不是合法 JSON，跳过 ${dep.mcp.server} 注册（修好该文件后重跑 install.js）。`);
+		return;
+	}
+	cfg.mcpServers = isPlainObject(cfg.mcpServers) ? cfg.mcpServers : {};
+	const existing = cfg.mcpServers[dep.mcp.server];
+	const env = {};
+	for (const [key, declared] of Object.entries(dep.mcp.env ?? {})) {
+		const value = existing?.env?.[key] || declared || process.env[key];
+		if (value) env[key] = value;
+		if (value && path.isAbsolute(value) && !fs.existsSync(value)) {
+			console.error(`⚠ ${dep.name}：${key} 指向的本机路径不存在（${value}）——先自备该环境或改 static/deps.json 再重跑。`);
+		}
+	}
+	if (existing) {
+		const add = Object.entries(env).filter(([k, v]) => !existing.env?.[k] && v);
+		if (add.length === 0) {
+			log(`mcp.json 已有 ${dep.mcp.server} 且 env 齐备，保留现有配置`);
+			return;
+		}
+		existing.env = { ...(existing.env ?? {}), ...Object.fromEntries(add) };
+		fs.writeFileSync(MCP_CONFIG, JSON.stringify(cfg, null, 2) + "\n", "utf8");
+		log(`补齐 ${dep.mcp.server} 缺失的环境变量：${add.map(([k]) => k).join(", ")}`);
+		return;
+	}
+	cfg.mcpServers[dep.mcp.server] = {
+		command: nodeExe,
+		args: [path.join(pkgDir, dep.mcp.entry), ...(dep.mcp.args ?? [])],
+		...(Object.keys(env).length ? { env } : {}),
+		...(dep.mcp.timeout ? { timeout: dep.mcp.timeout } : {}),
+		exposure: dep.mcp.exposure ?? "codemode",
+		...(dep.mcp.description ? { description: dep.mcp.description } : {}),
+	};
+	fs.writeFileSync(MCP_CONFIG, JSON.stringify(cfg, null, 2) + "\n", "utf8");
+	log(`注册 MCP 服务 ${dep.mcp.server} → ${MCP_CONFIG}（node ${nodeExe}，exposure ${dep.mcp.exposure ?? "codemode"}）`);
+}
+
+/** 复杂外部依赖（static/deps.json）：要装 npm 全局包 + 注册 MCP + 自带 skill 的那类第三方工具
+ *  （如 REA：139 个工具，塞不进 skill，得装 CLI 再按 codemode 曝光接进 pi）。
+ *  逐项确认后安装：npm i -g <包@版本> → 复制包内自带 skill（已存在则保留，不盖用户版）→ 写 mcp.json；
+ *  已就绪的项跳过（含版本比对与 env 键比对），任一步失败只告警不阻塞——依赖缺席时 pi 照常可用。 */
+async function installExternalDeps() {
+	const manifest = readJsonFile(DEPS_SRC);
+	const deps = manifest?.deps;
+	if (!Array.isArray(deps) || deps.length === 0) return;
+	for (const dep of deps) {
+		const spec = dep.version ? `${dep.npm}@${dep.version}` : dep.npm;
+		let root = npmGlobalRoot();
+		let pkgDir = root ? path.join(root, ...dep.npm.split("/")) : null;
+		let installedVersion = pkgDir ? readJsonFile(path.join(pkgDir, "package.json"))?.version ?? null : null;
+		const versionOk = Boolean(installedVersion) && (!dep.version || installedVersion === dep.version);
+		const skillDst = dep.skill ? path.join(SKILLS_DST, path.basename(dep.skill.dir)) : null;
+		const skillReady = !skillDst || fs.existsSync(skillDst);
+		const mcpState = dep.mcp ? mcpEntryState(dep) : { exists: true, missingEnv: [] };
+		const mcpReady = mcpState.exists && mcpState.missingEnv.length === 0;
+		if (versionOk && skillReady && mcpReady) {
+			log(`复杂依赖已就绪：${dep.name}（${installedVersion}）`);
+			continue;
+		}
+		const pending = [
+			!installedVersion ? `npm 全局装 ${spec}` : versionOk ? null : `升级到 ${dep.version}（当前 ${installedVersion}）`,
+			skillReady ? null : "装自带 skill",
+			mcpState.exists ? null : `注册 MCP ${dep.mcp.server}`,
+			mcpState.missingEnv.length ? `补齐 ${dep.mcp.server} 的 ${mcpState.missingEnv.join("/")}` : null,
+		].filter(Boolean);
+		if (!(await confirm(`是否安装复杂依赖 ${dep.name}（${pending.join(" + ")}）？（Y/n）`))) {
+			log(`跳过 ${dep.name}（以后重跑 install.js 可补装）`);
+			continue;
+		}
+		if (dryRun) {
+			log(`将执行：${pending.join(" + ")}`);
+			continue;
+		}
+		// 选 node（可能要求特定架构）在安装之前定：选不出就不写一条跑不起来的 MCP 条目
+		const nodeExe = dep.mcp ? resolveDepNode(dep) : null;
+		if (dep.mcp && !nodeExe) {
+			console.error(`⚠ ${dep.name}：找不到符合要求的 node（${dep.node?.arch ?? "任意"}）——${
+				dep.node?.hint ?? "在 static/deps.json 的 node.path 里指定一个可用的 node，然后重跑 install.js。"
+			}`);
+			if (!installedVersion) continue; // 包本身还没装时干脆停下，避免只装一半
+		}
+		if (!versionOk) {
+			log(`安装 ${spec}：npm install -g ${spec}`);
+			try {
+				execSync(`npm install -g ${spec}`, { stdio: "inherit" });
+			} catch {
+				console.error(`⚠ ${dep.name} 安装失败（需要网络）；需要时手动 npm i -g ${spec} 后重跑 install.js。`);
+				continue;
+			}
+			root = npmGlobalRoot();
+			pkgDir = root ? path.join(root, ...dep.npm.split("/")) : null;
+			installedVersion = pkgDir ? readJsonFile(path.join(pkgDir, "package.json"))?.version ?? null : null;
+			if (!installedVersion) {
+				console.error(`⚠ 装完仍找不到 ${dep.npm} 包目录，跳过后续配置；可稍后重跑 install.js。`);
+				continue;
+			}
+		}
+		if (skillDst && dep.skill && fs.existsSync(path.join(pkgDir, dep.skill.dir))) {
+			if (fs.existsSync(skillDst)) {
+				log(`skill 已在，保留现有：${skillDst}`);
+			} else {
+				log(`复制自带 skill → ${skillDst}`);
+				fs.mkdirSync(path.dirname(skillDst), { recursive: true });
+				fs.cpSync(path.join(pkgDir, dep.skill.dir), skillDst, { recursive: true });
+			}
+		}
+		if (dep.mcp && nodeExe) ensureMcpServer(dep, pkgDir, nodeExe);
+		console.log(`✓ ${dep.name} 已接好（重启 pi 生效）`);
+	}
+}
+
 async function main() {
 	console.log(`pi 一键环境安装 → ${PI_AGENT}\n`);
 
@@ -948,7 +1165,9 @@ async function main() {
 	generateTsconfig();
 	installFontFallback();
 
-	// 5. 可选依赖 rtk（失败不阻塞）；dry-run 下只预览
+	// 5. 复杂外部依赖、pi 补丁、可选依赖 rtk（均失败不阻塞；dry-run 下只预览）
+	await installExternalDeps();
+	await applyPatches();
 	await ensureRtk();
 
 	if (dryRun) {
