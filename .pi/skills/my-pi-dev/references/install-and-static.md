@@ -64,6 +64,8 @@ vendor 包若有运行时 `dependencies`：`npm install --omit=dev --no-audit --
 
 **验证接好了没**（REA）：用 deps.json 里选的 node、带上 `mcp.env` 的值跑 `rea doctor --json`——Ghidra 链路正常时应全绿（version / headless / native_decompiler / java / native_authority），`hopper`、`ida-registration` 红是没装、正常；`unsupported_host` 表示 node 用错了架构；`skill:identity` 与各 `registration:*` 是 REA 在审计它自己支持的客户端（pi 不在名单），属预期噪声，不要照着 remediation 去"修"。
 
+pi 侧接线用 `pi mcp list` 核（官方命令，只读）：应输出 `rea: connected, 139 tools (codemode, global)` 并回显所用的 node 与包内入口（2026-10-14 本机实测如此，用的正是 `deps.json` 里指定的那个 x64 node）。
+
 注意 `mcp.env` 只服务 pi 启动的 MCP 进程：在终端手动跑 `rea` 不会自动读到这些变量（需要自己 export，否则 doctor 会报 provider 缺失）。
 
 ### pi 安装布局（托管安装 vs npm 全局）
