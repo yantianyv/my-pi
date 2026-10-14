@@ -81,7 +81,7 @@
 - 状态 key（`STATUS_STYLE` 中登记）：`task-alert`（完成闪烁帧）/`task-alert-error`/`task-alert-wait`（等待人工）/`task-alert-run`（思考中/当前工具；run 开局重置防残留，块间隙与收尾不显）。key 沿用 task-alert* 旧名（前身即 task-alert）。
 - 五音效（`~/.pi/agent/sounds/`，由 install.js 部署 static/sounds）：`task_complete`（正常结束）/`error`（stopReason=error）/`attention`（阻塞等人工）/`idle_prompt`（完成提醒后 60s 无操作，且人真的离开时才补）/`subagent_complete`（工具名 ∈ {explore, subagent, Task} 成功）。超时自动撤销提醒 600s。
 - 提示音经 `shared/presence` 在场门控：系统空闲 <20s 或任一实例 20s 内有输入 → 只闪不出声；`claimSoundSlot` 全局去重（窗口 2.5s）只响第一声。
-- **扩展侧适配纪律**（AGENTS.md「提醒适配」条目的实施细节）：① 等人 UI 不要自己做声音——pi 把 `ctx.ui.custom/select/confirm/input/editor` 全部包进 `ui_prompt_start/end`（`wrapUIPromptContext`），自绘 overlay 也自动进 waiting 告警链；② 要让 Working 行显示具体等待内容，弹层前 `waitApi()?.wait?.(text)`、结束 `wait(null)`（dingtalk 的 review-panel 与 perm-gate 两处已按此实现，`wait` 在 `ui_prompt_start`（microtask 异步 emit）之前登记即生效）；③ 子代理完成音按工具名集合自动（`SUBAGENT_TOOLS` = subagent/explore/Task，新子代理工具名要手动加进该集合）；④ 完成/出错声音只在 turn 收尾触发一次，工具级完成不响。
+- **扩展侧适配纪律**（AGENTS.md「提醒适配」条目的实施细节）：① 等人 UI 不要自己做声音——pi 把 `ctx.ui.custom/select/confirm/input/editor` 全部包进 `ui_prompt_start/end`（`wrapUIPromptContext`），自绘 overlay 也自动进 waiting 告警链；② 要让 Working 行显示具体等待内容，弹层前 `setWaiting(text)`、结束 `setWaiting(null)`（`shared/status.ts` 导出；review-panel、perm-gate、ask 已按此实现，登记要早于 `ui_prompt_start`（microtask 异步 emit）才生效）；③ 子代理完成音按工具名集合自动（`SUBAGENT_TOOLS` = subagent/explore/Task，新子代理工具名要手动加进该集合）；④ 完成/出错声音只在 turn 收尾触发一次，工具级完成不响。
 - 发布 `__PI_STATUS_BEACON_API__ = { wait(text|null) }`（session_shutdown 删除）；读 pair-guard 注册表的 `work` 字段。Ctrl+C 打断不触发完成提醒：`agent_end` 记 `lastEndStopReason`，`agent_settled` 时若为 `aborted` 则跳过（零耦合，不依赖 claude-it）。
 
 ## clipboard.ts
@@ -95,7 +95,7 @@
 ## keep.ts
 
 - 停顿点续航（旁支自检，主记录零污染）：`turn_end` 时本轮 assistant 消息无 toolCall、`outcome === "completed"`、无排队消息、预算未用完、**且本轮出现过改写类工具调用**（内建集合 bash/write/edit/codemode → `readOnlyHint` 注解（`pi.getAllTools()`，MCP/扩展声明）→ 无注解按只读（安全默认）；零工具与只读工具的收尾是问答/调研的天然终点，不自检。全仓插件工具已逐个声明 `annotations: { readOnlyHint }`，钉钉工具组按能力统一标 false）→ **发起旁支自检**：复刻主会话请求前缀（`before_agent_start` 捕获的 systemPrompt + `filterKeepMessages(buildSessionContext().messages)` + 按 `getActiveTools()` 顺序复刻的工具集、执行体换空实现）+ 末尾追加自检问题，跑一次限 1 轮的 `runAgentLoop`（走 `shared/agent` 的 `createPiStreamFn`），拿 A/B/C 判定——提问与回答都不进主记录。
-- 展示与续跑：A → `turn_end` entries 注入 `keep-verdict`（display:true，自定义消息带底色）+ `keep-go`（display:false，续跑指令）并 continue；B（各档一律）与 default 档的 C → `pi.sendMessage(verdict, { triggerTurn:false })` 挂到本轮末尾后停下（运行中入 `_pendingCustomMessages`，run 收尾 flush）。判定块经 `registerMessageRenderer` 按 details 重绘（customMessageBg 底 + accent/warning/success 配色 + 下一步）。
+- 展示与续跑：A → `turn_end` entries 注入 `keep-verdict`（display:true，自定义消息带底色）+ `keep-go`（display:false，续跑指令）并 continue；B（各档一律）与 default 档的 C → `pi.sendMessage(verdict, { triggerTurn:false })` 挂到本轮末尾后停下。判定块经 `registerMessageRenderer` 按 details 重绘（customMessageBg 底 + accent/warning/success 配色 + 下一步）。
 - `context` 过滤：`keep-verdict` 任何位置都不进请求（纯展示）；`keep-go` 只在末尾「活尾巴」保留（当前轮的续跑指令）；旧版 in-transcript 的 `keep-ask`/回答记录一并滤掉（历史会话兼容）。
 - **前缀复刻与缓存**：provider 前缀缓存按 `tools → system → messages` 逐字节匹配，三者齐了才命中；命中与否只影响花费（未命中 = 全量按非缓存计价）。
   - 前缀取 **`context_with_system`** 事件捕获的主会话真实请求（该事件在所有 `context` 处理后触发，`messages` 含系统消息与工具声明）——其它扩展对请求的改写（如 time.ts 的时间戳前缀）也已包含，故逐字节一致；工具集从捕获消息里用 `getCurrentTools` 取出，执行体换空实现（误调无副作用）。捕获缺席时回退自拼（systemPrompt + 会话消息 + `getActiveTools()`/`getAllTools()` 重建工具），代价是 miss。

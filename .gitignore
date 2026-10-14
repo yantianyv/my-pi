@@ -35,3 +35,4 @@ src/extensions/test/.tmp-*
 .tmp/
 # scratch/ 本地手跑实验/预览脚本与下载遗留，不入库
 scratch/
+.pi/keep-idle/
