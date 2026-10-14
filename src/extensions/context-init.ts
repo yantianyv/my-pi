@@ -29,6 +29,7 @@ import { aiComplete, type AiModelChain } from "./shared/llm";
 import { CONTEXT_OVERFLOW_RE, pruneOldToolResults } from "./shared/context-budget";
 import { getExploreApi } from "./shared/explore-api";
 import { CONTEXT_FILE, checkContextArtifacts, findContextFiles } from "./shared/context-files";
+import { ensurePiGitignore } from "./shared/pi-ignore";
 import { createModelSetting, type ModelSetting } from "./shared/model-setting";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -715,6 +716,9 @@ export default function (pi: ExtensionAPI) {
 			launchBackgroundInit(ctx, buildInitPrompt(mode, getExploreApi() !== null), label);
 		},
 	});
+
+	// 会话开始兜底：项目的 .pi/ 还没有 .gitignore 就补一份（幂等，一次 stat 的成本）
+	pi.on("session_start", (_event, ctx) => ensurePiGitignore(ctx.cwd));
 
 	pi.on("session_shutdown", async () => {
 		// 中止后台 init；runInitAgent 会捕获 abort 并走失败收尾，此时 notify 对已关闭的会话是 no-op

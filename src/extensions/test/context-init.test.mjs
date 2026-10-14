@@ -9,11 +9,12 @@
  * - 场景 C：checkContextArtifacts / findContextFiles —— L1 与子目录 AGENTS.md 的死指针、索引对应、
  *   frontmatter、空文件、无 skill 时不误报
  * - 场景 D：CONTEXT_OVERFLOW_RE —— 常见超限措辞命中、限流/网络类不误判
+ * - 场景 F：ensurePiGitignore —— 首次写入白名单模板、已有文件不动、非 git 仓库不写、根已忽略不写
  *
  * 用法：node src/extensions/test/context-init.test.mjs（仓库根目录执行）
  */
 import { build } from "esbuild";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -22,6 +23,7 @@ const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
 const SRC_DIR = join(TEST_DIR, "../..");
 const BUDGET_BUNDLE = join(TEST_DIR, ".tmp-context-budget.mjs");
 const IT_BUNDLE = join(TEST_DIR, ".tmp-context-files.mjs");
+const PI_IGNORE_BUNDLE = join(TEST_DIR, ".tmp-pi-ignore.mjs");
 
 let failures = 0;
 const check = (name, cond, extra = "") => {
@@ -62,6 +64,7 @@ const toolResult = (toolName, text) => ({
 async function main() {
 	const budget = await bundle(join(SRC_DIR, "extensions", "shared", "context-budget.ts"), BUDGET_BUNDLE);
 	const it = await bundle(join(SRC_DIR, "extensions", "shared", "context-files.ts"), IT_BUNDLE);
+	const ignore = await bundle(join(SRC_DIR, "extensions", "shared", "pi-ignore.ts"), PI_IGNORE_BUNDLE);
 
 	// ---- 场景 A：token 粗估 ----
 	console.log("场景 A：estimateTokens");
@@ -194,6 +197,40 @@ async function main() {
 		check("D: 限流/网络类不误判", miss.every((m) => !budget.CONTEXT_OVERFLOW_RE.test(m)), miss.filter((m) => budget.CONTEXT_OVERFLOW_RE.test(m)).join(" | "));
 	}
 
+	// ---- 场景 F：.pi/.gitignore 自动补（白名单模板，幂等） ----
+	console.log("场景 F：ensurePiGitignore");
+	{
+		const mkRepo = (name) => {
+			const d = join(tmp, name);
+			mkdirSync(join(d, ".git"), { recursive: true });
+			return d;
+		};
+		const a = mkRepo("repo-a");
+		ignore.ensurePiGitignore(a);
+		const written = readFileSync(join(a, ".pi", ".gitignore"), "utf8");
+		check("F: 首次调用写入白名单模板", written.includes("*") && written.includes("!.gitignore") && written.includes("!skills/**"));
+		check("F: 模板不含黑名单式的运行时目录逐条", !written.includes("explore/") && !written.includes("questionnaires/"));
+
+		writeFileSync(join(a, ".pi", ".gitignore"), "项目自定义\n");
+		ignore.ensurePiGitignore(a);
+		check("F: 已有文件不动（保留项目自定义）", readFileSync(join(a, ".pi", ".gitignore"), "utf8") === "项目自定义\n");
+
+		const b = join(tmp, "no-git");
+		mkdirSync(b, { recursive: true });
+		ignore.ensurePiGitignore(b);
+		check("F: 非 git 仓库不写", !existsSync(join(b, ".pi", ".gitignore")));
+
+		const c = mkRepo("repo-c");
+		writeFileSync(join(c, ".gitignore"), "node_modules/\n.pi/\n");
+		ignore.ensurePiGitignore(c);
+		check("F: 根 .gitignore 已整体忽略 .pi/ 时不写", !existsSync(join(c, ".pi", ".gitignore")));
+
+		const d = mkRepo("repo-d");
+		writeFileSync(join(d, ".gitignore"), "node_modules/\n*.log\n");
+		ignore.ensurePiGitignore(d);
+		check("F: 根规则与 .pi/ 无关时照常写", existsSync(join(d, ".pi", ".gitignore")));
+	}
+
 	check("E: 临时产物已清理（构建产物落 test/ 下）", existsSync(BUDGET_BUNDLE) && existsSync(IT_BUNDLE));
 }
 
@@ -203,6 +240,7 @@ try {
 	rmSync(tmp, { recursive: true, force: true });
 	rmSync(BUDGET_BUNDLE, { force: true });
 	rmSync(IT_BUNDLE, { force: true });
+	rmSync(PI_IGNORE_BUNDLE, { force: true });
 }
 console.log(failures === 0 ? "\n全部通过 ✓" : `\n${failures} 项失败 ✗`);
 process.exit(failures === 0 ? 0 : 1);

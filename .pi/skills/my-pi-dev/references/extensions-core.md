@@ -11,7 +11,7 @@
 - 子代理工具：read/ls/grep/find + write/edit + bash + 可选 `explore`（`getExploreApi()?.createSubagentTool(ctx, { alwaysFresh: true })`，缺席静默降级为自读）。
 - 约束：**不设轮数与墙钟上限**；`NO_PROGRESS_TURNS = 8`（连续 8 轮既没写文件也没派 explore → 注入收尾指令，只提醒不硬停）；「没写完不许停」——打算停下但文件没被写过（mtime `> mtimeBefore + 1`）或末句是意图陈述 → 顶回去做完（最多两次），最终如实报「未完成」。
 - 审计子代理：主流程成功、文件确实写入、摘要不像「未完成」才启动；全新上下文 + 独立 system prompt；任务里显式列出全部上下文文件与 `.pi/skills/`；工具只有 read/ls/grep/find + write/edit（无 bash、无 explore）；不设轮数上限，带「没动手 / 末句是意图陈述 → 顶回去」与无结论补问一次；验收清单围绕上面的内容规范（两问、四处去向、该留的没丢、元规则板块在场），只做删减/合并/移出/修指针。审计故障只报「审计未完成」，不否定既有产物。
-- 纯 fs 的产物检查放在 `shared/context-files.ts`（`findContextFiles` / `checkContextArtifacts`，与本插件、`test/context-init.test.mjs` 共用，不依赖 pi 运行时）。
+- 纯 fs 的产物检查放在 `shared/context-files.ts`（`findContextFiles` / `checkContextArtifacts`，与本插件、`test/context-init.test.mjs` 共用，不依赖 pi 运行时）；`.pi/.gitignore` 的自动补放在 `shared/pi-ignore.ts`（`ensurePiGitignore`）：`session_start` 时幂等补一份白名单式嵌套忽略（项目 skill 放行、pi 运行时数据默认不入库），仅在 git 仓库、尚无该文件、根 `.gitignore` 未整体忽略 `.pi/` 时写。
 - 进度经官方 `ctx.ui.setStatus("init", …)`（hud 行 1；hud 缺席回落 pi 原生 footer）。
 
 ## claude-it.ts（会话体验，文档生成已拆出）

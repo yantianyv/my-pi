@@ -53,7 +53,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 - **hud 供外部扩展挂底部行**：`__PI_HUD_API__` 的 `registerExtraRows` / `notifyExtraRowsUpdate`；当前 workflow-mgr 已依赖（hud 开启时其常驻面板由 hud 渲染在 footer 最底、自绘面板隐藏，靠 `process.emit("hud:state-change")` 切换）。
 - **vendor**：`src/vendor/` 收录社区插件源码副本（当前 pi-rtk-optimizer；pi-subagents / pi-btw 曾收录后回退自研 explore-agent / btw），收录原则、出处表、对齐更新流程、回退记录见 `src/vendor/README.md`。rtk 二进制不入库，由 install.js 按平台下载。
 - **工作流数据按会话隔离（全局存储）**：workflow-mgr 的 `workflow.json`/`state.json` 存 `~/.pi/agent/workflow/<项目标识>/<会话 ID>/`（项目标识 = 目录名 + cwd 短哈希，`PI_WORKFLOW_HOME` 可覆盖）——同一项目的多个 pi 会话各写各的文件，天然互不干扰；`resume` 恢复会话即带回其工作流，无需任何选择或绑定。工作流数据不进项目 `.pi/`，项目目录只留随项目走的运行时数据。
-- **context-init `/init`**：后台 fork 独立上下文维护项目唯一的 `AGENTS.md`（主会话零污染）。核心是**内容规范**：写每行前过两问（不写会做错吗 / 换一年还成立吗），信息按「多常被需要」分四处——每轮用 → `AGENTS.md`、相关才用 → `.pi/skills/`、在办状态 → 该目录 `STATUS.md`、跨项目经验 → 知识库；子目录 `AGENTS.md` 分流后删除（附映射表），`CLAUDE.md` 合并后删除；顺手做目录对齐（同类只住一处），不强制目录树。explore 在场则派子代理并行摸底（缺席自读）；不设轮数与墙钟上限（`/init cancel` 中止）；上下文超限自动压缩后续跑（≤2 次）；收尾由审计子代理复核 + `shared/context-files.ts` 的结构检查（死指针 / skill 索引对应），有问题带问题再审一轮（最多两轮）。该插件只依赖 pi 的 fs、模型与官方 `setStatus`，其余（explore / hud / 知识库）全是可选增强，缺席静默降级。
+- **context-init `/init`**：后台 fork 独立上下文维护项目唯一的 `AGENTS.md`（主会话零污染）。核心是**内容规范**：写每行前过两问（不写会做错吗 / 换一年还成立吗），信息按「多常被需要」分四处——每轮用 → `AGENTS.md`、相关才用 → `.pi/skills/`、在办状态 → 该目录 `STATUS.md`、跨项目经验 → 知识库；子目录 `AGENTS.md` 分流后删除（附映射表），`CLAUDE.md` 合并后删除；顺手做目录对齐（同类只住一处），不强制目录树。explore 在场则派子代理并行摸底（缺席自读）；不设轮数与墙钟上限（`/init cancel` 中止）；上下文超限自动压缩后续跑（≤2 次）；收尾由审计子代理复核 + `shared/context-files.ts` 的结构检查（死指针 / skill 索引对应），有问题带问题再审一轮（最多两轮）。该插件只依赖 pi 的 fs、模型与官方 `setStatus`，其余（explore / hud / 知识库）全是可选增强，缺席静默降级；会话开始时兜底补 `.pi/.gitignore`（白名单式嵌套忽略：放行项目 skill 与本文件自身，其余 pi 运行时数据不入库）。
 
 ## 代码风格与约定
 

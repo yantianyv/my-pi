@@ -1,13 +1,9 @@
 # .pi/ 内部的忽略规则（嵌套 .gitignore：路径相对本目录，只作用于 .pi/ 以内）
 #
-# 语义：.pi/ 是 pi 的项目运行时目录，默认整体不入库；
-# 只有随项目走、需要 git 审查的东西用 ! 显式放行。
+# 语义：白名单——只放行值得随项目长期留存的东西（项目 skill、本文件自身），
+# 其余（pi 的运行时数据与遗留的工作流归档）一律不入库。
 *
 !.gitignore
 # 项目自己的 skill（随项目走的文档与约定）
 !skills/
 !skills/**
-# 工作流归档快照仍入库（进行中的工作流数据在全局 ~/.pi/agent/workflow/）
-!workflow/
-workflow/*
-!workflow/archive/

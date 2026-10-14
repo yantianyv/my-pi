@@ -52,7 +52,7 @@ const mod = await import(pathToFileURL(bundle).href);
 | `test/dingtalk-bridge.test.mjs` | 纯函数策略层（buildArgv / 标签拦截与豁免 / 两阶段确认 / 防重发 / parsePeople / schema 截断 / 命令路径归一与上游可用性），不起真实 dws 进程 |
 | `test/dingtalk-intents.test.mjs` | 语义层纯映射（intents.ts：时间/优先级/单元格规范化 + 消息/待办/日程/审批/文件/文档六域的业务参数 → dws argv），不联网不起进程 |
 | `test/mimo-omni.test.mjs` | 媒体内容块构造离线 18 项；`MIMO_LIVE=1` + 传音频/视频路径才真打 API |
-| `test/context-init.test.mjs` | /init 闭环的纯逻辑（不依赖 pi 包）：`estimateTokens` 口径、`pruneOldToolResults`（超预算才剪/按重读代价排序/write-edit 与近期不剪）、`checkContextArtifacts`（各上下文文件死指针、索引与 references 对应、frontmatter、空文件、无 skill 不误报）、`CONTEXT_OVERFLOW_RE` 命中与不误判 |
+| `test/context-init.test.mjs` | /init 闭环的纯逻辑（不依赖 pi 包）：`estimateTokens` 口径、`pruneOldToolResults`（超预算才剪/按重读代价排序/write-edit 与近期不剪）、`checkContextArtifacts`（各上下文文件死指针、索引与 references 对应、frontmatter、空文件、无 skill 不误报）、`CONTEXT_OVERFLOW_RE` 命中与不误判、`ensurePiGitignore`（首次写入白名单模板、已有文件不动、非 git 仓库不写、根已整体忽略 `.pi/` 时不写） |
 | `test/crash-log.test.mjs` | 用 `PI_CRASH_LOG_FILE` 注入临时日志 + 打两份 bundle（同进程两实例 = 模拟 /reload）：启动头/process 监听器只挂一次；同一条崩溃只提醒一次（新建崩溃再提醒）、无 UI 不提醒也不写 ack、`/crash-log` 视图即标已看、`clear` 清日志与 ack |
 | `test/keep.test.mjs` | 停顿点自检闭环（假 pi/ctx 驱动 turn_end/context）：A 注入判定块+续跑、B/C 挂块停下、零工具与只读工具停点不自检、内建与 readOnlyHint=false 视为工作、解析失败/预算耗尽/排队消息/aborted 降级、判定块不进请求与旧追问过滤、开关持久化、idle 探在场与挂机（挂机轮只注入隐藏指令、状态行走 `keep-idle`、段末发单行收尾摘要：做满/无活可干/用户回来） |
 | `test/time.test.mjs` | 纯函数策略层：stamp 形状（带年/本地时区/分钟粒度）、user 贴前缀与已带前缀防重贴、非 user 角色原样、now 输出组装 |

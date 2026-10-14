@@ -76,6 +76,7 @@ hud 自己只推 `hud-bash` / `balance-error` / `model-switch` 三个 key，其�
 | `explore-api.ts` | 跨扩展契约单点定义：`EXPLORE_API_KEY="__PI_EXPLORE_API__"`、`EXPLORE_API_VERSION=1`、`publishExploreApi`/`getExploreApi`（版本不符或未加载返回 null） | explore-agent 发布、context-init 消费 |
 | `context-budget.ts` | `estimateTokens`（CJK 按 1 字 1 token、ASCII 按 3.5 字符）、`pruneOldToolResults(messages, budget)`（超预算从最旧/最廉价开始把工具结果换成占位文本：read/grep/find/ls/bash → explore → 其他，write/edit 不剪，最近 10 条不动）、`CONTEXT_OVERFLOW_RE`（各家超限措辞，explore 转出） | context-init、explore-agent |
 | `context-files.ts` | `CONTEXT_FILE`、`findContextFiles(cwd)`（根 + 子目录的 AGENTS.md/CLAUDE.md，跳过 node_modules/.git/dist/.tmp/vendor 与隐藏目录）、`checkContextArtifacts(cwd)`（references 死指针、SKILL.md 索引与 references 一一对应、frontmatter name/description、近乎空文件）；纯 fs、无 pi 依赖 | context-init、`test/context-init.test.mjs` |
+| `pi-ignore.ts` | `.pi/.gitignore` 的自动维护：`PI_GITIGNORE`（白名单模板：`*` + 放行 `.gitignore`/`skills/`）、`ensurePiGitignore(cwd)`——仅在 git 仓库、尚无该文件、根 `.gitignore` 未整体忽略 `.pi/` 时写入（`wx` 不覆盖、异常静默）；纯 fs、无 pi 依赖 | context-init、`test/context-init.test.mjs` |
 | `turndown-gfm.d.ts` | `turndown-plugin-gfm` 的类型声明 | web-tool |
 
 ## shared/ui.ts（浮层 UI 公共层）
