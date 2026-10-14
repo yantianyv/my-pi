@@ -2,29 +2,43 @@
 /**
  * workflow-mgr stale ctx 回归测试（session 替换后 "ctx is stale" 崩溃）
  *
- * 背景：getStore 的会话缓存比较依赖 `sessionStore.cwd`，而旧实现该 getter 动态访问
- * this.ctx.cwd——session 替换（compaction / reload）后旧 ctx 被 pi 标记 stale，
- * 任何属性访问抛 assertActive 错误，session_start 事件里 getStore 即崩溃，
- * wf_* 全部不可用（重启恢复）。修复：WorkflowStore 构造时固化 cwd 字符串，
- * 类内不再持有/访问 ctx，所有文件操作基于固化 cwd。
+ * 背景：WorkflowStore 构造时固化 cwd 字符串、类内不持有 ctx。若改成动态读
+ * this.ctx.cwd，session 替换（compaction / reload）后旧 ctx 被 pi 标记 stale，
+ * 任何属性访问抛 assertActive 错误，session_start 里 getStore 即崩溃，
+ * wf_* 全部不可用（重启恢复）。
  *
  * 覆盖：
  * - 固化：构造后 ctx 变 stale（Proxy 任何访问抛错），store.cwd / getWorkflow 等仍正常
- * - getStore 复用：旧实例 stale 后，新 ctx 调 getStore 比较不崩（纯字符串比较）
- * - cwd 变化自动重建：新 cwd 的新 ctx → 重建为新 store
+ * - getStore 比较：旧会话实例 stale 后，新 ctx 调 getStore 不崩（纯字符串比较）
+ * - 会话/项目变化自动重建：新会话 ID 或新 cwd → 重建为新 store
  *
  * 用法：node src/extensions/workflow-mgr/test/stale-ctx.test.mjs（仓库根目录执行）
  */
 import { build } from "esbuild";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
 const WFMG_DIR = join(TEST_DIR, ".."); // src/extensions/workflow-mgr/
 const SRC_DIR = join(WFMG_DIR, "../.."); // src/
 const BUNDLE = join(TEST_DIR, ".tmp-stale-bundle.mjs");
+
+/* ---------- 存储路径（与 store.ts 同一套规则） ---------- */
+const WF_HOME = mkdtempSync(join(tmpdir(), "wfmg-stale-home-"));
+process.env.PI_WORKFLOW_HOME = WF_HOME;
+const SID = "test-sid";
+function sessionDir(cwd, sid = SID) {
+	const name = basename(cwd).replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 40) || "project";
+	const key = `${name}-${createHash("sha1").update(cwd).digest("hex").slice(0, 8)}`;
+	return join(WF_HOME, key, sid);
+}
+/** 会话数据文件路径 */
+const wfFile = (cwd, name, sid = SID) => join(sessionDir(cwd, sid), name);
+/** mock ctx：携带会话 ID 与 UI 占位 */
+const makeCtx = (cwd, sid = SID) => ({ cwd, hasUI: true, mode: "tui", sessionManager: { getSessionId: () => sid }, ui: {} });
 
 let failures = 0;
 const check = (name, cond, extra = "") => {
@@ -49,13 +63,13 @@ await build({
 });
 const { WorkflowStore, getStore } = await import(pathToFileURL(BUNDLE).href);
 
-/** 写 fixture 工作目录（含简单工作流） */
+/** 写 fixture 工作目录（工作流数据落在全局 WF_HOME 下，按 cwd + 会话 ID 隔离） */
 function makeFixture() {
 	const dir = mkdtempSync(join(tmpdir(), "wfmg-stale-"));
-	const wfDir = join(dir, ".pi", "workflow");
-	mkdirSync(wfDir, { recursive: true });
+	const sd = sessionDir(dir);
+	mkdirSync(sd, { recursive: true });
 	writeFileSync(
-		join(wfDir, "workflow.json"),
+		join(sd, "workflow.json"),
 		JSON.stringify({
 			schemaVersion: 1,
 			stages: [{
@@ -66,8 +80,8 @@ function makeFixture() {
 		"utf8",
 	);
 	writeFileSync(
-		join(wfDir, "state.json"),
-		JSON.stringify({ schemaVersion: 1, currentTaskId: "s1.1", tasks: {}, milestones: {}, log: [], notes: [], mode: "human-ai" }),
+		join(sd, "state.json"),
+		JSON.stringify({ schemaVersion: 1, currentTaskId: "s1.1", tasks: {}, log: [] }),
 		"utf8",
 	);
 	return dir;
@@ -89,7 +103,7 @@ function makeStaleCtx() {
 console.log("场景 1：固化 cwd（构造后 ctx stale，store 不崩）");
 {
 	const dir = makeFixture();
-	const ctx = { cwd: dir, hasUI: true, mode: "tui", ui: {} };
+	const ctx = makeCtx(dir);
 	const store = new WorkflowStore(ctx);
 	// 固化验证：构造后 ctx 变 stale（Proxy 包裹，访问即抛错）
 	const staleProxy = new Proxy(ctx, {
@@ -107,29 +121,36 @@ console.log("场景 1：固化 cwd（构造后 ctx stale，store 不崩）");
 	const { readFileSync } = await import("node:fs");
 	check(
 		"commitWorkflow 写盘正常（固化 cwd）",
-		JSON.parse(readFileSync(join(dir, ".pi", "workflow", "workflow.json"), "utf8")).stages[0].name === "改过的阶段",
+		JSON.parse(readFileSync(wfFile(dir, "workflow.json"), "utf8")).stages[0].name === "改过的阶段",
 	);
 	// 防 lint 未使用：staleProxy 仅用于模拟（此处不再访问，固化即本测试意义所在）
 	void staleProxy;
 	rmSync(dir, { recursive: true, force: true });
 }
 
-// ---- 场景 2：报告崩溃链复现——旧 store 持有 stale ctx 时，新会话 session_start 调 getStore ----
-console.log("场景 2：getStore 在旧实例 stale 后仍可安全复用/比较");
+// ---- 场景 2：会话切换后的 getStore 比较（纯字符串，不触碰 stale ctx） ----
+console.log("场景 2：getStore 在旧会话 stale 后仍可安全比较/重建");
 {
 	const dir = makeFixture();
-	const freshCtx = { cwd: dir, hasUI: true, mode: "tui", ui: {} };
+	const freshCtx = makeCtx(dir);
 	// 会话 A：首次 getStore（session_start）
 	const s1 = getStore(freshCtx);
-	check("会话 A：首次 getStore 正常", s1.cwd === dir);
+	check("会话 A：首次 getStore 正常", s1.cwd === dir && s1.sid === SID);
 
-	// session 替换：会话 A 的 ctx 被 pi 标记 stale，新会话 B 传入新 ctx（同 cwd）
-	const staleCtxA = makeStaleCtx(); // 会话 A 的 ctx 已 stale（访问即抛错）
-	const freshCtxB = { cwd: dir, hasUI: true, mode: "tui", ui: {} }; // 新会话 B 的新 ctx
-	// 修复前：getStore(freshCtxB) 比较 sessionStore.cwd（动态访问 staleCtxA）→ 崩溃
-	const s2 = getStore(freshCtxB);
-	check("会话 B：getStore 不崩溃（cwd 纯字符串比较）", s2 === s1, "复用同 cwd 实例");
-	check("会话 B：store 仍可读写", s2.getWorkflow().stages.length === 1);
+	// 同会话新 ctx（reload 等）：cwd/sid 均未变 → 复用
+	const s1b = getStore(makeCtx(dir));
+	check("同会话新 ctx：复用实例（纯字符串比较）", s1b === s1);
+
+	// 会话切换（新会话 ID，同 cwd）→ 重建为新实例（数据按会话隔离，不碰 stale ctx）
+	const staleCtxA = makeStaleCtx(); // 旧会话 ctx 已 stale（访问即抛错），仅供语义对照
+	void staleCtxA;
+	const s2 = getStore(makeCtx(dir, "sid-b"));
+	check("会话 B：不同会话 ID → 重建（会话隔离）", s2 !== s1 && s2.sid === "sid-b");
+	check("会话 B：独立空间（读不到会话 A 的工作流）", s2.getWorkflow().stages.length === 0);
+	check("会话 B：可正常读写（空工作流不崩）", !!s2.getState().tasks);
+	// 切回会话 A（再重建）：不因曾遇 stale 会话而崩
+	const s3 = getStore(makeCtx(dir));
+	check("切回会话 A：重建正常", s3 !== s2 && s3.getWorkflow().stages.length === 1);
 	rmSync(dir, { recursive: true, force: true });
 }
 
@@ -138,13 +159,13 @@ console.log("场景 3：cwd 变化自动重建");
 {
 	const dirA = makeFixture();
 	const dirB = makeFixture();
-	const sA = getStore({ cwd: dirA, hasUI: true, mode: "tui", ui: {} });
+	const sA = getStore(makeCtx(dirA));
 	check("项目 A：getStore 正常", sA.cwd === dirA);
 	// 切到项目 B（不同 cwd）→ 重建
-	const sB = getStore({ cwd: dirB, hasUI: true, mode: "tui", ui: {} });
+	const sB = getStore(makeCtx(dirB));
 	check("项目 B：cwd 变化自动重建", sB !== sA && sB.cwd === dirB, `sB===sA: ${sB === sA}`);
 	// 切回项目 A → 再次重建（A 的实例已丢弃）
-	const sA2 = getStore({ cwd: dirA, hasUI: true, mode: "tui", ui: {} });
+	const sA2 = getStore(makeCtx(dirA));
 	check("切回项目 A：重建为新实例", sA2 !== sB && sA2.cwd === dirA);
 	rmSync(dirA, { recursive: true, force: true });
 	rmSync(dirB, { recursive: true, force: true });
@@ -152,6 +173,7 @@ console.log("场景 3：cwd 变化自动重建");
 
 // ---- 清理 ----
 rmSync(BUNDLE, { force: true });
+rmSync(WF_HOME, { recursive: true, force: true });
 
 console.log(failures === 0 ? "\n全部通过 ✓" : `\n${failures} 个断言失败 ✗`);
 process.exit(failures === 0 ? 0 : 1);

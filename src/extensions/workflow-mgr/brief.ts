@@ -1,12 +1,10 @@
 /**
  * workflow-mgr 简报层：给 AI 看的文本视图（不依赖 TUI，非 TUI 模式也能用）
  *
- * - renderBrief：完整状态简报（当前任务+人机分工+交付物+完成信号、下一步、
- *   阻塞项、里程碑、最近决策）——wf_status 的正文，也是
- *   before_agent_start 注入 systemPrompt 时 AI 参考的状态视图
- *   （行为指引只由 before_agent_start 注入，此处不重复）；
+ * - renderBrief：完整状态简报（当前任务+人机分工+交付物+完成信号、下一步、阻塞项）
+ *   ——wf_status 的正文；
  * - summaryLine：一行进度摘要（常驻面板底部状态条 / session_start notify）；
- * - lightState：工具 results 的轻量 details——只带状态摘要与最近记录，
+ * - lightState：工具 results 的轻量 details——只带状态快照与最近日志，
  *   不把 500 条 log 全量塞进会话条目。
  */
 import type { TaskDef, WorkflowState } from "./types";
@@ -36,13 +34,13 @@ export function renderBrief(state: WorkflowState, derived: Derived): string {
 
 	lines.push("【工作流状态】");
 	if (derived.all.length === 0) {
-		lines.push("- 工作流为空：请用 wf_workflow add 规划阶段/任务（含人机分工、交付物、完成信号、依赖）");
+		lines.push("- 工作流为空：请用 wf_workflow import/add 规划阶段与任务（含人机分工、交付物、完成信号、依赖）");
 	} else if (cur) {
 		const stage = derived.stageOf.get(cur.id);
 		const st = state.tasks[cur.id]?.status ?? "todo";
 		const statusText = st === "doing" ? "进行中" : st === "blocked" ? "已阻塞（等外部条件）" : st === "done" ? "已完成" : "待开始";
 		lines.push(`- 当前阶段：${stage?.name ?? "?"}｜当前任务：${cur.id} ${cur.title}（${statusText}）`);
-		// agent 模式（纯 agent 自动驾驶）不显示人类分工（0.3 拍板）
+		// agent 模式（纯 agent 自动驾驶）不显示人类分工
 		if (derived.mode !== "agent") lines.push(`- 用户负责：${cur.humanTasks.join("；") || "（暂无）"}`);
 		lines.push(`- AI 负责：${cur.aiTasks.join("；") || "（暂无）"}`);
 		lines.push(`- 交付物：${cur.deliverable || "（未定义）"}`);
@@ -58,30 +56,14 @@ export function renderBrief(state: WorkflowState, derived: Derived): string {
 		lines.push(`- 阻塞任务：${blocked.map((t) => `${t.id} ${t.title}`).join("、")}`);
 	}
 
-	const milestones = Object.entries(state.milestones)
-		.map(([name, m]) => `${name}${m.done ? "✓" : m.date ? `(${m.date})` : "(未定)"}`)
-		.join(" ");
-	if (milestones) lines.push(`- 里程碑：${milestones}`);
-
-	const activeNotes = state.notes.filter((n) => !n.supersededBy);
-	if (activeNotes.length) {
-		// 全量展示生效记录（已作废的不展示）——让 AI 每次 wf_status 都能发现过时/冲突记录并清理
-		const fmt = activeNotes.map((n) => `${n.id}${n.kind === "status" ? "⏱" : ""}${n.key ? `〈${n.key}〉` : ""} ${truncate(n.content, 50)}`);
-		lines.push(`- 记录（wf_note）：${fmt.join("｜")}`);
-		if (activeNotes.some((n) => n.kind === "status")) {
-			lines.push("  ⏱ = 时效性记录：推进任务前请复核是否仍成立，过时请 wf_note remove/edit");
-		}
-	}
-
 	return lines.join("\n");
 }
 
-/** 一行进度摘要：`进度 3/7｜当前：1.2 xxx`（多工作流场景带槽位标签，default 不带） */
-export function summaryLine(state: WorkflowState, derived: Derived, slot?: string): string {
+/** 一行进度摘要：`📋 进度 3/7 · 当前：1.2 xxx` */
+export function summaryLine(state: WorkflowState, derived: Derived): string {
 	const done = derived.all.filter((t) => state.tasks[t.id]?.status === "done").length;
 	const cur = currentTask(state, derived);
-	const tag = slot && slot !== "default" ? `「${slot}」` : "";
-	return `📋 ${tag}进度 ${done}/${derived.all.length} · 当前：${cur ? cur.id + " " + cur.title : "全部完成"}`;
+	return `📋 进度 ${done}/${derived.all.length} · 当前：${cur ? cur.id + " " + cur.title : "全部完成"}`;
 }
 
 /** 轻量状态视图：工具 results 的 details（不带完整 log） */
@@ -93,9 +75,6 @@ export function lightState(state: WorkflowState) {
 	return {
 		currentTaskId: state.currentTaskId,
 		tasks,
-		milestones: state.milestones,
-		// 只带生效记录（已作废的不进 AI 视野）
-		notes: state.notes.filter((n) => !n.supersededBy).slice(-10),
 		log: state.log.slice(-10),
 	};
 }

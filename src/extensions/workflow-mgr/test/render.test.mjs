@@ -19,9 +19,10 @@
  * 用法：node src/extensions/workflow-mgr/test/render.test.mjs（仓库根目录执行）
  */
 import { build } from "esbuild";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -29,6 +30,25 @@ const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
 const EXT_DIR = join(TEST_DIR, ".."); // src/extensions/workflow-mgr/
 const SRC_DIR = join(EXT_DIR, "../.."); // src/
 const BUNDLE = join(TEST_DIR, ".tmp-bundle.mjs");
+
+/* ---------- 存储路径（与 store.ts 同一套规则，测试自算以便预置/复查文件） ---------- */
+const WF_HOME = mkdtempSync(join(tmpdir(), "wfmg-home-"));
+process.env.PI_WORKFLOW_HOME = WF_HOME;
+const SID = "test-sid";
+
+function projectKey(cwd) {
+	const name = basename(cwd).replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 40) || "project";
+	return `${name}-${createHash("sha1").update(cwd).digest("hex").slice(0, 8)}`;
+}
+function sessionDir(cwd, sid = SID) {
+	return join(WF_HOME, projectKey(cwd), sid);
+}
+/** 会话数据文件路径（workflow.json / state.json） */
+const wfFile = (cwd, name, sid = SID) => join(sessionDir(cwd, sid), name);
+/** 面板开关配置（全局单份） */
+const configFile = () => join(WF_HOME, "config.json");
+/** 项目归档目录 */
+const archiveRoot = (cwd) => join(WF_HOME, projectKey(cwd), "archive");
 
 let failures = 0;
 const check = (name, cond) => {
@@ -102,14 +122,14 @@ function makeCtx(cwd, captures = {}) {
 	};
 }
 
-/** 写 fixture 工作目录 */
+/** 写 fixture 工作目录（工作流数据落在全局 WF_HOME 下，按 cwd + 会话 ID 隔离） */
 function makeFixture(workflowJson, stateJson = null, configJson = null) {
 	const dir = mkdtempSync(join(tmpdir(), "wfmg-test-"));
-	const wfDir = join(dir, ".pi", "workflow");
-	mkdirSync(wfDir, { recursive: true });
-	writeFileSync(join(wfDir, "workflow.json"), JSON.stringify(workflowJson, null, 2), "utf8");
-	if (stateJson) writeFileSync(join(wfDir, "state.json"), JSON.stringify(stateJson, null, 2), "utf8");
-	if (configJson) writeFileSync(join(wfDir, "config.json"), JSON.stringify(configJson, null, 2), "utf8");
+	const sd = sessionDir(dir);
+	mkdirSync(sd, { recursive: true });
+	writeFileSync(join(sd, "workflow.json"), JSON.stringify(workflowJson, null, 2), "utf8");
+	if (stateJson) writeFileSync(join(sd, "state.json"), JSON.stringify(stateJson, null, 2), "utf8");
+	if (configJson) writeFileSync(configFile(), JSON.stringify(configJson, null, 2), "utf8");
 	return dir;
 }
 
@@ -191,12 +211,12 @@ async function scenarioA() {
 		check("菜单行宽 ≤ 100", over.length === 0);
 	}
 	check("未注册别名 /wfmg（只需 /wf-config）", !pi.commands.wfmg);
-	// 子命令已删除（0.4 拍板：只留无参）——任意子命令参数一律走无参浮窗逻辑，不产生状态变更
+	// 只留无参入口——任意子命令参数一律走无参浮窗逻辑，不产生状态变更
 	const caps3 = {};
 	const ctx3 = makeCtx(dir, caps3);
 	await pi.commands["wf-config"].handler("done 0.1", ctx3);
 	check("子命令已删除：done 参数走无参浮窗（不弹子命令逻辑）", caps3.custom !== undefined);
-	const stPath = join(dir, ".pi", "workflow", "state.json");
+	const stPath = wfFile(dir, "state.json");
 	const stAfter = existsSync(stPath) ? JSON.parse(readFile(stPath)) : null;
 	check("子命令不产生状态变更（0.1 仍非 done）", !stAfter || stAfter.tasks["0.1"]?.status !== "done");
 
@@ -213,7 +233,7 @@ async function scenarioA() {
 	check("wf_switch 无参：完成 1.1 并开始 1.2", r3.content[0].text.includes("已完成任务 1.1") && r3.content[0].text.includes("1.2"));
 	const r4 = await sw.execute("4", {}, undefined, undefined, ctx);
 	check("wf_switch 无参：全部完成后提示收尾", r4.content[0].text.includes("全部任务完成"));
-	const stateFile = join(dir, ".pi", "workflow", "state.json");
+	const stateFile = wfFile(dir, "state.json");
 	check("state.json 已落盘", existsSync(stateFile));
 	const saved = JSON.parse(readFile(stateFile));
 	check("state.json 全部任务 done、currentTaskId null", saved.currentTaskId === null && Object.values(saved.tasks).every((t) => t.status === "done"));
@@ -263,16 +283,15 @@ async function scenarioC() {
 	mod.default(pi);
 	// 用默认工作流 + 全 done 的 state
 	const dir = makeFixture({ schemaVersion: 1, stages: [] });
-	rmSync(join(dir, ".pi", "workflow", "workflow.json")); // 回退默认
 	const wf = { schemaVersion: 1, stages: [
 		{ id: "s0", name: "阶段一", goal: "", tasks: [
 			{ id: "1.1", title: "任务甲", desc: "", humanTasks: ["做甲"], aiTasks: ["辅助甲"], deliverable: "d", doneSignal: "s", deps: [] },
 		] },
 	] };
-	writeFileSync(join(dir, ".pi", "workflow", "workflow.json"), JSON.stringify(wf, null, 2), "utf8");
+	writeFileSync(wfFile(dir, "workflow.json"), JSON.stringify(wf, null, 2), "utf8");
 	writeFileSync(
-		join(dir, ".pi", "workflow", "state.json"),
-		JSON.stringify({ schemaVersion: 1, updatedAt: new Date().toISOString(), currentTaskId: "1.1", tasks: { "1.1": { status: "done", doneAt: new Date().toISOString() } }, milestones: {}, notes: [], log: [] }, null, 2),
+		wfFile(dir, "state.json"),
+		JSON.stringify({ schemaVersion: 1, updatedAt: new Date().toISOString(), currentTaskId: "1.1", tasks: { "1.1": { status: "done", doneAt: new Date().toISOString() } }, log: [] }, null, 2),
 		"utf8",
 	);
 	const ctx = makeCtx(dir);
@@ -293,10 +312,10 @@ async function scenarioD() {
 	const ctx = makeCtx(dir, caps);
 	await fireEvent(pi, ctx, "session_start");
 	check("无工作流时不推 widget", caps.widget === undefined || caps.widget.factory === undefined);
-	// 工具仍可用：wf_status 返回示例工作流信息
+	// 工具仍可用：wf_status 提示工作流为空
 	const s = pi.tools.find((t) => t.name === "wf_status");
 	const r = await s.execute("1", {}, undefined, undefined, ctx);
-	check("wf_status 仍可用（提示示例工作流）", r.content[0].text.includes("工作流"));
+	check("wf_status 仍可用（提示工作流为空）", r.content[0].text.includes("工作流为空"));
 	rmSync(dir, { recursive: true, force: true });
 }
 
@@ -308,7 +327,7 @@ async function scenarioE() {
 	mod.default(pi);
 	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
 	writeFileSync(
-		join(dir, ".pi", "workflow", "state.json"),
+		wfFile(dir, "state.json"),
 		JSON.stringify(
 			{
 				schemaVersion: 1,
@@ -320,8 +339,6 @@ async function scenarioE() {
 					"1.1": { status: "todo" },
 					"1.2": { status: "todo" },
 				},
-				milestones: {},
-				notes: [],
 				log: [],
 			},
 			null,
@@ -347,7 +364,7 @@ async function scenarioF() {
 	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
 	const caps = {};
 	const ctx = makeCtx(dir, caps);
-	await fireEvent(pi, ctx, "session_start"); // 真实生命周期：session_start 先行（自动绑定 default 槽）
+	await fireEvent(pi, ctx, "session_start"); // 真实生命周期：session_start 先行（加载本会话工作流）
 	await pi.commands["wf-config"].handler("", ctx);
 	check("无参数 /wf-config 打开统一菜单", !!caps.custom);
 	let closed = false;
@@ -366,12 +383,13 @@ async function scenarioF() {
 	comp.handleInput("\x1b[B");
 	comp.handleInput("\r");
 	check("开关切换触发 notify", caps.notify?.text.includes("常驻面板已关闭"));
-	const cfg = JSON.parse(readFile(join(dir, ".pi", "workflow", "config.json")));
+	const cfg = JSON.parse(readFile(configFile()));
 	check("config.json 持久化 showPanel=false", cfg.showPanel === false);
 
 	// Esc（\x1b）关闭浮窗
 	comp.handleInput("\x1b");
 	check("Esc 关闭浮窗", closed);
+	rmSync(configFile(), { force: true }); // 面板开关是全局单份：复位，避免影响后续场景
 	rmSync(dir, { recursive: true, force: true });
 }
 
@@ -417,8 +435,6 @@ async function scenarioH() {
 		updatedAt: new Date().toISOString(),
 		currentTaskId: "0.1",
 		tasks: { "0.1": { status: "todo" }, "0.2": { status: "todo" }, "1.1": { status: "todo" }, "1.2": { status: "todo" } },
-		milestones: { 面板验收: { done: true }, 布局定稿: { done: false } },
-		notes: [],
 		log: [],
 	});
 	const caps = {};
@@ -438,21 +454,12 @@ async function scenarioH() {
 	check("含当前任务 0.1", lines.some((l) => l.includes("0.1")));
 	check("含分工行", lines.some((l) => l.includes("你:")) && lines.some((l) => l.includes("AI:")));
 	check("含进度条块元素", lines[0].includes("░"));
-	check("含里程碑（✓/▶ 三态）", lines.some((l) => l.includes("里程碑") && l.includes("✓") && l.includes("▶")));
 	// 常驻面板开关联动：showPanel=false → provider 注销（hud 底部行隐藏）
-	writeFileSync(
-		join(dir, ".pi", "workflow", "config.json"),
-		JSON.stringify({ schemaVersion: 1, showPanel: false }, null, 2),
-		"utf8",
-	);
+	writeFileSync(configFile(), JSON.stringify({ schemaVersion: 1, showPanel: false }, null, 2), "utf8");
 	await fireEvent(pi, ctx, "session_start");
 	check("showPanel=false → provider 注销", registered === null);
 	// 重新开启 → 恢复注册
-	writeFileSync(
-		join(dir, ".pi", "workflow", "config.json"),
-		JSON.stringify({ schemaVersion: 1, showPanel: true }, null, 2),
-		"utf8",
-	);
+	writeFileSync(configFile(), JSON.stringify({ schemaVersion: 1, showPanel: true }, null, 2), "utf8");
 	await fireEvent(pi, ctx, "session_start");
 	check("showPanel=true → 重新注册", typeof registered === "function");
 	// 模拟 /hud 关闭：标记置 false + 派发 hud:state-change → workflow-mgr 注销底部行、恢复自绘面板
@@ -463,6 +470,7 @@ async function scenarioH() {
 	// 清理全局
 	delete globalThis.__PI_HUD_API__;
 	delete globalThis.__PI_HUD_ACTIVE__;
+	rmSync(configFile(), { force: true }); // 面板开关全局单份：复位
 	rmSync(dir, { recursive: true, force: true });
 }
 
@@ -479,9 +487,9 @@ async function scenarioI() {
 	check("归档前推送常驻 widget", !!caps.widget?.factory);
 	const t = pi.tools.find((x) => x.name === "wf_workflow");
 	const r = await t.execute("1", { action: "archive" }, undefined, undefined, ctx);
-	check("归档结果告知数据位置（对 AI 透明）", r.content[0].text.includes(".pi/workflow/archive/"));
-	check("归档后当前区无 workflow.json", !existsSync(join(dir, ".pi", "workflow", "workflow.json")));
-	const base = join(dir, ".pi", "workflow", "archive");
+	check("归档结果告知数据位置（对 AI 透明）", r.content[0].text.includes("归档目录"));
+	check("归档后当前区无 workflow.json", !existsSync(wfFile(dir, "workflow.json")));
+	const base = archiveRoot(dir);
 	check("归档目录留档（至少 workflow.json）", readdirSync(base).some((d) => readdirSync(join(base, d)).includes("workflow.json")));
 	const archState = JSON.parse(readFile(join(base, readdirSync(base)[0], "state.json")));
 	check("归档快照保留任务真实状态（不强制 done）", !Object.values(archState.tasks).every((t) => t.status === "done"));
@@ -535,24 +543,22 @@ async function scenarioJ() {
 			"1.1": { status: "blocked", blockReason: "等数据" },
 			"1.2": { status: "todo" },
 		},
-		milestones: {},
-		notes: [],
 		log: [],
 	});
 	const ctx = makeCtx(dir);
-	await fireEvent(pi, ctx, "session_start"); // 自动绑定 default 槽（真实生命周期）
+	await fireEvent(pi, ctx, "session_start"); // 加载本会话工作流（真实生命周期）
 	const sw = pi.tools.find((t) => t.name === "wf_switch");
 
 	// 1. 显式切换到一个 blocked 任务：完成当前 0.2 + 解除 1.1 阻塞并开始（1.1 依赖 0.2，当前任务即将完成不算阻塞）
 	const r1 = await sw.execute("1", { taskId: "1.1" }, undefined, undefined, ctx);
 	check("switch 到 blocked 任务：完成 0.2 + 解除阻塞开始 1.1", r1.content[0].text.includes("已完成任务 0.2") && r1.content[0].text.includes("1.1"));
-	let saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	let saved = JSON.parse(readFile(wfFile(dir, "state.json")));
 	check("0.2 完成、1.1 doing 且 blockReason 清除", saved.tasks["0.2"]?.status === "done" && saved.tasks["1.1"]?.status === "doing" && !saved.tasks["1.1"].blockReason);
 
 	// 2. 搁置转移：complete=false 切到 1.2（依赖 0.2 已 done）→ 1.1 回 todo
 	const r2 = await sw.execute("2", { taskId: "1.2", complete: false }, undefined, undefined, ctx);
 	check("complete=false 搁置 1.1 并切到 1.2", r2.content[0].text.includes("搁置任务 1.1") && r2.content[0].text.includes("1.2"));
-	saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	saved = JSON.parse(readFile(wfFile(dir, "state.json")));
 	check("搁置后 1.1 回 todo、currentTaskId=1.2", saved.tasks["1.1"]?.status === "todo" && saved.currentTaskId === "1.2");
 
 	// 3. 切回 1.1（依赖 0.2 done）：完成 1.2 + 开始 1.1
@@ -568,7 +574,7 @@ async function scenarioJ() {
 	// 5. 无参 switch 推进到无下一个 → 全部完成收尾
 	const r6 = await sw.execute("6", {}, undefined, undefined, ctx);
 	check("无参 switch 全部完成后提示收尾", r6.content[0].text.includes("全部任务完成"));
-	saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	saved = JSON.parse(readFile(wfFile(dir, "state.json")));
 	check("全部任务 done、currentTaskId null", saved.currentTaskId === null && Object.values(saved.tasks).every((t) => t.status === "done"));
 	rmSync(dir, { recursive: true, force: true });
 }
@@ -590,8 +596,6 @@ async function scenarioK() {
 			"1.1": { status: "todo" },
 			"1.2": { status: "todo" },
 		},
-		milestones: {},
-		notes: [],
 		log: [],
 	});
 	const ctx = makeCtx(dir);
@@ -599,7 +603,7 @@ async function scenarioK() {
 	const t = pi.tools.find((x) => x.name === "wf_workflow");
 	const r = await t.execute("1", { action: "archive", status: "放弃：方案 ROI 不足" }, undefined, undefined, ctx);
 	check("归档返回含收尾状态描述", r.content[0].text.includes("放弃：方案 ROI 不足"));
-	const base = join(dir, ".pi", "workflow", "archive");
+	const base = archiveRoot(dir);
 	const archState = JSON.parse(readFile(join(base, readdirSync(base)[0], "state.json")));
 	check("放弃场景：任务状态原样保留（doing/todo 不被强制 done）", archState.tasks["0.1"]?.status === "doing" && archState.tasks["0.2"]?.status === "todo");
 	check("归档快照记录 archiveStatus", archState.archiveStatus === "放弃：方案 ROI 不足");
@@ -607,43 +611,12 @@ async function scenarioK() {
 	rmSync(dir, { recursive: true, force: true });
 }
 
-/* ============================== 场景 L：里程碑删除/改名 + 分工多项渲染 ============================== */
+/* ============================== 场景 L：分工多项渲染 ============================== */
 async function scenarioL() {
-	console.log("\n场景 L：wf_milestone 删除/改名 + 分工多项渲染");
+	console.log("\n场景 L：分工多项渲染（human-ai 模式）");
 	const mod = await importBundle();
 	const pi = makePi();
 	mod.default(pi);
-	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE, {
-		schemaVersion: 1,
-		updatedAt: new Date().toISOString(),
-		currentTaskId: "0.1",
-		tasks: {
-			"0.1": { status: "doing", startedAt: new Date().toISOString() },
-			"0.2": { status: "todo" },
-			"1.1": { status: "todo" },
-			"1.2": { status: "todo" },
-		},
-		milestones: { 开题: { done: true }, 中期: { date: "2026-05-01" } },
-		notes: [],
-		log: [],
-	});
-	const ctx = makeCtx(dir);
-	await fireEvent(pi, ctx, "session_start");
-	const ms = pi.tools.find((t) => t.name === "wf_milestone");
-
-	// 增（缺省行为）→ 改 → 改名 → 删除
-	await ms.execute("1", { name: "答辩" }, undefined, undefined, ctx);
-	await ms.execute("2", { name: "中期", done: true }, undefined, undefined, ctx);
-	const r3 = await ms.execute("3", { name: "中期", newName: "中期答辩" }, undefined, undefined, ctx);
-	check("里程碑改名（保留日期/完成态）", r3.content[0].text.includes("改名为") && r3.content[0].text.includes("中期答辩"));
-	const r4 = await ms.execute("4", { name: "开题", remove: true }, undefined, undefined, ctx);
-	check("里程碑删除", r4.content[0].text.includes("已删除"));
-	const r5 = await ms.execute("5", { name: "不存在的里程碑", remove: true }, undefined, undefined, ctx);
-	check("删除不存在里程碑报错", r5.details?.kind === "error");
-	let saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
-	check("删除/改名后状态正确", !saved.milestones["开题"] && !saved.milestones["中期"] && saved.milestones["中期答辩"]?.done === true && saved.milestones["答辩"]);
-
-	// 分工多项渲染：构造多项分工的任务，widget 分工行应「、」连接
 	const wfMulti = {
 		schemaVersion: 1,
 		stages: [
@@ -657,23 +630,20 @@ async function scenarioL() {
 			},
 		],
 	};
-	const dir2 = makeFixture(wfMulti, {
+	const dir = makeFixture(wfMulti, {
 		schemaVersion: 1,
 		updatedAt: new Date().toISOString(),
 		currentTaskId: "0.1",
 		tasks: { "0.1": { status: "doing", startedAt: new Date().toISOString() } },
-		milestones: {},
-		notes: [],
 		log: [],
 	});
 	const caps = {};
-	const ctx2 = makeCtx(dir2, caps);
-	const lines = assertWidget(pi, ctx2, "分工多项 widget");
+	const ctx = makeCtx(dir, caps);
+	const lines = assertWidget(pi, ctx, "分工多项 widget");
 	if (lines) {
 		check("分工行多项「、」连接", lines.some((l) => l.includes("你:") && l.includes("、")) && lines.some((l) => l.includes("AI:") && l.includes("、")));
 	}
 	rmSync(dir, { recursive: true, force: true });
-	rmSync(dir2, { recursive: true, force: true });
 }
 
 /* ============================== 场景 M：纯 agent 模式 ============================== */
@@ -703,8 +673,6 @@ async function scenarioM() {
 		updatedAt: new Date().toISOString(),
 		currentTaskId: "0.1",
 		tasks: { "0.1": { status: "doing", startedAt: new Date().toISOString() }, "0.2": { status: "todo" } },
-		milestones: {},
-		notes: [],
 		log: [],
 	});
 	const ctx = makeCtx(dir);
@@ -732,7 +700,7 @@ async function scenarioM() {
 	await sw.execute("2", {}, undefined, undefined, ctx);
 	const r3 = await sw.execute("3", {}, undefined, undefined, ctx);
 	check("agent 模式 switch 推进到全部完成", r3.content[0].text.includes("全部任务完成"));
-	const saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	const saved = JSON.parse(readFile(wfFile(dir, "state.json")));
 	check("全部 done + currentTaskId null", saved.currentTaskId === null && Object.values(saved.tasks).every((t) => t.status === "done"));
 	rmSync(dir, { recursive: true, force: true });
 }
@@ -771,40 +739,25 @@ async function scenarioN() {
 	rmSync(dir3, { recursive: true, force: true });
 }
 
-/* ============================== 场景 O：wf_note 增删读改 ============================== */
+/* ============================== 场景 O：工具面（旧工具已移除） ============================== */
 async function scenarioO() {
-	console.log("\n场景 O：wf_note 增删读改（AI 记录，对用户透明）");
+	console.log("\n场景 O：工具面（5 个 wf_* 工具，记录/里程碑/绑定已移除）");
 	const mod = await importBundle();
 	const pi = makePi();
 	mod.default(pi);
-	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
-	const ctx = makeCtx(dir);
-	await fireEvent(pi, ctx, "session_start");
-	const note = pi.tools.find((t) => t.name === "wf_note");
-	check("注册了 wf_note（wf_decision 已删除）", !!note && !pi.tools.find((t) => t.name === "wf_decision"));
-
-	// add：自动 id n1/n2
-	const r1 = await note.execute("1", { action: "add", content: "用户选择 X 方案" }, undefined, undefined, ctx);
-	check("add 自动 id n1", r1.content[0].text.includes("n1"));
-	await note.execute("2", { action: "add", content: "不要用 Redis" }, undefined, undefined, ctx);
-
-	// list
-	const r3 = await note.execute("3", { action: "list" }, undefined, undefined, ctx);
-	const lm = /共 (\d+) 条/.exec(r3.content[0].text);
-	check("list 含两条记录", !!lm && lm[1] === "2" && r3.content[0].text.includes("X 方案"));
-
-	// edit / remove
-	const r4 = await note.execute("4", { action: "edit", id: "n1", content: "用户最终选择 Y 方案" }, undefined, undefined, ctx);
-	check("edit 修改 n1", r4.content[0].text.includes("已修改 n1"));
-	const r5 = await note.execute("5", { action: "remove", id: "n2" }, undefined, undefined, ctx);
-	check("remove 删除 n2", r5.content[0].text.includes("已删除 n2"));
-	const saved = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
-	check("state notes 只剩 n1 且内容已更新", saved.notes.length === 1 && saved.notes[0].id === "n1" && saved.notes[0].content.includes("Y"));
-
-	// 报错：删除不存在
-	const r6 = await note.execute("6", { action: "remove", id: "n99" }, undefined, undefined, ctx);
-	check("删除不存在记录报错", r6.details?.kind === "error");
-	rmSync(dir, { recursive: true, force: true });
+	const names = pi.tools.map((x) => x.name).sort();
+	check("恰好注册 5 个工具：" + names.join(","), names.length === 5);
+	check(
+		"工具清单正确",
+		JSON.stringify(names) === JSON.stringify(["wf_block", "wf_rollback", "wf_status", "wf_switch", "wf_workflow"]),
+	);
+	for (const gone of ["wf_note", "wf_milestone", "wf_decision"]) {
+		check(`已移除 ${gone}`, !pi.tools.find((x) => x.name === gone));
+	}
+	const wf = pi.tools.find((x) => x.name === "wf_workflow");
+	const actionSchema = JSON.stringify(wf.parameters.properties.action);
+	check("wf_workflow 无 bind/reset 动作", actionSchema.includes("list") && !actionSchema.includes("bind") && !actionSchema.includes("reset"));
+	check("命令面：/wf 与 /wf-config（无 /wf resume 子命令）", !!pi.commands["wf"] && !!pi.commands["wf-config"]);
 }
 
 /* ============================== 场景 Q：wf_workflow import 一次性导入 ============================== */
@@ -813,10 +766,10 @@ async function scenarioQ() {
 	const mod = await importBundle();
 	const pi = makePi();
 	mod.default(pi);
+	const t = pi.tools.find((x) => x.name === "wf_workflow");
 	const dir = makeFixture({ schemaVersion: 1, stages: [] });
 	const ctx = makeCtx(dir);
 	await fireEvent(pi, ctx, "session_start");
-	const t = pi.tools.find((x) => x.name === "wf_workflow");
 
 	// 1. 成功导入：2 阶段 3 任务（批内依赖 0.2→0.1、跨阶段 1.1→0.2；mode agent）
 	const draftPath = join(dir, "draft.json");
@@ -837,43 +790,50 @@ async function scenarioQ() {
 	);
 	const r1 = await t.execute("1", { action: "import", path: draftPath }, undefined, undefined, ctx);
 	check("导入返回阶段/任务摘要", r1.content[0].text.includes("2 个阶段") && r1.content[0].text.includes("3 个任务") && r1.content[0].text.includes("纯 agent"));
-	const wf = JSON.parse(readFile(join(dir, ".pi", "workflow", "workflow.json")));
+	const wf = JSON.parse(readFile(wfFile(dir, "workflow.json")));
 	check("导入生成 workflow.json：阶段与 id 正确", wf.stages.length === 2 && wf.stages[0].tasks[0].id === "0.1" && wf.stages[1].tasks[0].id === "1.1");
 	check("导入 mode 生效", wf.mode === "agent");
 	check("批内未来 id 依赖解析正确", wf.stages[0].tasks[1].deps[0] === "0.1" && wf.stages[1].tasks[0].deps[0] === "0.2");
-	const st = JSON.parse(readFile(join(dir, ".pi", "workflow", "state.json")));
+	const st = JSON.parse(readFile(wfFile(dir, "state.json")));
 	check("导入后当前任务 = 第一步 0.1", st.currentTaskId === "0.1");
 
-	// 2. 非空拒绝：已导入（非空）后再 import → 报错
+	// 2. 非空拒绝：已导入（非空）后再 import → 报错并提示先 archive
 	const r2 = await t.execute("2", { action: "import", path: draftPath }, undefined, undefined, ctx);
-	check("非空时拒绝导入", r2.details?.kind === "error" && r2.content[0].text.includes("非空"));
+	check("非空时拒绝导入", r2.details?.kind === "error" && r2.content[0].text.includes("非空") && r2.content[0].text.includes("archive"));
 
-	// 3. reset 后坏 JSON → 行号定位
-	await t.execute("3", { action: "reset" }, undefined, undefined, ctx);
-	const badPath = join(dir, "bad.json");
+	// 3. 空工作流上的坏 JSON → 行号定位
+	const dirBad = makeFixture({ schemaVersion: 1, stages: [] });
+	const ctxBad = makeCtx(dirBad);
+	const badPath = join(dirBad, "bad.json");
 	writeFileSync(badPath, '{\n  "stages": [\n    {"name": "x", "tasks": [}\n  ]\n}');
-	const r3 = await t.execute("4", { action: "import", path: badPath }, undefined, undefined, ctx);
+	const r3 = await t.execute("3", { action: "import", path: badPath }, undefined, undefined, ctxBad);
 	check("坏 JSON 报解析失败（含行号）", r3.details?.kind === "error" && r3.content[0].text.includes("解析失败") && /\d+ 行/.test(r3.content[0].text));
 
 	// 4. 缺 title → 定位到阶段/任务
-	const missPath = join(dir, "miss.json");
+	const dirMiss = makeFixture({ schemaVersion: 1, stages: [] });
+	const ctxMiss = makeCtx(dirMiss);
+	const missPath = join(dirMiss, "miss.json");
 	writeFileSync(missPath, JSON.stringify({ stages: [{ name: "A", tasks: [{ title: "ok" }, { desc: "缺 title" }] }] }));
-	const r4 = await t.execute("5", { action: "import", path: missPath }, undefined, undefined, ctx);
+	const r4 = await t.execute("4", { action: "import", path: missPath }, undefined, undefined, ctxMiss);
 	check("缺 title 校验定位到任务", r4.details?.kind === "error" && r4.content[0].text.includes("第 1 个阶段的第 2 个任务缺 title"));
 
 	// 5. 依赖不存在 → 报可用 id
-	const depPath = join(dir, "dep.json");
+	const dirDep = makeFixture({ schemaVersion: 1, stages: [] });
+	const ctxDep = makeCtx(dirDep);
+	const depPath = join(dirDep, "dep.json");
 	writeFileSync(depPath, JSON.stringify({ stages: [{ name: "A", tasks: [{ title: "x", deps: ["9.9"] }] }] }));
-	const r5 = await t.execute("6", { action: "import", path: depPath }, undefined, undefined, ctx);
+	const r5 = await t.execute("5", { action: "import", path: depPath }, undefined, undefined, ctxDep);
 	check("依赖不存在报错（含可用 id）", r5.details?.kind === "error" && r5.content[0].text.includes("9.9") && r5.content[0].text.includes("0.1"));
 
 	// 6. 依赖环 → 带链路
-	const cycPath = join(dir, "cyc.json");
+	const dirCyc = makeFixture({ schemaVersion: 1, stages: [] });
+	const ctxCyc = makeCtx(dirCyc);
+	const cycPath = join(dirCyc, "cyc.json");
 	writeFileSync(cycPath, JSON.stringify({ stages: [{ name: "A", tasks: [{ title: "a", deps: ["0.2"] }, { title: "b", deps: ["0.1"] }] }] }));
-	const r6 = await t.execute("7", { action: "import", path: cycPath }, undefined, undefined, ctx);
+	const r6 = await t.execute("6", { action: "import", path: cycPath }, undefined, undefined, ctxCyc);
 	check("依赖环报错带链路", r6.details?.kind === "error" && r6.content[0].text.includes("0.1 → 0.2"));
 
-	rmSync(dir, { recursive: true, force: true });
+	for (const d of [dir, dirBad, dirMiss, dirDep, dirCyc]) rmSync(d, { recursive: true, force: true });
 }
 
 /* ============================== 工具：bundle + 加载 ============================== */
@@ -922,209 +882,47 @@ const DEFAULT_WORKFLOW_FIXTURE = {
 	],
 };
 
-/* ============================== 场景 R：多工作流槽位与会话绑定 ============================== */
+/* ============================== 场景 R：工作流按会话隔离 ============================== */
 async function scenarioR() {
-	console.log("\n场景 R：多工作流槽位（并发隔离 + bind 绑定/拒绝/守卫）");
+	console.log("\n场景 R：工作流按会话隔离（同项目多会话互不干扰 + resume 带回）");
 	const mod = await importBundle();
 	const pi = makePi();
 	mod.default(pi);
-	// default 槽有工作流；另有命名槽 beta（slots/beta/ 下有自己的工作流）
 	const dir = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
-	const betaDir = join(dir, ".pi", "workflow", "slots", "beta");
-	mkdirSync(betaDir, { recursive: true });
-	writeFileSync(
-		join(betaDir, "workflow.json"),
-		JSON.stringify({
-			schemaVersion: 1,
-			stages: [{ id: "s0", name: "贝塔", goal: "", tasks: [{ id: "0.1", title: "贝塔任务", desc: "", humanTasks: [], aiTasks: [], deliverable: "", doneSignal: "", deps: [] }] }],
-		}),
-		"utf8",
-	);
-	const ctx = makeCtx(dir);
-	ctx.hasUI = false; // 非 TUI：session_start 不弹选择框，保持未绑定（TUI 弹窗路径在步骤 8 另测）
 	const wf = pi.tools.find((x) => x.name === "wf_workflow");
 	const st = pi.tools.find((x) => x.name === "wf_status");
+	const sw = pi.tools.find((x) => x.name === "wf_switch");
 
-	// 1. 多槽时 session_start 不自动绑定 → 工具被守卫拒绝 + before_agent_start 注入选择指引（非 TUI 兜底）
-	await fireEvent(pi, ctx, "session_start");
-	const r0 = await st.execute("0", {}, undefined, undefined, ctx);
-	check("多槽未绑定：wf_status 被守卫拒绝并引导 bind", r0.details?.kind === "error" && r0.content[0].text.includes("尚未选择工作流"));
-	const inject = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx);
-	check("未绑定注入选择指引（含两个槽位）", inject.systemPrompt.includes("尚未绑定") && inject.systemPrompt.includes("beta") && inject.systemPrompt.includes("default"));
-	// 2. bind 无参 → 列出可选与当前绑定
-	const r1 = await wf.execute("1", { action: "bind" }, undefined, undefined, ctx);
-	check("bind 无参列出可选工作流", r1.content[0].text.includes("beta") && r1.content[0].text.includes("未绑定"));
+	// 会话 A：自己的 4 任务工作流，推进一次
+	const ctxA = makeCtx(dir);
+	await fireEvent(pi, ctxA, "session_start");
+	await sw.execute("1", {}, undefined, undefined, ctxA);
+	const savedA = JSON.parse(readFile(wfFile(dir, "state.json")));
+	check("会话 A 状态落盘（0.1 done）", savedA.tasks["0.1"]?.status === "done");
 
-	// 3. 非法名拒绝
-	const r2 = await wf.execute("2", { action: "bind", slot: ".." }, undefined, undefined, ctx);
-	check("非法槽位名拒绝", r2.details?.kind === "error" && r2.content[0].text.includes("不合法"));
-
-	// 4. 绑定 beta → wf_status 读 beta 槽（贝塔任务），default 数据不受影响
-	const r3 = await wf.execute("3", { action: "bind", slot: "beta" }, undefined, undefined, ctx);
-	check("绑定 beta 成功并显示其进度", r3.content[0].text.includes("beta") && r3.content[0].text.includes("贝塔任务"));
-	const r4 = await st.execute("4", {}, undefined, undefined, ctx);
-	check("wf_status 作用于绑定槽（贝塔任务）", r4.content[0].text.includes("贝塔任务"));
-	// 推进一次 → beta 槽独立落盘；default 槽全程未被触碰（连 state.json 都不应被创建）
-	const swR = pi.tools.find((x) => x.name === "wf_switch");
-	await swR.execute("4b", {}, undefined, undefined, ctx);
-	const betaState = JSON.parse(readFile(join(betaDir, "state.json")));
-	check("beta 槽状态独立落盘（0.1 done）", betaState.tasks["0.1"]?.status === "done");
-	check("default 槽未被干扰（未创建 state.json）", !existsSync(join(dir, ".pi", "workflow", "state.json")));
-
-	// 5. 绑定持久化：同 sid 的新 ctx（模拟 /reload 后）仍绑定 beta
-	const ctx2 = makeCtx(dir);
-	const r5 = await st.execute("5", {}, undefined, undefined, ctx2);
-	// beta 槽唯一任务已在 4b 完成 → 「全部任务已完成」；若绑定丢失回落 default 会显示其待办任务
-	check("绑定跨 ctx 保持（bindings.json 持久化）", r5.details?.kind !== "error" && r5.content[0].text.includes("全部任务已完成"));
-
-	// 6. bind none → 守卫拒绝并提示「不使用工作流」
-	await wf.execute("6", { action: "bind", slot: "none" }, undefined, undefined, ctx);
-	const r6 = await st.execute("7", {}, undefined, undefined, ctx);
-	check("bind none 后工具拒绝（不使用工作流）", r6.details?.kind === "error" && r6.content[0].text.includes("不使用工作流"));
-	const inject2 = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx);
-	check("bind none 后零注入", inject2 === undefined || !inject2.systemPrompt?.includes("【工作流】"));
-
-	// 7. 并发侦测：其他活跃会话已绑定（pair-guard 注册表活心跳）→ 新会话不自动绑定
-	const dir2 = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
-	writeFileSync(
-		join(dir2, ".pi", "workflow", "bindings.json"),
-		JSON.stringify({ schemaVersion: 1, sessions: { "sid-a": { slot: "default", at: Date.now() } } }),
-		"utf8",
-	);
-	const sessDir = join(dir2, ".pi", "sessions");
-	mkdirSync(sessDir, { recursive: true });
-	writeFileSync(join(sessDir, "sid-a.json"), JSON.stringify({ sessionId: "sid-a", lastBeat: Date.now() }), "utf8");
-	const ctxB = makeCtx(dir2);
-	ctxB.hasUI = false;
+	// 会话 B（同项目、另一个会话 ID）：读不到 A 的数据，面板隐藏
+	const capsB = {};
+	const ctxB = makeCtx(dir, capsB);
 	ctxB.sessionManager = { getSessionId: () => "sid-b" };
 	await fireEvent(pi, ctxB, "session_start");
-	const r7 = await st.execute("8", {}, undefined, undefined, ctxB);
-	check("有其他活跃绑定会话时新会话不自动绑定", r7.details?.kind === "error" && r7.content[0].text.includes("尚未选择工作流"));
+	const rB = await st.execute("2", {}, undefined, undefined, ctxB);
+	check("会话 B 读不到会话 A 的工作流（工作流为空）", rB.content[0].text.includes("工作流为空"));
+	check("会话 B 无工作流时不推面板", capsB.widget?.factory === undefined);
+	// 会话 B 规划自己的任务 → 独立落盘，不影响 A
+	await wf.execute("3", { action: "add", stageId: "s0", stageName: "B 阶段", title: "B 任务" }, undefined, undefined, ctxB);
+	const savedB = JSON.parse(readFile(wfFile(dir, "workflow.json", "sid-b")));
+	check("会话 B 独立落盘自己的 workflow.json", savedB.stages[0].tasks[0].title === "B 任务");
+	const savedA2 = JSON.parse(readFile(wfFile(dir, "state.json")));
+	check("会话 A 数据未被会话 B 干扰", savedA2.tasks["0.1"]?.status === "done");
 
-	// 8. TUI 弹窗路径：多槽时 session_start 弹选择浮窗——数字直选「新建」+ 输入名称 → 绑定新槽
-	const dir3 = makeFixture(DEFAULT_WORKFLOW_FIXTURE, {
-		schemaVersion: 1,
-		updatedAt: new Date().toISOString(),
-		currentTaskId: "0.1",
-		tasks: { "0.1": { status: "todo" }, "0.2": { status: "todo" }, "1.1": { status: "todo" }, "1.2": { status: "todo" } },
-		milestones: {},
-		notes: [],
-		log: [],
-	});
-	const beta3 = join(dir3, ".pi", "workflow", "slots", "beta");
-	mkdirSync(beta3, { recursive: true });
-	writeFileSync(
-		join(beta3, "workflow.json"),
-		JSON.stringify({ schemaVersion: 1, stages: [{ id: "s0", name: "贝塔", goal: "", tasks: [] }] }),
-		"utf8",
-	);
-	const caps8 = {};
-	const ctx8 = makeCtx(dir3, caps8);
-	caps8.customKeys = ["5"]; // 数字直选第 5 项 = ＋ 新建工作流…（1 暂不启用 2 resume 3 default 4 beta 5 新建）
-	caps8.inputAnswer = "gamma";
-	await fireEvent(pi, ctx8, "session_start");
-	check("多槽 TUI：session_start 弹出自绘选择浮窗", typeof caps8.custom === "function");
-	// 渲染断言：通用/工作流分组 + 边框 + 默认高亮 + 行宽
-	const comp8 = caps8.custom(null, themeMock, {}, () => {});
-	const lines8 = comp8.render(70);
-	check("选择浮窗圆角边框", lines8[0].includes("╭") && lines8[lines8.length - 1].includes("╰"));
-	check("通用操作与实际工作流分区呈现", lines8.some((l) => l.includes("通用")) && lines8.some((l) => l.includes("工作流（2）")));
-	check("分区之间含分隔线", lines8.some((l) => l.includes("───")));
-	check("暂不启用默认高亮（▶）", lines8.some((l) => l.includes("▶") && l.includes("暂不启用")));
-	check("槽位行带进度摘要", lines8.some((l) => l.includes("default")) && lines8.some((l) => l.includes("进度")));
-	check(
-		"浮窗行宽 ≤ 70",
-		lines8.map((l) => visibleWidth(l)).every((w) => w <= 70),
-	);
-	check("新建名称经 input 收集", caps8.input !== undefined && caps8.inputAnswer === "gamma");
-	const bound8 = JSON.parse(readFile(join(dir3, ".pi", "workflow", "bindings.json")));
-	check("选择「新建 gamma」后绑定落盘", bound8.sessions["test-sid"]?.slot === "gamma");
-	check("新建空槽 notify 引导规划", caps8.notify?.text.includes("gamma"));
-	const r8 = await st.execute("9", {}, undefined, undefined, ctx8);
-	check("绑定后 wf_status 可用（空槽引导文案）", r8.details?.kind !== "error" && r8.content[0].text.includes("工作流为空"));
-
-	// 9. TUI 弹窗 Esc（selectAnswer undefined）= 暂不启用 → 绑定 "auto"（不占槽、是否使用交由 AI）
-	const dir4 = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
-	const beta4 = join(dir4, ".pi", "workflow", "slots", "beta");
-	mkdirSync(beta4, { recursive: true });
-	writeFileSync(
-		join(beta4, "workflow.json"),
-		JSON.stringify({ schemaVersion: 1, stages: [{ id: "s0", name: "贝塔", goal: "", tasks: [{ id: "0.1", title: "贝塔任务", desc: "", humanTasks: [], aiTasks: [], deliverable: "", doneSignal: "", deps: [] }] }] }),
-		"utf8",
-	);
-	const caps9 = {};
-	const ctx9 = makeCtx(dir4, caps9);
-	caps9.customKeys = ["\x1b"]; // Esc = 暂不启用（与旧选择框语义一致）
-	await fireEvent(pi, ctx9, "session_start");
-	const bound9 = JSON.parse(readFile(join(dir4, ".pi", "workflow", "bindings.json")));
-	check("浮窗 Esc 视同暂不启用", typeof caps9.custom === "function" && caps9.notify?.text.includes("暂不启用"));
-	check("暂不启用绑定值为 auto（不占槽位）", bound9.sessions["test-sid"]?.slot === "auto");
-	const r9 = await st.execute("10", {}, undefined, undefined, ctx9);
-	check("auto 态工具拒绝并说明由 AI 判断是否使用",
-		r9.details?.kind === "error" && r9.content[0].text.includes("暂不启用") && r9.content[0].text.includes("action=bind"));
-	const inject9 = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx9);
-	check("auto 态零注入（不打扰 AI 自行判断）", inject9 === undefined || !inject9.systemPrompt?.includes("【工作流】"));
-	// AI 自行决定使用工作流：bind 具体槽位即可（无需用户再拍板）
-	await wf.execute("10b", { action: "bind", slot: "beta" }, undefined, undefined, ctx9);
-	const r9b = await st.execute("10c", {}, undefined, undefined, ctx9);
-	check("auto 态下 AI 可自行 bind 启用", r9b.details?.kind !== "error");
-	const inject9b = await pi.events.before_agent_start({ systemPrompt: "SYS" }, ctx9);
-	check("自行 bind 后恢复注入", inject9b.systemPrompt?.includes("【工作流】"));
-
-	// 9b. 选择「从 resume 中加载」→ 不写本会话绑定、派发 /wf resume 命令（内部入口）
-	const dirR = makeFixture(DEFAULT_WORKFLOW_FIXTURE);
-	const betaR = join(dirR, ".pi", "workflow", "slots", "beta");
-	mkdirSync(betaR, { recursive: true });
-	writeFileSync(
-		join(betaR, "workflow.json"),
-		JSON.stringify({ schemaVersion: 1, stages: [{ id: "s0", name: "贝塔", goal: "", tasks: [{ id: "0.1", title: "贝塔任务", desc: "", humanTasks: [], aiTasks: [], deliverable: "", doneSignal: "", deps: [] }] }] }),
-		"utf8",
-	);
-	const capsR = {};
-	const ctxR = makeCtx(dirR, capsR);
-	capsR.customKeys = ["2"]; // 数字直选第 2 项 = 从 resume 中加载会话
-	await fireEvent(pi, ctxR, "session_start");
-	check("选择 resume 后派发 /wf resume 命令（expandPromptTemplates）",
-		pi.sent.some((m) => m.content === "/wf resume" && m.options?.expandPromptTemplates === true));
-	const boundR = existsSync(join(dirR, ".pi", "workflow", "bindings.json"))
-		? JSON.parse(readFile(join(dirR, ".pi", "workflow", "bindings.json")))
-		: { sessions: {} };
-	check("选择 resume 不写本会话绑定（留给恢复流程决定）", !boundR.sessions["test-sid"]);
-
-	// 9c. resume 恢复绑定：被恢复会话绑定过 beta → session_start 直接命中（不弹选择框、面板用 beta）
-	writeFileSync(
-		join(dirR, ".pi", "workflow", "bindings.json"),
-		JSON.stringify({ schemaVersion: 1, sessions: { "sid-resumed": { slot: "beta", at: Date.now() } } }),
-		"utf8",
-	);
-	const capsR2 = {};
-	const ctxR2 = makeCtx(dirR, capsR2);
-	ctxR2.sessionManager = { getSessionId: () => "sid-resumed" };
-	await fireEvent(pi, ctxR2, "session_start");
-	check("resume：被恢复会话命中自己的绑定（不弹选择浮窗）", capsR2.custom === undefined && capsR2.select === undefined);
-	const rR = await st.execute("8r", {}, undefined, undefined, ctxR2);
-	check("resume：工作流作用于绑定槽（贝塔任务）", rR.details?.kind !== "error" && rR.content[0].text.includes("贝塔任务"));
-
-	// 9d. /wf-resume 命令注册 + 非 TUI 回落
-	check("注册了 /wf 主命令（resume 子命令入口）", !!pi.commands["wf"]);
-	const capsNR = {};
-	const ctxNR = makeCtx(dirR, capsNR);
-	ctxNR.mode = "print";
-	await pi.commands["wf"].handler("resume", ctxNR);
-	check("/wf resume 非 TUI 回落提示", capsNR.notify?.text.includes("交互界面"));
-
-	// 10. bind auto（非 TUI 路径：AI 用 ask 问卷问到「暂不启用」后落盘）
-	await wf.execute("11", { action: "bind", slot: "auto" }, undefined, undefined, ctx9);
-	const bound10 = JSON.parse(readFile(join(dir4, ".pi", "workflow", "bindings.json")));
-	check("bind auto 落盘且工具回到拒绝态", bound10.sessions["test-sid"]?.slot === "auto");
-	const r10 = await wf.execute("12", { action: "bind" }, undefined, undefined, ctx9);
-	check("bind 无参回显「暂不启用」", r10.content[0].text.includes("暂不启用"));
+	// resume：同会话 ID 再次 session_start → 数据从磁盘重载带回
+	const ctxA2 = makeCtx(dir);
+	ctxA2.sessionManager = { getSessionId: () => "test-sid" };
+	await fireEvent(pi, ctxA2, "session_start");
+	const rA2 = await st.execute("4", {}, undefined, undefined, ctxA2);
+	check("resume 回原会话：工作流随之恢复（非空且含当前任务）", !rA2.content[0].text.includes("工作流为空") && rA2.content[0].text.includes("当前任务"));
 
 	rmSync(dir, { recursive: true, force: true });
-	rmSync(dir2, { recursive: true, force: true });
-	rmSync(dir3, { recursive: true, force: true });
-	rmSync(dir4, { recursive: true, force: true });
-	rmSync(dirR, { recursive: true, force: true });
 }
 
 /* ============================== 主流程 ============================== */

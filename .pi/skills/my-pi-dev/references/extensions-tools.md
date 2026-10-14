@@ -34,14 +34,13 @@
 
 ## workflow-mgr（`workflow-mgr/`，产物 `workflow-mgr.ts`）
 
-- 文件职责：`index.ts`（组装薄壳）、`tools.ts`（7 个工具）、`commands.ts`（`/wf` 主命令 + `/wf-config` 只留无参 + `/wf resume`）、`events.ts`（session 钩子 / hud 联动 / 条件注入）、`store.ts`（数据层）、`types.ts`（类型 + schema 常量）、`panel.ts`（展示层）、`brief.ts`（AI 简报 `renderBrief`/`summaryLine`/`lightState`）、`audit.ts`（完成信号独立审计）、`slot-picker.ts`（槽位选择浮窗）。
-- 工具：`wf_workflow`（`import` 一次性导入工作流草稿 json、`bind` 会话绑定、`add`/`archive` 等）/ `wf_status` / `wf_switch`（完成 + 推进一步到位，`complete=false` 搁置；推进后附 status 记录复核提醒）/ `wf_block` / `wf_rollback` / `wf_note`（`kind=fact/status` 时效分类 + `key` 主题键顶替防决策打架）/ `wf_milestone`。未绑定/暂不启用/明确不用时其余 6 个工具被 `guardBound` 拒绝。
-- 数据：多工作流槽位——default 槽 = `.pi/workflow/` 根三 JSON（`workflow.json`/`state.json`/`config.json`，可 git 审查）、命名槽 = `.pi/workflow/slots/<名称>/`、archive 随槽分目录（`wf_workflow archive` 移入，无找回功能）；会话绑定表 `.pi/workflow/bindings.json`（sessionId → 槽 / `auto` = 暂不启用 / `null` = 明确不用 / 无记录 = 未选择；7 天保鲜 `BINDING_TTL_MS`）。`WorkflowStore` 构造时固化 cwd（不持 ctx），session 替换不触发 stale。状态 key `workflow-mgr`。
-- 并发隔离动机：多 pi 会话同项目跑不同任务时共享单工作流会互相干扰（wf_switch 乱推进、内存缓存写盘互相覆盖）。
-- `session_start` 绑定判定：单槽/无槽自动绑定（零行为变化）；多槽或侦测到其他活跃会话已绑定（借 pair-guard 注册表心跳零耦合判活，缺席按 24h 内绑定视为活跃）→ TUI 弹自绘选择浮窗（`slot-picker.ts`：「通用」组 =「暂不启用」默认高亮 / Esc 同此 /「从 resume 中加载」，与「工作流（N）」槽位列表分区 + ▶ 高亮 + 数字键直选）；选 resume 放弃本会话、转 `/wf resume`（官方 `SessionSelectorComponent` → `switchSession`；恢复后按被恢复会话自己的绑定加载其工作流空间，不写本会话绑定）；非 TUI 退化为注入选择指引让 AI 用 ask 问，最终 `wf_workflow action=bind` 落地。`session_start` 开头强制重读绑定缓存（resume/new/fork 换会话即恢复对应工作流空间）。
+- 文件职责：`index.ts`（组装薄壳）、`tools.ts`（5 个工具）、`commands.ts`（`/wf` 状态摘要 + `/wf-config` 无参浮窗）、`events.ts`（session 钩子 / hud 联动 / 角色注入）、`store.ts`（数据层 + 路径解析）、`types.ts`（类型 + schema 常量）、`panel.ts`（展示层）、`brief.ts`（AI 简报 `renderBrief`/`summaryLine`/`lightState`）。
+- 工具：`wf_workflow`（`list`/`add`/`edit`/`remove`/`archive`/`import`）/ `wf_status` / `wf_switch`（完成 + 推进一步到位，`complete=false` 搁置）/ `wf_block` / `wf_rollback`。无绑定守卫，任何会话随时可用。
+- 存储（全局、按会话隔离）：`<workflowHome>/<项目标识>/<会话 ID>/{workflow.json,state.json}`。`workflowHome` = `~/.pi/agent/workflow`（`PI_WORKFLOW_HOME` 可覆盖，测试用）；项目标识 = 目录名净化 + cwd sha1 前 8 位（同名目录不串）；面板开关 `config.json` 全局单份；`archive` 移入 `<项目标识>/archive/<时间戳>-<名称>/`。工作流数据不进项目 `.pi/`。状态 key `workflow-mgr`。
+- `WorkflowStore` 构造时固化 cwd 与会话 ID（不持 ctx），`getStore` 按二者变化重建——session 替换不触发 stale，同项目多会话各写各的会话文件、天然隔离。
+- `session_start` 加载本会话数据并刷新 UI（无工作流 → 隐藏面板）；`before_agent_start` 仅在有非空工作流时按 `mode` 注入（human-ai = 指挥者、agent = 自动驾驶执行者），否则零注入。
 - 展示：常驻 widget（belowEditor）+ `/wf-config` 浮窗 + 非 TUI 文本回落（`compactLines` 单一渲染源）；hud 在场且开启时改由 `__PI_HUD_API__` 渲染在 footer 最底部（见 `hud-and-shared.md`）。
-- 审计：`config.json` 开 `auditOnComplete` 后，`wf_switch` 完成推进前派全新上下文的只读 + bash 子代理核验 `doneSignal`，不通过则打回（`kind=evidence` 证据不足 / `format` 审计输出无法解析，失败提示附任务交付物 + 完成信号）；审计自身故障放行（增强不是门禁）；审计模型按用途 `audit` 解析（默认策略 AUTO = 当前会话模型，可在 `/model-config` 改指）。
-- 测试：`test/render.test.mjs`（16 场景 A~R，含 `__PI_HUD_API__` 注册/通知/注销）、`test/stale-ctx.test.mjs`。
+- 测试：`test/render.test.mjs`（17 场景 A~R，含 `__PI_HUD_API__` 注册/通知/注销）、`test/stale-ctx.test.mjs`。
 
 ## dingtalk-bridge/（钉钉 dws CLI 受控桥接 + 业务语义层）
 

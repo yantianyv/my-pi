@@ -2,7 +2,7 @@
  * workflow-mgr 展示层：常驻 widget + /wf-config 统一功能菜单浮窗 + 非 TUI 文本回落
  *
  * - renderWidget：belowEditor 常驻面板（字符边框 + selectedBg 背景 + 进度条右对齐
- *   + 分工两行 + 阻塞警告 + 里程碑三态），宽度自适应用 pi-tui visibleWidth
+ *   + 分工两行 + 阻塞警告），宽度自适应用 pi-tui visibleWidth
  *   （中文=2、块元素=1），窗口 resize 按宽度变化才重建；
  * - updateWidget：把 store 当前状态推到 ctx.ui（widget + setStatus 摘要一行），
  *   面板开关（config.json showPanel）为 false 时移除 widget；非 TUI 自动跳过；
@@ -14,7 +14,7 @@
  */
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, matchesKey, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import type { MilestoneState, TaskStatus, WorkflowState } from "./types";
+import type { TaskStatus, WorkflowState } from "./types";
 import type { Derived, WorkflowStore } from "./store";
 import { nextPendingTask } from "./store";
 import { blockedList, currentTask, summaryLine, truncate } from "./brief";
@@ -70,17 +70,6 @@ function progressBarText(th: Theme, done: number, total: number, bars = 12): str
 	return s;
 }
 
-/** 里程碑三态分段：✓已完成 / ▶当前目标 / ○未完成（join 分隔符由调用方决定） */
-function milestoneTexts(th: Theme, milestones: Record<string, MilestoneState>): string[] {
-	const entries = Object.entries(milestones);
-	const curIdx = entries.findIndex(([, m]) => !m.done);
-	return entries.map(([n, m], i) => {
-		if (m.done) return th.fg("success", `✓ ${n}`);
-		if (i === curIdx) return th.fg("accent", `▶ ${n}`);
-		return th.fg("dim", `○ ${n}`);
-	});
-}
-
 /**
  * 紧凑面板行（常驻 widget 与 hud 底部行共用的单一渲染源）：
  * 行 1 = 任务 + 阶段（┃ 分隔）+ 进度条右对齐；分工两行（截断）；阻塞警告；里程碑三态。
@@ -132,10 +121,6 @@ function compactLines(state: WorkflowState, derived: Derived, th: Theme, width: 
 	if (blocked.length) {
 		lines.push(th.fg("warning", `阻塞 ${blocked.map((t) => `${t.id} ${truncate(t.title, 16)}`).join("；")}`));
 	}
-
-	// 里程碑行：✓已完成 / ▶当前目标 / ○未完成（无里程碑则省略整行；不带日期）
-	const ms = milestoneTexts(th, state.milestones);
-	if (ms.length) lines.push(th.fg("muted", "里程碑 ") + ms.join("   "));
 
 	return lines;
 }
@@ -230,7 +215,7 @@ export function updateWidget(ctx: ExtensionContext, store: WorkflowStore) {
 				placement: "belowEditor",
 			});
 			// 空工作流（无任务）不推状态摘要，避免「进度 0/0｜当前：全部完成」
-			ctx.ui.setStatus("workflow-mgr", derived.all.length > 0 ? summaryLine(state, derived, store.slot) : undefined);
+			ctx.ui.setStatus("workflow-mgr", derived.all.length > 0 ? summaryLine(state, derived) : undefined);
 		} else {
 			ctx.ui.setWidget("workflow-mgr", undefined, { placement: "belowEditor" });
 			ctx.ui.setStatus("workflow-mgr", undefined);
@@ -383,8 +368,6 @@ export class WfmgMenuPanelComponent {
 		}
 		const doneCount = derived.all.filter((t) => state.tasks[t.id]?.status === "done").length;
 		lines.push(` 进度：${progressBarText(th, doneCount, derived.all.length)} ${doneCount}/${derived.all.length}`);
-		const ms = milestoneTexts(th, state.milestones);
-		if (ms.length) lines.push(th.fg("muted", " 里程碑 ") + ms.join("  "));
 		return lines;
 	}
 
@@ -414,16 +397,5 @@ export function textPanel(state: WorkflowState, derived: Derived): string[] {
 			`  ${mark} ${t.id} ${t.title}${st === "blocked" && state.tasks[t.id]?.blockReason ? `（${state.tasks[t.id].blockReason}）` : ""}`,
 		);
 	}
-	const msEntries = Object.entries(state.milestones);
-	if (msEntries.length) {
-		lines.push("");
-		// 与面板同一套三态：✓ 已完成 / ▶ 下一里程碑 / ○ 未完成
-		const curMsIdx = msEntries.findIndex(([, m]) => !m.done);
-		const msText = msEntries
-			.map(([n, m], i) => `${m.done ? "✓" : i === curMsIdx ? "▶" : "○"}${n}${m.date ? `(${m.date})` : ""}`)
-			.join("  ");
-		lines.push(`里程碑（✓已完成 ▶下一 ○未完成）：${msText}`);
-	}
-	lines.push(`记录：${state.notes.filter((n) => !n.supersededBy).length} 条`);
 	return lines;
 }

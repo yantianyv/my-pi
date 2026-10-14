@@ -26,7 +26,7 @@ install.js            # 安装向导（唯一入口）：见 skill references/in
 src/                  # 全部源码 + npm 生态 + 构建脚本（build.js 的唯一输入）
   package.json        #   构建工具与内联依赖声明 + typecheck script；非运行时依赖
   build.js            #   伪编译：只把扩展打成 dist/extensions/
-  config/             #   tsconfig.template.json（install.js 填 __PI_ROOT__ 生成 tsconfig.json）/ tsconfig.build.json（无 paths，build 专用）
+  config/             #   tsconfig.template.json（install.js 填 __PI_PKG_* / __PI_TYPES__ 生成 tsconfig.json）/ tsconfig.build.json（无 paths，build 专用）
   extensions/         #   扩展源码（产物 dist/extensions/）
     shared/           #     共享模块：只被扩展 import、不直接部署，build.js 内联进各产物
     hud/              #     3 行 HUD（多文件，入口 index.ts → 产物 hud.ts）
@@ -36,7 +36,7 @@ src/                  # 全部源码 + npm 生态 + 构建脚本（build.js 的�
   vendor/             #   社区插件源码收录区（当前仅 pi-rtk-optimizer）+ README.md（出处表/收录原则/回退记录）
 static/               # 静态部署物（无需编译）：AGENTS.md / themes/ / sounds/(5 音效) / skills/markitdown/ / models.json / deps.json(复杂外部依赖清单) / patches/(3 个 pi 补丁，install.js 代跑)
 dist/                 # 扩展产物（gitignore 不入库，install.js 每次重建）
-.pi/                  # 项目级运行时数据：workflow/(工作流区+bindings.json) / explore/ / questionnaires/ / sessions/
+.pi/                  # 项目级运行时数据：explore/ / questionnaires/ / sessions/（工作流数据在全局 ~/.pi/agent/workflow/，见「工作流数据按会话隔离」）
 ```
 
 各扩展一句话职责见 `README.md`；工具名、命令、配置文件、状态 key、坑见 skill 的 `references/extensions-*.md`。
@@ -45,14 +45,14 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 
 - **伪编译**：`src/extensions/`（含 shared/、hud/ 多文件目录）→ `src/build.js` → `dist/extensions/`；顺序：改 `src/` → `node install.js`（自动构建+安装）→ pi 内 `/reload`。构建**必须**用 `src/config/tsconfig.build.json`：主 tsconfig 的 `paths` 会把包名解析成 pi 全局绝对路径，破坏 external 白名单匹配、意外内联 typebox。external 白名单只有 `@earendil-works/*` 与 `typebox`，其余 npm 依赖内联 → 产物零外部依赖、运行时零安装。入口规则：顶层 `*.ts` 是单文件扩展，子目录只有含 `index.ts` 才作多文件扩展（`src/extensions/qr/` 只有 test/、不是入口）。
 - **安装模型**：install.js 把 dist 产物与 static 资源复制/合并进 `~/.pi/agent/`（会改动的全局文件清单见 skill）。克隆后直接 `node install.js` 即用：自动装 pi 本体、按 package.json 清单**与本机平台**补全构建依赖（双系统共享 `src/node_modules` 时，另一平台的原生包还在、本机的没有，install.js 按 package-lock 的 os/cpu 约束查出并自动补装）、重建 dist。
-- **扩展间零耦合**，通信只走三条公开通道：官方 `ctx.ui.setStatus(key, text)`；`globalThis` 契约 `__PI_HUD_API__` / `__PI_EXPLORE_API__` / `__PI_STATUS_BEACON_API__`（键名与版本在各自 shared 模块单点定义，缺席静默降级）；`.pi/` 下的项目文件（工作流、问卷、会话注册表）。不许 import 对方产物。
+- **扩展间零耦合**，通信只走三条公开通道：官方 `ctx.ui.setStatus(key, text)`；`globalThis` 契约 `__PI_HUD_API__` / `__PI_EXPLORE_API__` / `__PI_STATUS_BEACON_API__`（键名与版本在各自 shared 模块单点定义，缺席静默降级）；`.pi/` 下的项目文件（问卷、会话注册表）。不许 import 对方产物。
 - **状态通道分层**：行 1 只显示 priority 最高的一个 key，`STATUS_STYLE`（`src/extensions/hud/hud-core.ts`）是一根轴——输入态 100 > 结果提醒 90+ > 阻塞等人 86/84 > 具体活动 80~60 > 通用运行兜底 58 > 环境信息 56；未登记 key 灰字 priority 0。文案约定：进行中 `<emoji>动作中`、成功 `✓ 结果`、失败 `⚠ 对象失败`，数字与单位空格分隔。`src/extensions/test/status-keys.test.mjs` 双向校验推送 key 与登记表一致。hud 缺席时这些状态自动回落 pi 原生 footer 第 3 行。
 - **模型调用纪律（新增/改动调用模型的插件必须遵守）**：一次成型的调用一律走 `shared/llm` 的 `aiComplete` 并传入 `shared/model-setting` 的解析链（**禁止**裸调 `completeSimple`/`streamSimple`、也**禁止**自建重试/选模型逻辑——裸调缺 pi 的供应商会话头管道，opencode 系直接 400 MissingSessionID，表现为「AI 审核/概括永远失败降级」）。**超时按失败代价定**：失败比等待更亏的（审核、生成、压缩等）不设 `timeoutMs`，时间给足，中断靠透传 `ctx.signal`（用户 Esc）；只有失败几乎无损的增强类调用（如 Working 行的短语概括）才允许设短超时，快速放弃。**回退只属于 FREE 免费池**（`shared/model-setting`）：其余解析结果为单模型，禁止自建跨模型回退/选模型逻辑。**不得自设输出上限 `maxTokens`**（推理模型的思考 token 计入该预算，小上限会把预算吃在思考阶段，导致正文为空或 JSON 被截断）——成本由模型策略槽控制、长度由提示词约束，与 pi 主会话同一口径。注：`shared/agent` 的 `createPiStreamFn` 只服务子代理多轮循环。
 - **模型设置的统一约定（新增用模型的插件必须遵守）**：需要调用模型的插件声明一个**用途**（`shared/model-setting` 的 `createModelSetting({purpose, plugin, label, file?, key?, defaultStrategy})`），由它解析「本地设置（auto|具体模型）→ 中心设置（策略|具体模型）→ 注册时声明的默认策略 → AUTO」并给故障转移链；策略 `AUTO`（当前会话模型）/`FREE`（免费池）语义固定，`MAX/FAST/LITE/BASE/BATCH` 可在 `model-config` 面板重指模型。**禁止**插件自写选模型逻辑或自设优先列表；本地设置 key 只在插件自己的配置文件里（`shared/model-setting` 读改写，保留同文件其它键），中心设置落在 `~/.pi/agent/model-config.json`，跨扩展只走 `globalThis.__PI_MODEL_DECLS__`（用途清单）与这两个文件（面板改完靠每次解析重读生效，无需 /reload）。**两个入口分工**：`/model-config` 面板管中心设置（也能改本地设置，改前二次确认）；各插件自己的 `<插件>-config` 管本地设置。
 - **提醒适配（新扩展对齐 status-beacon，禁止自放提示音）**：完成/出错声由 status-beacon 在 turn 收尾自动触发；凡阻塞等人的 UI（`ctx.ui.custom/select/confirm/input/editor`，含自绘 overlay）自动进 waiting 告警链（提示音 + 标题闪烁 + `task-alert-wait`），无需自己做声音；要让 Working 行说清「在等什么」，弹层**前**调 `shared/status.ts` 的 `setWaiting(text)`、结束 `setWaiting(null)`（串行弹层逐个登记；不要自行去摸 `__PI_STATUS_BEACON_API__`）。新增 `setStatus` key 必须同步登记 `STATUS_STYLE`（见测试说明节）。
 - **hud 供外部扩展挂底部行**：`__PI_HUD_API__` 的 `registerExtraRows` / `notifyExtraRowsUpdate`；当前 workflow-mgr 已依赖（hud 开启时其常驻面板由 hud 渲染在 footer 最底、自绘面板隐藏，靠 `process.emit("hud:state-change")` 切换）。
 - **vendor**：`src/vendor/` 收录社区插件源码副本（当前 pi-rtk-optimizer；pi-subagents / pi-btw 曾收录后回退自研 explore-agent / btw），收录原则、出处表、对齐更新流程、回退记录见 `src/vendor/README.md`。rtk 二进制不入库，由 install.js 按平台下载。
-- **多工作流并发隔离**：一个项目可并存多个命名工作流（default 槽 = `.pi/workflow/` 根三 JSON；命名槽 = `slots/<名称>/`），每会话经 `bindings.json` 绑一个槽——解决多 pi 会话同项目跑不同任务互相干扰。session_start 自动判定：单槽/无槽直接绑定（零行为变化）；多槽或有其他活跃会话已绑定 → TUI 弹选择浮窗（「暂不启用」默认高亮 = 绑定 `auto`、不占槽位、AI 自行判断是否用；「从 resume 中加载」放弃本会话转 `/wf-resume`），非 TUI 退化为注入指引让 AI 用 `ask` 问后 `wf_workflow action=bind` 落地。
+- **工作流数据按会话隔离（全局存储）**：workflow-mgr 的 `workflow.json`/`state.json` 存 `~/.pi/agent/workflow/<项目标识>/<会话 ID>/`（项目标识 = 目录名 + cwd 短哈希，`PI_WORKFLOW_HOME` 可覆盖）——同一项目的多个 pi 会话各写各的文件，天然互不干扰；`resume` 恢复会话即带回其工作流，无需任何选择或绑定。工作流数据不进项目 `.pi/`，项目目录只留随项目走的运行时数据。
 - **context-init `/init`**：后台 fork 独立上下文维护项目唯一的 `AGENTS.md`（主会话零污染）。核心是**内容规范**：写每行前过两问（不写会做错吗 / 换一年还成立吗），信息按「多常被需要」分四处——每轮用 → `AGENTS.md`、相关才用 → `.pi/skills/`、在办状态 → 该目录 `STATUS.md`、跨项目经验 → 知识库；子目录 `AGENTS.md` 分流后删除（附映射表），`CLAUDE.md` 合并后删除；顺手做目录对齐（同类只住一处），不强制目录树。explore 在场则派子代理并行摸底（缺席自读）；不设轮数与墙钟上限（`/init cancel` 中止）；上下文超限自动压缩后续跑（≤2 次）；收尾由审计子代理复核 + `shared/context-files.ts` 的结构检查（死指针 / skill 索引对应），有问题带问题再审一轮（最多两轮）。该插件只依赖 pi 的 fs、模型与官方 `setStatus`，其余（explore / hud / 知识库）全是可选增强，缺席静默降级。
 
 ## 代码风格与约定
@@ -71,7 +71,7 @@ dist/                 # 扩展产物（gitignore 不入库，install.js 每次�
 
 ## 测试说明
 
-- **无框架、无 runner、无 CI、无 lint**：32 个 `*.test.mjs` 都是独立可执行脚本（自定义 `check()` + exit code，唯一例外 `shared/test/shell-split.test.mjs` 用 `node:assert/strict`），每个文件单独跑：`node src/extensions/<...>/test/<name>.test.mjs`（仓库根执行）。
+- **无框架、无 runner、无 CI、无 lint**：41 个 `*.test.mjs` 都是独立可执行脚本（自定义 `check()` + exit code，唯一例外 `shared/test/shell-split.test.mjs` 用 `node:assert/strict`），每个文件单独跑：`node src/extensions/<...>/test/<name>.test.mjs`（仓库根执行）。
 - 测试需要 `.ts` 时用 esbuild 现场 bundle 成 `.tmp-*.mjs` 再 import（external 白名单同 build.js，tsconfig 用 `config/tsconfig.build.json`）；`qr` 例外（用 jiti 加载产物，与运行时一致）。
 - 集成类测试（ask / qr / workflow-mgr / `src/extensions/test/`）依赖 `src/extensions/node_modules/` 的 pi 安装包副本（不入库）——换机器或 pi 升级后跑 `node src/extensions/test/relink-deps.mjs` 重建（优先链接，不支持链接的文件系统回退递归复制）；`hud/test` 与 `shared/test` 不需要。
 - 缺省全部离线可跑；`MIMO_LIVE=1`、各 `*-live.mjs` 才需要真实网络/环境（硬编码本机路径，换机器不可用）。

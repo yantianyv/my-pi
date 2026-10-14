@@ -1,10 +1,11 @@
 /**
- * workflow-mgr 类型定义（人机协作任务面板）
+ * workflow-mgr 类型定义（会话级任务面板）
  *
- * 三个 JSON 文件的 schema：
+ * 两份 JSON 的 schema：
  * - workflow.json：工作流定义（AI 用 wf_workflow 工具读写，人可手工编辑）
- * - state.json：进度状态（工具自动维护，可 git 审查）
- * - config.json：面板开关等 UI 配置（与进度语义分离）
+ * - state.json：进度状态（工具自动维护）
+ *
+ * 数据按会话隔离，存放位置见 store.ts 的 sessionDir。
  */
 
 export const WORKFLOW_SCHEMA_VERSION = 1;
@@ -38,7 +39,7 @@ export interface StageDef {
 /** 工作流定义（workflow.json） */
 export interface WorkflowDef {
 	schemaVersion: number;
-	/** 协作模式（0.3 拍板：工作流级，缺省 human-ai 向后兼容；agent 模式无人类分工、渲染隐藏「你:」行） */
+	/** 协作模式（工作流级，缺省 human-ai；agent 模式无人类分工、渲染隐藏「你:」行） */
 	mode?: WorkflowMode;
 	stages: StageDef[];
 }
@@ -51,28 +52,6 @@ export interface TaskState {
 	startedAt?: string;
 	doneAt?: string;
 	blockReason?: string;
-	note?: string;
-}
-
-/**
- * AI 记录（wf_note）：工作流内的决策记录（当前步骤产生、后续步骤需要知晓的信息）
- * - kind：fact（长期事实/硬约束/用户拍板，默认）| status（时效性状态快照，任务切换时提醒复核）
- * - key：主题键（可选）；同 key 新记录自动作废旧记录（解决「决策改主意后两条打架」）
- */
-export interface NoteRecord {
-	id: string;
-	ts: string;
-	content: string;
-	kind?: "fact" | "status";
-	key?: string;
-	/** 已被 supersededBy 指向的记录作废（list/brief 不展示，留痕可审计） */
-	supersededBy?: string;
-}
-
-/** 里程碑（名称 → 日期/完成态） */
-export interface MilestoneState {
-	date?: string;
-	done?: boolean;
 }
 
 /** 进度状态（state.json） */
@@ -81,18 +60,13 @@ export interface WorkflowState {
 	updatedAt: string;
 	currentTaskId: string | null;
 	tasks: Record<string, TaskState>;
-	milestones: Record<string, MilestoneState>;
-	/** AI 记录（wf_note）；旧 decisions 数据已丢弃（1.7 拍板，不迁移） */
-	notes: NoteRecord[];
 	/** 归档时的收尾状态描述（wf_workflow archive status 参数写入；完成/放弃/其他——归档 ≠ 完成，快照保留任务真实状态） */
 	archiveStatus?: string;
 	log: { ts: string; event: string; taskId?: string; msg?: string }[];
 }
 
-/** 面板开关等 UI 配置（config.json） */
+/** 面板开关等 UI 配置（全局单份 config.json） */
 export interface PanelConfig {
 	schemaVersion: number;
 	showPanel: boolean;
-	/** 完成推进前独立审计（借鉴 pi-goal-x：wf_switch 完成任务时派全新上下文的只读子代理核验完成信号，默认 false） */
-	auditOnComplete?: boolean;
 }

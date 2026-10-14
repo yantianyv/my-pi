@@ -173,7 +173,7 @@ export default async function (pi: ExtensionAPI) {
 		"web-search": { color: "accent", priority: 75 }, // 联网搜索状态（web-tool）
 		"web-fetch": { color: "accent", priority: 74 }, // 网页抓取状态（web-tool）
 		"kb-sync": { color: "accent", priority: 73 }, // 知识库同步进度（webdav-kb；后台自动同步，低于前台 web 活动）
-		"workflow-mgr": { color: "accent", priority: 72 }, // 人机协作任务摘要 / 完成信号审计（workflow-mgr）
+		"workflow-mgr": { color: "accent", priority: 72 }, // 工作流摘要（workflow-mgr）
 		"model-switch": { color: "accent", priority: 70 }, // 模型切换
 		"explore": { color: "accent", priority: 68 }, // 探索子代理进度（explore-agent；高于通用运行态）
 		"keep": { color: "accent", priority: 66 }, // 停顿点续航判断/续跑计数（keep）
@@ -185,6 +185,7 @@ export default async function (pi: ExtensionAPI) {
 		// 进行中·通用兜底（说不出具体在干什么时的活动态）
 		"task-alert-run": { color: "accent", priority: 58 }, // 思考中 / 输出中 / 当前工具（status-beacon）
 		// 环境信息（常态存在，不需要抢格子）
+		"secret": { color: "muted", priority: 57 }, // 本会话已录入的密钥条数（secret）
 		"pair-guard": { color: "muted", priority: 56 }, // 并发会话数（pair-guard）
 	};
 	/** 检测 ctx 是否仍有效：session 替换 / reload 后旧 ctx 的所有 getter 都会抛 stale 错误。 */

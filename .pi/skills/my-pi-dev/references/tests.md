@@ -2,7 +2,7 @@
 
 ## 运行方式
 
-**无框架、无 runner、无 test script**：26 个 `*.test.mjs` 都是独立可执行脚本（`#!/usr/bin/env node`），自带断言与 exit code：
+**无框架、无 runner、无 test script**：41 个 `*.test.mjs` 都是独立可执行脚本（`#!/usr/bin/env node`），自带断言与 exit code：
 
 - 多数：自写 `check(name, cond, extra)` 累加 failures，末尾 `process.exit(failures === 0 ? 0 : 1)`
 - `shared/test/shell-split.test.mjs`：唯一用 `node:assert/strict`（失败即抛）
@@ -60,10 +60,11 @@ const mod = await import(pathToFileURL(bundle).href);
 | `model-config/test/panel.test.mjs` | 面板主页/动作层/策略层渲染与键位：AUTO·FREE 标固定语义且 Enter 只给提示、用途行 Enter 出动作层、section 行不被选中、↑ 越界不越位、Esc 逐层退出、非交互 `renderTextSummary` 列出策略槽与全部用途 |
 | `shared/test/model-setting.test.mjs` | 两层模型设置的解析链：本地固定优先于中心、中心缺记录用注册默认策略、未映射槽回落会话模型、FREE 只在免费池取且带链、不可用回落 AUTO、本地键读改写保留同文件其它键、旧值 auto-not-free 归一化、用途声明去重（沙箱 HOME，不碰真实 `~/.pi/agent`） |
 | `shared/test/model-util.test.mjs` | 价格口径与筛选：目录 0 价的高速档不判免费（`COST_OVERRIDES`）、有效价参与排序、真 0 价仍免费、动态定价与无价排最后、`excludeFree` 不吃高速档 |
+| `shared/test/review-panel.test.mjs` | 写操作确认面板（钉钉 / secret 共用）：长单行正文按宽度折行且 PgDn 能看全尾部（不被行截断吞掉）、正文区高度固定（空/单行/不满一页同高，超一页只多一行滚动指示）、短正文不受折行影响 |
 | `shared/test/shell-split.test.mjs` | 20 场景（顶层分隔符 / 引号转义 / 子 shell / 权限门关键样本 / heredoc） |
 | `shared/test/fs-safe.test.mjs` | `shared/fs-safe` 的 `removePath`：**探针建在含中文的临时目录**（本机 `fs.rmSync` 在此静默不删——改用 rmSync 实现本测试即失败）、中文路径下删文件与目录树、目标不存在返回 true、删链接不跟进目标 |
-| `workflow-mgr/test/render.test.mjs` | 渲染 16 场景 A~R（R=多槽绑定），含 `__PI_HUD_API__` 注册/通知/注销 |
-| `workflow-mgr/test/stale-ctx.test.mjs` | session 替换后 getStore 不崩（固化 cwd）+ cwd 变化重建 |
+| `workflow-mgr/test/render.test.mjs` | 渲染 17 场景 A~R（R = 会话隔离），含 `__PI_HUD_API__` 注册/通知/注销 |
+| `workflow-mgr/test/stale-ctx.test.mjs` | session 替换后 getStore 不崩（固化 cwd + 会话 ID）+ 会话/cwd 变化重建 |
 | `webdav-kb/test/*.test.mjs`（9 个） | client / sync / tools / commands / search / crypto / lfs / panel / panel-config，全部离线：`mock-dav.mjs` 是进程内 HTTP mock（PROPFIND/GET/PUT/MKCOL/DELETE/MOVE + Basic 认证，Nextcloud/Apache 双命名空间），不联网 |
 
 ## 联调脚本（不自动跑、需真实环境）

@@ -1,5 +1,5 @@
 /**
- * workflow-mgr 工具注册层：7 个 wf_* 工具的 schema 定义与注册。
+ * workflow-mgr 工具注册层：5 个 wf_* 工具的 schema 定义与注册。
  *
  * 从 index.ts 拆出：index 只负责组装（tools/commands/events），本模块持有
  * 全部工具注册逻辑与辅助（err/taskDetail/commitAndRefresh），共享 store 经
@@ -10,28 +10,18 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { readFileSync } from "node:fs";
 import { Type, type Static } from "typebox";
 import {
-	BINDING_AUTO,
-	DEFAULT_SLOT,
-	cloneWorkflow,
 	depsSatisfied,
 	findTask,
 	genTaskId,
-	getBinding,
 	getStore,
 	hasDependencyCycle,
-	invalidateBindingCache,
-	isValidSlotName,
 	logEvent,
 	nextPendingTask,
 	reconcile,
-	setBinding,
-	slotSummaries,
-	type WorkflowStore,
 } from "./store";
-import { lightState, renderBrief, summaryLine, truncate } from "./brief";
-import { hideWidget, updateWidget } from "./panel";
-import { auditCompletion } from "./audit";
-import type { NoteRecord, TaskDef, WorkflowDef, WorkflowMode, WorkflowState } from "./types";
+import { lightState, renderBrief, summaryLine } from "./brief";
+import { updateWidget } from "./panel";
+import type { TaskDef, WorkflowDef, WorkflowMode } from "./types";
 import { WORKFLOW_SCHEMA_VERSION } from "./types";
 
 /* ============================== 工具参数 schema ============================== */
@@ -49,37 +39,15 @@ const rollbackParams = Type.Object({
 	taskId: Type.String({ description: "要回退的任务 ID" }),
 	to: StringEnum(["todo", "doing"], { description: "回退到的状态（blocked 任务请用 wf_switch 解除）" }),
 });
-const noteParams = Type.Object({
-	action: StringEnum(["list", "add", "edit", "remove"], {
-		description: "操作类型：list 查看全部生效记录；add 追加（自动 id+时间戳，可选 kind/key）；edit 修改（按 id）；remove 删除（按 id）",
-	}),
-	id: Type.Optional(Type.String({ description: "记录 id（edit/remove 必填）" })),
-	content: Type.Optional(Type.String({ description: "记录内容（add/edit 必填）" })),
-	kind: Type.Optional(
-		StringEnum(["fact", "status"], {
-			description:
-				"记录类型（仅 add）：fact 长期事实/硬约束/用户拍板（默认）；status 时效性状态快照——进度/收集情况等会随时间变化的信息必须用它，任务切换时会提醒复核",
-		}),
-	),
-	key: Type.Optional(
-		Type.String({ description: "主题键（仅 add，可选）：同 key 的新记录自动作废旧记录——决策/结论类建议带 key，方便改主意时顶替" }),
-	),
-});
-const milestoneParams = Type.Object({
-	name: Type.String({ description: "里程碑名（不存在则自动创建），如 开题/中期/答辩" }),
-	date: Type.Optional(Type.String({ description: "日期，如 2026-03-15" })),
-	done: Type.Optional(Type.Boolean({ description: "是否已完成" })),
-	remove: Type.Optional(Type.Boolean({ description: "删除该里程碑（默认 false）" })),
-	newName: Type.Optional(Type.String({ description: "改名（name 存在时更新名称，保留日期/完成态）" })),
-});
 const workflowParams = Type.Object({
-	action: StringEnum(["list", "add", "edit", "remove", "archive", "reset", "import", "bind"], {
+	action: StringEnum(["list", "add", "edit", "remove", "archive", "import"], {
 		description:
-			"操作类型：list 查看全量；import 初始化一次性导入（草稿结构见工具描述，建新工作流优先用它）；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段（空数组清空列表字段）；remove 删除任务；archive 归档整个工作流（收尾退出视野，数据留档，无找回）；reset 清空工作流（不可逆）；bind 绑定本会话到某个工作流（多工作流并发场景，配 slot 参数；缺省 slot 时列出可选工作流与当前绑定）",
+			"操作类型：list 查看全量；import 初始化一次性导入（草稿结构见工具描述，建新工作流优先用它）；add 新增任务（stageId 不存在则自动创建阶段）；edit 修改任务字段（空数组清空列表字段）；remove 删除任务；archive 归档整个工作流（收尾退出视野，数据留档，无找回）",
 	}),
 	mode: Type.Optional(
 		StringEnum(["human-ai", "agent"], {
-			description: "工作流协作模式（add 时设置工作流级；缺省 human-ai 向后兼容）：human-ai = 人机协作（AI 指挥、人执行）；agent = 纯 agent 自动驾驶（无人类分工、渲染隐藏「你:」行、连续执行直到完成）",
+			description:
+				"工作流协作模式（add 时设置工作流级；缺省 human-ai）：human-ai = 人机协作（AI 指挥、人执行）；agent = 纯 agent 自动驾驶（无人类分工、渲染隐藏「你:」行、连续执行直到完成）",
 		}),
 	),
 	stageId: Type.Optional(Type.String({ description: "阶段 ID；add 时不存在则自动创建新阶段" })),
@@ -96,22 +64,12 @@ const workflowParams = Type.Object({
 	deliverable: Type.Optional(Type.String({ description: "交付物" })),
 	doneSignal: Type.Optional(Type.String({ description: "完成信号（AI 据此验证）" })),
 	deps: Type.Optional(Type.Array(Type.String({ description: "依赖的任务 id 列表（传空数组清空）" }))),
-	path: Type.Optional(
-		Type.String({ description: "草稿 json 文件路径（仅 import 用）：初始化一次性导入，结构见工具描述中的示例" }),
-	),
-	slot: Type.Optional(
-		Type.String({
-			description:
-				"工作流槽位名（仅 bind 用）：绑定本会话到该工作流，不存在则创建空工作流；\"default\" = 项目根默认工作流；\"auto\" = 暂不启用（是否使用由你判断）；\"none\" = 明确不用工作流",
-		}),
-	),
+	path: Type.Optional(Type.String({ description: "草稿 json 文件路径（仅 import 用）：初始化一次性导入，结构见工具描述中的示例" })),
 });
 
 type SwitchParams = Static<typeof switchParams>;
 type BlockParams = Static<typeof blockParams>;
 type RollbackParams = Static<typeof rollbackParams>;
-type NoteParams = Static<typeof noteParams>;
-type MilestoneParams = Static<typeof milestoneParams>;
 type WorkflowParams = Static<typeof workflowParams>;
 
 /** 任务详情文本（工具返回文案共用；agent 模式隐藏「用户负责」行——无人类分工） */
@@ -131,24 +89,6 @@ function taskDetail(
 
 /** 失败结果：带 isError，pi 侧模型与 UI 才识别为失败（与 shared/tool-result 同一口径） */
 const err = (text: string) => ({ content: [{ type: "text" as const, text }], details: { kind: "error" as const }, isError: true as const });
-
-/**
- * 绑定守卫：会话未绑定（undecided）/ 暂不启用（auto，由 AI 判断）/ 明确不用（none）时
- * 拒绝操作并引导 bind。多工作流并发隔离：一个项目可存在多个命名工作流（wf_workflow bind 切换），
- * 未绑定时操作会打在错误的槽位上，必须拦截。
- */
-function guardBound(s: WorkflowStore) {
-	if (!s.blocked) return null;
-	if (s.blocked === "auto")
-		return err(
-			"本会话暂不启用工作流（是否使用由你判断）：需要就用 wf_workflow action=bind 选定/新建工作流后再操作（slot 缺省时列出可选）；不需要则无需调用 wf_* 工具。",
-		);
-	return err(
-		s.blocked === "none"
-			? "本会话已明确不使用工作流（如需启用：wf_workflow action=bind slot=<名称>）"
-			: "本会话尚未选择工作流——先用 wf_workflow action=bind 选定（slot 缺省时列出可选工作流与当前绑定；slot=\"none\" = 明确不用；slot=\"auto\" = 暂不启用）",
-	);
-}
 
 /** 依赖环检测（导入全图校验用）：从每个起点 DFS 沿 deps 走，回到起点即环，返回环链路 */
 function findCycle(tasks: { id: string; deps: string[] }[]): string | null {
@@ -174,16 +114,6 @@ export function commitAndRefresh(ctx: ExtensionContext): void {
 	updateWidget(ctx, s);
 }
 
-/** 时效性记录（kind=status）复核提醒：wf_switch 推进后附在结果尾部，防过时状态误导后续步骤 */
-function statusNotesReminder(state: WorkflowState): string {
-	const act = state.notes.filter((n) => !n.supersededBy && n.kind === "status");
-	if (!act.length) return "";
-	return (
-		`\n\n⚠️ 有 ${act.length} 条时效性记录（status），进入新任务前请复核是否仍然成立，过时请 wf_note remove/edit：\n` +
-		act.map((n) => `  ${n.id}${n.key ? `〈${n.key}〉` : ""} ${truncate(n.content, 40)}`).join("\n")
-	);
-}
-
 /* ============================== 工具注册 ============================== */
 
 export function registerTools(pi: ExtensionAPI) {
@@ -193,98 +123,13 @@ export function registerTools(pi: ExtensionAPI) {
 		annotations: { readOnlyHint: false },
 		label: "维护工作流",
 		description:
-			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）；动作一律作用于本会话绑定的工作流。" +
+			"创建/修改工作流定义（阶段→任务，含人机分工、交付物、完成信号、依赖）；动作作用于本会话的工作流。" +
 			"新建优先用 import：先 write 一份草稿 json 再一次性导入（比逐条 add 省 token）；add 只用于后续增补调整。" +
-			"import 草稿结构：{\"mode\":\"human-ai\",\"stages\":[{\"id\":\"design\",\"name\":\"阶段名\",\"goal\":\"阶段目标\",\"tasks\":[{\"title\":\"任务标题\",\"desc\":\"目标\",\"humanTasks\":[],\"aiTasks\":[],\"deliverable\":\"\",\"doneSignal\":\"\",\"deps\":[\"0.1\"]}]}]}——id 缺省自动生成（0.1/1.2 式），deps 可引用本批未来 id；工作流非空时拒绝导入（先 archive/reset）。",
+			"import 草稿结构：{\"mode\":\"human-ai\",\"stages\":[{\"id\":\"design\",\"name\":\"阶段名\",\"goal\":\"阶段目标\",\"tasks\":[{\"title\":\"任务标题\",\"desc\":\"目标\",\"humanTasks\":[],\"aiTasks\":[],\"deliverable\":\"\",\"doneSignal\":\"\",\"deps\":[\"0.1\"]}]}]}——id 缺省自动生成（0.1/1.2 式），deps 可引用本批未来 id；工作流非空时拒绝导入（先 archive 归档）。",
 		promptSnippet: "工作流定义：wf_workflow(action, …) → 阶段→任务的增删改与一次性导入",
 		parameters: workflowParams,
 		async execute(_id, params: WorkflowParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
-
-			/* ---------- bind：会话绑定（不受绑定守卫限制——它本身就是解绑/绑定入口） ---------- */
-			if (params.action === "bind") {
-				const sid = ctx.sessionManager?.getSessionId?.() ?? "unknown";
-				if (!params.slot) {
-					const cur = getBinding(ctx.cwd, sid);
-					const curText =
-						cur === undefined ? "（未绑定）" : cur === BINDING_AUTO ? "（暂不启用，由 AI 判断）" : cur === null ? "（明确不用）" : cur;
-					const sums = slotSummaries(ctx.cwd);
-					const list = sums.length
-						? sums.map((x) => `- ${x.slot}：进度 ${x.done}/${x.total}${x.current ? `｜当前：${x.current}` : ""}`).join("\n")
-						: "（暂无工作流）";
-					return {
-						content: [
-							{
-								type: "text",
-								text:
-									`当前绑定：${curText}\n可选工作流：\n${list}\n\n` +
-									"绑定：wf_workflow action=bind slot=<名称>（不存在则创建空工作流；\"default\" = 项目根默认；\"auto\" = 暂不启用；\"none\" = 明确不用）",
-							},
-						],
-						details: { kind: "workflow-bind" },
-					};
-				}
-				const slot = params.slot.trim();
-				if (slot === BINDING_AUTO) {
-					setBinding(ctx.cwd, sid, BINDING_AUTO);
-					invalidateBindingCache();
-					hideWidget(ctx);
-					return {
-						content: [
-							{
-								type: "text",
-								text: "已记下「暂不启用」：是否使用工作流由你视任务判断（不需要就不必调用 wf_* 工具；需要时用 wf_workflow action=bind slot=<名称> 选定或新建）",
-							},
-						],
-						details: { kind: "workflow-bind" },
-					};
-				}
-				if (slot === "none") {
-					setBinding(ctx.cwd, sid, null);
-					invalidateBindingCache();
-					hideWidget(ctx);
-					return {
-						content: [
-							{
-								type: "text",
-								text: "本会话已明确不使用工作流（面板已隐藏；随时可 wf_workflow action=bind slot=<名称> 重新启用）",
-							},
-						],
-						details: { kind: "workflow-bind" },
-					};
-				}
-				if (slot !== DEFAULT_SLOT && !isValidSlotName(slot)) {
-					return err(`工作流名称不合法：「${slot}」（需以字母/数字/中文开头，可含 _ -，≤32 字符；default/none/archive/slots 为保留字）`);
-				}
-				setBinding(ctx.cwd, sid, slot);
-				invalidateBindingCache();
-				const s2 = getStore(ctx);
-				s2.reload();
-				updateWidget(ctx, s2);
-				if (!s2.hasWorkflowFile()) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `已绑定新工作流「${slot}」（当前为空）——用 wf_workflow import（推荐）或 add 规划阶段/任务`,
-							},
-						],
-						details: { kind: "workflow-bind" },
-					};
-				}
-				return {
-					content: [
-						{
-							type: "text",
-							text: `已绑定工作流「${slot}」\n${summaryLine(s2.getState(), s2.getDerived(), slot)}（用 wf_status 查看详情）`,
-						},
-					],
-					details: { kind: "workflow-bind", state: lightState(s2.getState()) },
-				};
-			}
-
-			const blockedErr = guardBound(s);
-			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			const derived = s.getDerived();
 			const wf = s.getWorkflow();
@@ -317,7 +162,7 @@ export function registerTools(pi: ExtensionAPI) {
 				if (!params.path) return err("wf_workflow import 需要 path（指向草稿 json 文件）");
 				if (wf.stages.length > 0 || Object.keys(state.tasks).length > 0) {
 					return err(
-						`当前工作流非空（${wf.stages.length} 个阶段、${derived.all.length} 个任务）——import 是「初始化一次性导入」，请先 archive/reset 清空；已有工作流的增补请用 add/edit`,
+						`当前工作流非空（${wf.stages.length} 个阶段、${derived.all.length} 个任务）——import 是「初始化一次性导入」，请先 archive 归档；已有工作流的增补请用 add/edit`,
 					);
 				}
 				let raw: string;
@@ -563,7 +408,7 @@ export function registerTools(pi: ExtensionAPI) {
 				return { content: [{ type: "text", text }], details: { kind: "workflow-remove", state: lightState(state) } };
 			}
 
-			// archive：工作流收尾——退出用户视野，数据留档（不提供找回功能，需时手动查 archive/）
+			// archive：工作流收尾——退出用户视野，数据留档（不提供找回功能，需时手动查归档目录）
 			s.archiveAll(params.status ?? "");
 			updateWidget(ctx, s);
 			return {
@@ -571,26 +416,12 @@ export function registerTools(pi: ExtensionAPI) {
 					{
 						type: "text",
 						text:
-							"已归档工作流：退出面板视野，数据移入 .pi/workflow/archive/（按时间戳-名称分目录留档，可 git 审查）。\n" +
+							"已归档工作流：退出面板视野，数据移入归档目录（按时间戳-名称分目录留档）。\n" +
 							`收尾状态：${params.status ? `「${params.status}」` : "（未描述）"}——快照保留任务真实状态（完成/放弃/暂停一目了然），不做强制完成标记。\n` +
 							"不提供找回功能——真需要时手动查看该目录；当前工作流为空，用 wf_workflow add 开新任务。",
 					},
 				],
 				details: { kind: "workflow-archive", state: lightState(s.getState()) },
-			};
-
-			// reset
-			s.resetAll();
-			updateWidget(ctx, s);
-			return {
-				content: [
-					{
-						type: "text",
-						text:
-							"已清空工作流（无阶段无任务）。\n用 wf_workflow add 从零创建（stageId 不存在会自动创建阶段）；从未创建过时常驻面板隐藏。",
-					},
-				],
-				details: { kind: "workflow-reset", state: lightState(s.getState()) },
 			};
 		},
 	});
@@ -601,14 +432,12 @@ export function registerTools(pi: ExtensionAPI) {
 		annotations: { readOnlyHint: true },
 		label: "查工作流状态",
 		description:
-			"工作流管理：获取当前阶段、当前任务（含人机分工、交付物、完成信号）、下一步、阻塞项、里程碑。" +
+			"工作流管理：获取当前阶段、当前任务（含人机分工、交付物、完成信号）、下一步、阻塞项。" +
 			"会话开始时、每次用户汇报进展后、以及推进任务前都应调用。",
-		promptSnippet: "工作流状态：wf_status() → 当前阶段/任务分工/下一步/阻塞项/里程碑",
+		promptSnippet: "工作流状态：wf_status() → 当前阶段/任务分工/下一步/阻塞项",
 		parameters: statusParams,
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
-			const blockedErr = guardBound(s);
-			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			const derived = s.getDerived();
 			return { content: [{ type: "text", text: renderBrief(state, derived) }], details: { kind: "status", state: lightState(state) } };
@@ -629,8 +458,6 @@ export function registerTools(pi: ExtensionAPI) {
 		parameters: switchParams,
 		async execute(_id, params: SwitchParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
-			const blockedErr = guardBound(s);
-			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			const derived = s.getDerived();
 			const curId = state.currentTaskId;
@@ -647,7 +474,7 @@ export function registerTools(pi: ExtensionAPI) {
 							logEvent(state, "task_done", cur.title, curId);
 						}
 					} else {
-						// 搁置：回 todo，清状态字段（0.1 拍板：不新增 paused 状态）
+						// 搁置：回 todo，清状态字段（不新增 paused 状态）
 						state.tasks[curId] = { ...curSt, status: "todo", startedAt: undefined, doneAt: undefined, blockReason: undefined };
 						logEvent(state, "task_hold", cur.title, curId);
 					}
@@ -671,41 +498,12 @@ export function registerTools(pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text" as const,
-							text:
-								`${prevMsg}开始任务 ${target.id} ${target.title}（${stage.name}）\n` +
-								taskDetail(target, stage.name, derived.mode) +
-								statusNotesReminder(state),
+							text: `${prevMsg}开始任务 ${target.id} ${target.title}（${stage.name}）\n` + taskDetail(target, stage.name, derived.mode),
 						},
 					],
 					details: { kind: "switch" as const, state: lightState(state) },
 				};
 			};
-
-			// 独立审计（借鉴 pi-goal-x 的 completion auditor；config.json 设 auditOnComplete:true 开启）：
-			// 完成推进前派全新上下文的只读+bash 子代理核验完成信号，不通过则打回（任务保持 doing）。
-			// 审计自身故障（超时/异常）放行——增强不是门禁，基础设施故障不卡死工作流。
-			if (complete && cur && curSt && curSt.status !== "done" && cur.doneSignal && s.getPanelConfig().auditOnComplete) {
-				if (ctx.hasUI) ctx.ui.setStatus("workflow-mgr", `🔍 正在审计完成信号…（≤90 秒）`);
-				const verdict = await auditCompletion(ctx, cur);
-				updateWidget(ctx, s); // 恢复常规进度摘要（审计期间占用的是同一条状态）
-				if (!verdict.pass) {
-					const head =
-						verdict.kind === "format"
-							? "⛔ 独立审计未能得出结论（输出无法解析，按保守策略视为未通过），任务保持进行中："
-							: "⛔ 独立审计认为证据不足，任务保持进行中：";
-					return err(
-						`${head}\n` +
-							`任务：${cur.id} ${cur.title}\n` +
-							`交付物：${cur.deliverable || "（未定义）"}\n` +
-							`完成信号：${cur.doneSignal}\n` +
-							`审计意见：${verdict.reason}\n\n` +
-							(verdict.kind === "format"
-								? "这是审计输出格式问题、不一定代表任务未完成：请对照完成信号自查后再次 wf_switch（重跑会有新的审计）。"
-								: "请按审计意见补齐交付物/证据后再次 wf_switch。") +
-							`\n（审计是独立子代理做的证据核验；可在 .pi/workflow/config.json 设 auditOnComplete:false 关闭）`,
-					);
-				}
-			}
 
 			// 模式一：显式 taskId 切换（先校验，再 settle 当前，最后开始目标）
 			if (params.taskId) {
@@ -740,10 +538,9 @@ export function registerTools(pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text:
-								(allDone
-									? `🎉 全部任务完成！（${summaryLine(state, derived)}）进入收尾：可 wf_workflow archive 归档（自动标记全部完成，退出面板视野）。`
-									: "没有满足依赖的待办任务——请检查依赖或先用 wf_workflow 调整。") + statusNotesReminder(state),
+							text: allDone
+								? `🎉 全部任务完成！（${summaryLine(state, derived)}）进入收尾：可 wf_workflow archive 归档留档，退出面板视野。`
+								: "没有满足依赖的待办任务——请检查依赖或先用 wf_workflow 调整。",
 						},
 					],
 					details: { kind: "switch", state: lightState(state) },
@@ -763,12 +560,11 @@ export function registerTools(pi: ExtensionAPI) {
 		parameters: blockParams,
 		async execute(_id, params: BlockParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
-			const blockedErr = guardBound(s);
-			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			const derived = s.getDerived();
 			const taskId = params.taskId ?? state.currentTaskId;
-			if (!taskId || !derived.taskMap.has(taskId)) return err("没有当前任务");
+			if (!taskId) return err("没有当前任务，请用 taskId 指定要标记阻塞的任务");
+			if (!derived.taskMap.has(taskId)) return err(`任务 ${taskId} 不存在。可用: ${derived.all.map((t) => t.id).join(", ")}`);
 			state.tasks[taskId] = { ...state.tasks[taskId], status: "blocked", blockReason: params.reason };
 			logEvent(state, "task_blocked", `${taskId}: ${params.reason}`, taskId);
 			commitAndRefresh(ctx);
@@ -796,8 +592,6 @@ export function registerTools(pi: ExtensionAPI) {
 		parameters: rollbackParams,
 		async execute(_id, params: RollbackParams, _signal, _onUpdate, ctx) {
 			const s = getStore(ctx);
-			const blockedErr = guardBound(s);
-			if (blockedErr) return blockedErr;
 			const state = s.getState();
 			const derived = s.getDerived();
 			const t = derived.taskMap.get(params.taskId);
@@ -832,173 +626,6 @@ export function registerTools(pi: ExtensionAPI) {
 				text += `\n\n⚠️ 依赖警告：以下已完成任务依赖它，需你判断是否也要回退（不会自动回退）：\n${dependents.map((x) => `  ${x.id} ${x.title}`).join("\n")}`;
 			}
 			return { content: [{ type: "text", text }], details: { kind: "rollback", state: lightState(state) } };
-		},
-	});
-
-	/* ---------- 工具：wf_note（AI 记录） ---------- */
-	pi.registerTool({
-		name: "wf_note",
-		annotations: { readOnlyHint: false },
-		label: "记录信息",
-		description:
-			"AI 的记录工具：记录后续步骤需要知晓的信息。进入新步骤先 list 查看已有记录，不再需要的及时 remove。\n" +
-			"记：用户拍板的选择、硬约束、需后续遵守的结论、会随时间变化的进度/状态。\n" +
-			"不记：琐碎细节、任务字段已覆盖的内容（分工/交付物/完成信号）。\n" +
-			"同主题更新：有 key 用同 key add 顶替，无 key 用 edit 改原记录——不留两条互相矛盾的记录。",
-		promptSnippet: "记录信息：wf_note(action, …) → 后续步骤需要知晓的结论/状态（list/add/edit/remove）",
-		parameters: noteParams,
-		async execute(_id, params: NoteParams, _signal, _onUpdate, ctx) {
-			const s = getStore(ctx);
-			const blockedErr = guardBound(s);
-			if (blockedErr) return blockedErr;
-			const state = s.getState();
-
-			if (params.action === "add") {
-				if (!params.content) return err("wf_note add 需要 content（记录内容）");
-				// 自动 id：n + 现有最大序号 + 1
-				let max = 0;
-				for (const n of state.notes) {
-					const m = /^n(\d+)$/.exec(n.id);
-					if (m) max = Math.max(max, Number(m[1]));
-				}
-				const id = `n${max + 1}`;
-				const rec: NoteRecord = { id, ts: new Date().toISOString(), content: params.content };
-				if (params.kind === "status") rec.kind = "status"; // fact 为默认，不落盘省字段
-				if (params.key?.trim()) rec.key = params.key.trim();
-				// 同 key 作废旧记录（留痕不物理删除，list/brief 不展示）——解决「决策改主意后两条打架」
-				const superseded: NoteRecord[] = [];
-				if (rec.key) {
-					for (const n of state.notes) {
-						if (!n.supersededBy && n.key === rec.key) {
-							n.supersededBy = id;
-							superseded.push(n);
-						}
-					}
-				}
-				state.notes.push(rec);
-				logEvent(state, "note_add", params.content, id);
-				commitAndRefresh(ctx);
-				const tags = `${rec.kind === "status" ? "，status" : ""}${rec.key ? `，key=${rec.key}` : ""}`;
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								`已记录（${id}${tags}）：${params.content}` +
-								(superseded.length
-									? `\n已作废旧记录：${superseded.map((n) => `${n.id}（${truncate(n.content, 30)}）`).join("、")}`
-									: ""),
-						},
-					],
-					details: { kind: "note", state: lightState(state) },
-				};
-			}
-
-			if (params.action === "list") {
-				const active = state.notes.filter((n) => !n.supersededBy);
-				const dead = state.notes.length - active.length;
-				if (!active.length)
-					return {
-						content: [{ type: "text", text: `暂无生效记录${dead ? `（${dead} 条已作废）` : ""}` }],
-						details: { kind: "note", state: lightState(state) },
-					};
-				const text =
-					`【记录】共 ${active.length} 条生效${dead ? `（另 ${dead} 条已作废不展示）` : ""}\n` +
-					active
-						.map(
-							(n) =>
-								`  ${n.id}${n.kind === "status" ? "⏱" : ""}${n.key ? `〈${n.key}〉` : ""} ${new Date(n.ts).toLocaleString()} ${n.content}`,
-						)
-						.join("\n") +
-					(active.some((n) => n.kind === "status")
-						? "\n（⏱ = 时效性记录：请确认仍成立，过时请 remove/edit）"
-						: "");
-				return { content: [{ type: "text", text }], details: { kind: "note", state: lightState(state) } };
-			}
-
-			if (params.action === "edit") {
-				if (!params.id) return err("wf_note edit 需要 id");
-				if (params.content === undefined) return err("wf_note edit 需要 content");
-				const n = state.notes.find((x) => x.id === params.id);
-				if (!n) return err(`记录 ${params.id} 不存在`);
-				n.content = params.content;
-				logEvent(state, "note_edit", params.id);
-				commitAndRefresh(ctx);
-				return {
-					content: [{ type: "text", text: `已修改 ${params.id}：${n.content}` }],
-					details: { kind: "note", state: lightState(state) },
-				};
-			}
-
-			// remove
-			if (!params.id) return err("wf_note remove 需要 id");
-			const idx = state.notes.findIndex((x) => x.id === params.id);
-			if (idx < 0) return err(`记录 ${params.id} 不存在`);
-			const [removed] = state.notes.splice(idx, 1);
-			logEvent(state, "note_remove", params.id);
-			commitAndRefresh(ctx);
-			return {
-				content: [{ type: "text", text: `已删除 ${removed.id}：${removed.content}` }],
-				details: { kind: "note", state: lightState(state) },
-			};
-		},
-	});
-
-	/* ---------- 工具：wf_milestone ---------- */
-	pi.registerTool({
-		name: "wf_milestone",
-		annotations: { readOnlyHint: false },
-		label: "设置里程碑",
-		description:
-			"设置/更新/删除里程碑（名称/日期/完成态）。名称不存在则自动创建，如 开题、中期、答辩。" +
-			"remove=true 删除该里程碑；newName 给已存在的里程碑改名（保留日期/完成态）。",
-		promptSnippet: "里程碑：wf_milestone(name[, date][, done][, remove][, newName]) → 新建/更新/改名/删除",
-		parameters: milestoneParams,
-		async execute(_id, params: MilestoneParams, _signal, _onUpdate, ctx) {
-			const s = getStore(ctx);
-			const blockedErr = guardBound(s);
-			if (blockedErr) return blockedErr;
-			const state = s.getState();
-			// 删除：remove=true 移除该里程碑（不存在时报错）
-			if (params.remove) {
-				if (!(params.name in state.milestones)) return err(`里程碑 ${params.name} 不存在`);
-				delete state.milestones[params.name];
-				logEvent(state, "milestone_remove", params.name);
-				commitAndRefresh(ctx);
-				return {
-					content: [{ type: "text", text: `里程碑 ${params.name} 已删除` }],
-					details: { kind: "milestone", state: lightState(state) },
-				};
-			}
-			// 改名：newName 且 name 已存在（保留 date/done）
-			if (params.newName) {
-				if (!(params.name in state.milestones)) return err(`里程碑 ${params.name} 不存在，无法改名`);
-				const m = state.milestones[params.name];
-				delete state.milestones[params.name];
-				state.milestones[params.newName] = { ...m };
-				logEvent(state, "milestone_rename", `${params.name} → ${params.newName}`);
-				commitAndRefresh(ctx);
-				return {
-					content: [{ type: "text", text: `里程碑 ${params.name} 已改名为 ${params.newName}` }],
-					details: { kind: "milestone", state: lightState(state) },
-				};
-			}
-			// 增/改：缺省行为（0.2 兼容）
-			if (!(params.name in state.milestones)) state.milestones[params.name] = { done: false };
-			if (params.date) state.milestones[params.name].date = params.date;
-			if (params.done !== undefined) state.milestones[params.name].done = params.done;
-			logEvent(state, "milestone", `${params.name} ${params.date ?? ""} done=${params.done ?? false}`);
-			commitAndRefresh(ctx);
-			return {
-				content: [
-					{
-						type: "text",
-						// 用存储后的实际值回显（本次未传 date 时也应显示已存日期）
-						text: `里程碑 ${params.name} 已更新：${state.milestones[params.name].date ?? "日期未定"}${state.milestones[params.name].done ? "（已完成）" : ""}`,
-					},
-				],
-				details: { kind: "milestone", state: lightState(state) },
-			};
 		},
 	});
 }

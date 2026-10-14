@@ -1,26 +1,26 @@
 /**
- * workflow-mgr 数据层：workflow.json / state.json / config.json 的加载保存与一致性
+ * workflow-mgr 数据层：workflow.json / state.json 的加载保存与一致性
  *
- * 与垂直版 thesis-workflow 的最大差异：工作流定义从「模块常量」变为「运行时数据」，
+ * 存储位置（全局、按会话隔离）：
+ * - 工作流数据：`~/.pi/agent/workflow/<项目标识>/<会话ID>/{workflow.json,state.json}`
+ * - 面板开关：`~/.pi/agent/workflow/config.json`（全局单份，与项目/会话无关）
+ * - 归档：`~/.pi/agent/workflow/<项目标识>/archive/<时间戳>-<名称>/`
+ * 项目标识 = 目录名（净化）+ 路径短哈希，避免同名目录互相串数据；
+ * `PI_WORKFLOW_HOME` 可整体覆盖根目录（测试用）。
+ *
  * 本模块负责：
- * - 三个 JSON 的路径定位、加载（schemaVersion 校验 + fallback）、保存（自动建目录）；
+ * - 两个 JSON 的路径定位、加载（schemaVersion 校验 + fallback）、保存（自动建目录）；
  * - 派生表（taskMap/stageOf/all）按工作流动态构建，工作流变更后失效重建；
  * - reconcile 一致性兜底：工作流被工具/人工增删任务后，清理 state 孤儿 key、
  *   补齐缺失任务、currentTaskId 失效时用「依赖满足的下一任务」补位；
  * - 依赖环检测（add/edit 时防呆，DFS 沿依赖能否回到自身）；
- * - WorkflowStore 类持有三份缓存（单会话内存态），session_start / cwd 变化时重建。
- *
- * 多工作流槽位（并发隔离）：一个项目可同时存在多个命名工作流——
- * default 槽 = .pi/workflow/ 根目录三 JSON（向后兼容旧布局），命名槽 =
- * .pi/workflow/slots/<名称>/ 下同样三 JSON（archive 亦按槽分目录）。
- * 每个会话经 .pi/workflow/bindings.json 绑定一个槽（sessionId → 槽名 /
- * "auto"=暂不启用、是否使用交由 AI 判断 / null=明确不用工作流 / 无记录=未选择）；
- * 未选择时由 events 层按「槽位 ≥2 或有其他活跃会话已绑定」决定自动绑定还是注入选择指引。
- * 旧路径：.pi/workflow/{workflow,state,config}.json（项目级、跨会话、可 git 审查）。
+ * - WorkflowStore 类持有缓存（单会话内存态），会话/cwd 变化时重建。
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { CONFIG_DIR_NAME, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadJsonConfig, saveJsonConfig } from "../shared/config";
 import {
 	PANEL_SCHEMA_VERSION,
@@ -44,151 +44,42 @@ export interface Derived {
 	mode: WorkflowMode;
 }
 
-/* ------------------------------ 多工作流槽位与会话绑定 ------------------------------ */
+/* ------------------------------ 存储路径 ------------------------------ */
 
-/** 默认槽位名：对应 .pi/workflow/ 根目录（向后兼容既有数据布局） */
-export const DEFAULT_SLOT = "default";
-/**
- * 绑定值：暂不启用——用户的无责选择（不指定工作流、也不关掉），是否使用由 AI 视任务自行判断。
- * 不占用槽位，与 null（明确不用）区分：auto 下 AI 可自行 bind 启用，null 下 AI 不得启用。
- */
-export const BINDING_AUTO = "auto";
-/** 保留槽位名（与目录/命令字冲突） */
-const RESERVED_SLOTS = new Set([DEFAULT_SLOT, "none", "archive", "slots", BINDING_AUTO]);
-/** 绑定记录保鲜期：超过视为失效（防重启堆积的陈旧绑定复活） */
-const BINDING_TTL_MS = 7 * 24 * 3600_000;
-
-/** 槽位名合法性：字母/数字/中文开头，可含 _ -，≤32 字符，非保留字 */
-export function isValidSlotName(name: string): boolean {
-	return /^[\p{L}\p{N}][\p{L}\p{N}_-]{0,31}$/u.test(name) && !RESERVED_SLOTS.has(name);
+/** 数据根目录（`PI_WORKFLOW_HOME` 覆盖，测试用） */
+export function workflowHome(): string {
+	return process.env.PI_WORKFLOW_HOME || join(homedir(), ".pi", "agent", "workflow");
 }
 
-/** 槽位目录：default → .pi/workflow/；命名槽 → .pi/workflow/slots/<名称>/（archive 随之分槽） */
-function slotDir(cwd: string, slot: string): string {
-	return slot === DEFAULT_SLOT
-		? join(cwd, CONFIG_DIR_NAME, "workflow")
-		: join(cwd, CONFIG_DIR_NAME, "workflow", "slots", slot);
+/** 项目标识：目录名净化（保留中文/字母数字/_-.）+ 路径短哈希（同名目录不串） */
+export function projectKey(cwd: string): string {
+	const name = basename(cwd).replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 40) || "project";
+	return `${name}-${createHash("sha1").update(cwd).digest("hex").slice(0, 8)}`;
 }
 
-function workflowPath(cwd: string, slot: string): string {
-	return join(slotDir(cwd, slot), "workflow.json");
-}
-function statePath(cwd: string, slot: string): string {
-	return join(slotDir(cwd, slot), "state.json");
-}
-function panelConfigPath(cwd: string, slot: string): string {
-	return join(slotDir(cwd, slot), "config.json");
-}
-function bindingsPath(cwd: string): string {
-	return join(cwd, CONFIG_DIR_NAME, "workflow", "bindings.json");
+/** 会话数据目录：`<根>/<项目标识>/<会话ID>/`（会话 ID 里的非法字符替换为 _） */
+export function sessionDir(cwd: string, sid: string): string {
+	return join(workflowHome(), projectKey(cwd), sid.replace(/[^\w.-]/g, "_"));
 }
 
-/** bindings.json：sessionId → 绑定（slot=槽名 / BINDING_AUTO=暂不启用、由 AI 判断 / null=明确不用；无记录=未选择） */
-interface BindingsFile {
-	schemaVersion: 1;
-	sessions: Record<string, { slot: string | null; at: number }>;
+function workflowPath(cwd: string, sid: string): string {
+	return join(sessionDir(cwd, sid), "workflow.json");
 }
-
-function isBindingsFile(v: unknown): v is BindingsFile {
-	const b = v as BindingsFile | null;
-	return !!b && b.schemaVersion === 1 && !!b.sessions && typeof b.sessions === "object";
+function statePath(cwd: string, sid: string): string {
+	return join(sessionDir(cwd, sid), "state.json");
 }
-
-function readBindings(cwd: string): BindingsFile {
-	return loadJsonConfig(bindingsPath(cwd), { schemaVersion: 1, sessions: {} }, isBindingsFile);
+/** 面板开关配置：全局单份（用户偏好，不随项目/会话分家） */
+export function panelConfigPath(): string {
+	return join(workflowHome(), "config.json");
 }
-
-/** 读会话绑定：槽位名 / BINDING_AUTO=暂不启用（AI 判断） / null=明确不用 / undefined=未选择（过期按未选择） */
-export function getBinding(cwd: string, sid: string): string | null | undefined {
-	const b = readBindings(cwd).sessions[sid];
-	if (!b || Date.now() - b.at > BINDING_TTL_MS) return undefined;
-	return b.slot;
-}
-
-/** 写会话绑定（顺带清理过期条目） */
-export function setBinding(cwd: string, sid: string, slot: string | null): void {
-	const f = readBindings(cwd);
-	const now = Date.now();
-	for (const [k, v] of Object.entries(f.sessions)) {
-		if (now - v.at > BINDING_TTL_MS) delete f.sessions[k];
-	}
-	f.sessions[sid] = { slot, at: now };
-	saveJsonConfig(bindingsPath(cwd), f);
-}
-
-/** 列出全部槽位：default（根目录有 workflow.json 才计入）+ slots/ 下各命名槽 */
-export function listSlots(cwd: string): string[] {
-	const slots: string[] = [];
-	if (existsSync(workflowPath(cwd, DEFAULT_SLOT))) slots.push(DEFAULT_SLOT);
-	try {
-		const base = join(cwd, CONFIG_DIR_NAME, "workflow", "slots");
-		for (const e of readdirSync(base, { withFileTypes: true })) {
-			if (e.isDirectory() && isValidSlotName(e.name)) slots.push(e.name);
-		}
-	} catch {
-		/* slots 目录不存在 */
-	}
-	return slots;
-}
-
-export interface SlotSummary {
-	slot: string;
-	total: number;
-	done: number;
-	current: string;
-}
-
-/** 各槽位进度摘要（绑定选择指引 / bind 无参列表用；损坏槽按 0/0 兜底） */
-export function slotSummaries(cwd: string): SlotSummary[] {
-	return listSlots(cwd).map((slot) => {
-		let total = 0;
-		let done = 0;
-		let current = "";
-		try {
-			const wf = JSON.parse(readFileSync(workflowPath(cwd, slot), "utf8")) as {
-				stages?: { tasks?: { id: string; title: string }[] }[];
-			};
-			const st = JSON.parse(readFileSync(statePath(cwd, slot), "utf8")) as {
-				currentTaskId?: string | null;
-				tasks?: Record<string, { status?: string }>;
-			};
-			const tasks = (wf.stages ?? []).flatMap((s) => s.tasks ?? []);
-			total = tasks.length;
-			done = tasks.filter((t) => st.tasks?.[t.id]?.status === "done").length;
-			current = tasks.find((t) => t.id === st.currentTaskId)?.title ?? "";
-		} catch {
-			/* 文件缺失/损坏 → 0/0 空摘要 */
-		}
-		return { slot, total, done, current };
-	});
-}
-
-/**
- * 是否有其他「活着的」会话已绑定工作流（session_start 自动绑定判定用）：
- * 优先借 pair-guard 注册表心跳判活（零耦合可选读，缺席/无记录时按绑定时间 24h 内视为活跃）；
- * 绑定为 null（明确不用）或 BINDING_AUTO（暂不启用）的会话不占槽，不参与判定。
- */
-export function hasOtherLiveBinding(cwd: string, selfSid: string): boolean {
-	const now = Date.now();
-	for (const [sid, b] of Object.entries(readBindings(cwd).sessions)) {
-		if (sid === selfSid || b.slot === null || b.slot === BINDING_AUTO || now - b.at > BINDING_TTL_MS) continue;
-		let live = now - b.at < 24 * 3600_000;
-		try {
-			const rec = JSON.parse(readFileSync(join(cwd, CONFIG_DIR_NAME, "sessions", `${sid}.json`), "utf8")) as {
-				lastBeat?: number;
-			};
-			if (typeof rec.lastBeat === "number") live = now - rec.lastBeat < 6 * 60_000;
-		} catch {
-			/* pair-guard 缺席/无该会话记录 → 按绑定时间兜底 */
-		}
-		if (live) return true;
-	}
-	return false;
+/** 归档目录：项目内聚合各会话的历史快照 */
+function archiveDir(cwd: string): string {
+	return join(workflowHome(), projectKey(cwd), "archive");
 }
 
 /* ------------------------------ 空工作流与校验 ------------------------------ */
 
-/** 空工作流：无内置示例——数据缺失 / wf_workflow reset 后均为「无阶段无任务」，AI 用 wf_workflow 从零创建 */
+/** 空工作流：无内置示例——数据缺失时为「无阶段无任务」，AI 用 wf_workflow 从零创建 */
 const EMPTY_WORKFLOW: WorkflowDef = { schemaVersion: WORKFLOW_SCHEMA_VERSION, stages: [] };
 
 const isStr = (v: unknown): v is string => typeof v === "string";
@@ -233,13 +124,10 @@ export function isWorkflowDef(v: unknown): v is WorkflowDef {
 export function isWorkflowState(v: unknown): v is WorkflowState {
 	const s = v as WorkflowState | null;
 	if (!s || s.schemaVersion !== STATE_SCHEMA_VERSION || !s.tasks || typeof s.tasks !== "object") return false;
-	for (const [k, t] of Object.entries(s.tasks)) {
+	for (const t of Object.values(s.tasks)) {
 		if (!t || typeof t !== "object" || !["todo", "doing", "done", "blocked"].includes(t.status as string)) return false;
 	}
 	if (s.currentTaskId !== null && typeof s.currentTaskId !== "string") return false;
-	if (!s.milestones || typeof s.milestones !== "object") return false;
-	// notes 允许缺失（旧 v1 数据仅含 decisions）→ getState 加载后丢弃 decisions 并补空数组
-	if (s.notes !== undefined && !Array.isArray(s.notes)) return false;
 	if (!Array.isArray(s.log)) return false;
 	return true;
 }
@@ -247,13 +135,12 @@ export function isWorkflowState(v: unknown): v is WorkflowState {
 /** config.json 校验 */
 export function isPanelConfig(v: unknown): v is PanelConfig {
 	const c = v as PanelConfig | null;
-	return !!c && c.schemaVersion === PANEL_SCHEMA_VERSION && typeof c.showPanel === "boolean" &&
-		(c.auditOnComplete === undefined || typeof c.auditOnComplete === "boolean");
+	return !!c && c.schemaVersion === PANEL_SCHEMA_VERSION && typeof c.showPanel === "boolean";
 }
 
 /* ------------------------------ 状态构造与一致性 ------------------------------ */
 
-/** 按工作流生成全新状态（所有任务 todo、无当前任务、里程碑/决策/日志为空） */
+/** 按工作流生成全新状态（所有任务 todo、无当前任务、日志为空） */
 export function freshState(wf: WorkflowDef): WorkflowState {
 	const tasks: Record<string, TaskState> = {};
 	for (const stage of wf.stages) for (const t of stage.tasks) tasks[t.id] = { status: "todo" };
@@ -262,13 +149,11 @@ export function freshState(wf: WorkflowDef): WorkflowState {
 		updatedAt: new Date().toISOString(),
 		currentTaskId: null,
 		tasks,
-		milestones: {},
-		notes: [],
 		log: [],
 	};
 }
 
-/** 构建派生表（工作流变更后必须重建）；mode 缺省 human-ai（0.3 拍板：向后兼容） */
+/** 构建派生表（工作流变更后必须重建）；mode 缺省 human-ai */
 export function derive(wf: WorkflowDef): Derived {
 	const taskMap = new Map<string, TaskDef>();
 	const stageOf = new Map<string, StageDef>();
@@ -331,7 +216,7 @@ export function hasDependencyCycle(taskId: string, newDeps: string[], derived: D
 	return false;
 }
 
-/** 深拷贝（reset 回默认工作流时避免污染模块常量） */
+/** 深拷贝（构造空工作流/导入时避免污染模块常量） */
 export function cloneWorkflow(wf: WorkflowDef): WorkflowDef {
 	return JSON.parse(JSON.stringify(wf)) as WorkflowDef;
 }
@@ -367,35 +252,27 @@ export function logEvent(state: WorkflowState, event: string, msg?: string, task
 /* ------------------------------ WorkflowStore ------------------------------ */
 
 /**
- * 单会话缓存容器：三个 JSON + 派生表。
- * session_start 或 cwd 变化时重建（重建即从磁盘重新加载——文件被外部修改后自动生效）。
+ * 单会话缓存容器：两个 JSON + 派生表 + 面板配置。
+ * 会话/cwd 变化时重建（重建即从磁盘重新加载——文件被外部修改后自动生效）。
  *
- * stale 防护：构造时把 cwd 固化为字符串，之后不再持有/访问 ctx——session 替换
+ * stale 防护：构造时把 cwd 与会话 ID 固化为字符串，之后不再持有/访问 ctx——session 替换
  * （compaction / reload）后旧 ctx 被 pi 标记 stale，任何属性访问都会抛
- * assertActive 错误（此前 getStore 比较 sessionStore.cwd 时动态访问旧 ctx 即崩溃）。
- * 路径函数全部接收固化 cwd，store 方法在 stale 后仍可安全读写磁盘。
+ * assertActive 错误。路径函数全部接收固化值，store 方法在 stale 后仍可安全读写磁盘。
  */
 export class WorkflowStore {
 	/** 构造时固化的工作目录：后续所有文件操作基于此值，不访问可能 stale 的 ctx */
 	readonly cwd: string;
-	/** 本 store 对应的槽位（default = 根目录布局） */
-	readonly slot: string;
-	/**
-	 * 绑定阻塞态（getStore 赋值）：undecided=会话未绑定（多槽/并发待选择）、
-	 * auto=用户暂不启用（是否使用由 AI 判断）、none=明确不用工作流；
-	 * 非 null 时工具层应拒绝操作并引导 bind。
-	 * 阻塞时 store 落在 default 槽（惰性、不主动写盘），仅作占位。
-	 */
-	blocked: "undecided" | "auto" | "none" | null = null;
+	/** 构造时固化的会话 ID（数据隔离键） */
+	readonly sid: string;
 	private wf: WorkflowDef | null = null;
 	private derived: Derived | null = null;
 	private state: WorkflowState | null = null;
 	private panelCfg: PanelConfig | null = null;
 
-	constructor(ctx: ExtensionContext, slot: string = DEFAULT_SLOT) {
+	constructor(ctx: ExtensionContext) {
 		// 构造时刻的 ctx 必然是新鲜的（getStore 只在事件/工具携带的新 ctx 下新建），固化后彻底解耦
 		this.cwd = ctx.cwd;
-		this.slot = slot;
+		this.sid = ctx.sessionManager?.getSessionId?.() ?? "unknown";
 	}
 
 	/** 清空全部缓存（下次访问重新从磁盘加载） */
@@ -408,13 +285,13 @@ export class WorkflowStore {
 
 	/** 工作流定义文件是否已落盘（从未创建过工作流 → 常驻面板整体隐藏） */
 	hasWorkflowFile(): boolean {
-		return existsSync(workflowPath(this.cwd, this.slot));
+		return existsSync(workflowPath(this.cwd, this.sid));
 	}
 
 	getWorkflow(): WorkflowDef {
 		if (!this.wf) {
 			// 无内置示例：文件缺失 → 空工作流（无阶段无任务），面板按 hasWorkflowFile 隐藏/显示空提示
-			this.wf = loadJsonConfig(workflowPath(this.cwd, this.slot), cloneWorkflow(EMPTY_WORKFLOW), isWorkflowDef);
+			this.wf = loadJsonConfig(workflowPath(this.cwd, this.sid), cloneWorkflow(EMPTY_WORKFLOW), isWorkflowDef);
 		}
 		return this.wf;
 	}
@@ -427,13 +304,7 @@ export class WorkflowStore {
 	getState(): WorkflowState {
 		if (!this.state) {
 			const wf = this.getWorkflow();
-			this.state = loadJsonConfig(statePath(this.cwd, this.slot), freshState(wf), isWorkflowState);
-			// 1.7 拍板：decisions → notes 替换，旧数据直接丢弃（插件未被大规模使用，不迁移）
-			const old = (this.state as WorkflowState & { decisions?: unknown }).decisions;
-			if (old !== undefined || !Array.isArray(this.state.notes)) {
-				delete (this.state as { decisions?: unknown }).decisions;
-				if (!Array.isArray(this.state.notes)) this.state.notes = [];
-			}
+			this.state = loadJsonConfig(statePath(this.cwd, this.sid), freshState(wf), isWorkflowState);
 			reconcile(this.state, wf, this.getDerived());
 		}
 		return this.state;
@@ -441,7 +312,7 @@ export class WorkflowStore {
 
 	getPanelConfig(): PanelConfig {
 		if (!this.panelCfg) {
-			this.panelCfg = loadJsonConfig(panelConfigPath(this.cwd, this.slot), { schemaVersion: PANEL_SCHEMA_VERSION, showPanel: true }, isPanelConfig);
+			this.panelCfg = loadJsonConfig(panelConfigPath(), { schemaVersion: PANEL_SCHEMA_VERSION, showPanel: true }, isPanelConfig);
 		}
 		return this.panelCfg;
 	}
@@ -449,7 +320,7 @@ export class WorkflowStore {
 	/** 工作流落盘 + 派生表失效（下次 getDerived 重建） */
 	commitWorkflow(): void {
 		if (this.wf) {
-			saveJsonConfig(workflowPath(this.cwd, this.slot), this.wf);
+			saveJsonConfig(workflowPath(this.cwd, this.sid), this.wf);
 			this.derived = null;
 		}
 	}
@@ -457,21 +328,12 @@ export class WorkflowStore {
 	commitState(): void {
 		if (this.state) {
 			this.state.updatedAt = new Date().toISOString();
-			saveJsonConfig(statePath(this.cwd, this.slot), this.state);
+			saveJsonConfig(statePath(this.cwd, this.sid), this.state);
 		}
 	}
 
 	commitPanelConfig(): void {
-		if (this.panelCfg) saveJsonConfig(panelConfigPath(this.cwd, this.slot), this.panelCfg);
-	}
-
-	/** 全量重置：清空工作流（无阶段无任务）+ 状态重建（wf_workflow reset 用） */
-	resetAll(): void {
-		this.wf = cloneWorkflow(EMPTY_WORKFLOW);
-		this.derived = null;
-		this.state = freshState(this.wf);
-		this.commitWorkflow();
-		this.commitState();
+		if (this.panelCfg) saveJsonConfig(panelConfigPath(), this.panelCfg);
 	}
 
 	/**
@@ -490,11 +352,12 @@ export class WorkflowStore {
 	}
 
 	/**
-	 * 归档（wf_workflow archive 用）：把当前工作流三 JSON 移动到 archive/<时间戳>-<名称>/ 留档。
-	 * 归档 ≠ 完成（可能是放弃/暂停/换方案）：不再强制标 done，快照保留任务真实状态，
+	 * 归档（wf_workflow archive 用）：把当前工作流两个 JSON 移动到
+	 * `<项目>/archive/<时间戳>-<名称>/` 留档。
+	 * 归档 ≠ 完成（可能是放弃/暂停/换方案）：不强制标 done，快照保留任务真实状态，
 	 * 收尾状态经 status 字符串记录（archiveStatus 字段）供追溯；当前工作流区清空
-	 * （hasWorkflowFile → false，面板自动隐藏退出视野）；数据保留可 git 审查，
-	 * 但不提供找回功能——真需要时由人手动查看 archive/ 目录。
+	 * （hasWorkflowFile → false，面板自动隐藏退出视野）；数据保留可人工查看，
+	 * 但不提供找回功能。
 	 */
 	archiveAll(status = ""): void {
 		// 归档前：写入收尾状态描述（不强制改任务状态）
@@ -503,12 +366,11 @@ export class WorkflowStore {
 			this.state.currentTaskId = null;
 			this.commitState();
 		}
-		const base = join(dirname(workflowPath(this.cwd, this.slot)), "archive");
 		const name = (this.wf?.stages[0]?.name ?? "工作流").replace(/[\\/:*?"<>|\s]+/g, "-");
 		const ts = new Date().toISOString().replace(/[:.]/g, "-");
-		const dir = join(base, `${ts}-${name}`);
+		const dir = join(archiveDir(this.cwd), `${ts}-${name}`);
 		mkdirSync(dir, { recursive: true });
-		// rename 跨文件系统（如镜像目录与工作流目录不同盘符/分区）会抛 EXDEV，退化为复制+删除
+		// rename 跨文件系统（如镜像目录与数据目录不同盘符/分区）会抛 EXDEV，退化为复制+删除
 		const moveFile = (src: string, dest: string) => {
 			try {
 				renameSync(src, dest);
@@ -517,53 +379,30 @@ export class WorkflowStore {
 				unlinkSync(src);
 			}
 		};
-		for (const p of [workflowPath(this.cwd, this.slot), statePath(this.cwd, this.slot), panelConfigPath(this.cwd, this.slot)]) {
+		for (const p of [workflowPath(this.cwd, this.sid), statePath(this.cwd, this.sid)]) {
 			if (existsSync(p)) moveFile(p, join(dir, basename(p)));
 		}
 		this.wf = null;
 		this.derived = null;
 		this.state = null;
-		this.panelCfg = null;
 	}
 }
 
 /* ------------------------------ 会话级 store 访问（跨模块共享） ------------------------------ */
 
 /**
- * 单会话 store：会话内按 cwd 缓存，cwd 变化自动重建（重建即从磁盘重载）。
- * 由 tools/commands/events 各模块共享——index 只负责组装，不再持有 store 生命周期。
+ * 单会话 store：会话内按 (cwd, 会话 ID) 缓存，任一变化即重建（重建即从磁盘重载）。
+ * 由 tools/commands/events 各模块共享——index 只负责组装，不持有 store 生命周期。
  *
- * stale 防护：WorkflowStore 构造时已固化 cwd（不持有 ctx），此处的 cwd 比较是纯字符串
+ * stale 防护：WorkflowStore 构造时已固化 cwd/sid（不持有 ctx），此处的比较是纯字符串
  * 比较，session 替换后旧实例即使持有 stale ctx 引用也不触发访问，直接重建/复用。
  */
 let sessionStore: WorkflowStore | null = null;
-/** 本会话绑定缓存（rebind 后需 invalidateBindingCache 失效重建）；键含 cwd 防同 sid 跨目录串 */
-let sessionBinding: { sid: string; cwd: string; value: string | null | undefined } | null = null;
-
-/** 解析本会话绑定：槽位名 / BINDING_AUTO=暂不启用（AI 判断） / null=明确不用 / undefined=未选择（会话内缓存） */
-export function resolveBinding(ctx: ExtensionContext): string | null | undefined {
-	// sessionManager 在真实 pi 中恒存在；可选链兜底测试 mock 与极端场景
-	const sid = ctx.sessionManager?.getSessionId?.() ?? "unknown";
-	if (!sessionBinding || sessionBinding.sid !== sid || sessionBinding.cwd !== ctx.cwd) {
-		sessionBinding = { sid, cwd: ctx.cwd, value: getBinding(ctx.cwd, sid) };
-	}
-	return sessionBinding.value;
-}
-
-/** 绑定缓存失效（wf_workflow bind / session_start 自动绑定后调用） */
-export function invalidateBindingCache(): void {
-	sessionBinding = null;
-}
 
 export function getStore(ctx: ExtensionContext): WorkflowStore {
-	const binding = resolveBinding(ctx);
-	const deferred = binding === BINDING_AUTO;
-	const slot = typeof binding === "string" && !deferred ? binding : DEFAULT_SLOT;
-	const blocked =
-		binding === undefined ? ("undecided" as const) : binding === null ? ("none" as const) : deferred ? ("auto" as const) : null;
-	if (!sessionStore || sessionStore.cwd !== ctx.cwd || sessionStore.slot !== slot || sessionStore.blocked !== blocked) {
-		sessionStore = new WorkflowStore(ctx, slot);
-		sessionStore.blocked = blocked;
+	const sid = ctx.sessionManager?.getSessionId?.() ?? "unknown";
+	if (!sessionStore || sessionStore.cwd !== ctx.cwd || sessionStore.sid !== sid) {
+		sessionStore = new WorkflowStore(ctx);
 	}
 	return sessionStore;
 }

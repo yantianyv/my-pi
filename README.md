@@ -26,6 +26,7 @@ node install.js --dry-run # 先预览要做什么，不修改
 | `extensions/` | `ask/` — 整屏问卷：`ask` 工具批量提问（七题型、最多 12 题）+ `/answer` 续答已搁置问卷；必答未完成时连按两次 Enter 可跳过未答直接提交 | `~/.pi/agent/extensions/` |
 | `extensions/` | `status-beacon.ts` — 全链路状态感知：执行中标题进度（spinner+工具活动）+ 五状态五音效 + 状态栏闪烁 + 提醒标题动画（见下；前身 task-alert） | `~/.pi/agent/extensions/` |
 | `extensions/` | `perm-gate.ts` — bash 命令权限门：硬拒绝 / 关注项 / 已记住的操作（意图缓存）+ AI 审核与人工确认面板（见下） | `~/.pi/agent/extensions/` |
+| `extensions/` | `secret/` — 密钥不外发：会话级内存库（掩码录入 / 粘贴捕获 / 形态识别）+ `{{sec:名字}}` 引用（bash 走按次环境变量注入，真值不进 argv）+ 四道出口脱敏网 + 跨会话长期指纹表；`secret_list` / `secret_prompt` 工具、`/secret` 面板（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `web-tool.ts` — 联网工具：`web_search` 多源搜索 + `web_fetch` 抓网页转 markdown（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `explore-agent.ts` — `explore` 只读探索子代理：并行派子代理、成果渐进落盘（`.pi/explore/report.md`）、断点续跑与上下文压缩（见下） | `~/.pi/agent/extensions/` |
 | `extensions/` | `clipboard.ts` — 剪贴板读写：`clipboard_get` 读取 + `clipboard_set` 写入 + `/clipboard` 命令（见下） | `~/.pi/agent/extensions/` |
@@ -83,7 +84,7 @@ pi 内置供应商无火山引擎（volcengine/ark/doubao），模板通过 pi �
 
 ## 模型管理（src/extensions/model-config/）
 
-各插件要用模型的地方（btw 问答、explore 子代理、perm-gate 命令审核、status-beacon 动作短语、hud-git 提交信息与冲突消解、/init 子代理、完成信号审计）统一走两层设置：
+各插件要用模型的地方（btw 问答、explore 子代理、perm-gate 命令审核、status-beacon 动作短语、hud-git 提交信息与冲突消解、/init 子代理）统一走两层设置：
 
 - **插件侧**（各自配置文件里的 `model` 键，值只有两种）：`auto` = 交给 model-config 管理；或一个具体 `provider/modelId`（本地固定，管理插件在不在都照用）。各插件的模型命令（`/btw-config`、`/explore-config`、`/git-config`、`/beacon-config`、`/perm-gate model`）都打开同一个可搜索选择浮层。
 - **管理侧**（`~/.pi/agent/model-config.json`，`/model-config` 面板，全部操作都在面板里）：每个用途可设为某个策略或某个具体模型。
@@ -142,7 +143,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | | `web-search` | `web_search` 执行中 / 完成 | `🔍 搜索中` → `✓ 搜索 8 条` | 75 |
 | | `web-fetch` | `web_fetch` 执行中 / 完成 | `🌐 抓取中` → `✓ 抓取完成` | 74 |
 | | `kb-sync` | 知识库同步（含后台自动同步） | `🔄 同步中` → `✓ 下载 3、上传 1` | 73 |
-| | `workflow-mgr` | 工作流摘要 / 完成信号审计 | `📋 进度 3/12 · 当前：2.1 重构锁等待` | 72 |
+| | `workflow-mgr` | 工作流摘要 | `📋 进度 3/12 · 当前：2.1 重构锁等待` | 72 |
 | | `model-switch` | 模型切换（3s TTL） | `⇄ deepseek-chat` | 70 |
 | | `explore` | 探索子代理进度 | `🔎 探索 3/8 · 并发 4` | 68 |
 | | `keep` | 停顿点续航判断 / 续航与挂机计数 | `🔁 续航 3/16` `⏳ 挂机 3/16` | 66 |
@@ -152,6 +153,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 | | `kb-op` | kb 工具回执（读/写/删/移/上传…共用一个键） | `✓ 已读取笔记` | 61 |
 | | `btw-transfer` | btw 问答已附带进下一条消息 | `📎 已附带 btw 问答` | 60 |
 | 通用兜底 | `task-alert-run` | 执行中（思考块 / 正文 / 工具） | `💭 思考中` | 58 |
+| 环境信息 | `secret` | 本会话已录入的密钥/敏感文本条数 | `🔐 secret 3 条` | 57 |
 | 环境信息 | `pair-guard` | 有并发 pi 会话 | `👥 2 并发会话` | 56 |
 
 状态文案约定（同一根轴上的并列状态，尽量一眼并列）：**进行中** = `<emoji> 动作/对象 + 中`（`🔍 搜索中`、`🔎 探索 3/8`）；**成功** = `✓ 结果`（`✓ 搜索 8 条`）；**失败** = `⚠ 对象失败`（`⚠ 搜索失败`）；数字与单位之间留空格。三处语义化例外：`🔓/🔒 vault 已解锁/口令错误`（锁状态本身是信息）、`📎 已附带 btw 问答`（附件语义）、`✅/❌/⏳` 结果提醒（本身是家族标识）。`src/extensions/test/status-keys.test.mjs` 双向校验「推的 key 都登记了」+「登记的 key 都有人推」。
@@ -180,7 +182,7 @@ git 状态每 5 秒自动刷新；`/balance` 手动刷新余额；`/git` 打开 
 - 速率：平均每分钟消耗，启动 1 分钟后即显示（分母=实际经过分钟数，封顶 10 分钟，之后过渡为滚动平均）。消耗统计按供应商单独适配（`BalanceAdapter.rateText`）：DeepSeek / Moonshot / OpenRouter 等按量付费显示 `¥/min + 累计`；Kimi / MiMo 等订阅制仅显示会话 token 累计。DeepSeek 按官方人民币定价直算（`hud/cost.ts` 的 `DEEPSEEK_PRICES`：缓存命中 ¥0.02/0.025、未命中 ¥1/3、输出 ¥2/6 每百万 tokens），不再经 USD×汇率；峰谷定价（高峰 2 倍）已按官方规则生效（HUD 行 3 的「高峰/低峰」徽章与实际计价一致，见上图例）。其余供应商成本内部按**原始货币 USD** 记录，显示时按汇率换算 RMB。**汇率三态**（`hud/cost.ts`）：① 实时（多源拉取 frankfurter(ECB) → open.er-api，每日快照、免 key，随余额刷新 1h 节流一次）→ ② 磁盘缓存（`~/.pi/agent/tmp/exchange-rate.json`，拉取失败时读缓存）→ ③ 无汇率（断网且无缓存，显示原始货币 USD，**不使用任何固定近似汇率**）。OpenRouter 余额：有汇率时换算 RMB（明细附原始 USD + 汇率，缓存标注「(缓存)」），无汇率时直接显示 USD 原始值。所有供应商在 HUD 第 2 行统一显示 `↑input ↓output rate/s` 的输出 token 速率；该速率为 EMA 平滑值（历史 80% + 新 turn 20%，首轮直接采用），基于 `output token / turn 实际耗时`，比长期平均更能反映当前生成速度，但不是严格的逐 chunk 实时流式速率。
 - 思考折叠：默认折叠（`settings.json` 的 `hideThinkingBlock: true`），折叠标签为动画 `Thinking.` → `Thinking..` → `Thinking...` → `Thinking....`（4 帧循环，随思考过程增长），`Ctrl+T` 切换展开。
 - 命令：`/balance` 手动刷新余额；`/git` 打开 git 可视化面板；`/hud` 开关 HUD。
-- **额外底部行接口**：通用 `__PI_HUD_API__`（`registerExtraRows(provider)` / `notifyExtraRowsUpdate()`）——workflow-mgr 等扩展注册渲染函数，hud 只把返回的行追加到 footer 底部（屏幕最底），**内容与样式由注册方决定**。当前 workflow-mgr 使用：其常驻面板内容（任务/分工/里程碑 ≈4 行，12 格进度条 + selectedBg 底色与面板同款）在底部渲染，面板隐藏；`/hud` 关闭时置 `__PI_HUD_ACTIVE__=false` 并派发 `hud:state-change`，workflow-mgr 自动注销底部行、恢复自绘面板。
+- **额外底部行接口**：通用 `__PI_HUD_API__`（`registerExtraRows(provider)` / `notifyExtraRowsUpdate()`）——workflow-mgr 等扩展注册渲染函数，hud 只把返回的行追加到 footer 底部（屏幕最底），**内容与样式由注册方决定**。当前 workflow-mgr 使用：其常驻面板内容（任务/分工 ≈3 行，12 格进度条 + selectedBg 底色与面板同款）在底部渲染，面板隐藏；`/hud` 关闭时置 `__PI_HUD_ACTIVE__=false` 并派发 `hud:state-change`，workflow-mgr 自动注销底部行、恢复自绘面板。
 
 说明：DeepSeek 按量付费，余额过低变色警示；Kimi For Coding 为订阅制 + 加油包（Extra Usage）混合，优先显示加油包余额，没有加油包则显示订阅额度，订阅额度耗尽或余额过低变色警示，右下角显示会话 token 累计；Kimi 开放平台（`moonshotai`/`moonshotai-cn`）为按量付费，显示现金 + 赠金余额；MiMo Token Plan CN（`xiaomi-token-plan-cn`）与火山方舟 Coding（`volcengine-coding`）均无公开余量 API（官方仅提供控制台查看，5h/周/月限额），余额行以灰色 OSC 8 超链接短文本显示控制台查询链接（Windows Terminal 等终端 Ctrl/⌘+点击打开；单击需 pi 端支持），完整 URL 在 `/balance` 通知里，右下角显示会话 token 累计。Z.AI Coding CN（智谱 GLM Coding Plan）为订阅积分制：余额行画 MCP月/周/5h 三窗口额度条（大周期在前，百分比 + 5h 窗口重置倒计时），积分绝对值与套餐档位收进 `/balance` 通知；消耗统计走**积分轨**（积分视为独立货币，不换算 ¥/$，统一用 🪙 符号——`CREDIT_SYMBOL`，未来所有非货币计费复用）：因消息 usage 不含积分，turn_end / 余额刷新时采样 quota 接口的「5h 窗口已用积分」做差分（30s 节流；负增量/窗口滚动仅换基线不记增量），显示 `🪙X.XX/min + 🪙累计`（采样接口不可用时自动回落为会话 token 数）。数字与颜色解耦：🪙 数字只反映额度消耗速率，颜色按 pi 内置 provider 价格（`usage.cost.total`，USD 等效成本）的速率染色——积分/min 高 ≠ 花钱多，成本速率才是价格信号。所有供应商都在 HUD 第 2 行统一显示输出 token 速率。
 
@@ -341,19 +343,17 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 
 取舍（实测数据，2000px 上限）：**无损重编码对 JPEG 源无解**（7.43MB 照片 → 无损 WebP 11.44MB，1.5 倍膨胀且 87s/张；JPEG 已是有损 DCT，解码后熵高）；PNG 截图转无损 WebP 只省 ~20-30% 且不能降分辨率，打不过现状的降采样。真杠杆是分辨率：1400px+JPEG q90 平均 433KB（48MiB ≈113 张）、1024px+q85 平均 198KB（≈248 张）、现状（pi 2000px）1618KB（≈30 张）。本扩展保守沿用 2000px，想更狠改文件顶部 `MAX_SIDE` / `PHOTO_MAX_B64` / `GRAPHIC_MAX_B64` 即可。已知限制：APNG（动图 PNG）在 pi 的图片嗅探层就被判为非图片（会当文本读入），钩子层拿不到 `ImageContent`，无法在此修复。
 
-## 人机协作任务面板（src/extensions/workflow-mgr/）
+## 会话任务面板（src/extensions/workflow-mgr/）
 
-通用工作流面板：AI 是**流程指挥者**（拆解、排序、验证、推进），你是**执行者**（做任务、拍板）。对 AI 说「帮我规划 X」，它会用 `wf_workflow` 建出阶段→任务工作流，常驻面板立刻出现——你抬眼就知道「现在该做什么」。泛化自论文工作流垂直版（thesis-workflow），工作流定义不再写死，AI 用工具动态创建，可加载任意任务。
+AI 是流程指挥者（拆解、排序、验证、推进），用户是执行者（做任务、拍板）。对 AI 说「帮我规划 X」，它用 `wf_workflow` 建出阶段→任务工作流，常驻面板随即出现。
 
-- **数据（项目级、跨会话、可 git 审查）**：`.pi/workflow/workflow.json`（工作流定义：阶段→任务，含人机分工/交付物/完成信号/依赖 + 可选 `mode`：`human-ai`/`agent`）、`state.json`（进度：当前任务/任务状态/里程碑/AI 记录/日志）、`config.json`（面板开关）；**无内置示例**：从未创建过时为空工作流（常驻面板整体隐藏），AI 用 `wf_workflow` 从零创建；
-- **协作模式（mode）**：工作流级可选字段，缺省 `human-ai`（AI 指挥、人执行）向后兼容；`agent` = **纯 agent 自动驾驶**（0.3 拍板）——无人类分工（`humanTasks` 可不填、渲染/简报隐藏「你:」行）、AI 用 `wf_switch` 连续推进直到全部完成并 `wf_workflow archive` 收尾，遇到无法完成的任务用 `wf_block` 标记原因停下报告；
-- **常驻面板**：输入框下方背景色区块，3~5 行——当前任务（最显眼）+ 阶段 + 右对齐进度条（`▓`实心/`░`空心，附 完成数/总数）、分工两行 `你:/AI:`（多项「、」连接，agent 模式隐藏「你:」）、阻塞 warning 提示、里程碑三态（`▶`当前目标/`○`未完成/`✓`已完成）；宽度自适应（`visibleWidth`：中文=2 列、块元素=1 列），窗口 resize 自动重排；空工作流显示「无任务，请先让 AI 用 wf_workflow 规划」；**hud 接管**：hud 存在且开启时，面板内容改由 hud 在 footer 底部渲染（屏幕最底，任务/分工/里程碑 ≈4 行），常驻面板隐藏——经 hud 通用接口 `__PI_HUD_API__.registerExtraRows` 注册渲染函数（**内容与样式由 workflow 自决**，与常驻面板同款：12 格进度条 + selectedBg 底色，确保体验一致），`notifyExtraRowsUpdate` 请求重绘，零耦合零 import；**常驻面板开关联动**：`showPanel=false` 时 hud 底部行一并隐藏；`/hud` 关闭后自动恢复自绘面板（`hud:state-change` 事件驱动）；
-- **工具（7 个）**：`wf_workflow`（list/import/add/edit/remove/archive/reset——**初始化优先 import**：用 write 写一份草稿 json（`{stages:[{name,goal,tasks:[{title,deps,...}]}]}`，id 自动生成如 0.1/1.2、deps 可直接引用本批未来 id）一次性导入整份计划，远比逐条 add 省 token，add 只用于已有工作流增补调整；非空时拒绝导入；add 时 stageId 不存在自动建阶段、id 自动生成如 1.2、防依赖环（导入含全图环检测带链路）；可带 `mode` 设工作流级协作模式；remove 同步清状态、空阶段自动移除；**archive 归档工作流**：可带 `status` 描述收尾状态（完成/放弃/其他），**归档 ≠ 完成**——快照保留任务真实状态、不做强制 done 标记，数据移入 `.pi/workflow/archive/` 留档可 git 审查，不提供找回功能需时手动查看；reset 清空工作流）、`wf_status`（当前任务+分工+交付物+完成信号+下一步+阻塞+里程碑+最近记录）、`wf_switch`（**推进核心**：一次调用替代 start+done——无参=完成当前任务并自动开始下一个依赖满足的任务，无下一个则全部完成；`taskId=X` 显式切换；`complete=false` 搁置当前任务回 todo 直接转移；switch 到 blocked 任务即解除阻塞；**独立审计**（借鉴 pi-goal-x completion auditor）：`.pi/workflow/config.json` 设 `auditOnComplete:true` 后，完成推进前派全新上下文的只读+bash 子代理核验完成信号（不信宣布者、自己查证据），不通过则打回任务保持 doing；审计自身故障放行——增强不是门禁）、`wf_block`（阻塞+原因）、`wf_rollback`（回退 todo/doing，输出依赖警告清单不自动回退下游）、`wf_note`（**AI 记录，对用户透明**：交流中的重要结论/约束/偏好，增删读改 {id,ts,content}，作为跨会话记忆）、`wf_milestone`（增/改/删/改名里程碑）；
-- **命令**：`/wf-config` 轻量功能浮窗（居中浮窗：显示详细信息/常驻面板开关，↑↓ 选择 Enter 执行 Esc 关闭；详细信息页任意键返回）——**只留无参**（0.4 拍板：人无需管理工作流，管理是 AI 的事）；`/wf` 主命令（状态 + `resume` 恢复历史会话）（复用 pi 官方会话选择器全屏选择，等价手动 `/resume`）——工作流选择弹窗「从 resume 中加载」的内部入口，也可手动输入重试恢复；
-- **会话工作流选择（多工作流并发隔离）**：一个项目可并存多个命名工作流。多槽或其他活跃会话已绑定时，启动会话会弹选择框——**「暂不启用（AI 自动判断）」居首位并默认高亮**：不指定工作流、也不关掉，是否使用交由 AI 视任务判断（需要时它自行绑定，不需要则零打扰）；也可选某个已有工作流或「＋ 新建工作流…」自建，Esc 同暂不启用；单槽/无槽仍自动绑定，零打扰。
-- **AI 角色注入（条件注入，0.2 拍板）**：`before_agent_start` 按三态把指南追加进 systemPrompt（不进对话、不膨胀会话文件）：暂不启用（`auto`）/明确不用（`none`）→ **零注入**（前者是否使用由 AI 自行判断，需要时它自己 `wf_workflow bind`，不反复提示用户）；无工作流/空工作流 → **零注入**（简单任务不被引导，AI 靠工具描述按需发现）；`human-ai` → 完整指挥者角色（下达指令格式 📋任务/🎯目标/📌做法/✅回报/🔍验证、完成信号验证后 `wf_switch`、重要结论用 `wf_note` 记录）；`agent` → 轻量自动驾驶执行者（连续 `wf_switch` 直到完成并 archive，障碍 `wf_block` 停下报告）；
-- **多工作流并发与恢复**：多槽或有其他活跃会话已绑定时启动弹**自绘分组选择浮窗**——「通用」组（**暂不启用**（默认高亮，Esc 同此）/ **从 resume 中加载会话**（放弃本会话直接触发恢复流程，不写本会话绑定，恢复后按被恢复会话自己的绑定加载其工作流空间））与「工作流（N）」槽位列表（进度摘要）分区呈现，＋新建收尾；↑↓/j/k 移动、Enter 确认、数字键 1-9 直选；被恢复的会话无绑定时再弹框拍板；
-- **渲染回归测试**：`node src/extensions/workflow-mgr/test/render.test.mjs`（test/ 下 node_modules junction 指向 pi 全局包；esbuild bundle 扩展 + mock pi/ctx → 17 场景 A-O、Q、R：三态渲染断言、工具流程、switch 语义、mode、注入三态、wf_note 增删读改、archive 自动完成、import 一次性导入、多槽绑定「暂不启用」/「从 resume 中加载」派发与恢复绑定断言）。
+- **数据按会话隔离**：`~/.pi/agent/workflow/<项目标识>/<会话 ID>/{workflow.json,state.json}`（`PI_WORKFLOW_HOME` 可覆盖）。项目标识 = 目录名 + 路径哈希，同一项目的多个会话各写各的文件、天然互不干扰，`resume` 恢复会话即带回其工作流；面板开关 `config.json` 全局单份，归档移入 `<项目标识>/archive/`。工作流数据不进项目 `.pi/`。
+- **协作模式（`mode`）**：缺省 `human-ai`（AI 指挥、用户执行）；`agent` = 纯 agent 自动驾驶（不显示人类分工，AI 用 `wf_switch` 连续推进到全部完成并 `wf_workflow archive` 收尾，卡住用 `wf_block` 停下报告）。
+- **常驻面板**：输入框下方背景色区块——当前任务 + 阶段 + 右对齐进度条、分工两行 `你:/AI:`（多项「、」连接，agent 模式隐藏「你:」）、阻塞提示；宽度自适应（`visibleWidth`）。hud 开启时改由 hud 在 footer 最底部渲染同款内容（经 `__PI_HUD_API__.registerExtraRows` 注册，`/hud` 关闭后自动恢复自绘），`showPanel=false` 时一并隐藏。
+- **工具（5 个）**：`wf_workflow`（`list`/`add`/`edit`/`remove`/`archive`/`import`——初始化优先 `import`：写一份草稿 json 一次性导入，id 自动生成、`deps` 可引用本批未来 id、非空时拒绝；`archive` 可带 `status` 描述收尾状态，归档 ≠ 完成、快照保留真实状态）、`wf_status`（当前任务+分工+交付物+完成信号+下一步+阻塞项）、`wf_switch`（推进核心：无参 = 完成当前并开始下一个依赖满足的任务；`taskId=X` 显式切换；`complete=false` 搁置当前回 todo；切到 blocked 任务即解除阻塞）、`wf_block`、`wf_rollback`。
+- **命令**：`/wf` 状态摘要；`/wf-config` 无参功能浮窗（进度总览 / 常驻面板开关）。
+- **AI 角色注入**：`before_agent_start` 仅在存在非空工作流时把角色指南追加进 systemPrompt（不进对话），无工作流时零注入。
+- **渲染回归测试**：`node src/extensions/workflow-mgr/test/render.test.mjs`（17 场景 A~R）、`node src/extensions/workflow-mgr/test/stale-ctx.test.mjs`。
 
 ## 知识库（src/extensions/webdav-kb/）
 
@@ -369,6 +369,27 @@ bash 命令三层名单（`tool_call` 事件拦截，只管 bash）：**复合�
 - **`/.history` 历史副本区**：所有文件的改动（覆盖/追加）与删除自动留档——副本存 `/.history/`、目录结构与根一致、文件名加 `_yymmddhhmmss` 后缀；同秒重名叠加 `_hash`（sha1 前 8 位），`_hash` 也重名说明是同一份内容直接跳过；**自身不递归**（`/.history` 与 `/lfs/` 下文件不备份）；`.history` 不参与 `kb_list`/`kb_search`（内容浏览不透明），恢复用 WebDAV 客户端取回副本（vault 历史为密文 `.enc`，拷回 `/vault/` 对应路径后经 kb 工具解密）；备份先落本地、账本登记、**下次同步补传远端**（延迟一轮）；`kb_move` 不备份（内容未变、只是路径变化，目标被删时仍会留档）；
 - **工具清单**：`kb_help`（守则，topic 按节筛选）/ `kb_search`（全文检索，namespace 限定）/ `kb_read`（读全文）/ `kb_write`（写/覆盖，需 overwrite:true，文本上限 50MB）/ `kb_append`（追加）/ `kb_list`（目录树，路径可不带前导 `/`）/ `kb_upload` `kb_download` `kb_lslfs`（LFS）/ `kb_move`（移动/重命名，镜像+远端+账本三方一致、vault 透明搬移）/ `kb_delete`（删除，需 confirm:true，先留 `.history` 副本再删）/ `kb_status`（同步状态）/ `kb_sync`（手动同步）/ `kb_import`（本地目录批量导入，导入后按守则重新归位）；
 - **测试**：`node src/extensions/webdav-kb/test/sync.test.mjs`（esbuild bundle + mock DAV：增量同步全场景 + `.history` 留档/命名/去重/不递归 + 空目录清理 + PROTOCOL 过滤）、`tools.test.mjs`/`search.test.mjs`/`client.test.mjs`/`crypto.test.mjs`/`panel-config.test.mjs`/`commands.test.mjs`/`lfs.test.mjs`/`panel.test.mjs`；`live-*` 为真实网盘联调脚本（不自动跑）。
+
+## 密钥保护（`src/extensions/secret/`，产物 `secret.ts`）
+
+模型与转录里只有 `{{sec:名字}}`；真值只出现在两处：掩码录入的那一瞬，与执行前一刻。
+
+- **交互面只有一个命令**：`/secret` 开面板，录入、条目管理（复制/改名/删除）、长期指纹表、设置、帮助全在里面。`on/off/list` 只是给无界面场景留的旁路，不必记。
+- **库**：会话级内存，不落盘、不进会话 JSONL、不写临时文件（设置存 `~/.pi/agent/secret-config.json`）；`/reload` 保留，`/new` 与退出即清空。
+- **录入三条路**：面板里 `a` 密钥 / `t` 其它敏感文本（掩码输入）；粘进对话的凭证由 `input` 钩子在**落盘之前**换成 ref；工具输出里认出的凭证自动收成 `auto_N`。
+- **AI 可以主动要**：`secret_prompt(name, why)` 弹掩码框请用户录入（框上写明是谁在要、要什么、为什么），值直接进用户的内存库，AI 只拿到名字；用户 Esc 即取消，工具返回失败。
+- **给模型**：`secret_list` 只列名字、类型与字符数——不含值，也不含值的片段（首尾切片仍是密钥的一部分）。
+- **使用**：在 bash 命令或工具参数里写 `{{sec:名字}}`。bash 由 spawnHook 换成 `"${PI_SEC_*}"`，真值只进该次子进程的环境（`process.env` 不碰、并发命令互不可见、`argv` 里没有明文）；其它工具在 `tool_call` 时原地展开——pi 校验参数时做的是 `structuredClone`，所以转录与模型看到的仍是 ref。
+- **出口四道网**：`tool_result`（落盘前）→ bash 的流式帧与「截断快照」（pi 会把未脱敏全文写进临时文件、只把路径给模型）→ `context`（每次请求前洗全量消息）→ `before_provider_request`（真正离开机器的请求体，靠 `turn_end` 探测该钩子是否被供应商触发）。
+- **长期指纹表**（跨会话，只存指纹不存值）：≥16 字符的值入库时顺带记一条 HMAC 指纹（密钥为另存的 32 字节随机数），所以下次会话即使值已忘记，同一个口令再出现仍能被认出来遮住。**只能遮，不能拿来执行**（没有值），命中后占位会写明「本会话没有值」。匹配靠「切候选片段 + 逐段算指纹」，因此 `密码：xxx` / `DB_PASSWORD=xxx` / `u:xxx@host` 能命中，嵌在更长串里的会漏；弱口令（<16 字符）不入表，免得给自己留一个可撞库的靶。面板里可单条删除或清空整表。
+- **识别分三档**（`detect.ts`）：打分后落到「收 / 只遮 / 不管」——形态 3 分、关键词 2 分、编码命中 3 分、高熵 1 分、主动粘贴 2 分，再减去示例词、占位符语法、配置词形、哈希语境、含空白、批量命中。≥4 且来自粘贴才收进库；1~3 只换成不可执行的占位；≤0 原样放过（配置项、UUID、校验和都落在这一档）。
+- **工具输出侧永远不收**：模型读文档和读真密钥是同一个动作，实测一次研究任务因此收进 6 条第三方 README 里的示例 token——库里塞满是噪音，所以输出侧只遮不建档。
+- **认得什么**：13 种供应商形态（GitHub/AWS/Stripe/Slack/GitLab/npm/HuggingFace/SendGrid/JWT/PEM/连接串/Google/通用）、关键词与中文写法（`密码：`、`密钥是`、`改为`、`口令是`）、CLI 旗标、`Authorization: Bearer`、以及前面这些的 base64 / hex / URL 编码形式（解开后认得出就算）。短于 8 字符的值不参与脱敏，8~15 字符的只在词边界替换。
+- **认不出的裸口令**：粘贴时弹一次「这看起来像密钥」，答不是就在本次会话里不再问它。
+- **在 bash 里写 ref 的字面量**用 `\{{sec:名字}}`（反斜杠转义，不展开也不校验）；其它工具里名字不在库时一律原样保留，结果里补一句提醒。
+- **基准测试**：`test/corpus/detect.tsv`（带档位标签的语料）+ `test/detect-bench.test.mjs`（46 项：语料档位、编码形式、真实负样本——package-lock.json / README / AGENTS.md / 本扩展自己的源码必须零误报）。改识别规则先跑它。
+- **边界**（明确不设防）：图片/音频等二进制原样放行（改 base64 会让请求 400），命中时会主动告知；供应商回放签名字段不碰；同账户进程可读 `/proc/<pid>/environ`；模型可用 shell 切片重建值；explore 子代理有自己的模型循环，不经过这些钩子。
+- **测试**：`node src/extensions/secret/test/core.test.mjs`（纯逻辑，含指纹表加解密往返与密钥丢失重建）与 `.../e2e.test.mjs`（假 pi/ctx 驱动真实钩子链：面板多步浮层、真跑一次 shell 验证环境变量注入、确认面板、跨会话指纹、`reload` 保留库）。
 
 ## 媒体兼容层（src/extensions/mimo-omni.ts）
 

@@ -31,9 +31,8 @@
  *   标题进注册表供 peer 互见，不单独发广播（随其他广播事件行内捎带，/pair 详情完整展示）
  * - /pair 命令：查看 peer 详情 / label <文本> 设置自己的任务标签 / prune 手动清残留
  *
- * 任务标签：仅 /pair label 手动设置（曾自动读 workflow-mgr 当前任务，但工作流是
- * 项目级共享的——多会话并发时各会话显示同一标签，没有意义，已移除）。
- * 多工作流并发隔离由 workflow-mgr 的会话绑定（wf_workflow bind）负责。
+ * 任务标签：仅 /pair label 手动设置（不再自动读 workflow-mgr 当前任务——多会话下同标签无意义）。
+ * 同项目多会话的工作流互不干扰由 workflow-mgr 的会话级存储负责。
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
