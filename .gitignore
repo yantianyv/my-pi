@@ -13,26 +13,9 @@ src/extensions/test/.tmp-*
 # 根目录手跑 esbuild 调试产物兜底（outfile 相对路径未带目录时落 CWD）
 /.tmp-*
 
-# 问卷运行时数据（ask 扩展的草稿/答案，随答随删，类似会话状态）
-.pi/questionnaires/
-.pi/sessions/
-# .pi/ 下的本机运行时日志（pair-guard 排障、会话前缀缓存诊断等）
-.pi/*.log
-# 工作流会话绑定表（workflow-mgr：sessionId→槽，本机会话级运行时数据）
-.pi/workflow/bindings.json
-# 工作流槽位的进行中状态（归档快照 .pi/workflow/**/archive/** 仍照常入库）
-.pi/workflow/state.json
-.pi/workflow/workflow.json
-.pi/workflow/config.json
-.pi/workflow/slots/*/state.json
-.pi/workflow/slots/*/workflow.json
-.pi/workflow/slots/*/config.json
-
-# explore 子代理的运行产物（渐进报告 + 单任务成果缓存）：与具体仓库内容无关，不入库
-.pi/explore/
+# .pi/ 内部的运行时数据由 .pi/.gitignore 管（嵌套 .gitignore 就近生效：默认全忽略，只放行 skills 与工作流归档）
 
 # 临时工作目录（冒烟/联调脚本产物）
 .tmp/
 # scratch/ 本地手跑实验/预览脚本与下载遗留，不入库
 scratch/
-.pi/keep-idle/
