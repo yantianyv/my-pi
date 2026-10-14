@@ -772,7 +772,8 @@ async function main() {
 		comp.handleInput("D");
 		const result = await execP;
 		check("O: details.status === deleted", result.details?.status === "deleted");
-		check("O: 工具结果告知不再追问", (result.content?.[0]?.text ?? "").includes("不要追问"));
+		check("O: 工具结果只报状态（问卷已删、不再等待回答）", (result.content?.[0]?.text ?? "").includes("不再等待回答"));
+		check("O: 行为指令在 promptGuidelines（不要追问/不要重建）", (tool.promptGuidelines ?? []).some((g) => g.includes("不要追问") && g.includes("不要重建")));
 		check("O: 问卷文件已删除", !existsSync(join(dir, ".pi", "questionnaires", "test-survey.json")));
 		check("O: 待答状态已清除", captures.statuses.ask === undefined);
 		rmSync(dir, { recursive: true, force: true });

@@ -38,7 +38,7 @@ export interface ReviewRequest {
 	object: string;
 	/** 对象是名单类时（收件人），由面板按可用宽度决定显示几个名字 */
 	objectItems?: { label: string; items: string[] };
-	/** 内容（正文等；整块展示，不滚动时用空行占位） */
+	/** 内容（正文等；按面板宽度折行，超出固定区用 PgUp/PgDn 翻页） */
 	content: string[];
 	/** 影响与可逆性（一行，前缀 ⚠） */
 	impact: string[];
@@ -57,7 +57,7 @@ export type ReviewOutcome =
 export const REVIEW_ALLOW = "允许一次";
 export const REVIEW_REMEMBER = "当前工作区不再询问";
 export const REVIEW_REJECT = "拒绝";
-/** 正文区固定行数：不足补空行（面板高度稳定），超出用 PgUp/PgDn 翻页 */
+/** 正文区固定行数：不足补空行（面板高度稳定），超出用 PgUp/PgDn 翻页（行数按折行后的行算） */
 export const CONTENT_ROWS = 5;
 
 /** 默认选项组：允许一次（/ 记住这类） / 拒绝 */
@@ -124,7 +124,8 @@ export class ReviewPanel {
 
 	private idx = 0;
 	private scroll = 0;
-	private lastBudget = 5;
+	/** 正文折行后的总行数（render 时更新）：翻页要按它算，不能按调用方给的原行数 */
+	private bodyRows = CONTENT_ROWS;
 
 	constructor(
 		private tui: TUI,
@@ -147,7 +148,7 @@ export class ReviewPanel {
 			case "cancel":
 				return this.done(null);
 			case "page":
-				this.scroll = scrollByPage(this.scroll, r.dir, this.req.content.length, CONTENT_ROWS);
+				this.scroll = scrollByPage(this.scroll, r.dir, this.bodyRows, CONTENT_ROWS);
 				return;
 			case "skip":
 				return;
@@ -179,9 +180,11 @@ export class ReviewPanel {
 		wrap(head, 1).forEach((l, i) => lines.push(row(i === 0 ? l : " ".repeat(indent) + l.trimStart())));
 		lines.push(row(""));
 
-		// 正文区：固定 CONTENT_ROWS 行；超出时 PgUp/PgDn 翻页
-		const body = this.req.content;
+		// 正文区：高度固定 CONTENT_ROWS 行（面板不随内容长短抖动），但先折行再取窗口——
+		// row() 只按宽度截断不折行，长单行正文直出会连尾部带翻页一起丢掉
+		const body = this.req.content.flatMap((l) => (l.trim() ? wrapIndented(l, innerW - 2, 0) : [""]));
 		const maxScroll = Math.max(0, body.length - CONTENT_ROWS);
+		this.bodyRows = body.length;
 		this.scroll = clampScroll(this.scroll, body.length, CONTENT_ROWS);
 		const visible = body.slice(this.scroll, this.scroll + CONTENT_ROWS);
 		while (visible.length < CONTENT_ROWS) visible.push("");

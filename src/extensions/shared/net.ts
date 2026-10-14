@@ -1,8 +1,7 @@
 /**
  * 共享网络工具：超时信号工厂 + HTTP 代理 CONNECT 隧道
  *
- * 原先 web-tool/http.ts 与 webdav-kb/client.ts 各自维护一份逐字相同的实现
- * （webdav-kb 注释标注「web-tool 同款」），现收敛到此模块，由 build.js 内联进各产物。
+ * 由 build.js 内联进各产物。
  *
  * 使用方：web-tool（直连/代理/curl 竞速）、webdav-kb（WebDAV 传输层）。
  */

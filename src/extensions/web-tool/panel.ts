@@ -1,13 +1,12 @@
 /**
  * web-tool/panel：/web-tool-config 设置面板（web-tool 多文件扩展的组成部分）
  *
- * 重做后的交互（吸取 ModelSelectOverlay 精华，弃旧版双焦点混乱）：
- * - 单焦点模型：Tab 在「代理输入框 ↔ 差评列表」间切换（弃旧版 ↑↓ 到顶/到底的「自然出口」）
- * - 输入框焦点：Enter 保存/清空回车清除、Esc 取消；backspace/left/right/home/end/粘贴
- *   统一走 shared/ui editInput（补齐旧版缺的粘贴）
- * - 差评列表焦点：↑↓ 选择、Del 删除选中项（语义明确，弃旧版 d/Backspace 删条目）、
- *   Enter/Tab 回输入框、Esc 取消
- * - 弃：Delete 无确认清空全部差评（危险）、双焦点自然出口（反直觉）
+ * 键位与焦点（单焦点模型）：
+ * - Tab 在「代理输入框 ↔ 差评列表」间切换
+ * - 输入框焦点：Enter 保存、清空回车清除、Esc 取消；backspace/left/right/home/end/粘贴
+ *   统一走 shared/ui editInput
+ * - 差评列表焦点：↑↓ 选择、Del 删除选中项、Enter/Tab 回输入框、Esc 取消
+ * - 清空全部差评需显式确认（不提供一键清空）
  * - 复用 shared/ui 的 createBoxRenderer / editInput / renderScrollingInput
  *
  * 注意：本模块不注册任何 pi API，仅导出组件类，由入口（/web-tool-config 命令）实例化。

@@ -33,7 +33,7 @@
  *     "aiReview": true, "sudoExec": true, "model": "auto",
  *   }
  *   model 键是本插件的本地模型设置（auto = 交给 model-config；或 provider/modelId 本地固定），
- *   由 shared/model-setting 维护；配置只认当前字段，历史字段（blacklist/whitelist）不再读取。
+ *   由 shared/model-setting 维护。
  *
  * 命令：/perm-gate 查看状态；on|off 开关；reload 重读配置；sudo on|off；prune 清理过期记忆；
  *       model [provider/id|auto] 直接设置，无参打开模型选择浮层（shared/model-select）。
@@ -85,7 +85,7 @@ const AI_CMD_MAX_CHARS = 4_000;
 /** 记忆规则的保鲜期（天）：超过未命中自动清理（防无限膨胀；过期未清理前仍生效） */
 const REMEMBER_EXPIRE_DAYS = 30;
 
-/** 已记住的操作（意图缓存）：记忆保鲜期同 WHITELIST_EXPIRE_DAYS，过期自动清理 */
+/** 已记住的操作（意图缓存），过期自动清理 */
 interface RememberedRule {
 	pattern: string;
 	/** 人类可读的操作意图（面板/通知展示；旧数据缺失时回落 pattern） */
@@ -771,7 +771,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** 已记住规则的工厂（保鲜期从记住时刻起算） */
-	function newRememberedRule(pattern: string, intent: string, now = Date.now()): RememberedRule {
+	function newRememberedRule(pattern: string, intent: string): RememberedRule {
+		const now = Date.now();
 		return { pattern, intent: intent || pattern, addedAt: now, lastHit: now, hits: 0 };
 	}
 

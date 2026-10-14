@@ -335,9 +335,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 					content: [
 						{
 							type: "text",
-							text:
-								`用户删除了问卷「${q.title}」（问卷文件已删除）。这通常意味着这些问题已不再需要——` +
-								`请不要追问，也不要把同一份问卷重新创建一遍；若确实还需要这些信息，先向用户确认。${personNote}`,
+							text: `用户删除了问卷「${q.title}」（问卷文件已删除，本轮不再等待回答）。${personNote}`,
 						},
 					],
 					details: { ...details, status: "deleted" },
@@ -355,8 +353,7 @@ export function registerAskTool(pi: ExtensionAPI): void {
 						type: "text",
 						text:
 							`用户暂时搁置了问卷「${q.title}」（已答 ${answeredProgress(q, result.answers)}/${total}，` +
-							`草稿已保存）。用户可随时通过 /answer 命令继续作答，答案会以用户消息送达。` +
-							`请简要告知用户这一点后结束本轮回复，不要追问这些问题。${personNote}`,
+							`草稿已保存）。用户可随时通过 /answer 命令继续作答，答案会以用户消息送达。${personNote}`,
 					},
 				],
 				details: { ...details, status: "shelved", answered: answeredProgress(q, result.answers) },

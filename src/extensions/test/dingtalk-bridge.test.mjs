@@ -269,7 +269,7 @@ console.log("U、群与本人解析");
 	// 解析失败（上游超时/出错）必须与「查无此人」分开说：否则模型会把超时读成名字写错
 	const note = searchFailedNote("严天宇", "请求超时（dws 没在限定时间内返回）");
 	check("解析失败不说成查无此人", note.includes("不是查无此人") && note.includes("请求超时") && note.includes("原样重试") && !note.includes("核对用字"));
-	// 回归：群名→cid 链路（resolveGroup 曾按 title/openConversationId 键过滤 parseGroups 结果，永远 0 命中）
+	// 群名 → cid：parseGroups 结果按 name 全等过滤
 	const search = parseGroups(JSON.stringify({ chats: [
 		{ name: "乌鲁木齐市第八中学", title: "乌鲁木齐市第八中学", openConversationId: "cidGcszODYFzAG2T9Ho4vjuaQ==", groupType: "INTERNAL_GROUP", memberCount: 388 },
 		{ name: "工作通知:乌鲁木齐市第八中学", openConversationId: "cideXP/5BH3MjO4sFa+God1ew==" },
@@ -277,9 +277,9 @@ console.log("U、群与本人解析");
 	const hit = matchGroupsByName(search, "乌鲁木齐市第八中学");
 	check("群名精确匹配取 cid", hit.length === 1 && hit[0].cid === "cidGcszODYFzAG2T9Ho4vjuaQ==");
 	check("部分同名不误配", matchGroupsByName(search, "第八中学").length === 0);
-	// 回归：base64 填充符 == 曾使 isIdLike 拒收真实 cid
+	// base64 填充符 == 不影响 isIdLike 判定
 	check("带 == 的 cid 视为 ID", isIdLike("cidGcszODYFzAG2T9Ho4vjuaQ==") === true);
-	// 回归：真实会话 ID / messageId 里还有 / 与 +（cid…/…+…=），漏了就会被当成名字去搜
+	// 真实会话 ID / messageId 含 / 与 +
 	check("带 / 的 cid 视为 ID", isIdLike("cidKI5Xy3llME3Ktv8egWRVNiKN7m3/P8swwU+nUbkeeh4=") === true);
 	check("带 / 的 messageId 视为 ID", isIdLike("msg3YDaXMO4GnH1YQh0MS89/A==") === true);
 	// 故意不收 .：文档标题常是纯 ASCII 带点，得继续走搜索而不是当 nodeId 直发

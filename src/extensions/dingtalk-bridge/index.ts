@@ -741,7 +741,7 @@ export type ExecDecision =
 	| { action: "pending"; token: string; preview: string };
 
 /**
- * --formal 不是命令参数（旧版提示曾引导模型往参数里加它）：出现即拦下，避免模型原地打转。
+ * --formal 不是命令参数：出现即拦下，避免模型原地打转。
  */
 export function formalFlagError(args: string[]): string | null {
 	const hit = args.find((a) => a === "--formal" || a.startsWith("--formal="));
@@ -1010,7 +1010,7 @@ export function formatBroadcastPreflight(pre: BroadcastPreflight): string {
 
 /* ===================== 逐人个性化：正文占位符 → 每人一份变量表 =====================
  * dws 的 +broadcast 只支持「所有人收到同一条」（content 是单值），所以正文一旦含占位符，
- * 就不能用它：改为预检拿到每人 openDingTalkId 后，逐人渲染正文、逐人 +messages-send。
+ * 就不能用它：预检拿到每人 openDingTalkId 后，逐人渲染正文、逐人 +messages-send。
  * 替换值完全由调用方给出（不做"姓/名"语义猜测），插件只负责：取占位符、按人对齐、补幂等键。
  */
 
@@ -2209,7 +2209,7 @@ export default function (pi: ExtensionAPI) {
 		const g3 =
 			"同名或同名群会返回候选（带部门/职务/工号与账号 ID）：由 AI 自己挑定后，把该项换成候选里的 ID 重调——不要重复猜姓名，也不必转问用户。";
 		const g4 =
-			"业务工具做不到的钉钉操作：先回报用户（缺什么能力、常用的话建议补进插件）；dws_skill 只为这份回报评估可行性而读，不允许照文档换参数/换格式自己继续试。";
+			"业务工具做不到的钉钉操作：先回报用户（缺什么能力、常用的话建议补进插件），不得照技能文档自行换参数继续试。";
 		if (!guidelines.includes(g1)) guidelines.push(g1, g2, g3, g4);
 	});
 
@@ -2490,7 +2490,8 @@ ${pathNote ? `${pathNote}
 				const outcome = await askReview(ctx, {
 					...await enrichReviewTargets(cfg, args, peek.review),
 					actions: reviewActions(peek.canRemember),
-					rememberNote: rememberedKey(args)
+					// 旁标写人话：记住的仍是 cli_path（rememberedKey），但面板里只出现动作名
+					rememberNote: peek.review.verb
 				});
 				if (outcome.kind === "no-ui") {
 					stats.blocked++;

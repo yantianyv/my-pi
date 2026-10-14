@@ -1,12 +1,11 @@
 /**
  * webdav-kb / tools.ts — AI 工具集（kb_help / kb_search / kb_read / kb_write / kb_append / kb_list）
  *
- * 零注入 pull 式：所有工具按需调用，AI 首次使用前经 kb_help 读取使用守则
- * （守则本体 = 网盘根 PROTOCOL.md，跨设备同步、用户可迭代；缺失时回退内嵌版）。
+ * 零注入 pull 式：所有工具按需调用，AI 首次使用前经 kb_help 读取使用守则（守则本体见 protocol.ts）。
  *
  * 设计约束：
  * - 写入前查重：kb_write 对已存在文件要求显式 overwrite:true（协议约束的硬落地）
- * - 命名空间白名单：/notes /references /scratch /vault（/memory 已废弃），防 AI 写乱库
+ * - 命名空间白名单：防 AI 写乱库
  * - vault 透明：/vault/ 下自动加解密（见 crypto.ts），其余命名空间明文
  * - 结果限长：读全文截断、列表限条数、搜索限条数——保护上下文
  * - 未配置时给出明确引导（/kb-config 设置 WebDAV）
@@ -923,9 +922,8 @@ function hasFrontmatter(content: string): boolean {
 }
 
 /**
- * kb 工具回执：统一走一个状态键（kb-op），文案写清「做了什么 + 对象」——
- * 单 emoji 的提示看不出动作（旧版 10 个键各自一个图标，且都没登记进 hud 样式表，
- * 优先级 0 等于从不显示）。TTL 短，不抢长期状态。
+ * kb 工具回执：统一走一个状态键（kb-op），文案写清「做了什么 + 对象」
+ * （单 emoji 看不出动作）。TTL 短，不抢长期状态。
  */
 const KB_OP_KEY = "kb-op";
 

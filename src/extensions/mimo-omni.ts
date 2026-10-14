@@ -354,11 +354,8 @@ export default function (pi: ExtensionAPI) {
 					attemptsLog = [...attemptsLog, a];
 					ctx.ui.setStatus("mimo-omni", `🎬 ${a.model}：${a.note}`);
 				});
-				const tokens = usage ? `（用量 ${JSON.stringify(usage)}）` : "";
 				return {
-					content: [{ type: "text", text: `${text}
-
-—— 由 ${model} 解析${tokens}` }],
+					content: [{ type: "text", text }],
 					details: { model, source: params.path, instruction, usage, attempts },
 				};
 			} catch (e) {

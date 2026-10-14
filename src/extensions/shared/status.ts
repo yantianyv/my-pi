@@ -2,14 +2,14 @@
  * 官方 setStatus 状态通道的 TTL 包装
  *
  * 展示层统一走 ctx.ui.setStatus 推送（hud 行 1 动态区 / 原生 footer 第 3 行），
- * 各扩展自行管理「显示一段时间后消失」的 TTL 曾大量重复 setTimeout 样板。
+ * 各扩展自行管理「显示一段时间后消失」的 TTL 会重复大量 setTimeout 样板。
  * 本工具以 key 维度维护定时器：重复调用同 key 会重置旧定时器（延长展示），
  * text 传 undefined 则手动清除、不挂新定时器。
  *
  * 复杂行为（闪烁帧、多层撤销、多阶段）仍由调用方自管（如 status-beacon 的闪烁）。
  *
  * 生命周期：定时器闭包捕获调用方传入的 ctx——/reload、ctx.switchSession() 等
- * 场景下旧 ctx 会失效，到期回调再调 ctx.ui.setStatus 会抛 stale 错误（曾导致
+ * 场景下旧 ctx 会失效，到期回调再调 ctx.ui.setStatus 会抛 stale 错误（会让
  * pi 因 uncaughtException 崩溃）。双保险：
  * 1. 调用方在 session_shutdown 时调 clearStatusTimers() 主动清空（治本）；
  * 2. 到期回调内 try/catch 吞掉失效 ctx 错误（兜底，防漏网扩展）。

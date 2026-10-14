@@ -3,11 +3,11 @@
  *
  * 背景：HUD 行 1 动态区只显示优先级最高的一个状态，而优先级来自 hud-core 的 STATUS_STYLE；
  * 未登记的 key 缺省 priority 0，会被任何已登记状态盖掉——「推了状态却永远看不见」这类
- * 问题光看代码很难发现（曾有 explore / perm-gate / ask / pair-guard / clipboard 五个）。
+ * 问题光看代码很难发现（未登记的 key 缺省 priority 0，会被任何已登记状态盖掉）。
  *
  * 本测试做双向检查：
  *   1. 所有扩展推的 key 都在 STATUS_STYLE 里登记（否则永远抢不过别人）；
- *   2. STATUS_STYLE 里没有没人推的死条目（曾经有 kb-test）。
+ *   2. STATUS_STYLE 里没有没人推的死条目。
  *
  * 运行：node src/extensions/test/status-keys.test.mjs
  */
@@ -53,8 +53,7 @@ for (const file of sources(EXT_ROOT)) {
 		const key = m[1] ?? m[2];
 		if (key) pushed.set(key, rel);
 	}
-	// 包装函数式调用（历史盲区：webdav-kb 的 status(ctx, "kb-read", …) 不走 setStatus，
-	// 曾让 10 个键逃过检查）——凡是 `xxxStatus(ctx, "小写键"` 形态都当键处理
+	// 包装函数式调用：凡是 `xxxStatus(ctx, "小写键"` 形态都当键处理（webdav-kb 的 status(...) 不走 setStatus）
 	for (const m of src.matchAll(/[Ss]tatus\(\s*ctx,\s*"([a-z][a-z0-9-]*)"\s*,/g)) {
 		if (!pushed.has(m[1])) pushed.set(m[1], rel);
 	}

@@ -125,7 +125,7 @@ node src/extensions/test/relink-deps.mjs              # 测试依赖副本换成
 cd src && npm run typecheck                           # 对新 pi 的 .d.ts 应为 0 报错，报错即扩展用到了变动的 API
 ```
 
-然后是 35 个回归测试（无 runner，逐个跑）：
+然后是 41 个回归测试（无 runner，逐个跑）：
 
 ```bash
 for f in $(ls src/extensions/*/test/*.test.mjs src/extensions/test/*.test.mjs | sort -u); do node "$f" >/dev/null 2>&1 || echo "FAIL $f"; done

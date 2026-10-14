@@ -132,7 +132,7 @@ export default function (pi: ExtensionAPI) {
 		label: "抓取网页",
 		description:
 			"抓取网页 URL 转 markdown（正文提取 + 去导航广告 + 截断）。适合深读文档/README。"
-			+ "JS 渲染的页面（正文极短、内容靠脚本注入）会自动用无头浏览器兜一次，无需换工具。",
+			+ "JS 渲染的页面（正文极短、内容靠脚本注入）也能抓，正文不足时结果里会说明。",
 		promptSnippet: "抓取网页转 markdown：web_fetch(URL[, maxChars]) → 正文",
 		renderCall: (args, theme) =>
 			renderToolCall("🌐", typeof args?.url === "string" ? args.url : undefined, theme, "web_fetch"),

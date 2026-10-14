@@ -118,7 +118,7 @@ function buildInitPrompt(mode: "create" | "merge" | "overwrite", hasExplore: boo
 		"- 保持精炼：用路径引用代替粘贴原文，只写能改变 AI 行为的行",
 		"- 内容使用中文（代码、命令、标识符除外）",
 		"- 建了 `.pi/skills/` 时，在总结里说明它首次会触发一次项目信任确认",
-		`- 用 write 工具把结果写入 ${CONTEXT_FILE}；最后一条回复用一两句话总结写入了什么（会展示给用户）`,
+		`- 用 write 工具把结果写入 ${CONTEXT_FILE}；最后一条回复用一两句话总结写入了什么`,
 	].join("\n");
 }
 
@@ -134,7 +134,7 @@ function buildClaudeMergePrompt(): string {
 		"4. 按信息去向分流：子系统细节进 `.pi/skills/`、在办状态进对应目录的 `STATUS.md`，不要全堆进 AGENTS.md",
 		`5. 用 write 工具把结果写入 ${CONTEXT_FILE}（中文，只写能改变 AI 行为的行），并确保含「## 关于 AGENTS.md 自身」一节`,
 		"6. 用 bash 删除 CLAUDE.md（Windows 用 del 或 Remove-Item，按当前 shell 而定）",
-		"7. 最后一条回复用一两句话总结：保留了什么、更新了什么、删除了 CLAUDE.md（会展示给用户）",
+		"7. 最后一条回复用一两句话总结：保留了什么、更新了什么、删除了 CLAUDE.md",
 	].join("\n");
 }
 

@@ -373,9 +373,13 @@ async function main() {
 		const go = r?.entries?.[1];
 		check("idle 档：C + 探测超时 → 注入挂机指令并 continue",
 			r?.continue === true && r.entries[0].details.idle === true && go?.customType === "keep-go");
-		check("挂机指令：点明白名单与硬约束",
-			go?.content.includes("补文档或注释") && go.content.includes("不改变既有行为"));
-		check("挂机：状态行显示挂机计数", h.statuses.some(([, t]) => t?.includes("挂机 1/16")));
+		check("挂机指令：写死唯一判据（无需拍板 + 不产生后继任务）",
+			go?.content.includes("唯一判据") && go?.content.includes("需要用户拍板")
+			&& go?.content.includes("需要人工处理的后继任务") && go?.content.includes("反面清单"));
+		check("挂机指令：示例项仍是清账类、无不一致可清就停",
+			go?.content.includes("文档时效性") && go?.content.includes("没有可清的账")
+			&& go?.content.includes("不改代码语义"));
+		check("挂机：状态行显示挂机计数", h.statuses.some(([, t]) => t?.includes("挂机 1/4")));
 
 		// 挂机轮再停（仍 C）：不再重复探测，直接续下一件
 		h.work();
@@ -383,6 +387,18 @@ async function main() {
 		const r2 = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "这件做完了" }], timestamp: 5 });
 		check("挂机阶段：再停不再探测，直接续下一件",
 			r2?.continue === true && h.probes.length === 1 && r2.entries[0].details.idle === true);
+
+		// 领满 IDLE_MAX 件后：不再续跑，停下并告知
+		for (let i = 0; i < 3; i++) {
+			h.work();
+			await h.turnEnd({ role: "assistant", content: [{ type: "toolCall", id: `t${i}`, name: "edit", arguments: {} }], timestamp: 5 });
+			await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "这件也做完了" }], timestamp: 5 });
+		}
+		h.work();
+		await h.turnEnd({ role: "assistant", content: [{ type: "toolCall", id: "t9", name: "edit", arguments: {} }], timestamp: 5 });
+		const capped = await h.turnEnd({ role: "assistant", content: [{ type: "text", text: "又停下来了" }], timestamp: 5 });
+		check("挂机：领满 4 件后停下（不再续跑）", capped === undefined || capped?.continue !== true);
+		check("挂机：预算用完给出一句提醒", h.notifies.some(([, t]) => t?.includes("挂机已做满 4 件")));
 	}
 	{
 		// 探测面板：倒计时按 PROBE_MS 起算（3 分钟），文案点明两种出口
@@ -417,12 +433,12 @@ async function main() {
 		// 渲染器：C + 挂机标记 → 显示挂机计数
 		const h = await makeHarness();
 		const comp = h.renderers["keep-verdict"](
-			{ details: { cls: "C", reason: "全部完成", next: "", used: 1, budget: 16, idle: true } },
+			{ details: { cls: "C", reason: "全部完成", next: "", used: 2, budget: 4, idle: true } },
 			{ expanded: false, outputPad: 1 },
 			h.theme,
 		);
 		const text = typeof comp?.render === "function" ? comp.render(80).join("\n") : "";
-		check("渲染器：判定块显示「已完成 · 挂机 1/16」", text.includes("已完成") && text.includes("挂机 1/16"));
+		check("渲染器：判定块显示「已完成 · 挂机 2/4」", text.includes("已完成") && text.includes("挂机 2/4"));
 	}
 
 	const failed = results.filter((r) => !r.ok);

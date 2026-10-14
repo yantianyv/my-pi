@@ -65,9 +65,8 @@ const SKILLS_DST = path.join(PI_AGENT, "skills");
 const VENDOR_DST = path.join(PI_AGENT, "vendor");
 const MCP_CONFIG = path.join(PI_AGENT, "mcp.json");
 
-// 已删除的自研扩展（src/extensions/ 中删除源码后，install 时同步清理已安装的 stale 副本，
-// 避免与 vendor 版命令/工具冲突，如 /btw、bash 输出 hook）
-const LEGACY_REMOVED_EXTENSIONS = ["explore-agent.ts", "token-saver.ts", "webui.ts", "paste-image.ts", "task-alert.ts", "btf-think.ts", "mimo-media.ts"]; // task-alert.ts 改名 status-beacon.ts（全链路状态感知）；btf-think 已删除（其折叠标签动画未保留，pi 默认静态标签 + Working 行行首 pi 自带 spinner）
+// src/extensions/ 已不存在的扩展：install 时清理已安装的 stale 副本，避免与 vendor 版命令/工具冲突
+const LEGACY_REMOVED_EXTENSIONS = ["explore-agent.ts", "token-saver.ts", "webui.ts", "paste-image.ts", "task-alert.ts", "btf-think.ts", "mimo-media.ts"];
 
 // pi 安装产物补丁（static/patches/，不进构建）：pi 升级会重写 dist 与启动器，每次安装重打一遍
 const PATCH_SCRIPTS = ["apply-pi-ai-usage-guard.mjs", "apply-zuchongzhi-zh.mjs", "apply-pi-launch-report.mjs"];

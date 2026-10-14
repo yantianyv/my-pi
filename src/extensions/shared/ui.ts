@@ -1,18 +1,12 @@
 /**
  * 通用 UI 渲染辅助（各 overlay 浮层共用）
  *
- * - renderInputWithCursor：输入框光标反显（最初在 btw 与 shared/model-select.ts 中
- *   逐字重复，抽取至此）
- * - charIndexAtWidth / sliceByWidth：输入框水平滚动窗口定位（原在 shared/model-select.ts，
- *   与 web-tool/panel.ts 的本地实现逐字重复，聚合到输入框工具族）
- * - renderScrollingInput：水平滚动输入框整段渲染（ModelSelectOverlay / ProxyConfigOverlay /
- *   BtwOverlay 三处逐字重复，抽取统一；inputOffset 兼容各处输入行宽度差异）
- * - createBoxRenderer：浮层边框行渲染原语（╭╮│╰╯ 全封闭行 + 统一 "…" 截断），
- *   统一 ModelSelect / ProxyConfig / Btw 的单行边框风格，弃 webdav 系列的无右边界、
- *   Btw 的 "..." 三连点等分散实现
+ * - renderInputWithCursor：输入框光标反显（CURSOR_MARKER 标记 + 当前字符反白）
+ * - charIndexAtWidth / sliceByWidth：输入框水平滚动窗口定位
+ * - renderScrollingInput：水平滚动输入框整段渲染；inputOffset 兼容各处输入行宽度差异
+ * - createBoxRenderer：浮层边框行渲染原语（╭╮│╰╯ 全封闭行 + 统一 "…" 截断）
  * - editInput / pasteText：输入框编辑键统一（backspace/left/right/home/end/insert/粘贴 +
- *   ctrl+←→ 按词移动、ctrl+w 删词、grapheme 安全步进），吸收 KbOverlay 的 bracketed paste
- *   精华，弃 5 处逐字重复的手感不一实现
+ *   ctrl+←→ 按词移动、ctrl+w 删词、grapheme 安全步进）
  */
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -51,8 +45,7 @@ export function sliceByWidth(text: string, startChar: number, maxW: number): str
 
 /**
  * 水平滚动输入框整段渲染：计算滚动窗口起点（光标前留 60% 宽度）+ 窗口内光标位置 +
- * 光标反显。ModelSelectOverlay / ProxyConfigOverlay / BtwOverlay 三处此前逐字重复，
- * 抽取统一。返回 { display: 带光标的窗口文本, cursorInWindow: 窗口内光标索引 }。
+ * 光标反显。返回 { display: 带光标的窗口文本, cursorInWindow: 窗口内光标索引 }。
  */
 export function renderScrollingInput(
 	text: string,
@@ -91,9 +84,7 @@ export interface BoxRenderer {
 }
 
 /**
- * 创建浮层边框渲染器：统一 ╭╮│╰╯ 单行边框 + "…" 截断。
- * 此前 ModelSelect / ProxyConfig / Btw 各自手写 border/row（截断字符 "…" 与 "..." 不一），
- * webdav 系列甚至无右边界（`│内容` 不闭合）——统一为全封闭 + 单 "…"；
+ * 创建浮层边框渲染器：统一 ╭╮│╰╯ 全封闭单行边框 + "…" 截断；
  * color 可换 borderMuted（workflow-mgr 暗色浮窗用）。
  */
 export function createBoxRenderer(
@@ -118,7 +109,7 @@ export function createBoxRenderer(
 // ---------------------------------------------------------------------------
 
 /** 终端粘贴（bracketed paste `\x1b[200~…\x1b[201~` / 多字符文本）→ 规范化文本；非粘贴返回 null。
- *  换行压成空格（输入框单行语义）。吸自 KbOverlay 的粘贴处理（原为全库唯一实现）。 */
+ *  换行压成空格（输入框单行语义）。 */
 export function pasteText(data: string): string | null {
 	const isPaste = data.includes("\x1b[200~") || (data.length > 1 && !data.startsWith("\x1b"));
 	if (!isPaste) return null;

@@ -10,8 +10,8 @@
  * 3. 介入等级（/keep 选择，存 keep.json 的 level 键）：
  *    - default：只做上面的就地续航（B 一律停，守住需人工这道闸）。
  *    - idle（挂机）：完成（C）时先弹一次在场探测——有回应即视为在场、按 default 停；无回应判定脱机，
- *      改为注入挂机指令续跑，只做白名单里的新增性工作（补文档/补测试/备料/记清单），不改变既有行为。
- *      同一用户输入内只探一次，此后每个停点直接续下一件挂机工作。
+ *      注入挂机指令续跑，只做**清账类**工作（判据与用法见 idleGoMessage）：清项目里已存在的文档/注释与代码现状的不一致，
+ *      改的是描述而不是行为，无法客观判定的一律跳过。同一用户输入内只探一次，此后每个停点领一件。
  * 4. 判定块 keep-verdict 是自定义消息：带底色 + 判定配色，纯展示、永不进模型请求（过滤器一律滤掉）。
  *
  * 复刻前缀的目的与边界：
@@ -57,6 +57,10 @@ import { createBoxRenderer, keyHintRow } from "./shared/ui";
 
 /** 每次用户输入后的自检预算（一次三选一自检消耗 1；用完强制停） */
 const MAX_CONTINUATIONS = 16;
+/** 挂机（idle）专属预算：清账类是一件一件的细活，四件足以看出效果，也避免挂机段把转录撑长 */
+const IDLE_MAX = 4;
+/** 挂机产物落点（相对于项目根）：每件活追加一段，对话里只留一行指针 */
+const IDLE_LOG = ".pi/keep-idle/<日期>.md";
 /**
  * 挂机在场探测的超时：无回应即判定脱机（毫秒）。
  * 给到 3 分钟是「读完一轮回复再决定离开」的余量；探测期间 AI 是停住的，
@@ -65,12 +69,12 @@ const MAX_CONTINUATIONS = 16;
 const PROBE_MS = 3 * 60_000;
 /** 探测时长的展示文案（整分钟用分钟） */
 const PROBE_LABEL = PROBE_MS % 60_000 === 0 ? `${PROBE_MS / 60_000} 分钟` : `${PROBE_MS / 1000} 秒`;
-/** 挂机工作白名单：只做不改变既有行为的新增性工作，每次自选一件（没有合适的就停） */
+/** 挂机工作清单（示例项）：判据与用法见 idleGoMessage */
 const IDLE_WORK = [
-	"补文档或注释：描述现状，不改代码语义",
-	"补测试或跑核验（typecheck / 测试 / lint），结果写进回复",
-	"准备后续材料：查资料、写方案草稿、列清单",
-	"把发现的问题记成清单，不擅自修",
+	"文档时效性：AGENTS.md / README / skill references 里写的命令、目录、文件名、工具名、命令名、状态 key、测试文件数等，与仓库现状逐条对照，过期就按现状更正（只动描述）",
+	"死指针与索引：文内引用的脚本、测试文件、路径是否都还在；skill references 的索引与实际文件是否互相覆盖；断链就修",
+	"跨文件一致性：同一事实在几处写法是否冲突（术语、阈值、文件路径、状态 key 名），以代码现状为准统一",
+	"注释时效性：是否残留变更史叙述（「改为」「之前是」「本次新增」类），按约定删成现状描述",
 ];
 /** 状态 key（hud-core STATUS_STYLE 已登记） */
 const STATUS_KEY = "keep";
@@ -511,6 +515,7 @@ function saveLevel(l: Level): void {
 
 let level = loadLevel();
 let budgetLeft = MAX_CONTINUATIONS; // 本次用户输入还剩几次自检额度
+let idleUsed = 0; // 本次用户输入已经领了几件挂机工作（上限 IDLE_MAX）
 let away = false; // 本次用户输入内是否已判定用户脱机（进入挂机阶段）
 let awaitingGo = false; // 已注入 keep-go，等续跑轮验证有没有实际动作
 let runDidWork = false; // 本轮（自上次用户输入起）出现过改写类工具调用
@@ -531,7 +536,7 @@ function verdictMessage(t: Triage, used: number, idle: boolean) {
 		customType: VERDICT_TYPE,
 		display: true,
 		content: `[harness 自检] ${t.cls}｜${t.reason}${tail}`,
-		details: { cls: t.cls, reason: t.reason, next: t.next, used, budget: MAX_CONTINUATIONS, idle },
+		details: { cls: t.cls, reason: t.reason, next: t.next, used, budget: idle ? IDLE_MAX : MAX_CONTINUATIONS, idle },
 	};
 }
 
@@ -542,14 +547,18 @@ function goMessage(t: Triage) {
 	return { type: "custom_message" as const, customType: GO_TYPE, display: false, content };
 }
 
-/** 挂机指令（判定脱机后注入）：只做白名单里的新增性工作，没有合适的就停 */
+/** 挂机指令（判定脱机后注入）：只领过了唯一判据的活，没有就停 */
 function idleGoMessage(t: Triage) {
 	const work = IDLE_WORK.map((w, i) => `${i + 1}) ${w}`).join("；");
-	const content = `[harness 挂机] 用户不在场（判定：${t.reason || "已到交付点"}），这段时间用来推进安全的后备工作，`
-		+ `从下列各类里自选一件去做（做完停下即可，会继续挑下一件）：${work}。`
-		+ `硬约束：只做新增性的文档/测试/草稿，不改变既有行为与对外约定；需要拍板的事只记录、不擅自决定；`
-		+ `不要执行需要人工确认的命令、也不要发起需要回应的提问（人不在场，没人能确认，会白白挂着）；`
-		+ `没有合适的就停下说明，不要为找活而发散。`;
+	const content = `[harness 挂机] 用户不在场（判定：${t.reason || "已到交付点"}）。这段时间做的是「清账」：把项目里**已经存在的不一致**清掉。`
+		+ `唯一判据（动手前问两问，任一为「是」就不做）：一、这件事需要用户拍板吗？二、做完会给用户留下需要人工处理的后继任务吗`
+		+ `（待审阅的新东西、要回答的清单、要确认的改动…）？两问都否，才是挂机的活。`
+		+ `常见的合规项（示例；列外的事用同一判据自查）：${work}。`
+		+ `反面清单（明确不合规）：新增文档/方案/测试/清单、把发现的问题列出来、记录待拍板项。`
+		+ `其余约束：① 只改描述与索引，不改代码语义与对外约定；② 一件活尽量一次做完（合并读取与修改，能用一条命令跑完就不要分步）；`
+		+ `③ 做完把改了什么追加到 ${IDLE_LOG}，回复里只留一行指针，然后停下等下一件；`
+		+ `④ 没有合规的活就直接说明「没有可清的账」停下，不要为找活而发散、也不要自己发明新工作；`
+		+ `⑤ 不执行需要人工确认的命令、也不发起需要回应的提问。`;
 	return { type: "custom_message" as const, customType: GO_TYPE, display: false, content };
 }
 
@@ -587,6 +596,7 @@ export default function (pi: ExtensionAPI) {
 		away = false;
 		if (next === "off") clearStatus(ctx);
 		else budgetLeft = MAX_CONTINUATIONS;
+		idleUsed = 0;
 		ctx.ui.notify(`keep：${LEVEL_LABEL[next]}（${LEVEL_DESC[next]}）`, "info");
 	};
 
@@ -617,6 +627,7 @@ export default function (pi: ExtensionAPI) {
 		budgetLeft = MAX_CONTINUATIONS;
 		awaitingGo = false;
 		away = false;
+		idleUsed = 0;
 		runDidWork = false;
 		hintCache = null;
 		if (event?.systemPrompt) capturedPrompt = event.systemPrompt;
@@ -701,9 +712,15 @@ export default function (pi: ExtensionAPI) {
 			}
 			away = true;
 		}
+		if (idleUsed >= IDLE_MAX) {
+			stopHere(ctx, triage, IDLE_MAX, true);
+			ctx.ui.notify(`keep：挂机已做满 ${IDLE_MAX} 件，保持停下（需要时手动叫起来）`, "info");
+			return;
+		}
+		idleUsed++;
 		awaitingGo = true;
-		setStatusWithTTL(ctx, STATUS_KEY, `⏳ 挂机 ${used}/${MAX_CONTINUATIONS}`, 600_000);
-		return { continue: true, entries: [verdictMessage(triage, used, true), idleGoMessage(triage)] };
+		setStatusWithTTL(ctx, STATUS_KEY, `⏳ 挂机 ${idleUsed}/${IDLE_MAX}`, 600_000);
+		return { continue: true, entries: [verdictMessage(triage, idleUsed, true), idleGoMessage(triage)] };
 	});
 
 	// 模型上下文过滤：keep 的消息不进 LLM 请求（会话记录保留，判定块在界面上可见）

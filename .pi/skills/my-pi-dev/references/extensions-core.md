@@ -110,11 +110,14 @@
   - 探测**每个用户输入只做一次**（`away` 在 `before_agent_start`/切档时复位），其后每个停点直接续下一件挂机工作；用户插消息或 Esc 自然回到正常循环。
   - 挂机指令另带两条无人值守约束：不执行需要人工确认的命令、不发起需要回应的提问（人不在场，perm-gate/ask 的面板会挂到用户回来为止——挂机时段碰上就是白等）。
   - **插件联动经评估暂缓**（workflow-mgr 让挂机工作对着工作流下一步、perm-gate 脱机快速拒绝、explore-agent 备料）：都会新增 globalThis 契约或直接读对方数据，显著加重插件间耦合；keep 保持只依赖官方 `setStatus` + `shared/*`。
-  - 挂机指令带白名单 `IDLE_WORK`（补文档/补测试核验/备料/记清单）+ 硬约束（只做新增性工作、不改既有行为、需拍板的事只记录）；「没有合适的活」由既有的**续跑空转保护**收口（挂机轮无 toolCall → 停），不另设协议。挂机同样吃预算 16。
+  - 挂机工作的**唯一判据**（用户拍板口径，别改宽）：「无需用户拍板，且做完不会产出需要人工处理的后续任务」——两问任一为「是」就不做。`IDLE_WORK` 只是**示例项**（文档时效性 / 死指针与索引 / 跨文件一致性 / 注释时效性），清单外的事用同一判据自查。
+  - **当初的偏差与纠偏**（设计意图的记录，别改回去）：挂机不是「闲时找一件可做的事」，而是「把项目里已经存在的不一致清掉」。旧白名单（补文档/补测试/备料/**记清单**）全是产出型类别，必然产出要人验收的待决项，又堆在真正关心的回复后面——实测表现为「闲时帮忙解决力所能及的事」退化成「闲时帮忙找事」。判据里的「后继任务」专指这类东西：新文档/新方案/新测试/新清单、待拍板清单、要人确认的改动。
+  - 挂机预算**独立于续航**：`IDLE_MAX = 4`（`idleUsed` 计数，领满即停 + 一句 notify）；续航仍是 `MAX_CONTINUATIONS = 16`。「没有合适的活」仍由**续跑空转保护**收口（挂机轮无 toolCall → 停），未另设协议。
+  - 挂机产物落点由指令指定（`IDLE_LOG`，keep 自己不写文件）——避免挂机回合的正文把真正关心的输出顶远；工具调用行仍会照常出现在转录里（pi 的转录机制，无法只留一行）。
   - 面板只在 TUI 弹（`ctx.mode !== "tui"` 视作在场、按 default 停），弹前经 `setWaiting()` 登记 Working 行。**不要把「是否在场」寄托在 `ui.confirm/select` 的 `timeout` 上**：它们超时与用户按 Esc 都返回 `undefined`，区分不了「脱机」与「人在按 Esc」，语义会反。
 - **自指场景的预期失败**（别为它加机制）：若会话记录本身在讨论 keep 的提问原文（开发 keep 的会话必然如此），模型会把追加的自检提问读成「对话内容/被粘贴的历史」，起手调工具去查证而不是作答 → 无 JSON → 停。实测 4 次（`blocks=thinking+toolCall`、`ans=` 是排查开场白）全发生在 keep 开发会话里。处理口径：提问措辞标明来源与角色（`[harness 自检]` + 「你是被提问方，直接给出 JSON 结论」），失败即停下（**不加重试机制**——那是拿机制复杂度换边角场景；非自指会话里暂未观察到该形态）。
 - 表述风格：注入给模型的自检提问/续跑指令用**正向框架**（说明「是什么、该做什么」），避免「不是…不要…」式否定句——否定式说明容易被读成「需要留意的例外」。
-- 模型：用途 `keep-triage`（默认策略 AUTO = 跟随会话模型，可在 `/model-config` 改指）。命令 `/keep` 无参开等级选择面板（`ctx.ui.select` 三档，当前档带 ✓；Esc/非 TUI 不改档），`/keep off|default|idle` 直设（非法值给用法提示）；全局持久 `~/.pi/agent/keep.json`，默认 `default`。状态 key `keep`（priority 66：`🔁 停顿自检中` / `🔁 续航 n/16` / `⏳ 探测在场中` / `⏳ 挂机 n/16`）；判定块：`↻ 可继续` / `⚠ 需要人工` / `✓ 已完成`（挂机时带 ` · 挂机 n/16`，`details.idle = true` 标的就是这件事）。回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx + `PI_KEEP_TRIAGE` 测试桩，全离线；假 `ui.custom` 按 `probe=stop|idle|key:<键>|timeout` 驱动真组件的按键/超时路径）。
+- 模型：用途 `keep-triage`（默认策略 AUTO = 跟随会话模型，可在 `/model-config` 改指）。命令 `/keep` 无参开等级选择面板（`ctx.ui.select` 三档，当前档带 ✓；Esc/非 TUI 不改档），`/keep off|default|idle` 直设（非法值给用法提示）；全局持久 `~/.pi/agent/keep.json`，默认 `default`。状态 key `keep`（priority 66：`🔁 停顿自检中` / `🔁 续航 n/16` / `⏳ 探测在场中` / `⏳ 挂机 n/4`）；判定块：`↻ 可继续` / `⚠ 需要人工` / `✓ 已完成`（挂机时带 ` · 挂机 n/4`，`details.idle = true` 标的就是这件事）。回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx + `PI_KEEP_TRIAGE` 测试桩，全离线；假 `ui.custom` 按 `probe=stop|idle|key:<键>|timeout` 驱动真组件的按键/超时路径）。
 - 解析兑底（不为弱遵从模型打提示词补丁）：平衡括号扫描从散文/围栏里捞第一个 class 合法的 JSON；捞不到 = 未判定 → 停下并 warning（回答是面向用户的自然语言时，总结≈C / 求助≈B，停下语义自洽）。
 
 ## crash-log.ts
@@ -140,3 +143,25 @@
 - 能力约束：用途声明 `requiresVision` 时，选模型列表只列 `input` 含 `image` 的模型。
 - 改完立即生效：插件每次 resolve 都重读中心文件与本插件文件（mtime 缓存），无需 `/reload`。
 - 默认策略：`btw.chat` / `hud-git.conflict` = FAST；`explore.subagent` / `perm-gate.review` / `hud-git.commit` = LITE；`beacon.phrase` = BATCH；`init` / `audit` = AUTO。
+
+## secret（`secret/`，产物 `secret.ts`）
+
+- 职责：让模型用得上密钥但看不到它。模型与转录里只有 `{{sec:名字}}`，真值只出现在掩码录入那一瞬与执行前一刻。库是**会话级内存**（`globalThis.__PI_SECRET_VAULTS__` 注册表，按会话文件索引），不落盘、不进 JSONL、不写临时文件；`/reload` 保留、`/new` 与退出清空。
+- **交互面只有一个命令**：`/secret` 开面板（条目管理 / 长期指纹表 / 设置 / 帮助全在里面）；`on|off|list` 是给无界面场景留的旁路；`/secret-config` 只是打开面板的设置页（满足仓库「配置类命令」约定，但用户不必记）。面板是自绘多视图组件，动作经返回值交给 index.ts 执行后再打开一次；设置项例外，在面板内直接改（每次 render 从 deps 现读，改完当帧生效）。
+- 文件分工：`refs.ts`（ref 语法/名字校验/环境变量名/撞名/`expandForBash`）、`vault.ts`（内存库 + 会话注册表）、`detect.ts`（13 种形态 + 关键词/中文写法/旗标 + 编码变体）、`engine.ts`（`maskText`/`maskDeep`/`expandDeep`/自动收录/`post` 钩子）、`fingerprint.ts`（长期指纹表）、`bash.ts`（接管 bash 工具）、`ui.ts`（掩码输入浮层 + 多视图面板）、`index.ts`（钩子、两个工具、命令、配置）。
+- 工具两个：`secret_list`（只读，名字+类型+长度）与 `secret_prompt(name, why)`——后者弹掩码框请用户录入，值直接进内存库，AI 只拿到名字；用户 Esc → 返回 `isError`。**两个工具都不把值交给模型**。
+- 钩子布局：入口 `input`（粘贴捕获 + 长期指纹扫描，**落盘前** transform）与 `tool_call`（展开 + 会话内首次确认 + 缺名/撞名阻断）；出口 `tool_result` → bash 的流式帧与截断快照 → `context` → `before_provider_request`；`before_agent_start` 注入用法说明；`turn_end` 探测 provider 钩子是否存在。
+- 硬约束（改这个模块前必读）：
+  - **bash 必须走 `spawnHook`**：真值经按次环境变量进子进程，`process.env` 不碰、argv 无明文。这要求替换 bash 工具（`createBashToolDefinition(cwd,{spawnHook})`），而**扩展之间同名工具先注册者胜**，被别的扩展抢先时 pi 不报错——所以 `session_start` 里用 `bashIsOurs(pi)`（比对 `sourceInfo.path` 与 `import.meta.url` 的 realpath）显式查一次并告警。
+  - **`tool_result` 改写 content 必须一并给出 `structuredContent`**，否则 pi 会丢弃它（仓库既有硬约束）。
+  - **二进制与回放签名字段绝不改写**：`engine.ts` 的 `OPAQUE_TYPES`（image/audio/binary 整体跳过）与 `OPAQUE_KEYS`（data/thinkingSignature/thoughtSignature/textSignature）。改 base64 会让图片请求 400。
+  - `tool_call` 里展开而非 `input`/`before_agent_start`：pi 校验参数时对参数做 `structuredClone`，钩子改的是克隆体，转录与模型看到的仍是模型最初写的 ref（已核实）。
+  - 短值边界：`MIN_MASK_LEN = 8`（更短不参与脱敏）、`WORD_BOUNDARY_LEN = 16`（8~15 字符只在词边界替换，否则 `test` 会打掉 `latest`）。
+  - **识别是三档不是二值**（`detect.ts` 的 `scout`）：打分 → `adopt`（≥4 且来自粘贴才算）/ `mask`（1~3）/ `ignore`（≤0）。工具输出侧永远不给 adopt——文档里的示例 token 会被读进来，收进库就是噪音。改动打分项后必须跑 `test/detect-bench.test.mjs`，它带语料与真实负样本（package-lock.json / README / 本扩展源码必须零误报）。
+  - **ref 的转义**：`\{{sec:名字}}` 是字面量（`refsIn` 不计、bash 展开时去掉反斜杠）。没有它，任何提到 ref 语法的命令都会被「名字不在库里」拦下（本扩展自己的源码注释就被拦过两次）。
+  - **名字不在库时**：bash 阻断（shell 拿到字面量会很困惑），其它工具原样保留并在结果里补一句提醒。
+  - **长期指纹表**：`fingerprint.ts`，HMAC-SHA256，密钥是 `secret-fingerprints.key`（32 字节，mode 600），表是 `secret-fingerprints.json`（只有指纹）。密钥文件丢失 → 旧指纹无从校验，必须**整表重建并告知**（不能只换密钥留着旧条目，那会变成永远不命中的死数据）。只收 ≥16 字符的值（`MIN_FINGERPRINT_LEN`）。匹配靠「宽窄两套分隔符切候选片段 + 逐段算指纹」，因此嵌在更长串里辨认不出（已知取舍，别当 bug 修）。命中占位写明「本会话没有值」——指纹**不能**替代值去执行。
+  - 状态 key `secret`（环境信息层 57）已登记 `hud-core.ts` 的 `STATUS_STYLE`。
+- 配置：`~/.pi/agent/secret-config.json`（`enabled` / `confirm` / `redactShapes` / `captureOnPaste` / `guessConfirm` / `fingerprints`）；`SECRET_CONFIG_DIR` 环境变量可改配置目录（指纹表也跟着走），**测试隔离用**（同 webdav-kb 的 `KB_CONFIG_DIR`）；该变量在建 boot 时现读，所以同一进程里可以来回切目录。
+- 测试：`test/core.test.mjs`（纯逻辑 + 指纹表往返与密钥丢失重建）、`test/e2e.test.mjs`（假 pi/ctx 驱动真实钩子链：多视图面板的多步浮层、真跑一次 shell 验证环境变量注入、`process.env` 未被污染、转录保持 ref、确认面板记住后不再问、`secret_prompt` 索要与取消、跨会话指纹、`reload` 保留库）。**驱动多步浮层时用「起始下标记 + 相对偏移」定位组件**——同一实例会先后弹多次，用 `at(-1)` 会打到过期组件上、整个测试挂住。
+- 已知不设防边界（写死在 README 与代码注释，不要当 bug 修）：截图/二进制里的密钥照发；同账户可读 `/proc/<pid>/environ`；模型可用 shell 切片重建值；explore 子代理有自己的模型循环，不经过主会话钩子。

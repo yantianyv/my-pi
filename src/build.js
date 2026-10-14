@@ -127,8 +127,7 @@ async function main() {
 	// 清理 dist/extensions 里已不存在的旧产物（如某扩展被移除）
 	for (const f of fs.readdirSync(path.join(DIST, "extensions"))) {
 		if (f.endsWith(".ts") && !entries.some((e) => e.out.endsWith(f))) {
-			// fs.rmSync 在含中文的路径下会静默删除失败（报成功但不删），
-			// 改用 unlinkSync（实测可靠）；失败仅告警不中断构建
+			// fs.rmSync 在含中文的路径下会静默失败（报成功但不删），用 unlinkSync；失败仅告警不中断构建
 			try {
 				fs.unlinkSync(path.join(DIST, "extensions", f));
 				console.log(`– 清理旧产物 ${f}`);

@@ -111,8 +111,8 @@ export default function (pi: ExtensionAPI) {
 
 	// 4) Ctrl+C：第一次打断当前 turn；打断沉降完成后的窗口内再按一次 → 直接执行 /rewind 回退
 	//    窗口起点是「沉降完成时刻」（agent_end）而非按键时刻：abort 有沉降期（isIdle 迟迟不变
-	//    true），旧实现从按键起算会被沉降期吃掉大半窗口，且沉降期内误按会刷新起点，手感极差。
-	//    现沉降期内按下的 Ctrl+C 只把回退意图排队（rewindArmed，不刷新窗口），空闲后的下一
+	//    true），从按键起算会被沉降期吃掉大半窗口，沉降期内误按还会刷新起点。
+	//    沉降期内按下的 Ctrl+C 只把回退意图排队（rewindArmed，不刷新窗口），空闲后的下一
 	//    次 Ctrl+C 消费——双击连按永远有效，无需探准沉降结束的时机
 	let currentCtx: ExtensionContext | null = null;
 	// 注销函数（pi 返回的 unsubscribe）；同时充当「是否已注册」标志——shutdown 时注销并复位，

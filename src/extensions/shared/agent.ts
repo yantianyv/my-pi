@@ -24,8 +24,8 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 }
 
 /**
- * 构造前导 system 消息（0.86 TranscriptContext 模型）：AgentContext 已无 systemPrompt 字段，
- * 子代理的系统提示词改为以 system 消息置于 context.messages 开头；工具仍走 context.tools，
+ * 构造前导 system 消息（0.86 起 TranscriptContext 模型）：AgentContext 无 systemPrompt 字段，
+ * 系统提示词以 system 消息置于 context.messages 开头；工具仍走 context.tools，
  * 由 agent-loop 的 declareToolChanges 自动声明进系统消息（空 content 重放时被跳过，无副作用）。
  */
 export function systemMessage(content: string): AgentMessage {
