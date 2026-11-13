@@ -1,0 +1,403 @@
+/**
+ * web-tool: 联网搜索 + 网页抓取转 markdown（入口薄壳：注册 web_search / web_fetch / web_dislike
+ * 三个工具与 /web-tool-config 命令；核心逻辑在 http.ts / search.ts / fetch.ts / dislike.ts / panel.ts）
+ *
+ * 多源搜索，零 API key 零费用（彻底去除对 kimi-coding 的依赖）：
+ * - 通用网页：cn.bing.com RSS + 360 搜索 HTML 双源并行，结果**逐条评分合并**：
+ *   标题/URL/摘要按权重计分 + 完整查询短语命中强加成，跨源去重（URL 规范化 /
+ *   标题归一化）后按分数降序取前 15 条——两个源的高质量条目都能入选，bing 泛化
+ *   查询（地名+机构被吞长尾词）混入的低相关条目自然沉底；
+ * - 垂类 JSON API：npm registry（source: "npm"）/ GitHub 仓库搜索（source: "github"）；pypi.org 搜索页有 Client
+ *   Challenge 反爬（实测 curl 只回挑战页），不做垂类源，Python 包让 agent 走
+ *   普通网页搜索查；
+ * - 不依赖服务端 AI 总结：直接返回 标题+URL+摘要 列表由主 agent 自行判断，
+ *   需要深读时用 web_fetch 抓取——成本从 kimi 时代每次 2 万+ token 降到 0。
+ *
+ * 差评降权（动态黑名单）：AI 发现低质量结果（内容与标题不符/灌水/死链）时调用
+ * web_dislike 对域名记差评，持久化到 ~/.pi/agent/web-search-blacklist.json（跨会话）；
+ * 搜索评分时按差评次数降权（×DECAY^count），累计到阈值直接滤除——无需维护域名白名单，
+ * 降权对象由 AI 使用中自然沉淀。
+ *
+ * fetch：抓取 URL → 双通道竞速（直连 / curl+代理）→ domino 解析 DOM → 选正文容器
+ * → turndown(+gfm 表格) 转 markdown → 压缩空行/截断。turndown 与其依赖 domino、
+ * turndown-plugin-gfm 由 build.js（esbuild）内联进单文件产物——build.js 的
+ * external 白名单只保留 @earendil-works/* 与 typebox，产物仍是零外部依赖单文件。
+ *
+ * 抓不到的站点（被墙、反爬验证页等）如实报错，由 agent 自行决定下一步。
+ */
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import { setStatusWithTTL, clearStatusTimers } from "../shared/status";
+import { searchWeb, searchNpm, searchGithub, formatSearchResults, type SearchResult } from "./search";
+import { fetchAsMarkdown, DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT } from "./fetch";
+import { clearProfile, openLoginWindow, profileDir, rendererReady, shutdownRenderer } from "./render-cdp";
+import { loadDislikeData, saveDislikeData, dislikeKey, DISLIKE_BAN_THRESHOLD } from "./dislike";
+import { getProxyUrl, setProxySetting, validateProxy } from "../shared/http";
+import { ProxyConfigOverlay } from "./panel";
+import { FREE_PROVIDER, PAID_PROVIDERS, PROVIDER_VALUES, isPaidProvider, providerApiKey, searchPaid, type PaidProvider } from "./providers";
+import { resetPaidHint, takePaidHint } from "./paid-hint";
+
+/** 调用卡片参数展示上限（超长截断，防 URL/查询词撑爆卡片） */
+const MAX_CALL_ARG_CHARS = 72;
+
+/** source 参数的全部合法取值（搜哪类资源） */
+const SOURCE_VALUES = ["web", "npm", "github"] as const;
+
+/** source 的对外取值：只能是这三者之一（provider 只影响「谁来搜」，不改变「搜哪类」） */
+type SourceValue = (typeof SOURCE_VALUES)[number];
+
+/** 工具调用卡片渲染：粗体「图标+参数」，风格对齐内置工具（bash 显示 `$ 命令`）；参数缺失（流式未到）时用工具名兜底 */
+function renderToolCall(icon: string, arg: string | undefined, theme: Theme, fallback: string): Text {
+	const label = arg ?? fallback;
+	const text = theme.fg(
+		"toolTitle",
+		theme.bold(`${icon} ${label.length > MAX_CALL_ARG_CHARS ? label.slice(0, MAX_CALL_ARG_CHARS) + "…" : label}`),
+	);
+	return new Text(text, 0, 0);
+}
+
+export default function (pi: ExtensionAPI) {
+	// reload / session 替换前清掉 TTL 定时器（旧 ctx 已失效，到期回调会抛 stale 错误）；
+	// 渲染用的无头浏览器也要在这里收尾，免得留下孤儿进程占着 profile
+	let sessionId = "";
+	pi.on("session_start", async (_event, ctx) => {
+		sessionId = ctx.sessionManager.getSessionId();
+	});
+	pi.on("session_shutdown", async () => {
+		if (sessionId) resetPaidHint(sessionId);
+		clearStatusTimers();
+		await shutdownRenderer();
+	});
+
+	/** 已配置 key 的付费源（决定是否在免费结果后引导；没有 key 就不提用不了的能力） */
+	async function availablePaidProviders(ctx: Parameters<typeof searchPaid>[2]): Promise<PaidProvider[]> {
+		const out: PaidProvider[] = [];
+		for (const p of Object.keys(PAID_PROVIDERS) as PaidProvider[]) {
+			const cred = await providerApiKey(ctx, PAID_PROVIDERS[p]).catch(() => undefined);
+			if (cred) out.push(p);
+		}
+		return out;
+	}
+/** web_search 的结构化结果（codemode 脚本按字段筛选用，模型侧仍看文本） */
+	const SearchOutput = Type.Object({
+		query: Type.String({ description: "搜索查询词" }),
+		source: Type.String({ description: `实际搜索源（web / npm / github，付费时另标 provider）` }),
+		results: Type.Array(
+			Type.Object({
+				title: Type.String({ description: "标题" }),
+				url: Type.String({ description: "链接" }),
+				snippet: Type.String({ description: "摘要" }),
+				src: Type.Optional(Type.String({ description: "该条来自哪个源（多源合并时标注）" })),
+			}),
+			{ description: "结果列表，按相关度排序" },
+		),
+	});
+
+	pi.registerTool({
+		name: "web_search",
+		annotations: { readOnlyHint: true },
+		label: "联网搜索",
+		description:
+			"搜索互联网，返回标题 + URL + 摘要列表（深读某条用 web_fetch 抓 URL）。"
+			+ "查 npm 包用 source=\"npm\"，查 GitHub 仓库用 source=\"github\"；Python 包走默认网页搜索（site:pypi.org/project/）。"
+			+ "低质量结果（文题不符/灌水/死链）用 web_dislike 记差评降权。",
+		promptSnippet: "搜索互联网：web_search(查询词[, source][, provider]) → 标题+URL+摘要列表",
+		renderCall: (args, theme) => {
+			const query = typeof args?.query === "string" ? args.query.trim() : "";
+			const provider = typeof args?.provider === "string" && args.provider !== FREE_PROVIDER ? ` [${args.provider}]` : "";
+			const source = typeof args?.source === "string" && args.source !== "web" ? ` [${args.source}]` : "";
+			return renderToolCall("🔍", query ? `${query}${provider}${source}` : undefined, theme, "web_search");
+		},
+		promptGuidelines: [
+			"需要实时或外部信息（GitHub issues、文档、新闻、价格）时用 web_search，不要凭记忆猜测。",
+			"查询词要具体；首屏结果不满意就换词再搜一次。",
+		],
+		parameters: Type.Object({
+			query: Type.String({ description: "搜索查询词（可含站点限定，如 site:github.com）" }),
+			// provider / source 用 String 而不用 Union：枚举一旦写死在 schema 里，非法值会在 execute 之前
+			// 被校验拒掉，白白耗掉一轮；写成 String 则非法值能走到 execute，给出结果 + 告警
+			// 付费 provider 不写进描述（否则模型每次搜索都会优先选它、白白花钱），由搜索结果末尾按需告知
+			provider: Type.Optional(
+				Type.String({
+					description: `由谁来搜索，默认 ${FREE_PROVIDER}（免费，零 key 零费用）。只作用于 source=web`,
+				}),
+			),
+			source: Type.Optional(
+				Type.String({
+					description: `搜哪类资源，可选：${SOURCE_VALUES.join(" / ")}（不传默认 web）。npm / github 走官方免费 API，与 provider 无关`,
+				}),
+			),
+		}),
+		outputSchema: SearchOutput,
+
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			if (signal?.aborted) {
+				return { content: [{ type: "text", text: "已取消" }], details: {} };
+			}
+			const push = (text: string, ttlMs: number) => setStatusWithTTL(ctx, "web-search", text, ttlMs);
+			const provider = params.provider ?? FREE_PROVIDER;
+			const source = params.source ?? "web";
+			push("🔍 搜索中", 30_000);
+			onUpdate?.({ content: [{ type: "text", text: `正在搜索：${params.query}` }], details: { progress: 10 } });
+			try {
+				let results: SearchResult[];
+				let usedSource: SourceValue;
+				// 实际生效的 provider：npm/github 路径下恒为 free（provider 被忽略）
+				let usedProvider: string = FREE_PROVIDER;
+				let hint: string | undefined;
+				// 未知取值（codemode 脚本可绕过类型校验）：不报错——白白丢一轮不如给结果 + 明确告警
+				const warnings: string[] = [];
+				const paidProvider = isPaidProvider(provider) ? provider : undefined;
+				if (provider !== FREE_PROVIDER && !paidProvider) {
+					warnings.push(`⚠ 未知的 provider「${provider}」，已改用 ${FREE_PROVIDER}。可用取值：${PROVIDER_VALUES.join(" / ")}`);
+				}
+				const sourceKnown = (SOURCE_VALUES as readonly string[]).includes(source);
+				if (!sourceKnown) {
+					warnings.push(`⚠ 未知的 source「${source}」，已改用 web。可用取值：${SOURCE_VALUES.join(" / ")}`);
+				}
+				const effSource: SourceValue = sourceKnown ? (source as SourceValue) : "web";
+
+				if (effSource === "npm" || effSource === "github") {
+					// 这两个 source 走官方免费 API，本身不收费也没别的 provider 可选：provider 被忽略
+					if (paidProvider) {
+						warnings.push(`⚠ source=${effSource} 走官方免费 API，已忽略 provider=${paidProvider}`);
+					}
+					results = effSource === "npm" ? await searchNpm(params.query) : await searchGithub(params.query);
+					usedSource = effSource;
+				} else if (paidProvider) {
+					results = await searchPaid(paidProvider, params.query, ctx, signal);
+					usedSource = "web";
+					usedProvider = paidProvider;
+					if (!results.length) throw new Error("付费源无结果");
+				} else {
+					const r = await searchWeb(params.query);
+					results = r.results;
+					usedSource = "web"; // 三源命中情况由结果的 [bing]/[baidu] 分组标题呈现
+					// 付费源不写进工具描述（默认不花这笔钱），只在免费结果后提一次
+					hint = takePaidHint(sessionId, await availablePaidProviders(ctx));
+				}
+				const warning = warnings.length ? warnings.join("\n") : undefined;
+				push(warning ? "⚠ 参数已调整" : `✓ 搜索 ${results.length} 条`, 6_000);
+				return {
+					content: [{ type: "text", text: formatSearchResults(results, usedSource, hint, warning) }],
+					details: {
+						results: results.length,
+						source: usedSource,
+						provider: usedProvider,
+						...(warnings.length ? { warnings } : {}),
+					},
+					structuredContent: {
+						query: params.query,
+						source: usedSource,
+						provider: usedProvider,
+						results: results.map((r) => ({ title: r.title, url: r.url, snippet: r.snippet, ...(r.src ? { src: r.src } : {}) })),
+					},
+				};
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				push("⚠ 搜索失败", 6_000);
+				return {
+					content: [{ type: "text", text: `搜索失败：${msg}` }],
+					details: { error: msg },
+					isError: true,
+				};
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "web_fetch",
+		annotations: { readOnlyHint: true },
+		label: "抓取网页",
+		description:
+			"抓取网页 URL 转 markdown（正文提取 + 去导航广告 + 截断）。适合深读文档/README。"
+			+ "JS 渲染的页面（正文极短、内容靠脚本注入）也能抓，正文不足时结果里会说明。",
+		promptSnippet: "抓取网页转 markdown：web_fetch(URL[, maxChars]) → 正文",
+		renderCall: (args, theme) =>
+			renderToolCall("🌐", typeof args?.url === "string" ? args.url : undefined, theme, "web_fetch"),
+		parameters: Type.Object({
+			url: Type.String({ description: "要抓取的完整 URL（http/https）" }),
+			maxChars: Type.Optional(
+				Type.Integer({
+					description: `返回 markdown 最大字符数，默认 ${DEFAULT_MAX_CHARS}，上限 ${MAX_CHARS_LIMIT}`,
+				}),
+			),
+		}),
+
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			if (signal?.aborted) {
+				return { content: [{ type: "text", text: "已取消" }], details: {} };
+			}
+			const push = (text: string, ttlMs: number) => setStatusWithTTL(ctx, "web-fetch", text, ttlMs);
+			push("🌐 抓取中", 30_000);
+			onUpdate?.({ content: [{ type: "text", text: `正在抓取：${params.url}` }], details: { progress: 10 } });
+			try {
+				const maxChars = Math.min(params.maxChars ?? DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT);
+				const { markdown, title, finalUrl, bytes, truncated, rendered, renderNote } = await fetchAsMarkdown(
+					params.url,
+					maxChars,
+					signal,
+					push,
+				);
+				push("✓ 抓取完成", 6_000);
+				const header: string[] = [];
+				if (title) header.push(`标题: ${title}`);
+				header.push(`源: ${finalUrl}`);
+				header.push(
+					`（HTML 约 ${(bytes / 1024).toFixed(0)} KB，正文 ${markdown.length} 字符${truncated ? "，已截断" : ""}${rendered ? `，无头渲染 ${renderNote}` : ""}）`,
+				);
+				return {
+					content: [{ type: "text", text: `${header.join("\n")}\n---\n${markdown}` }],
+					details: { bytes, chars: markdown.length, truncated, rendered },
+				};
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				push("⚠ 抓取失败", 6_000);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `抓取失败：${msg}`,
+						},
+					],
+					details: { error: msg },
+					isError: true,
+				};
+			}
+		},
+	});
+
+	// ---- web_dislike：搜索结果差评（动态黑名单，持久化降权） ----
+	pi.registerTool({
+		name: "web_dislike",
+		annotations: { readOnlyHint: false },
+		label: "搜索差评",
+		description:
+			"给低质量域名记差评（本地持久化、跨会话生效）：累计差评使该域名在搜索结果中降权（×0.6/次，5 次滤除）。"
+			+ "深读后发现文题不符/灌水/死链时使用。",
+		promptSnippet: "搜索差评：web_dislike(域名/URL[, reason]) → 累计差评降权该域名",
+		renderCall: (args, theme) => {
+			const domains = Array.isArray(args?.domains) ? (args.domains as string[]).slice(0, 3).join(", ") : "";
+			return renderToolCall("👎", domains || undefined, theme, "web_dislike");
+		},
+		parameters: Type.Object({
+			domains: Type.Array(Type.String({ description: "要差评的域名（如 blog.csdn.net）或结果 URL（自动提取域名）" })),
+			reason: Type.Optional(Type.String({ description: "差评原因（如：内容与标题不符 / 灌水 / 死链），仅用于追踪" })),
+		}),
+
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			if (signal?.aborted) {
+				return { content: [{ type: "text", text: "已取消" }], details: {} };
+			}
+			const data = loadDislikeData();
+			const added: Array<{ key: string; count: number }> = [];
+			for (const d of params.domains ?? []) {
+				const key = dislikeKey(d);
+				if (!key) continue;
+				const rec = data[key] ?? { count: 0, reasons: [] as string[] };
+				rec.count++;
+				if (params.reason && !rec.reasons.includes(params.reason)) rec.reasons.push(params.reason);
+				data[key] = rec;
+				added.push({ key, count: rec.count });
+			}
+			if (added.length) saveDislikeData(data);
+			const detail = added.length
+				? added.map((a) => `${a.key}×${a.count}`).join("、")
+				: "没有有效的域名/URL";
+			const hint =
+				added.some((a) => a.count >= DISLIKE_BAN_THRESHOLD)
+					? `；已累计 ${DISLIKE_BAN_THRESHOLD} 次差评，该域名不再出现在搜索结果里（要恢复就在 /web-tool-config 面板的「搜索结果黑名单」里删掉这条）`
+					: added.length
+						? `；该域名在搜索结果中的排名已按次数降低（累计 ${DISLIKE_BAN_THRESHOLD} 次后完全隐藏；/web-tool-config 面板可查看与删除）`
+						: "";
+			return {
+				content: [{ type: "text", text: `已差评：${detail}${hint}` }],
+				details: { disliked: added.map((a) => a.key), counts: Object.fromEntries(added.map((a) => [a.key, a.count])) },
+			};
+		},
+	});
+
+	// ---- /web-tool-config：配置 web_fetch/web_search 被墙自动重试的代理地址；搜索差评管理在面板内（Del 删除选中项） ----
+	pi.registerCommand("web-tool-config", {
+		description:
+			"联网工具配置：代理与域名差评（无参开面板；<url> 直设、off 清除、show 查看）",
+		handler: async (args, ctx) => {
+			const arg = (args ?? "").trim();
+
+			// 带参数：直接设置 / 清除 / 查看
+			if (arg) {
+				if (arg === "off" || arg === "clear" || arg === "none") {
+					setProxySetting("");
+					ctx.ui.notify("已清除代理设置，web_fetch/web_search 恢复直连", "info");
+					return;
+				}
+				if (arg === "show" || arg === "status" || arg === "?") {
+					ctx.ui.notify(`当前代理：${getProxyUrl() ?? "未设置"}`, "info");
+					return;
+				}
+				if (!validateProxy(arg)) {
+					ctx.ui.notify(`非法代理地址「${arg}」，需 http://host:port 形式（如 http://127.0.0.1:7890）`, "warning");
+					return;
+				}
+				setProxySetting(arg);
+				ctx.ui.notify(`代理已设为 ${arg}（被墙时自动经此重试）`, "info");
+				return;
+			}
+
+			// 无参数：打开设置面板（非 TUI 回落为文本提示）
+			if (!ctx.hasUI) {
+				ctx.ui.notify(
+					`当前代理：${getProxyUrl() ?? "未设置"}。用法：/web-tool-config（面板）、/web-tool-config <url> 直接设置、/web-tool-config off 清除`,
+					"info",
+				);
+				return;
+			}
+			const result = await ctx.ui.custom<string | null>(
+				(tui, theme, _kb, done) => new ProxyConfigOverlay(tui, theme, getProxyUrl() ?? "", done),
+				{
+					overlay: true,
+					overlayOptions: {
+						anchor: "right-center",
+						width: "46%",
+						minWidth: 44,
+						maxHeight: "90%",
+						margin: { right: 1 },
+					},
+				},
+			);
+			if (result === null) return; // 取消
+			setProxySetting(result);
+			ctx.ui.notify(result ? `代理已设为 ${result}（被墙时自动经此重试）` : "已清除代理设置，web_fetch/web_search 恢复直连", "info");
+		},
+	});
+
+	// ---- /web-render-login：无头渲染的登录态（无头浏览器里没法扫码，只能开有界面的窗口登一次） ----
+	pi.registerCommand("web-render-login", {
+		description: "无头渲染登录：开窗口登一次目标站点；clear 清空",
+		handler: async (args, ctx) => {
+			const arg = (args ?? "").trim();
+			if (!rendererReady()) {
+				ctx.ui.notify("未找到 Chromium，无法渲染（可设 PI_WEB_RENDER_CHROME 指定 chrome 路径）", "warning");
+				return;
+			}
+			if (arg === "clear" || arg === "reset") {
+				const dir = await clearProfile();
+				ctx.ui.notify(`已清空渲染 profile（连同登录态）：${dir}`, "info");
+				return;
+			}
+			// 先关掉无头渲染器放锁：有界面窗口用的是同一个 profile 目录
+			await shutdownRenderer();
+			try {
+				const url = arg && /^https?:\/\//.test(arg) ? arg : "about:blank";
+				const { profile } = openLoginWindow(url);
+				ctx.ui.notify(
+					`已打开登录窗口（profile: ${profile}）：登录目标站点后直接关窗即可，之后 web_fetch 的渲染兜底会复用该会话`,
+					"info",
+				);
+			} catch (e) {
+				ctx.ui.notify(`打开登录窗口失败：${e instanceof Error ? e.message : String(e)}`, "warning");
+			}
+		},
+	});
+}

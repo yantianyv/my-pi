@@ -1,0 +1,32 @@
+# tsconfig.json 由 install.js 从 tsconfig.template.json 动态生成（paths 指向本机 pi 全局目录），不入库
+tsconfig.json
+node_modules/
+# docs/ 是本地参考资料（DeepSeek 官方文档提取，版权归 DeepSeek），不入库
+docs/
+# dist/ 是构建产物（build.js 生成）：每次 install 自动重建，不入库
+dist/
+
+# test 临时构建产物（各扩展回归测试的 esbuild bundle/mock，每次测试重新生成）
+src/extensions/*/test/.tmp-*
+src/extensions/*/.tmp-*
+src/.tmp-*
+src/extensions/*/test/.dbg-*
+src/extensions/test/.tmp-*
+# 临时脚本自己生成的一次性 bundle（子进程测试把产物写到 src/ 下时落在这里）
+src/.*-tmp.mjs
+src/.race*
+src/.probe*
+/.race*
+/.probe*
+# 根目录手跑 esbuild 调试产物兜底（outfile 相对路径未带目录时落 CWD）
+/.tmp-*
+/.tmpn-*
+# 无头浏览器/子进程在仓库根留下的日志
+/debug.log
+
+# .pi/ 内部的运行时数据由 .pi/.gitignore 管（嵌套 .gitignore 就近生效：默认全忽略，只放行 skills/ 与本文件自身）
+
+# 临时工作目录（冒烟/联调脚本产物）
+.tmp/
+# scratch/ 本地手跑实验/预览脚本与下载遗留，不入库
+scratch/

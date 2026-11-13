@@ -1,0 +1,64 @@
+{
+	"mode": "human-ai",
+	"stages": [
+		{
+			"id": "audit",
+			"name": "审计",
+			"goal": "摸清 0.87.1→0.99.2 变更对仓库补丁与扩展的影响面",
+			"tasks": [
+				{
+					"title": "补丁命中情况实测",
+					"desc": "三个补丁（usage-guard / zuchongzhi / launch-report）在 0.99.2 上逐一验证目标串命中情况",
+					"aiTasks": ["grep/试运行验证三个补丁", "记录命中与缺失清单"],
+					"deliverable": "补丁命中报告（已在对话给出）",
+					"doneSignal": "三个补丁的命中/缺失结论均已确认"
+				},
+				{
+					"title": "扩展类型检查",
+					"desc": "用 0.99.2 的 .d.ts 跑全扩展 tsc 类型检查，暴露 API breaking changes",
+					"aiTasks": ["确认 tsconfig.json paths 指向新 pi 全局目录", "运行 npx typescript -p src/config/tsconfig.json", "汇总报错清单"],
+					"deliverable": "tsc 报错清单",
+					"doneSignal": "tsc 运行完成且报错已汇总"
+				},
+				{
+					"title": "扩展运行时依赖审计",
+					"desc": "审计 tsc 查不出的运行时依赖：pi 内部组件引用（ModelSelectorComponent 等）、事件签名变化（turn_end/agent_settled/context）、主题系统变化（system 默认主题、appearance 字段）",
+					"aiTasks": ["派子代理并行审计各扩展", "对照 changelog breaking changes 逐条核对"],
+					"deliverable": "运行时风险清单",
+					"doneSignal": "所有扩展审计完毕，风险清单汇总"
+				}
+			]
+		},
+		{
+			"id": "fix",
+			"name": "修复",
+			"goal": "修复审计发现的所有问题并重打补丁",
+			"tasks": [
+				{
+					"title": "重打三个补丁",
+					"desc": "usage-guard 重打；zuchongzhi 去掉失效条目后重打；launch-report 重打并验证注入",
+					"aiTasks": ["更新补丁脚本中失效的替换条目", "运行三个补丁", "验证结果"],
+					"deliverable": "0.99.2 上补丁全部生效",
+					"doneSignal": "三个补丁运行输出无错误、标记验证通过",
+					"deps": ["0.1"]
+				},
+				{
+					"title": "修复扩展兼容问题",
+					"desc": "按审计清单修复扩展源码",
+					"aiTasks": ["修复 tsc 报错", "修复运行时风险项"],
+					"deliverable": "修复后的 src/extensions/",
+					"doneSignal": "tsc 0 报错，风险项全部处置",
+					"deps": ["0.2", "0.3"]
+				},
+				{
+					"title": "构建安装与文档更新",
+					"desc": "node install.js 构建安装 + 回归测试 + AGENTS.md/README 同步",
+					"aiTasks": ["node src/build.js 构建", "跑各扩展回归测试", "node install.js 安装", "更新 AGENTS.md 注意事项"],
+					"deliverable": "0.99.2 环境可用的安装",
+					"doneSignal": "构建安装成功、回归测试通过、文档已同步",
+					"deps": ["1.1", "1.2"]
+				}
+			]
+		}
+	]
+}

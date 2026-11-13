@@ -1,0 +1,343 @@
+#!/usr/bin/env node
+/**
+ * webdav-kb / sync.ts 增量同步单元测试（共享 mock DAV + esbuild bundle）
+ *
+ * 覆盖：首次全量下载、无变化幂等、远端改/删、本地新建/改/删、冲突（保留远端 +
+ * 本地 .conflict 副本且不回传）、父目录自动创建、账本跨实例持久化、离线写入兜底补传、
+ * .history 历史副本（远端删除留档/命名规则/不自我递归）、空目录清理、PROTOCOL 过滤、
+ * 同步锁（活锁拒绝/心跳与旧格式残锁回收/等待接管/超时报错/锁内进度上报）。
+ *
+ * 用法：node src/extensions/webdav-kb/test/sync.test.mjs（仓库根目录执行）
+ */
+import { build } from "esbuild";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import { startMockDav } from "./mock-dav.mjs";
+
+const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
+const SRC_DIR = join(TEST_DIR, "../../..");
+
+let failures = 0;
+const check = (name, cond, extra = "") => {
+	if (cond) console.log(`  ✓ ${name}`);
+	else {
+		console.error(`  ✗ ${name}${extra ? `  ← ${extra}` : ""}`);
+		failures++;
+	}
+};
+
+const USER = "test-user";
+const PASS = "test-pass";
+
+const tmp = mkdtempSync(join(tmpdir(), "kb-sync-test-"));
+const dav = await startMockDav();
+let syncAll, putNote, readNote, listNotes, loadLedger, saveLedger4, backupToHistory;
+let formatSyncSummary, formatSyncNotes;
+try {
+	// bundle sync.ts（连带 client/store 内联）
+	const outfile = join(tmp, "sync.mjs");
+	await build({
+		entryPoints: [join(SRC_DIR, "extensions", "webdav-kb", "sync.ts")],
+		outfile,
+		bundle: true,
+		format: "esm",
+		platform: "node",
+		target: "es2022",
+		tsconfig: join(SRC_DIR, "config", "tsconfig.build.json"),
+		logLevel: "silent",
+	});
+	const m = await import(pathToFileURL(outfile));
+	syncAll = m.syncAll;
+	putNote = m.putNote;
+	readNote = m.readNote;
+	listNotes = m.listNotes;
+	loadLedger = m.loadLedger;
+	saveLedger4 = m.saveLedger;
+	backupToHistory = m.backupToHistory;
+	formatSyncSummary = m.formatSyncSummary;
+	formatSyncNotes = m.formatSyncNotes;
+
+	// ---- 0) 摘要与错误翻译（单一渲染源：命令/工具/面板共用同一份文案） ----
+	{
+		const empty = { downloaded: 0, uploaded: 0, deleted: 0, conflicts: 0, conflictFiles: [], failedDirs: [], unchanged: 3, errors: [] };
+		check("摘要：无变化显示「已是最新」", formatSyncSummary(empty) === "已是最新");
+		check(
+			"摘要：计数全人话且 0 值省略",
+			formatSyncSummary({ ...empty, downloaded: 3, uploaded: 1, conflicts: 2, errors: ["a"] }) === "下载 3 · 上传 1 · 冲突 2 · 失败 1",
+		);
+		check("摘要：无变化时没有冲突/失败细节", formatSyncNotes(empty).length === 0);
+		const notes = formatSyncNotes({
+			...empty,
+			conflictFiles: ["/notes/a.md", "/notes/b.md"],
+			failedDirs: [{ dir: "/private", reason: "HTTP 403" }],
+			errors: [
+				"上传 /notes/x.md: 含疑似密钥（API key），已拦截上传，本地文件保留；确认无敏感信息后可移除密钥再同步，或把配置项 allowSecretUpload 设为 true 放行全部",
+			],
+		});
+		check("说明：冲突给出路径与副本处理办法", notes[0].includes("/notes/a.md") && notes[0].includes(".conflict-"));
+		check(
+			"说明：读取失败的目录带路径与原因，且提醒结果不完整",
+			notes.some((n) => n.includes("/private") && n.includes("HTTP 403") && n.includes("未纳入本次同步")),
+		);
+		check("说明：失败明细原文带可操作指引", notes.some((n) => n.includes("已拦截上传") && n.includes("allowSecretUpload")));
+		const many = formatSyncNotes({ ...empty, errors: ["e1", "e2", "e3", "e4", "e5"] }, 3);
+		check("说明：明细超限时折叠计数", many.length === 4 && many[3].includes("另有 2 条"));
+	}
+
+	const mirrorDir = join(tmp, "mirror");
+	const cfg = { baseUrl: dav.baseUrl, username: USER, password: PASS };
+	const local = (rel) => join(mirrorDir, ...rel.split("/").filter(Boolean));
+	const local4 = (rel) => join(tmp, "mirror-prune", ...rel.split("/").filter(Boolean));
+
+	// ---- 1) 首次同步全量下载 ----
+	dav.seed("/notes/a.md", "# A\n远端内容 A\n");
+	dav.seed("/notes/sub/b.md", "# B\n远端内容 B\n");
+	dav.seed("/refs/c.md", "# C\n引用 C\n");
+	let s = await syncAll(cfg, mirrorDir);
+	check("首次同步下载 3 个文件", s.downloaded === 3 && s.errors.length === 0, JSON.stringify(s));
+	check("镜像内容正确", readNote(mirrorDir, "/notes/a.md") === "# A\n远端内容 A\n");
+	check("嵌套目录落盘", readNote(mirrorDir, "/notes/sub/b.md") === "# B\n远端内容 B\n");
+	check("账本生成 3 条", Object.keys(loadLedger(mirrorDir).files).length === 3);
+
+	// ---- 2) 无变化二次同步幂等 ----
+	s = await syncAll(cfg, mirrorDir);
+	check("二次同步零操作", s.downloaded === 0 && s.uploaded === 0 && s.deleted === 0 && s.conflicts === 0, JSON.stringify(s));
+	check("无变化计数 = 3", s.unchanged === 3, String(s.unchanged));
+
+	// ---- 3) 远端修改 → 下载 ----
+	dav.seed("/notes/a.md", "# A\n远端内容 A v2\n");
+	s = await syncAll(cfg, mirrorDir);
+	check("远端修改被下载", s.downloaded === 1 && readNote(mirrorDir, "/notes/a.md") === "# A\n远端内容 A v2\n", JSON.stringify(s));
+
+	// ---- 4) 远端删除 → 删本地 ----
+	dav.remove("/refs/c.md");
+	s = await syncAll(cfg, mirrorDir);
+	check("远端删除同步到本地", s.deleted === 1 && !existsSync(local("/refs/c.md")), JSON.stringify(s));
+
+	// ---- 5) 本地新建 → 上传（含父目录自动创建） ----
+	mkdirSync(local("/deep/x"), { recursive: true });
+	writeFileSync(local("/deep/x/new.md"), "# 本地新建\n");
+	s = await syncAll(cfg, mirrorDir);
+	// uploaded>=1：新建文件 + 上轮远端删除留档的 .history 副本补传（延迟一轮同步）
+	check("本地新建上传", s.uploaded >= 1 && s.errors.length === 0, JSON.stringify(s));
+	check("远端父目录已创建", dav.store.has(dav.prefix + "/deep/x"));
+	check("远端内容正确", dav.store.get(dav.prefix + "/deep/x/new.md").data.toString() === "# 本地新建\n");
+
+	// ---- 6) 本地修改 → 上传 ----
+	writeFileSync(local("/notes/sub/b.md"), "# B\n本地改的内容\n");
+	s = await syncAll(cfg, mirrorDir);
+	check("本地修改上传", s.uploaded === 1, JSON.stringify(s));
+	check("远端已更新", dav.store.get(dav.prefix + "/notes/sub/b.md").data.toString() === "# B\n本地改的内容\n");
+
+	// ---- 7) 本地删除 → 删远端 ----
+	rmSync(local("/deep/x/new.md"));
+	s = await syncAll(cfg, mirrorDir);
+	check("本地删除同步到远端", s.deleted === 1 && !dav.store.has(dav.prefix + "/deep/x/new.md"), JSON.stringify(s));
+
+	// ---- 8) 冲突：两侧都改 → 保留远端 + 本地 .conflict 副本 ----
+	writeFileSync(local("/notes/a.md"), "# A\n本地抢先修改\n"); // 本地改
+	// 稍候让 mtime 稳定，再改远端
+	await new Promise((r) => setTimeout(r, 50));
+	dav.seed("/notes/a.md", "# A\n远端也改了\n"); // 远端改
+	s = await syncAll(cfg, mirrorDir);
+	check("冲突被检出", s.conflicts === 1, JSON.stringify(s));
+	check("冲突后本地为远端版", readNote(mirrorDir, "/notes/a.md") === "# A\n远端也改了\n");
+	const conflictFiles = readdirSync(local("/notes")).filter((f) => f.includes(".conflict-"));
+	check("冲突副本已保留", conflictFiles.length === 1 && conflictFiles[0].startsWith("a.conflict-"), JSON.stringify(conflictFiles));
+	check("冲突副本内容为本地版", readFileSync(local("/notes/" + conflictFiles[0]), "utf8") === "# A\n本地抢先修改\n");
+
+	// ---- 9) 冲突副本不回传 ----
+	s = await syncAll(cfg, mirrorDir);
+	check("冲突副本不参与上传", s.uploaded === 0, JSON.stringify(s));
+	check("远端仍是远端版", dav.store.get(dav.prefix + "/notes/a.md").data.toString() === "# A\n远端也改了\n");
+
+	// ---- 10) 账本跨实例持久化（新 syncAll 调用仍识别无变化） ----
+	const before = Object.keys(loadLedger(mirrorDir).files).length;
+	s = await syncAll(cfg, mirrorDir);
+	check("跨实例账本持久且幂等", s.downloaded === 0 && s.uploaded === 0 && Object.keys(loadLedger(mirrorDir).files).length === before, JSON.stringify(s));
+
+	// ---- 11) 离线上传兜底：putNote 写本地失败后下次同步补传 ----
+	await putNote({ baseUrl: "http://127.0.0.1:1", username: USER, password: PASS }, mirrorDir, "/notes/offline.md", "# 离线写入\n");
+	check("putNote 断网时仅写本地", existsSync(local("/notes/offline.md")));
+	check("putNote 断网时远端无", !dav.store.has(dav.prefix + "/notes/offline.md"));
+	s = await syncAll(cfg, mirrorDir);
+	check("离线积压被补传", s.uploaded === 1 && dav.store.has(dav.prefix + "/notes/offline.md"), JSON.stringify(s));
+	check("补传后本地未误删", existsSync(local("/notes/offline.md")));
+
+	// ---- 12) 本地目录与文件列表 ----
+	const listing = listNotes(mirrorDir);
+	check("listNotes 含文件与目录", listing.some((f) => f.path === "/notes/offline.md") && listing.some((f) => f.path === "/notes" && f.isDir), JSON.stringify(listing));
+	check("listNotes 跳过账本与冲突副本", !listing.some((f) => f.path.includes(".conflict-") || f.path.includes(".kb-")), JSON.stringify(listing));
+
+	// ---- 13) .history 历史副本：远端删除留档（结构镜像根、内容为旧版、已补传远端） ----
+	const histFiles = readdirSync(local("/.history/refs")).filter((f) => f.startsWith("c_"));
+	check("远端删除留 .history 副本", histFiles.length >= 1, JSON.stringify(histFiles));
+	check("历史副本内容为旧版", histFiles.every((f) => readFileSync(local("/.history/refs/" + f), "utf8") === "# C\n引用 C\n"));
+	check("历史副本已上传远端", histFiles.length >= 1 && dav.store.has(dav.prefix + "/.history/refs/" + histFiles[0]));
+
+	// ---- 14) 历史备份命名：_yymmddhhmmss 后缀 / 同秒重名 _hash / 同秒同内容跳过 / 不自我递归 ----
+	// backupToHistory 为同步函数，三连调用同时间戳（yymmddhhmmss 12 位）
+	const enc = (s) => new TextEncoder().encode(s);
+	const h1 = backupToHistory(mirrorDir, "/notes/a.md", enc("# A\n第一版\n"));
+	check("备份路径带时间戳后缀且结构镜像根", h1 !== null && /^\/\.history\/notes\/a_\d{12}\.md$/.test(h1), String(h1));
+	const h2 = backupToHistory(mirrorDir, "/notes/a.md", enc("# A\n第二版\n"));
+	check("同秒不同内容 → 叠加 _hash", h2 !== null && h2 !== h1 && /^\/\.history\/notes\/a_\d{12}_[0-9a-f]{8}\.md$/.test(h2), String(h2));
+	const h3 = backupToHistory(mirrorDir, "/notes/a.md", enc("# A\n第二版\n"));
+	check("同秒同内容 → 跳过", h3 === null, String(h3));
+	check("history 不自我递归", backupToHistory(mirrorDir, "/.history/notes/a.md", enc("x")) === null);
+	check("LFS 不备份", backupToHistory(mirrorDir, "/lfs/x.bin", enc("x")) === null);
+
+	// ---- 15) 空目录清理 + 列表过滤（.history / PROTOCOL.md 对内容浏览不透明） ----
+	mkdirSync(local("/scratch/空目录"), { recursive: true });
+	writeFileSync(local("/PROTOCOL.md"), "# 守则\n");
+	s = await syncAll(cfg, mirrorDir);
+	check("空目录被清理", !existsSync(local("/scratch/空目录")) && !existsSync(local("/scratch")));
+	const listing2 = listNotes(mirrorDir);
+	check("listNotes 跳过 .history 与 PROTOCOL", !listing2.some((f) => f.path.startsWith("/.history") || f.path === "/PROTOCOL.md"), JSON.stringify(listing2));
+	// PROTOCOL.md 仍可被 kb_help 读取（readNote 不经 listNotes）
+	check("PROTOCOL.md 仍可直读", readNote(mirrorDir, "/PROTOCOL.md") === "# 守则\n");
+
+	// ---- 16) 同步锁：活锁拒绝 / 心跳与旧格式残锁回收 / 等待接管 / 超时报错 / 进度上报 ----
+	const lockPath = join(mirrorDir, ".kb-sync.lock");
+	const writeLock = (meta) => writeFileSync(lockPath, JSON.stringify(meta));
+
+	// 活锁（pid 活 + 心跳新鲜）+ 无等待 → 立即拒绝，报错含锁绝对路径
+	writeLock({ pid: process.pid, startedAt: new Date().toISOString(), heartbeat: Date.now() });
+	let lockErr = null;
+	try { await syncAll(cfg, mirrorDir); } catch (e) { lockErr = e; }
+	check("活锁无等待立即拒绝", lockErr !== null && lockErr.method === "SYNC_LOCKED", String(lockErr));
+	check("报错含锁绝对路径", lockErr !== null && lockErr.message.includes(lockPath), lockErr && lockErr.message);
+
+	// 心跳过期（pid 活但 60s 未续期）→ 残锁回收，同步正常完成
+	writeLock({ pid: process.pid, startedAt: new Date(Date.now() - 60_000).toISOString(), heartbeat: Date.now() - 60_000 });
+	s = await syncAll(cfg, mirrorDir);
+	check("心跳过期残锁被回收", !existsSync(lockPath), "锁文件仍在");
+
+	// 旧格式锁（无心跳）：pid 活 + startedAt 新 → 仍拒绝；超 30min → 回收
+	writeLock({ pid: process.pid, startedAt: new Date().toISOString() });
+	let legacyErr = null;
+	try { await syncAll(cfg, mirrorDir); } catch (e) { legacyErr = e; }
+	check("旧格式活锁仍拒绝", legacyErr !== null && legacyErr.method === "SYNC_LOCKED", String(legacyErr));
+	writeLock({ pid: process.pid, startedAt: new Date(Date.now() - 31 * 60_000).toISOString() });
+	s = await syncAll(cfg, mirrorDir);
+	check("旧格式超时残锁被回收", !existsSync(lockPath), "锁文件仍在");
+
+	// 等待接管：对方 1s 后释放，lockWaitMs 内等到并完成同步，等待期有进度报告
+	const waitLabels = [];
+	writeLock({ pid: process.pid, startedAt: new Date().toISOString(), heartbeat: Date.now() });
+	setTimeout(() => rmSync(lockPath, { force: true }), 1_000);
+	s = await syncAll(cfg, mirrorDir, { lockWaitMs: 8_000, onProgress: (l) => waitLabels.push(l) });
+	check("等待期内接管同步成功", !existsSync(lockPath), "锁文件仍在");
+	check("等待期报告对方与进度", waitLabels.some((l) => l.includes("等待另一实例释放同步锁")), JSON.stringify(waitLabels));
+
+	// 等待超时：对方不释放 → 到点抛 SYNC_LOCKED（且确实轮询等待过）
+	writeLock({ pid: process.pid, startedAt: new Date().toISOString(), heartbeat: Date.now() });
+	let timeoutErr = null;
+	const t0 = Date.now();
+	try { await syncAll(cfg, mirrorDir, { lockWaitMs: 3_000 }); } catch (e) { timeoutErr = e; }
+	check("等待超时抛锁占用", timeoutErr !== null && timeoutErr.method === "SYNC_LOCKED", String(timeoutErr));
+	check("超时前确实轮询等待", Date.now() - t0 >= 2_900, String(Date.now() - t0));
+	rmSync(lockPath, { force: true });
+
+	// 同步期间锁文件携带进度与心跳，完成后释放且不留 tmp 原子写残留
+	dav.seed("/notes/lock-probe.md", "# 锁进度探针\n");
+	let lockMeta = null;
+	s = await syncAll(cfg, mirrorDir, { onProgress: () => {
+		if (lockMeta && lockMeta.progress) return;
+		try {
+			const m = JSON.parse(readFileSync(lockPath, "utf8"));
+			if (m && typeof m.progress === "string") lockMeta = m;
+		} catch { /* 原子替换空窗，下个进度点再读 */ }
+	}});
+	check("同步期间锁文件上报进度与心跳", lockMeta !== null && typeof lockMeta.heartbeat === "number", JSON.stringify(lockMeta));
+	check("同步完成锁已释放且无 tmp 残留", !existsSync(lockPath) && readdirSync(mirrorDir).every((f) => !f.includes(".kb-sync.lock.tmp")), "锁或 tmp 残留");
+	// ---- 17) 怪癖服务器：GET 无 ETag 且与 PROPFIND 时间不一致（123 云盘实测行为）→ 不重复下载 ----
+	{
+		const dav2 = await startMockDav({ noGetEtag: true, getMtimeSkewMs: 300_000 });
+		try {
+			const mirror2 = join(tmp, "mirror-quirk");
+			const cfg2 = { baseUrl: dav2.baseUrl, username: USER, password: PASS };
+			dav2.seed("/notes/q.md", "# Q\n怪癖服务器\n");
+			const s1 = await syncAll(cfg2, mirror2);
+			check("怪癖服务器：首次下载", s1.downloaded === 1 && s1.errors.length === 0, JSON.stringify(s1));
+			const lf = loadLedger(mirror2).files["/notes/q.md"];
+			check("怪癖服务器：账本落遍历结果的 etag 与时间", Boolean(lf?.etag), JSON.stringify(lf));
+			const s2 = await syncAll(cfg2, mirror2);
+			check("怪癖服务器：二次同步不重复下载", s2.downloaded === 0 && s2.uploaded === 0, JSON.stringify(s2));
+		} finally {
+			dav2.close();
+		}
+	}
+
+	// ---- 18) 并行 putNote：所有账本条目与远端内容都保留，临时文件不互相覆盖 ----
+	{
+		const mirror3 = join(tmp, "mirror-concurrent");
+		await Promise.all(Array.from({ length: 12 }, (_, i) =>
+			putNote(cfg, mirror3, `/notes/batch/item-${i}.md`, `# 第 ${i} 篇\n`),
+		));
+		const ledger3 = loadLedger(mirror3);
+		check("并行写入保留全部账本条目", Object.keys(ledger3.files).length === 12, String(Object.keys(ledger3.files).length));
+		check("并行写入全部上传到远端", Array.from({ length: 12 }, (_, i) => dav.store.has(dav.prefix + `/notes/batch/item-${i}.md`)).every(Boolean));
+		check("账本临时文件无交叉残留", readdirSync(mirror3).every((f) => !f.startsWith(".kb-sync.json.tmp")));
+	}
+
+	// ---- 19) 目录快照剪枝：未变化的子树不再逐目录探测，且不误删其中的本地文件 ----
+	{
+		const dav3 = await startMockDav();
+		const mirror4 = join(tmp, "mirror-prune");
+		const cfg3 = { baseUrl: dav3.baseUrl, username: USER, password: PASS };
+		// 造一棵足够深的树：/deep/a/b/c/... 使剪枝的递归继承可被验证
+		for (let i = 0; i < 6; i++) dav3.seed(`/deep/a${i}/b${i}/c${i}/note.md`, `# ${i}\n`);
+		try {
+			const first = await syncAll(cfg3, mirror4);
+			check("剪枝：首次全量下载全部文件", first.downloaded === 6 && first.skippedDirs === 0, JSON.stringify(first));
+			const ledger4 = loadLedger(mirror4);
+			check("剪枝：首次同步后目录快照覆盖全部目录", Object.keys(ledger4.dirs ?? {}).length === 20, String(Object.keys(ledger4.dirs ?? {}).length));
+
+			const second = await syncAll(cfg3, mirror4);
+			check("剪枝：二次同步零操作且跳过子树", second.downloaded === 0 && second.uploaded === 0 && second.deleted === 0 && second.skippedDirs > 0, JSON.stringify(second));
+			check("剪枝：深层本地文件未被误删", existsSync(local4("deep/a3/b3/c3/note.md")));
+
+			// 剪枝跳过的子树里，本地删文件 → 远端同步删（快照变化后才能看到）
+			dav3.remove("/deep/a1/b1/c1/note.md");
+			const third = await syncAll(cfg3, mirror4);
+			check("剪枝：变化的子树会被下钻并同步远端删除", third.deleted === 1 && !existsSync(local4("deep/a1/b1/c1/note.md")), JSON.stringify(third));
+			check("剪枝：未变的其它子树仍然被跳过", third.skippedDirs > 0, JSON.stringify(third));
+
+			// full：忽略快照全量走，跳过的子树为 0
+			const full = await syncAll(cfg3, mirror4, { full: true });
+			check("剪枝：full 忽略快照", full.skippedDirs === 0 && full.downloaded === 0, JSON.stringify(full));
+
+			// 快照过期：强行把 at 改成超时，要求重新下钻
+			const ledger5 = loadLedger(mirror4);
+			for (const k of Object.keys(ledger5.dirs ?? {})) ledger5.dirs[k].at = Date.now() - 25 * 60 * 60 * 1000;
+			saveLedger4(mirror4, ledger5);
+			const expired = await syncAll(cfg3, mirror4);
+			check("剪枝：快照过期后强制重新下钻", expired.skippedDirs === 0 && expired.downloaded === 0, JSON.stringify(expired));
+
+			// /.history 单向下推：不遍历其子树（远端已有的历史副本不会拉下来，那是设计取舍）
+			dav3.seed("/.history/notes/a_250101120000.md", "# 历史旧版\n");
+			const withHistory = await syncAll(cfg3, mirror4);
+			check("单向区：远端已有历史副本不主动拉取", !existsSync(local4(".history/notes/a_250101120000.md")) && withHistory.downloaded === 0, JSON.stringify(withHistory));
+			const historySnapshot = loadLedger(mirror4).dirs ?? {};
+			check("单向区：历史目录未写入目录快照", !Object.keys(historySnapshot).some((d) => d.startsWith("/.history")), JSON.stringify(Object.keys(historySnapshot)));
+			// 本地新增历史副本正常上传；上传后账本有记录 → 后续同步不会把它当成远端已删
+			mkdirSync(local4(".history/notes"), { recursive: true });
+			writeFileSync(local4(".history/notes/a_250101130000.md"), "# 新历史\n");
+			const pushed = await syncAll(cfg3, mirror4);
+			check("单向区：本地新增历史副本单向上传", pushed.uploaded === 1 && dav3.store.has(dav3.prefix + "/.history/notes/a_250101130000.md"), JSON.stringify(pushed));
+			const again = await syncAll(cfg3, mirror4);
+			check("单向区：已上传的历史副本不被当成远端已删", again.deleted === 0 && existsSync(local4(".history/notes/a_250101130000.md")), JSON.stringify(again));
+		} finally {
+			dav3.close();
+		}
+	}
+} finally {
+	dav.close();
+	rmSync(tmp, { recursive: true, force: true });
+}
+
+console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
+process.exitCode = failures === 0 ? 0 : 1;

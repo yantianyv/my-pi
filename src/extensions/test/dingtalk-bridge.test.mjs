@@ -1,0 +1,1028 @@
+#!/usr/bin/env node
+/**
+ * dingtalk-bridge（src/extensions/dingtalk-bridge/index.ts）回归测试（复用 mimo-omni 测试基建：esbuild bundle + node_modules junction）
+ *
+ * 只测纯函数策略层（不真实起 dws 进程）：
+ * - 场景 A：buildArgv 自动补 --format json / --yes，已有则不重复
+ * - 场景 B：发送缺【AI发送】标签 → 拦截
+ * - 场景 C：两阶段——首次 pending 不执行、peekDraft 取回草稿、错 token/二次确认报错
+ * - 场景 D：已发送签名重复 → 拦截（防重发）
+ * - 场景 E：目标是中文姓名 → 拦截（强制 resolve）
+ * - 场景 F：formal=true 豁免标签检查
+ * - 场景 G：parsePeople 单候选/多候选/零候选/坏 JSON
+ * - 场景 H：annotateQuery 查询类附时间锚点、非查询原样
+ * - 场景 J：草稿 token 过期 → peekDraft 报错
+ * - 场景 K：requireAiTag=false 时无标签放行（仍走两阶段）
+ * - 场景 L：签名剔除易变 flag（--format/--yes 不影响「同一条消息」判定）
+ * - 场景 X：群发/批量/转发/回复/卡片更新均两阶段、姓名目标不拦（群发、转发目标群除外）、--dry-run 不进两阶段
+ * - 场景 Y：群发预检解析表（resolved/skipped）解析与格式化
+ * - 场景 Z：群发 --content 视为 Markdown，多行补硬换行
+ * - 场景 AA：人员候选富化（meta 取名、部门/职务/工号、家长账号标注、CLI 结构化候选）
+ * - 场景 AB/AC/AD/AE：命令分档（读/写/敏感）、元数据解析、人工审核文案（不出 argv/ID）、撤回对象识别
+ * - 场景 AH：命令路径归一（三版拼写 ↔ canonical/cli_path）、上游能力不可用先说清、DING 转提醒豁免标签
+ * - 场景 AJ/AK：文件内容指纹参与防重发签名、外发文件时间戳命名（消息副本 / 钉盘 --file-name）
+ *
+ * 用法：node src/extensions/test/dingtalk-bridge.test.mjs（仓库根目录执行）
+ */
+import { build } from "esbuild";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const EXT = join(HERE, "..", "dingtalk-bridge", "index.ts");
+const OUT = join(HERE, ".tmp-dingtalk-bridge-bundle.mjs");
+
+const results = [];
+function check(label, ok, extra) {
+	results.push({ label, ok });
+	console.log(`  ${ok ? "✓" : "✗"} ${label}${ok || extra === undefined ? "" : ` :: ${extra}`}`);
+}
+
+await build({
+	entryPoints: [EXT],
+	bundle: true,
+	platform: "node",
+	format: "esm",
+	outfile: OUT,
+	external: ["@earendil-works/*", "typebox"],
+	logLevel: "silent",
+});
+const mod = await import(pathToFileURL(OUT).href);
+const { decideExec, newExecState, peekDraft, annotateQuery, parsePeople, parseOrgInfo, parseCliCandidates, formatPersonLine, formatAmbiguousName, joinAmbiguous, failingName, buildArgv, pruneLedger, normalizeContent, mediaKind, hasMultilineText, dingChannel, isMarkdownBody, isDryRun, parseBroadcastPreflight, formatBroadcastPreflight, targetNames, parseMessageDigest, parseConversationInfo, cliPathOf, parseCmdMeta, presumedRead, tierOf, tierFromTables, contentPreview, buildReview, parseSelf, isSelfToken, searchFailedNote, parseGroups, parseDriveRefs, isFolderMessage, formatDriveRefs, ci, hasLowercaseDingtalkId, formatFieldSpellingNote, parseSkillDescription, formatSkillIndex, parseCmdParams, unknownFlags, parseCanonicalPath, matchToolByPath, localAliases, formalFlagError, reviewKind, isStableId, idKindOf, matchGroupsByName, sheetCreateFailureNote, pickNameMatches, formatAmbiguous, parseFirstSheetId, codemodeBlocked, decideAttachmentReuse, __test__ } = mod;
+const CFG = { requireAiTag: true };
+const NOW = Date.parse("2026-10-02T22:00:00+08:00");
+const SEND = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会"];
+
+console.log("A、buildArgv 自动附加");
+{
+	const a = buildArgv(["todo", "task", "list"]);
+	check("补 --format json 与 --yes", a.join(" ").includes("--format json") && a.includes("--yes"));
+	const b = buildArgv(["todo", "task", "list", "-f", "ndjson"]);
+	check("已有 -f 不重复附加", b.filter((x) => x === "--format").length === 0 && b.includes("ndjson"));
+	const c = buildArgv(["chat", "+messages-send", "--file", "a.pdf", "--dry-run"]);
+	check("--dry-run 时不附加 --yes（dws 要求二选一）", !c.includes("--yes") && !c.includes("-y"));
+}
+
+console.log("B、发送缺标签拦截");
+{
+	const d = decideExec(["chat", "+dm", "--to", "u001", "--content", "明天下午三点教研会"], {}, newExecState(), CFG, NOW);
+	check("缺【AI发送】→ block", d.action === "block" && d.reason.includes("【AI发送】"));
+}
+
+console.log("C、两阶段确认");
+{
+	const st = newExecState();
+	const d1 = decideExec(SEND, {}, st, CFG, NOW);
+	check("首次 → pending（不执行）", d1.action === "pending" && d1.token.length === 10);
+	check("回执信息齐全：动作/影响 + 完整参数 + 确认协议 + 有效期（草稿面向执行者，不同于人看的面板）", d1.action === "pending" && d1.preview.includes("动作与对象：") && d1.preview.includes("--content") && d1.preview.includes(`dingtalk_confirm(draftId="${d1.token}")`) && d1.preview.includes("分钟有效") && d1.preview.includes("人工审核面板"), d1.preview);
+	check("草稿列出未用的可用参数（schema 参数表传入时）", (() => { const d = decideExec(SEND, { tier: "sensitive", why: "会对外发出消息", flags: ["to", "content", "dry-run"] }, st, CFG, NOW); return d.action === "pending" && d.preview.includes("--content"); })(), (() => { const d = decideExec(SEND, { flags: ["to", "content"] }, st, CFG, NOW); return d.preview; })());
+	const d2 = peekDraft(st, d1.token, NOW);
+	check("正确 token → 取回草稿（参数取自草稿）", !("error" in d2) && d2.args.join(" ") === SEND.join(" "));
+	st.pending.delete(d1.token);
+	check("同一 token 二次确认 → 报错", "error" in peekDraft(st, d1.token, NOW));
+	const d3 = peekDraft(newExecState(), "deadbeef00", NOW);
+	check("错 token → 报错", "error" in d3 && !d3.error.startsWith("草稿已过期"));
+}
+
+console.log("D、防重发");
+{
+	const st = newExecState();
+	const p = decideExec(SEND, {}, st, CFG, NOW);
+	decideExec(SEND, { confirm: p.token }, st, CFG, NOW);
+	// 执行层成功后记录签名（此处模拟）
+	st.sent.set(__test__.sendSignature(SEND), { at: NOW, snippet: "" });
+	const d = decideExec(SEND, {}, st, CFG, NOW);
+	check("同目标同内容 → block", d.action === "block" && d.reason.includes("防重发"));
+	const other = ["chat", "+dm", "--to", "u001", "--content", "【AI发送】改到四点"];
+	check("不同内容放行", decideExec(other, {}, st, CFG, NOW).action === "pending");
+}
+
+console.log("E、中文姓名目标拦截");
+{
+	const d = decideExec(["chat", "+dm", "--to", "张艳", "--content", "【AI发送】x"], {}, newExecState(), CFG, NOW);
+	check("姓名作目标 → block（姓名必须先解析成账号）", d.action === "block" && d.reason.includes("账号"));
+}
+
+console.log("F、formal 豁免");
+{
+	const d = decideExec(["chat", "+dm", "--to", "u001", "--content", "正式通知正文"], { formal: true }, newExecState(), CFG, NOW);
+	check("formal=true 免标签 → pending", d.action === "pending");
+}
+
+console.log("G、parsePeople 解析");
+{
+	const one = parsePeople(JSON.stringify({ data: { items: [{ userId: "u1", name: "张三", department: "数学组" }] } }));
+	check("单候选提取", one.length === 1 && one[0].userId === "u1" && one[0].extra === "数学组");
+	const many = parsePeople(JSON.stringify({ results: [{ userId: "u1", name: "张艳" }, { userId: "u2", name: "张艳" }] }));
+	check("多候选提取且按 userId 去重", many.length === 2);
+	check("零候选/坏 JSON → 空数组", parsePeople("{}").length === 0 && parsePeople("not json").length === 0);
+}
+
+console.log("G2、调用链失败说明");
+{
+	// dws 的结构化报错（含上游原文）不能被截成第一个「{」
+	const upstream = JSON.stringify({ error: { category: "internal", code: 1, message: "[MCP_TOOL_ERROR] {\"result\":{\"values\":null},\"success\":\"false\"}" } });
+	const note = __test__.dwsFailureNote({ code: 1, stdout: "", stderr: upstream, timedOut: false });
+	check("上游拒绝：category + message + 原文都在", note.includes("[internal]") && note.includes("MCP_TOOL_ERROR") && note.includes("values"), note);
+	// list-submitted --limit>20 的真实报错形状：message 只有一句空壳，technical_detail 才是可对症的原文
+	const shaped = JSON.stringify({ error: { category: "api", message: "[UNCLASSIFIED] business error: success=false", technical_detail: "出参校验不通过：{\"success\":false,\"dingOpenErrcode\":400002}", trace_id: "abc123" } });
+	const n2 = __test__.dwsFailureNote({ code: 1, stdout: shaped, stderr: "", timedOut: false });
+	check("technical_detail 与 trace_id 一并带出", n2.includes("dingOpenErrcode") && n2.includes("trace_id=abc123"), n2);
+	check("非 JSON 报错退回首行文本", __test__.dwsFailureNote({ code: 2, stdout: "", stderr: "boom happened", timedOut: false }).includes("boom happened"));
+}
+
+console.log("G3、审批列表注解");
+{
+	const payload = JSON.stringify({ result: { values: [
+		{ processInstanceId: "i1", formMassage: "申请事由:x<br>名称:培训费<br>数量:22<br>名称:材料费<br>数量:3" },
+		{ processInstanceId: "i2", formMassage: "学科:信息<br>获奖级别:国家级" },
+	] } });
+	const fetched = [];
+	// detail 假数据：i1 两行明细 + 合计；i2 一行
+	const fake = (id) => {
+		fetched.push(id);
+		return {
+			result: {
+				businessId: id === "i1" ? "202611041213000261407" : "202610271737000056721",
+				formValueVOS: [
+					{ componentType: "TableField", name: "采购明细", value: id === "i1" ? '[{"rowValue":[]},{"rowValue":[]}]' : '[{"rowValue":[]}]' },
+					{ componentType: "CalculateField", name: "合计金额", value: id === "i1" ? "34234" : "1200" },
+				],
+			},
+		};
+	};
+	const out = await __test__.annotateApprovalList(["oa", "approval", "list-submitted"], payload, fake);
+	check("有明细痕迹的单据才去拉详情（摘要没有明细列的不拉）", fetched.join() === "i1", fetched.join());
+	check("明细行数、合计金额、审批编号一起给出", out.includes("审批编号 202611041213000261407 · 2 行明细 · 合计 34234 元"), out.slice(-300));
+	const notes = out.slice(out.indexOf(String.fromCharCode(10, 10) + "明细："));
+	check("没有明细痕迹的单据不补行（不存在凭空捏造的行数）", !notes.includes("i2："));
+	check("补的明细有独立标题", notes.includes("明细："));
+	check("非审批列表命令原样返回", (await __test__.annotateApprovalList(["chat", "+search-msg"], payload, fake)) === payload);
+	check("坏 JSON 原样返回", (await __test__.annotateApprovalList(["oa", "approval", "list-submitted"], "not json", fake)) === "not json");
+	// detail 拉不到（返回 null）时不应编任何数
+	const none = await __test__.annotateApprovalList(["oa", "approval", "list-submitted"], payload, async () => null);
+	check("detail 失败时不补数、列表照常返回", none.includes("i1") && !none.includes("行明细"), none.slice(-200));
+	// summarizeDetail 的边界
+	check("summarizeDetail：无 formValueVOS → rows/total 为 null", (() => { const r = __test__.summarizeDetail({ result: { businessId: "b1" } }); return r.rows === null && r.total === null && r.businessId === "b1"; })());
+	check("summarizeDetail：TableField 不是 JSON → 当没有明细、不崩", (() => { const r = __test__.summarizeDetail({ result: { businessId: "b1", formValueVOS: [{ componentType: "TableField", name: "明细", value: "坏数据" }] } }); return r.rows === null; })());
+	check("summarizeDetail：金额带千分位/元也能识别", __test__.summarizeDetail({ result: { formValueVOS: [{ componentType: "CalculateField", name: "合计金额", value: "1,200元" }] } }).total === 1200);
+	check("summarizeDetail：完全没有审批数据 → null", __test__.summarizeDetail({}) === null && __test__.summarizeDetail(null) === null);
+}
+
+console.log("G4、附件复用判定（避免钉盘里累积 (1)(2)）");
+{
+	const prev = { fileId: "241929726779", fileName: "材料(1).zip", localName: "材料.zip", spaceId: "450684510", fileSize: 100 };
+	const same = decideAttachmentReuse("材料.zip", prev);
+	check("内容+本地名都相同 → 复用已上传的 fileId（不重传）", same.kind === "reuse" && same.ref.fileId === "241929726779", JSON.stringify(same));
+	check("上游改过的名字不影响判等（本地名是基准）", decideAttachmentReuse("材料.zip", { ...prev, localName: undefined, fileName: "材料(2).zip" }).kind === "upload");
+	const renamed = decideAttachmentReuse("材料_20261104.zip", prev);
+	check("内容相同但本地名变了 → 按新名字重传（用户在区分版本）", renamed.kind === "upload");
+	check("没传过 → 直接传", decideAttachmentReuse("材料.zip", undefined).kind === "upload");
+}
+
+
+console.log("H、查询时间锚点");
+{
+	const q = annotateQuery(["chat", "+search-msg"], "[]", new Date(NOW));
+	check("查询类附当前时间", q.includes("当前系统时间") && q.includes("2026-10-02"));
+	check("非查询类原样", annotateQuery(["todo", "task", "list"], "[]", new Date(NOW)) === "[]");
+}
+
+console.log("J、草稿过期");
+{
+	const st = newExecState();
+	const p = decideExec(SEND, {}, st, CFG, NOW);
+	const d = peekDraft(st, p.token, NOW + 11 * 60_000);
+	check("超 10 分钟 → 报错", "error" in d && d.error.includes("过期"));
+}
+
+console.log("K、标签检查可配置关闭");
+{
+	const d = decideExec(["chat", "+dm", "--to", "u001", "--content", "无标签"], {}, newExecState(), { requireAiTag: false }, NOW);
+	check("requireAiTag=false → 仍 pending 不拦标签", d.action === "pending");
+}
+
+console.log("L、签名剔除易变 flag");
+{
+	const a = __test__.sendSignature(SEND);
+	const b = __test__.sendSignature([...SEND, "--format", "json", "--yes"]);
+	const c = __test__.sendSignature(["chat", "+dm", "--to", "u001", "--content", "【AI发送】明天下午三点教研会", "--timeout", "30"]);
+	check("--format/--yes/--timeout 不改变签名", a === b && a === c);
+}
+
+console.log("M、跨会话台账防重发");
+{
+	const now = NOW;
+	const entries = [
+		{ sig: "aaa", at: now - 10 * 60_000, snippet: "10 分钟前" },
+		{ sig: "bbb", at: now - 90 * 60_000, snippet: "90 分钟前" },
+	];
+	const kept = pruneLedger(entries, 60 * 60_000, now);
+	check("保留期内条目留下、过期剔除", kept.length === 1 && kept[0].sig === "aaa");
+	// 模拟新进程：台账汇入 state.sent 后，同内容发送应被拦（不依赖内存历史）
+	const st = newExecState();
+	for (const e of kept) st.sent.set(e.sig, { at: e.at, snippet: e.snippet });
+	st.sent.set(__test__.sendSignature(SEND), { at: now, snippet: "" });
+	const d = decideExec(SEND, {}, st, CFG, now);
+	check("新会话同内容 → block", d.action === "block" && d.reason.includes("台账"));
+}
+
+console.log("N、字面反斜杠-n 归一");
+{
+	const BS = String.fromCharCode(92);
+	const r = normalizeContent(["chat", "+messages-send", "--markdown", `第一行${BS}n第二行${BS}n第三行`]);
+	check("字面 \\n 转为真换行", r.fixed === 2 && r.args[3].includes("\n") && !r.args[3].includes(`${BS}n`));
+	check("--markdown=x 内联形式也归一", normalizeContent([`chat`, `+dm`, `--content=a${BS}nb`]).fixed === 1);
+	const keep = normalizeContent(["chat", "+dm", "--content", "已经是真\n换行"]);
+	check("真换行不动", keep.fixed === 0);
+	const esc = normalizeContent(["chat", "+dm", "--content", `写代码里的${BS}${BS}n`]);
+	check("转义反斜杠（\\\\n）不动", esc.fixed === 0);
+}
+
+console.log("O、文件/媒体消息识别");
+{
+	check("--file → file", mediaKind(["chat", "+messages-send", "--file", "a.pdf"]) === "file");
+	check("--msg-type image → image", mediaKind(["chat", "+messages-send", "--msg-type", "image", "--media-id", "x"]) === "image");
+	check("纯文本 → undefined", mediaKind(["chat", "+dm", "--content", "hi"]) === undefined);
+	const d = decideExec(["chat", "+messages-send", "--as", "user", "--user", "u1", "--msg-type", "file", "--file", "a.pdf", "--content", "【AI发送】说明"], {}, newExecState(), CFG, NOW);
+	check("文件发送的草稿预览注明「不含正文」", d.action === "pending" && d.preview.includes("不含正文"));
+}
+
+console.log("P、dws_skill 技能正文（纯函数）");
+{
+	const md = `---\nname: dingtalk-chat\ndescription: 钉钉群聊与消息。Use when 发消息。\nmetadata:\n  category: product\n---\n\n# 正文\n`;
+	check("frontmatter description 提取", parseSkillDescription(md).startsWith("钉钉群聊与消息"));
+	check("无 frontmatter 回落首个正文行", parseSkillDescription("# 标题\n这是一行说明\n") === "这是一行说明");
+	const idx = formatSkillIndex([{ name: "dingtalk-chat", description: "x".repeat(300) }, { name: "dingtalk-todo", description: "待办" }]);
+	check("索引列出技能并截断超长描述", idx.includes("dingtalk-chat") && idx.includes("dingtalk-todo") && idx.includes("…"));
+}
+
+console.log("P2、文档/文件同名解析（不能默默取第一个）");
+{
+	const docSearch = JSON.stringify({
+		documents: [
+			{ docType: "folder", name: "教案", nodeId: "f1", url: "u1" },
+			{ docType: "folder", name: "教案", nodeId: "f2", url: "u2" },
+			{ docType: "file", name: "项目六 教案", nodeId: "x1", url: "u3" },
+			{ docType: "file", name: "登记表", nodeId: "d1", url: "u4" },
+			{ docType: "file", name: "登记表", nodeId: "d2", url: "u5" },
+		],
+	});
+	check("名字全等才算命中（模糊命中的「项目六 教案」不算）", pickNameMatches(JSON.parse(docSearch), "教案").every((c) => c.kind === "folder"));
+	check("两个同名文件 → 两个候选", pickNameMatches(JSON.parse(docSearch), "登记表").length === 2);
+	check("唯一命中只返回一个", pickNameMatches(JSON.parse(docSearch), "项目六 教案").length === 1);
+	const driveSearch = JSON.stringify({ data: { files: [{ name: "在乌鲁木齐市第八中学玩转钉钉文档", nodeId: "n1" }, { name: "在乌鲁木齐市第八中学玩转钉钉文档（2）", nodeId: "n2" }] } });
+	check("钉盘文件同前缀不同名 → 只认全等那个", pickNameMatches(JSON.parse(driveSearch), "在乌鲁木齐市第八中学玩转钉钉文档").map((c) => c.id).join() === "n1");
+	const text = formatAmbiguous("登记表", [{ id: "d1", kind: "file", url: "u4" }, { id: "d2", kind: "file", url: "u5" }]);
+	check("消歧清单给出每个候选的 ID 与链接", text.includes("2 个同名对象") && text.includes("d1") && text.includes("d2") && text.includes("u4"));
+}
+
+console.log("Q、markdown 硬换行（钉钉单换行会拼成一行）");
+{
+	const BS = String.fromCharCode(92), NL = String.fromCharCode(10);
+	const md = (c) => ["chat", "+messages-send", "--as", "user", "--user", "u1", "--markdown", c];
+	const r = normalizeContent(md("一" + BS + "n二" + BS + "n三"));
+	check("单换行补行尾双空格", r.hardBreaks === 2 && r.args[7] === "一  " + NL + "二  " + NL + "三", JSON.stringify(r.args[7]));
+	check("字面反斜杠-n 也先归一", r.fixed === 2);
+	check("空行分段不动（不叠加硬换行）", normalizeContent(md("一" + BS + "n" + BS + "n二")).hardBreaks === 0);
+	check("已有行尾双空格不重复补", normalizeContent(md("一  " + BS + "n二")).hardBreaks === 0);
+	check("+dm 的 --content 同样按 markdown 处理", normalizeContent(["chat", "+dm", "--to", "u1", "--content", "一" + BS + "n二"]).hardBreaks === 1);
+	const txt = normalizeContent(["chat", "+messages-send", "--as", "user", "--user", "u1", "--text", "一" + BS + "n二"]);
+	check("--text 不做硬换行（但会提示）", txt.hardBreaks === 0 && hasMultilineText(txt.args));
+	check("--text 单行不提示", !hasMultilineText(["chat", "+messages-send", "--text", "一行"]));
+}
+
+console.log("R、发送入口覆盖与群名拦截");
+{
+	const st = newExecState();
+	const g1 = decideExec(["chat","+send-to-group","--group","教研组长群","--markdown","【AI发送】通知"], {}, st, CFG, NOW);
+	check("+send-to-group 纳入两阶段（群名先拦）", g1.action === "block" && g1.reason.includes("群名"));
+	const g2 = decideExec(["chat","+send-to-group","--group","cid123","--markdown","通知没标签"], {}, st, CFG, NOW);
+	check("群发同样受【AI发送】标签约束", g2.action === "block" && g2.reason.includes("【AI发送】"));
+	const g3 = decideExec(["chat","+send-to-group","--group","cid123","--markdown","【AI发送】通知"], {}, st, CFG, NOW);
+	check("cid + 标签 → 草稿待确认", g3.action === "pending");
+	const b1 = decideExec(["chat","+messages-send-by-bot","--robot-code","rc","--groups","cidA","--text","没标签"], {}, st, CFG, NOW);
+	check("机器人发群受标签约束", b1.action === "block");
+	const d1 = decideExec(["ding","+send-personal","--to","u1","--content","没标签"], {}, st, CFG, NOW);
+	check("ding +send-personal 纳入拦截", d1.action === "block");
+	const w1 = decideExec(["chat","+messages-send-card","--as","user","--group","cidX","--markdown","【AI发送】卡片"], {}, st, CFG, NOW);
+	check("卡片消息纳入拦截", w1.action === "pending");
+}
+
+console.log("S、DING 提醒方式警示");
+{
+	const st = newExecState();
+	check("默认 app", dingChannel(["ding","+send-personal","--to","u1"]) === "app");
+	check("识别短信", dingChannel(["ding","+send-personal","--type","sms"]) === "sms");
+	check("识别电话（内联写法）", dingChannel(["ding","message","send-personal","--type=call"]) === "call");
+	check("非 DING 命令不误判", dingChannel(["chat","+dm","--type","sms"]) === undefined);
+	const d = decideExec(["ding","+send-personal","--to","u1","--type","sms","--content","【AI发送】催办"], {}, st, CFG, NOW);
+	check("草稿预览含费用警示", d.action === "pending" && d.preview.includes("实际费用"));
+}
+
+console.log("T、撤回两阶段与防重复");
+{
+	const st = newExecState();
+	const rec = ["chat", "+messages-recall", "--msg-id", "msgABC"];
+	const d1 = decideExec(rec, {}, st, CFG, NOW);
+	check("首次撤回 → 草稿待确认", d1.action === "pending" && d1.preview.includes("撤回"));
+	check("预览含不可恢复提示", d1.action === "pending" && d1.preview.includes("不可恢复"));
+	const d2 = peekDraft(st, d1.token, NOW);
+	check("确认可取回该撤回顾", !("error" in d2) && d2.args.join(" ").includes("+messages-recall"));
+	st.sent.set("recall:msgABC", { at: NOW, snippet: "" });
+	check("重复撤回 → block", decideExec(rec, {}, st, CFG, NOW).action === "block");
+	check("撤回不受【AI发送】标签约束", decideExec(["ding","+recall-personal","--msg-id","m2"], {}, newExecState(), CFG, NOW).action === "pending");
+}
+
+console.log("U、群与本人解析");
+{
+	const g = parseGroups(JSON.stringify({ chats: [{ name: "教研室", openConversationId: "cidA", memberCount: 7 }, { title: "教研组", openConversationId: "cidB" }] }));
+	check("群候选提取", g.length === 2 && g[0].cid === "cidA" && g[0].extra.includes("7"));
+	const me = parseSelf(JSON.stringify({ ok: true, data: { name: "严天宇", userId: "u1", dept: "教研室" } }));
+	check("本人身份提取", me && me.name === "严天宇" && me.userId === "u1" && me.openId === undefined);
+	// 自指收件人（我/自己）要 openDingTalkId 才能直接发；只认本人对象自己那棵子树
+	const meFlat = parseSelf(JSON.stringify({ data: { name: "严天宇", userId: "u1", openDingTalkId: "Dme0" } }));
+	check("本人 openDingTalkId 提取", meFlat?.openId === "Dme0");
+	const meSub = parseSelf(JSON.stringify({ data: { user: { name: "严天宇", userId: "u1", profile: { openDingTalkId: "Dme1" } } } }));
+	check("本人子树里的 openDingTalkId 也认", meSub?.openId === "Dme1");
+	// 安全：旁支（部门/主管）的 openDingTalkId 是别人的，宁可留空退回姓名解析，也不能拿去发消息
+	const meSibling = parseSelf(JSON.stringify({ data: { user: { name: "严天宇", userId: "u1" }, leader: { openDingTalkId: "D别人" } } }));
+	check("不取旁支的 openDingTalkId", meSibling?.openId === undefined && meSibling?.userId === "u1");
+	check("坏输入不抛", parseSelf("nope") === null && parseGroups("nope").length === 0);
+	check("自指词识别", ["我", "自己", "本人", "me", "SELF"].every(isSelfToken) && !isSelfToken("严天宇") && !isSelfToken("我我"));
+	// 解析失败（上游超时/出错）必须与「查无此人」分开说：否则模型会把超时读成名字写错
+	const note = searchFailedNote("严天宇", "请求超时（dws 没在限定时间内返回）");
+	check("解析失败不说成查无此人", note.includes("不是查无此人") && note.includes("请求超时") && note.includes("原样重试") && !note.includes("核对用字"));
+	// 群名 → cid：parseGroups 结果按 name 全等过滤
+	const search = parseGroups(JSON.stringify({ chats: [
+		{ name: "乌鲁木齐市第八中学", title: "乌鲁木齐市第八中学", openConversationId: "cidGcszODYFzAG2T9Ho4vjuaQ==", groupType: "INTERNAL_GROUP", memberCount: 388 },
+		{ name: "工作通知:乌鲁木齐市第八中学", openConversationId: "cideXP/5BH3MjO4sFa+God1ew==" },
+	] }));
+	const hit = matchGroupsByName(search, "乌鲁木齐市第八中学");
+	check("群名精确匹配取 cid", hit.length === 1 && hit[0].cid === "cidGcszODYFzAG2T9Ho4vjuaQ==");
+	check("部分同名不误配", matchGroupsByName(search, "第八中学").length === 0);
+	// base64 填充符 == 不影响 isIdLike 判定
+	check("带 == 的 cid 视为 ID", isStableId("cidGcszODYFzAG2T9Ho4vjuaQ==") === true);
+	// 真实会话 ID / messageId 含 / 与 +
+	check("带 / 的 cid 视为 ID", isStableId("cidKI5Xy3llME3Ktv8egWRVNiKN7m3/P8swwU+nUbkeeh4=") === true);
+	check("带 / 的 messageId 视为 ID", isStableId("msg3YDaXMO4GnH1YQh0MS89/A==") === true);
+	// 故意不收 .：文档标题常是纯 ASCII 带点，得继续走搜索而不是当 nodeId 直发
+	check("带点的 ASCII 标题仍当名字", isStableId("report.docx") === false);
+	check("中文群名不视为 ID", isStableId("乌鲁木齐市第八中学") === false);
+	// sheetCreate 失败续做契约：非原子，禁整体重跑
+	const withNode = sheetCreateFailureNote(["sheet", "create-with-data", "--name", "t"], '{"nodeId":"n9","error":"write failed"}');
+	check("失败带 nodeId → 引导 sheetRead/sheetWrite 续做", withNode.includes("n9") && withNode.includes("sheetRead") && withNode.includes("sheetWrite") && withNode.includes("绝不要重跑"));
+	check("失败无 nodeId → 引导 search 确认", sheetCreateFailureNote(["sheet", "create", "--name", "t"], "boom").includes("search"));
+	check("非表格创建命令不附提示", sheetCreateFailureNote(["doc", "+create"], "boom") === "");
+	// 工作表清单 → 首个 sheetId（禁止猜 Sheet1）
+	check("list-sheets 取首个 sheetId", parseFirstSheetId(JSON.stringify({ sheets: [{ title: "汇总", sheetId: "sA", index: 0 }, { title: "明细", sheetId: "sB", index: 1 }] })) === "sA");
+	check("list-sheets 按 index 排序", parseFirstSheetId(JSON.stringify({ sheets: [{ title: "b", sheetId: "sB", index: 1 }, { title: "a", sheetId: "sA", index: 0 }] })) === "sA");
+	check("list-sheets 坏输入不抛", parseFirstSheetId("nope") === null && parseFirstSheetId("{}") === null);
+}
+
+console.log("V、钉盘/云盘分享解析");
+{
+	const NL = String.fromCharCode(10);
+	const real = "王应明材料.zip" + NL + "4.1MB" + NL + "[dingtalk://dingtalkclient/page/yunpan?route=previewDentry&spaceId=26810061928&fileId=238322429838&type=file](dingtalk://x)";
+	const r1 = parseDriveRefs(real);
+	check("完整链接解析出 spaceId+fileId", r1.length === 1 && r1[0].spaceId === "26810061928" && r1[0].fileId === "238322429838" && r1[0].type === "file");
+	const r2 = parseDriveRefs(JSON.stringify({ resourceId: "238322429838&type=file" }));
+	check("裸 dentryId 能识别但无 spaceId", r2.length === 1 && r2[0].spaceId === "" && r2[0].type === "file");
+	const r3 = parseDriveRefs(real + NL + real);
+	check("重复链接去重", r3.length === 1);
+	const r4 = parseDriveRefs("[dingtalk://dingtalkclient/page/yunpan?route=previewDentry&spaceId=26810061928&fileId=238322429838&type=folder](x)");
+	check("文件夹链接识别为 folder", r4[0].type === "folder");
+	check("无链接不误报", parseDriveRefs("普通消息没有分享").length === 0);
+	const f = "【AI发送】马老师好，您发的材料是「文件夹」形式" + NL + JSON.stringify({text:"[文件夹] 马晓玉"});
+	check("[文件夹] 消息识别", isFolderMessage(f));
+	check("普通消息不误判为文件夹消息", !isFolderMessage("文件夹里的文件我看了"));
+	const tips = formatDriveRefs(r1);
+	check("下载指引含 spaceId 与工具名", tips.includes("dingtalk_file") && tips.includes("26810061928"));
+	check("裸 id 指引提示换 drive 或让对方重发", formatDriveRefs(r2).includes("重发"));
+	check("文件夹指向 fetch（镜像）", formatDriveRefs(r4).includes("fetch"));
+}
+
+console.log("W、字段拼写不一致（群成员小写 t / 消息大写 T）");
+{
+	const memberApi = JSON.stringify({ users: [{ name: "马晓玉", openDingtalkId: "DHZxOiPQtiP3gz" }], bots: [{ name: "小钉", openDingtalkId: "X1" }] });
+	check("小写变体被识别", hasLowercaseDingtalkId(memberApi));
+	check("大写变体不误报", !hasLowercaseDingtalkId(JSON.stringify({ senderId: "x", openDingTalkId: "y" })));
+	check("自解释提示只在小写接口出现", formatFieldSpellingNote(memberApi).includes("两种拼写都要认") && formatFieldSpellingNote(String.fromCharCode(123)+String.fromCharCode(34)+"openDingTalkId"+String.fromCharCode(34)+":1"+String.fromCharCode(125)) === "");
+	const o = { openDingtalkId: "lower", openDingTalkId_T: 1 };
+	check("ci 大小写不敏感取值", ci(o, "openDingTalkId") === "lower");
+	check("ci 精确优先", ci({ name: "a", Name: "b" }, "name") === "a");
+	check("ci 缺失返回 undefined", ci({}, "nope") === undefined);
+	const people = parsePeople(JSON.stringify({ data: { items: [{ userId: "u1", name: "张三", Department: "数学组" }] } }));
+	check("解析对字段大小写容错", people.length === 1 && people[0].extra === "数学组");
+}
+
+console.log("X、群发两阶段与只读预演");
+{
+	const st = newExecState();
+	const bc = ["chat", "+broadcast", "--to", "王示例,张示例", "--content", "【AI发送】今晚 8 点上线"];
+	const d1 = decideExec(bc, {}, st, CFG, NOW);
+	check("群发首次 → pending（不被 --yes 绕过）", d1.action === "pending" && d1.preview.includes("王示例,张示例"));
+	const d2 = peekDraft(st, d1.token, NOW);
+	check("确认可取回群发草稿", !("error" in d2) && d2.args.join(" ").includes("+broadcast"));
+	check("群发目标为中文姓名不拦（预检把关）", decideExec(bc, {}, newExecState(), CFG, NOW).action === "pending");
+	check("群发缺【AI发送】标签仍拦", decideExec(["chat", "+broadcast", "--to", "王示例", "--content", "无标签"], {}, newExecState(), CFG, NOW).action === "block");
+	check("--dry-run 不进两阶段（发送类）", isDryRun(["chat", "+broadcast", "--to", "王示例", "--dry-run"]) && decideExec(["chat", "+messages-send", "--as", "user", "--user", "u1", "--text", "【AI发送】x", "--dry-run"], {}, newExecState(), CFG, NOW).action === "run");
+	check("--dry-run 不进两阶段（撤回类）", decideExec(["chat", "+messages-recall", "--msg-id", "m1", "--dry-run"], {}, newExecState(), CFG, NOW).action === "run");
+	check("机器人批量单聊 → pending", decideExec(["chat", "+messages-batch-send-by-bot", "--robot-code", "rc", "--users", "u1", "--title", "周报", "--content", "【AI发送】周报"], {}, newExecState(), CFG, NOW).action === "pending");
+	check("引用回复无标签 → block", decideExec(["chat", "+messages-reply", "--group", "cid1", "--content", "收到"], {}, newExecState(), CFG, NOW).action === "block");
+	check("引用回复带标签 → pending", decideExec(["chat", "+messages-reply", "--group", "cid1", "--content", "【AI发送】收到"], {}, newExecState(), CFG, NOW).action === "pending");
+	check("转发 → pending（无正文，豁免标签）", decideExec(["chat", "+messages-forward", "--msg-id", "m1", "--src-conversation-id", "cidA", "--dest-conversation-id", "cidB"], {}, newExecState(), CFG, NOW).action === "pending");
+	check("转发目标群写中文名 → block", decideExec(["chat", "+messages-forward", "--msg-id", "m1", "--dest-conversation-id", "教研室群"], {}, newExecState(), CFG, NOW).action === "block");
+	check("卡片更新 → pending（豁免标签）", decideExec(["chat", "+messages-update-card", "--biz-id", "b1", "--content", "卡片正文", "--flow-status", "3"], {}, newExecState(), CFG, NOW).action === "pending");
+}
+
+console.log("Y、群发预检解析表");
+{
+	const raw = JSON.stringify({
+		actionCount: 1,
+		actions: [{ arguments: { receiverOpenDingTalkId: "DblExample0001" }, recipient: "张示例", tool: "send_personal_message" }],
+		dry_run: true,
+		executed: false,
+		failed: ["王示例（\"王示例\" 匹配到多个用户：王示例(016100000000000001)；请提供更精确的名称或直接传稳定 ID）"],
+		sent: ["张示例"],
+	});
+	const p = parseBroadcastPreflight(raw);
+	check("已解析收件人带 openDingTalkId", p.resolved.length === 1 && p.resolved[0].recipient === "张示例" && p.resolved[0].openId === "DblExample0001");
+	check("未唯一解析者原样透传（含候选 ID）", p.skipped.length === 1 && p.skipped[0].includes("016100000000000001"));
+	check("坏输出不抛", parseBroadcastPreflight("nope").resolved.length === 0);
+	const tbl = formatBroadcastPreflight(p);
+	check("解析表列出收件人与人数", tbl.includes("张示例") && tbl.includes("1 人"));
+}
+
+console.log("Z、群发多行正文按 markdown 硬换行");
+{
+	const NL = String.fromCharCode(10);
+	const n = normalizeContent(["chat", "+broadcast", "--to", "王示例", "--content", `【AI发送】第一行${NL}第二行`]);
+	check("+broadcast 的 --content 视为 Markdown", isMarkdownBody(["chat", "+broadcast", "--content", "x"]) && !isMarkdownBody(["chat", "+send-to-group", "--content", "x"]));
+	check("行尾补双空格硬换行", n.hardBreaks === 1);
+}
+
+console.log("AA、人员候选富化（重名消歧靠部门/职务/工号）");
+{
+	// 真实 aisearch 形状：名字在 author/title 与 meta.name，没有部门
+	const aisearch = JSON.stringify({
+		result: [
+			{ author: "王示例", title: "王示例", userId: "016100000000000001", openDingTalkId: "DCExample000000000001", meta: { name: "王示例", jobNumber: "016100000000000001", position: "" } },
+		],
+	});
+	const p = parsePeople(aisearch);
+	check("名字取自 meta.name/author（不再“无名”）", p.length === 1 && p[0].name === "王示例", JSON.stringify(p));
+	check("不带出无关 title 当附加信息", !p[0].extra.includes("王示例") && p[0].extra.includes("工号 016100000000000001"), p[0].extra);
+	check("带出 openDingTalkId（用于对回预检结果）", p[0]?.openId === "DCExample000000000001");
+
+	// 真实 contact user get 形状：部门路径 + 职务 + 工号
+	const orgRaw = JSON.stringify({
+		result: [
+			{
+				isAdmin: false,
+				orgEmployeeModel: {
+					depts: [
+						{ deptId: 900000001, deptName: "示例校区班主任", deptPathName: "班主任-示例校区班主任" },
+						{ deptId: 36962143, deptName: "办公室", deptPathName: "办公室" },
+					],
+					jobNumber: "016100000000000001",
+					orgTitle: "班主任",
+					orgUserId: "016100000000000001",
+					orgUserName: "王示例",
+				},
+			},
+			{ isAdmin: false, orgEmployeeModel: { depts: [], jobNumber: null, orgTitle: null, orgUserId: "1786188376900", orgUserName: "胡琰松妈妈" } },
+		],
+		success: true,
+	});
+	const orgs = parseOrgInfo(orgRaw);
+	check("部门路径优先于单层部门名", orgs.get("016100000000000001")?.depts[0] === "班主任-示例校区班主任", JSON.stringify(orgs.get("016100000000000001")?.depts));
+	check("职务/工号取到", orgs.get("016100000000000001")?.title === "班主任" && orgs.get("016100000000000001")?.jobNumber === "016100000000000001");
+	check("无部门无工号的家长账号也入表", orgs.get("1786188376900")?.depts.length === 0);
+	check("坏 JSON 不抛", parseOrgInfo("nope").size === 0);
+
+	const line = formatPersonLine({ userId: "016100000000000001", name: "王示例", extra: "" }, orgs.get("016100000000000001"));
+	check("人员行带部门/职务/工号与 userId", line.includes("班主任-示例校区班主任") && line.includes("工号") && line.endsWith("016100000000000001"), line);
+	const parentLine = formatPersonLine({ userId: "1786188376900", name: "胡琰松妈妈", extra: "" }, orgs.get("1786188376900"));
+	check("家长/外部账号被标注", parentLine.includes("无部门/工号") && parentLine.includes("家长", 0), parentLine);
+	check("无组织详情时退回搜索附加信息", formatPersonLine({ userId: "u9", name: "张三", extra: "数学组" }).includes("数学组"));
+	// 候选行末尾的 userId 可直接当收件人重调：不能出现「别拿这个 ID」的禁令（recipientFlag 会映射成 --user）
+	const amb = formatAmbiguousName("王示例", [line, parentLine]);
+	check("同名提示不禁止使用候选 ID", !amb.includes("不要拿") && !amb.includes("不能"), amb);
+	check("同名提示说清可怎么定人", amb.includes("需确认是哪一位") && amb.includes("ID 作收件人"), amb);
+	// 一批名单里多个重名要一次列全，否则每个重名都得试一轮
+	const many = joinAmbiguous(["甲有 2 个同名…", "乙有 3 个同名…", "丙有 2 个同名…"]);
+	check("多条歧义合并成一次返回", many.split("\n\n").length === 3 && many.includes("甲") && many.includes("丙"), many);
+	check("只有一条时不加多余分隔", joinAmbiguous(["只有一条"]) === "只有一条");
+
+
+	// 真实 CLI 歧义输出：结构化的 candidates（不必抠中文报错文案）
+	const cli = JSON.stringify({ error: { details: { candidates: [{ userId: "016100000000000001", openDingTalkId: "DC6i", name: "王示例" }, { userId: "2131204145842894", openDingTalkId: "D63z", name: "王示例" }], subtype: "ambiguous" }, message: '"王示例" 匹配到多个用户：…' } });
+	const cands = parseCliCandidates(cli);
+	check("CLI 候选解析（带 openDingTalkId）", cands.length === 2 && cands[1].userId === "2131204145842894" && cands[0].openId === "DC6i");
+	check("非候选 JSON 不误取", parseCliCandidates(JSON.stringify({ result: [{ userId: "u1" }] })).length === 0);
+	check("从失败条目取输入名", failingName('王示例（"王示例" 匹配到多个用户：…）') === "王示例" && failingName("没有找到与 X") === "没有找到与 X");
+	check("群发目标名去重保序", targetNames(["chat", "+broadcast", "--to", "王示例,张示例,王示例"]).join("|") === "王示例|张示例");
+	check("重复 --to 与 --users 都收", targetNames(["x", "+broadcast", "--to", "a", "--to", "b,c", "--users", "u1"]).join("|") === "a|b|c|u1");
+}
+
+console.log("AB、命令分档（读 / 写 / 敏感）");
+{
+	check("cliPathOf 只取第一个 flag 前的命令词", cliPathOf(["chat", "+broadcast", "--to", "王示例"]) === "chat +broadcast", cliPathOf(["chat", "+broadcast", "--to", "王示例"]));
+	check("cliPathOf 认 --flag=value", cliPathOf(["todo", "task", "list", "--status=false"]) === "todo task list");
+	check("cliPathOf 全 flag 时为空", cliPathOf(["--help"]) === "");
+
+	check("读命令识别：list/get/search/me 类", presumedRead(["todo", "task", "list"]) && presumedRead(["chat", "+chat-messages"]) && presumedRead(["chat", "+search-msg"]) && presumedRead(["chat", "+at-me"]));
+	check("写命令不误判为读", !presumedRead(["chat", "+broadcast"]) && !presumedRead(["chat", "+messages-send"]) && !presumedRead(["chat", "+messages-recall"]) && !presumedRead(["chat", "+chat-create"]) && !presumedRead(["chat", "+messages-set-pin"]));
+
+	const compact = '{ "effect": "write", "risk": "medium", "confirmation": "user_required", "availability": "available", }';
+	const meta = parseCmdMeta(compact);
+	check("元数据解析（容忍紧凑输出的尾逗号）", meta && meta.effect === "write" && meta.confirmation === "user_required", JSON.stringify(meta));
+	check("元数据缺失时返回 null（不瞎猜）", parseCmdMeta("{ \"risk\": \"low\" }") === null);
+
+	check("元数据说只读 → read", tierOf(["todo", "task", "list"], { effect: "read", risk: "low", confirmation: "not_required", availability: "available" }).tier === "read");
+	check("元数据说破坏性 → sensitive", tierOf(["chat", "+chat-dismiss"], { effect: "destructive", risk: "high", confirmation: "user_required", availability: "available" }).tier === "sensitive");
+	check("发送类无元数据也 sensitive", tierOf(["chat", "+dm", "--to", "u1"], null).tier === "sensitive" && tierFromTables(["chat", "+broadcast"]) === "sensitive");
+	check("普通写入 → write（只两阶段，不弹窗）", tierOf(["todo", "task", "create"], { effect: "write", risk: "low", confirmation: "not_required", availability: "available" }).tier === "write");
+	check("取不到元数据 → 当写入处理", tierOf(["unknown", "thing"], null).tier === "write");
+}
+
+// 场景 AG：草稿前 flag 校验（unknownFlags / parseCmdParams）
+{
+	const compact = [
+		'{ \n  "cli_path": "chat +messages-send", "effect": "write", "risk": "medium", "confirmation": "user_required", "availability": "available",',
+		'  "parameters": {',
+		'    "ai-tag": { "type": "boolean" },',
+		'    "as": { "type": "string" },',
+		'    "at-open-dingtalk-ids": { "type": "array" },',
+		'    "markdown": { "type": "string", "required": false, "description": "正文，内嵌 \\"引号\\" 也没事" },',
+		'    "open-dingtalk-id": { "type": "string", "required": false },',
+		'    "open-dingtalk-ids": { "type": "array" },',
+		'    "user": { "type": "string" },',
+		'  },',
+		'  "risk2": 1,',
+		'}',
+	].join("\n");
+	const params = parseCmdParams(compact);
+	check("参数名提取（限 parameters 块，容忍内嵌引号与尾逗号）", params.includes("markdown") && params.includes("open-dingtalk-id") && !params.includes("risk2"), JSON.stringify(params));
+	check("flag 拦截：群发参数用到单发命令", (() => { const bad = unknownFlags(["chat", "+messages-send", "--to", "u1", "--content", "【AI发送】x", "--open-dingtalk-id", "d1"], params); return bad.includes("--to") && bad.includes("--content") && !bad.includes("--open-dingtalk-id"); })(), JSON.stringify(unknownFlags(["--to"], params)));
+	check("合法 flag 全放行", unknownFlags(["chat", "+messages-send", "--open-dingtalk-id", "d1", "--markdown", "【AI发送】x", "--ai-tag=false"], params).length === 0, JSON.stringify(unknownFlags(["--open-dingtalk-id", "d1", "--markdown", "x"], params)));
+	check("= 形式也认", unknownFlags(["--markdown=x", "--open-dingtalk-id=y"], params).length === 0, JSON.stringify(unknownFlags(["--open-dingtalk-id=y", "--markdown=x"], params)));
+	check("全局 flag 豁免（dry-run/timeout/format 等）", unknownFlags(["--dry-run", "--timeout", "90", "--format", "json", "--unknown-x"], params).join() === "--unknown-x", JSON.stringify(unknownFlags(["--dry-run", "--unknown-x"], params)));
+	check("参数表为空 → 不拦（fail-open，交给 dws）", unknownFlags(["chat", "+messages-send", "--to", "x"], []).length === 0);
+	// 值来自上游、可能长成 -xxxx：钉钉的 processInstanceId 就有一批以 - 开头
+	const ccParams = ["instance-id", "operator-id", "users"];
+	const inst = "-dGvs0kQT3KCpqdSPVHk8Q07271793773849";
+	check("以 - 开头的参数值不当 flag（实例 ID 实测就是这种形态）", unknownFlags(["oa", "approval", "oa-cc-noticer", "--instance-id", inst, "--users", "0135091542301250234"], ccParams).length === 0, JSON.stringify(unknownFlags(["oa", "approval", "oa-cc-noticer", "--instance-id", inst], ccParams)));
+	check("= 形式同样不被误判", unknownFlags(["oa", "approval", "oa-cc-noticer", `--instance-id=${inst}`, "--users", "1"], ccParams).length === 0);
+	check("值后面真跟着未知 flag 仍要拦", unknownFlags(["--instance-id", inst, "--nope", "v"], ccParams).join() === "--nope");
+}
+
+console.log("AC、人工审核文案（只给人看的信息）");
+{
+	const args = ["chat", "+broadcast", "--to", "王示例,张示例", "--content", "【AI发送】今晚 8 点线上教研"];
+	const review = buildReview(args, { effect: "write", risk: "medium", confirmation: "user_required", availability: "available" }, "会对外发出消息", { recipients: ["王示例（示例校区班主任）", "张示例"] });
+	const text = JSON.stringify(review);
+	check("外框标题固定、动作压到 2~4 字", review.title === "agent请求操作钉钉" && review.verb === "群发单聊", review.verb);
+	check("对象带前缀且只写人数（名单在主体区）", review.object === "收件人：2 人", review.object);
+	check("正文进 text 区块", review.sections.some((x) => x.kind === "text" && x.items.join(" ").includes("今晚 8 点")));
+	check("影响常驻底部且是事实", review.impact.join(" ").includes("每人各收到一条单聊") && !review.impact.join(" ").includes("无法撤回"));
+	check("不带 argv / flag / ID", !text.includes("--to") && !text.includes("--content") && !text.includes("dws "), text.slice(0, 120));
+	check("普通发送可记住、破坏性不可记住", review.canRemember === true && buildReview(["chat", "+chat-dismiss"], { effect: "destructive", risk: "high", confirmation: "user_required", availability: "available" }, "破坏性").canRemember === false);
+	check("破坏类：动作与对象做 highlight、不可恢复进底部", (() => {
+		const r = buildReview(["chat", "+chat-dismiss"], { effect: "destructive", risk: "high", confirmation: "user_required", availability: "available" }, "破坏性操作（不可逆）");
+		return r.verb === "解散群聊" && r.impact.join(" ").includes("不可恢复") && r.sections.length === 0;
+	})());
+	check("撤回也走敏感档并写明不可恢复", buildReview(["chat", "+messages-recall", "--msg-id", "m1"], null, "撤回会改变双方可见内容").impact.join(" ").includes("不可恢复"));
+
+	check("正文预览截行并给全文字数提示", (() => {
+		const long = Array.from({ length: 14 }, (_, i) => `第${i}行`).join(String.fromCharCode(10));
+		const p = contentPreview(["chat", "+dm", "--to", "u1", "--content", long], 10);
+		return p.length === 11 && p[10].includes("共 14 行");
+	})());
+
+	// 语义层能产生的写命令都要有人话动作（否回执就只剩“钉钉操作”）
+	const semanticWrites = [
+		[["todo", "task", "create", "--title", "交材料"], "新建待办", "交材料"],
+		[["todo", "task", "update", "--task-id", "1", "--title", "改期"], "修改待办", "改期"],
+		[["todo", "task", "done", "--task-id", "1"], "完成待办", ""],
+		[["calendar", "attendee", "add", "--event", "e1", "--attendees", "u1"], "加参会人", ""],
+		[["calendar", "event", "update", "--id", "e1", "--title", "教研"], "修改日程", "教研"],
+		[["oa", "approval", "redirect-task", "--task-id", "t1"], "转交审批", ""],
+		[["oa", "approval", "revoke", "--instance-id", "i1"], "撤销审批", ""],
+		[["doc", "+create", "--name", "周报"], "新建文档", "周报"],
+		[["doc", "+update", "--node", "n1", "--command", "append"], "编辑文档", ""],
+		[["sheet", "create", "--name", "成绩表"], "新建表格", "成绩表"],
+		[["sheet", "range", "update", "--node", "n1"], "写入表格", ""],
+		[["aitable", "record", "create", "--base-id", "b1"], "新增记录", ""],
+		[["aitable", "+record-delete", "--base-id", "b1"], "删除记录", ""],
+		[["drive", "+create-folder", "--name", "归档"], "新建文件夹", "归档"],
+		[["drive", "+rename", "--node", "n1", "--name", "新名"], "重命名", "新名"],
+	];
+	const bad = semanticWrites.filter(([a]) => {
+		const r = buildReview(a, null, "写入操作");
+		return r.verb === "钉钉操作";
+	});
+	check("语义层写命令都有人话动作（不退回“钉钉操作”）", bad.length === 0, bad.map(([a]) => a.join(" ")).join(" | "));
+	check("写命令的对象用标题/名称（人一眼能认出）", (() => {		const t1 = buildReview(["todo", "task", "create", "--title", "交材料"], null, "写入操作");
+		const t2 = buildReview(["doc", "+create", "--name", "周报"], null, "写入操作");
+		const t3 = buildReview(["drive", "+rename", "--node", "n1", "--name", "新名"], null, "写入操作");
+		return t1.object === "交材料" && t2.object === "周报" && t3.object === "新名" && !t3.object.includes("n1");
+	})(), `待办=${buildReview(["todo", "task", "create", "--title", "交材料"], null, "写").object} 文档=${buildReview(["doc", "+create", "--name", "周报"], null, "写").object}`);
+	// 语义层提供对象名（多维表/数据表/工作表）时优先用它，不露 ID
+	const withObj = buildReview(["aitable", "+record-delete", "--base-id", "b1", "--table-id", "t1", "--record-ids", "r1"], null, "写入操作", { objects: ["奥赛名单", "学生"] });
+	check("语义层给的库表名做对象（不露 baseId/tableId）", withObj.object === "奥赛名单、学生" && !withObj.object.includes("b1"), withObj.object);
+	const sheetObj = buildReview(["sheet", "range", "update", "--node", "n1", "--sheet-id", "s1", "--range", "A1:B2"], null, "写入操作", { objects: ["成绩表"] });
+	check("表格写区域的对象是表名", sheetObj.object === "成绩表", sheetObj.object);
+	const groupSend = buildReview(["chat", "+messages-send", "--as", "user", "--group", "cidAbC123==", "--markdown", "x", "--ai-tag"], null, "会对外发出消息", { target: "继续教育审验" });
+	check("群发消息：群已解析成 ID 时对象显示群名", groupSend.object === "群：继续教育审验", groupSend.object);
+	check("破坏性写命令写明不可逆", withObj.impact.join(" ").includes("不可逆"), withObj.impact.join(" "));
+
+}
+
+console.log("AD、撤回对象识别（弹窗要能看出撤的是哪条）");
+{
+	const digest = parseMessageDigest(JSON.stringify({ messages: [{ conversationId: "cidX", createTime: "2026-10-03 23:43:11", sender: "严天宇", text: "【AI发送】新版审核面板测试\n\n第二行" }] }));
+	check("取到会话/时间/正文预览", digest.length === 1 && digest[0].conversationId === "cidX" && digest[0].preview.startsWith("【AI发送】") && digest[0].createTime === "2026-10-03 23:43:11");
+	check("正文折成一行（预览不散成多行）", !digest[0].preview.includes(String.fromCharCode(10)));
+	check("长正文截断到 90 字", (() => { const d = parseMessageDigest(JSON.stringify({ messages: [{ text: "啊".repeat(200) }] })); return d[0].preview.length <= 91; })());
+	check("无文字消息不报错", parseMessageDigest(JSON.stringify({ messages: [{ conversationId: "c" }] }))[0].preview === "");
+	check("坏输入返回空", parseMessageDigest("nope").length === 0);
+	const single = parseConversationInfo(JSON.stringify({ result: { conversationInfo: { openConversationId: "cidA", title: "严天宇", singleChat: true, memberCount: 2 } } }));
+	const group = parseConversationInfo(JSON.stringify({ result: { conversationInfo: { openConversationId: "cidB", title: "教研室", singleChat: false, memberCount: 8 } } }));
+	check("单聊认得出对方姓名", single && single.title === "严天宇" && single.singleChat === true);
+	check("单聊取出会话 ID（转发给个人用）", single && single.cid === "cidA");
+	check("群聊给群名与人数", group && group.title === "教研室" && group.memberCount === 8 && group.singleChat === false);
+	check("坏输入返回 null", parseConversationInfo("nope") === null);
+}
+
+console.log("AE、人多时的名单排版");
+{
+	const { layoutList } = __test__;
+	const names = ["王示例（示例校区班主任）", "张示例", "王明睿妈妈", "胡琰松妈妈", "李梓钰家长妈妈", "张伟", "刘洋", "陈晨", "赵磊", "孙倩", "周洋", "吴敏", "郑昊"];
+	const lines3 = layoutList(names, 3, 96);
+	check("13 人排成 5 行（3 列）", lines3.length === 5, String(lines3.length));
+	check("每行不超过面板宽度", lines3.every((l) => [...l].length <= 96), JSON.stringify(lines3[0]));
+	check("名单不丢项（拼起来含每个人名首字）", names.map((n) => [...n].slice(0, 2).join("")).every((h) => lines3.join(" ").includes(h)));
+	check("空名单返回空", layoutList([], 3, 80).length === 0);
+	check("两人时不硬凑三列", layoutList(["甲", "乙"], 3, 80).length === 1);
+	const review = buildReview(["chat", "+broadcast", "--to", "x", "--content", "【AI发送】今晚 8 点线上教研"], { effect: "write", risk: "medium", confirmation: "user_required", availability: "available" }, "会对外发出消息", { recipients: names });
+	const listSec = review.sections.find((x) => x.kind === "list");
+	check("名单进 list 区块（多列铺满），表头只留人数摘要", !!listSec && listSec.items.length === 13 && review.object === "收件人：13 人", review.object);
+	check("正文进 text 区块", review.sections.some((x) => x.kind === "text" && x.items.join(" ").includes("今晚 8 点")));
+	const few = buildReview(["chat", "+dm", "--to", "x", "--content", "【AI发送】在吗"], null, "会对外发出消息", { recipients: ["王示例（示例校区班主任）", "张示例"] });
+	check("窄宽度下只显示能塞下的几个 + 等 N 人", (() => { const t = __test__.fitItems("收件人", few.sections[0].items, 40); return t.includes("等 2 人") && [...t].length <= 40; })(), __test__.fitItems("收件人", few.sections[0].items, 40));
+	// 建群：没有正文，名单必须占住主体区（这正是重做的动机）
+	const g = buildReview(["chat", "+chat-create", "--name", "家长群", "--users", "u1,u2"], null, "会影响他人或不可恢复", { recipients: names });
+	check("建群表头只写群名（不堆 49 人）", g.object === "群「家长群」" && g.verb === "创建群聊", g.object);
+	check("建群没有正文区块（不留空区）", !g.sections.some((x) => x.kind === "text"));
+	check("建群成员在 list 区块里（可多列铺满）", g.sections[0].kind === "list" && g.sections[0].items.length === 13 && g.sections[0].label.includes("成员"));
+}
+
+// ---- 场景 AA：非 NTFS 卷（exFAT）上 dws 下载的自动重定向 ----
+{
+	const { isDownloadCommand, isLinkPublishFailure, redirectOutputFlags, relocateLocalPaths } = __test__;
+
+	check("AA: 下载命令被识别", isDownloadCommand(["chat", "+messages-resource-download", "--resource-id", "x"]) === true);
+	check("AA: --download-resources 被识别", isDownloadCommand(["chat", "+messages-mget", "--msg-ids", "m", "--download-resources"]) === true);
+	check("AA: drive pull / download 被识别", isDownloadCommand(["drive", "pull", "--remote-folder", "n"]) && isDownloadCommand(["drive", "download", "--node", "n"]));
+	check("AA: 发送/查询命令不识别（不会触发重试）", !isDownloadCommand(["chat", "+dm", "--to", "x"]) && !isDownloadCommand(["chat", "+messages-list"]));
+
+	const realErr = 'dws 失败（exit 5）：{"message":"发布消息资源失败: link D:\\a\\.x.part-123 D:\\a\\x.pdf: Incorrect function."}';
+	check("AA: 真实硬链接失败被识别", isLinkPublishFailure(realErr) === true);
+	check("AA: 普通错误不误判", isLinkPublishFailure("dws 失败（exit 3）：permission denied") === false);
+
+	// 查消息附带下载时 dws 以 exit 0 把失败写进结果 JSON，重试决策不能看退出码
+	const { shouldRetryRedirect, formatResourceDownloads, hasOutputFlag, schemaSaysLocalOutput } = __test__;
+	const softFail = JSON.stringify({ resourceDownloads: { downloadedCount: 0, failedCount: 1, failures: [{ error: '发布消息资源失败: link D:\\a\\.x.part-1 D:\\a\\x.jpg: Incorrect function.' }], ok: false } });
+	check("AA: exit 0 的软失败仍触发重试（查消息附带下载）", (await shouldRetryRedirect(null, ["chat", "+search-msg", "--download-resources", "--output-dir", "dl"], softFail)) === true);
+	check("AA: 非下载类命令不重试", (await shouldRetryRedirect(null, ["chat", "+dm", "--to", "x"], softFail)) === false);
+	check("AA: 正常结果不重试", (await shouldRetryRedirect(null, ["chat", "+search-msg", "--download-resources"], '{"resourceDownloads":{"downloadedCount":2,"failedCount":0}}')) === false);
+	check("AA: 带输出 flag 的命令认得出来（超时按落盘类放宽）", hasOutputFlag(["doc", "download", "--output", "x.pdf"]) === true && hasOutputFlag(["doc", "read", "--node", "n"]) === false);
+	check("AA: schema 参数含输出参数 = 本地落盘", schemaSaysLocalOutput({ params: ["node", "output"], meta: { effect: "read" } }) === true);
+	check("AA: 写命令即使带输出参数也不自动重放", schemaSaysLocalOutput({ params: ["output"], meta: { effect: "write" } }) === false);
+	check("AA: 无输出参数/取不到 schema 时不猜", schemaSaysLocalOutput({ params: ["node"], meta: { effect: "read" } }) === false && schemaSaysLocalOutput(null) === false);
+
+	check("AA: 附件全成功 → 报目录", formatResourceDownloads('{"downloadedCount":2,"failedCount":0}', ".tmp/dingtalk-media").includes(".tmp/dingtalk-media"));
+	check("AA: 部分成功 → 两个数都给", (() => { const t = formatResourceDownloads('{"downloadedCount":1,"failedCount":2}', "dl"); return t.includes("1 个") && t.includes("2 个"); })());
+	check("AA: 全失败 → 不再反复重试", formatResourceDownloads('{"downloadedCount":0,"failedCount":3}', "dl").includes("别反复重试"));
+	check("AA: 无附件 → 明说没有", formatResourceDownloads('{"count":2}', "dl").includes("没有可下载的附件"));
+
+	const base = join(HERE, "fake-project");
+	const temp = join(HERE, "fake-temp");
+
+	const r1 = redirectOutputFlags(["chat", "+messages-resource-download", "--resource-id", "x", "--output", "收材料1006"], temp, base);
+	check("AA: 相对 --output 原样保留（靠换 cwd 落到临时区）", r1.argv[r1.argv.indexOf("--output") + 1] === "收材料1006", JSON.stringify(r1.argv));
+	check("AA: 相对目标按工作目录解析", r1.targets[0]?.rel === "收材料1006" && r1.targets[0]?.targetAbs === join(base, "收材料1006"));
+	check("AA: --output 指向文件时不改写成目录", (() => { const r = redirectOutputFlags(["chat", "+messages-resource-download", "--output", "./wsy.jpg"], temp, base); return r.argv[r.argv.indexOf("--output") + 1] === "./wsy.jpg" && r.targets[0].targetAbs === join(base, "wsy.jpg"); })());
+
+	const absOut = join(HERE, "abs-out");
+	const r2 = redirectOutputFlags(["drive", "download", "--node", "n", "--output", absOut], temp, base);
+	check("AA: 绝对 --output 改成临时区、目标仍是用户给的绝对路径", r2.argv[r2.argv.indexOf("--output") + 1] === temp && r2.targets[0]?.targetAbs === absOut && r2.targets[0]?.rel === undefined, JSON.stringify(r2.argv));
+	check("AA: --output-dir=xxx 形式同样处理", (() => { const r = redirectOutputFlags(["chat", "+messages-mget", "--output-dir=./dl"], temp, base); return r.argv.includes("--output-dir=./dl") && r.targets[0].rel === "./dl"; })());
+
+	const r3 = redirectOutputFlags(["drive", "pull", "--local-folder", absOut], temp, base);
+	check("AA: --local-folder 指向临时区绝对值", r3.argv[r3.argv.indexOf("--local-folder") + 1] === temp);
+	check("AA: --transcript-output 也认", redirectOutputFlags(["minutes", "+detail", "--transcript-output", "./t.md"], temp, base).targets.length === 1);
+	check("AA: 无输出 flag 时不给目标（调用方兜底工作目录）", redirectOutputFlags(["chat", "+messages-mget"], temp, base).targets.length === 0);
+
+	// localPath 改写：相对 flag 的产出与工作目录同构（原样），绝对目标换算到目标目录
+	const relTargets = [{ flag: "--output-dir", rel: ".tmp/dingtalk-media", targetAbs: join(base, ".tmp/dingtalk-media") }];
+	const json = JSON.stringify({ resourceDownloads: { downloads: [{ localPath: ".tmp/dingtalk-media/a.pdf", resourceId: "r" }] } });
+	const fixed = JSON.parse(relocateLocalPaths(json, temp, relTargets, base));
+	check("AA: 相对 flag 的 localPath 保持用户视角", fixed.resourceDownloads.downloads[0].localPath === ".tmp/dingtalk-media/a.pdf", fixed.resourceDownloads.downloads[0].localPath);
+	const absTargets = [{ flag: "--output", targetAbs: absOut }];
+	const fixedAbs = JSON.parse(relocateLocalPaths(JSON.stringify({ x: { localPath: "a.pdf", savedPath: "a.pdf" } }), temp, absTargets, base));
+	check("AA: 绝对目标的 localPath 换算到目标目录", fixedAbs.x.localPath === relative(base, join(absOut, "a.pdf")).split(sep).join("/"), fixedAbs.x.localPath);
+	check("AA: savedPath 一并改写（钉盘下载家族用这个名字）", fixedAbs.x.savedPath === fixedAbs.x.localPath, fixedAbs.x.savedPath);
+	check("AA: 非 JSON 输出原样返回", relocateLocalPaths("not json", temp, relTargets, base) === "not json");
+
+	// 搬回：递归复制 + 默认不覆盖；文件（含 .part 残留）单独处理
+	const { copyTree, copyEntry } = __test__;
+	const src = mkdtempSync(join(tmpdir(), "ct-src-"));
+	const dst = mkdtempSync(join(tmpdir(), "ct-dst-"));
+	mkdirSync(join(src, "sub"));
+	writeFileSync(join(src, "a.txt"), "A");
+	writeFileSync(join(src, "sub", "b.txt"), "B");
+	writeFileSync(join(src, ".x.pdf.part-123"), "TMP");
+	writeFileSync(join(dst, "a.txt"), "OLD");
+	const m1 = copyTree(src, dst, false);
+	check("AA: 不覆盖时同名跳过、其余照拷（.part 残留不搬）", m1.copied === 1 && m1.skipped.length === 1 && !existsSync(join(dst, ".x.pdf.part-123")), JSON.stringify(m1));
+	check("AA: 跳过的文件内容未变", readFileSync(join(dst, "a.txt"), "utf8") === "OLD");
+	check("AA: 子目录结构与文件保留", existsSync(join(dst, "sub", "b.txt")));
+	const m2 = copyTree(src, dst, true);
+	check("AA: --overwrite 时全部复制且内容更新", m2.copied === 2 && readFileSync(join(dst, "a.txt"), "utf8") === "A");
+
+	// 单文件产出：落到用户要的文件名；目标是目录时放进目录（与 dws 把 --output 当目录一致）
+	const fdir = mkdtempSync(join(tmpdir(), "ce-dst-"));
+	const one = join(src, "a.txt");
+	check("AA: 单文件产出落到指定文件名", copyEntry(one, join(fdir, "renamed.pdf"), true).copied === 1 && readFileSync(join(fdir, "renamed.pdf"), "utf8") === "A");
+	check("AA: 默认不覆盖已存在的同名文件", copyEntry(one, join(fdir, "renamed.pdf"), false).skipped.length === 1 && readFileSync(join(fdir, "renamed.pdf"), "utf8") === "A");
+	check("AA: 目标已存在且是目录时放进目录", copyEntry(one, fdir, true).copied === 1 && existsSync(join(fdir, "a.txt")));
+	check("AA: 源不存在时不算失败", copyEntry(join(src, "nope.txt"), join(fdir, "x"), true).copied === 0);
+}
+
+// ---- 场景 AB：群发逐人个性化（正文占位符 + 每人一份变量表）----
+{
+	const { extractPlaceholders, stripVarsFlags, parseVarsMap, validateVars, resolveRunVars, renderVars, personalKey } = __test__;
+
+	check("AB: 提取单个占位符", JSON.stringify(extractPlaceholders("【AI发送】{{称呼}}老师您好")) === '["称呼"]');
+	check("AB: 多占位符去重保序", JSON.stringify(extractPlaceholders("{{姓名}}的课表：{{课程}}，{{姓名}}老师")) === '["姓名","课程"]');
+	check("AB: 占位符允许内部空格", JSON.stringify(extractPlaceholders("{{ 称呼 }}")) === '["称呼"]');
+	check("AB: 普通花括号不误判", extractPlaceholders("JSON 里 {a: 1} 不是占位符").length === 0);
+	check("AB: 超长变量名不算占位符", extractPlaceholders("{{" + "x".repeat(30) + "}}").length === 0);
+
+	const rawArgs = ["chat", "+broadcast", "--to", "张三,李四", "--content", "【AI发送】{{称呼}}老师", "--vars", '{"张三":{"称呼":"张老师"}}'];
+	const st = stripVarsFlags(rawArgs);
+	check("AB: --vars 从 dws argv 剥离", !st.args.includes("--vars") && st.args.length === rawArgs.length - 2, JSON.stringify(st.args));
+	check("AB: 剥离后仍是 broadcast 命令", st.args[0] === "chat" && st.args[1] === "+broadcast");
+	check("AB: --vars 原值带出、vars-file 为空", st.varsRaw === '{"张三":{"称呼":"张老师"}}' && st.varsFile === undefined);
+	check("AB: --vars= 等号形式也识别", stripVarsFlags(["chat", "+broadcast", "--vars={}"]).varsRaw === "{}");
+	check("AB: --vars-file 形式识别", stripVarsFlags(["chat", "+broadcast", "--vars-file", "vars.json"]).varsFile === "vars.json");
+
+	const ok = parseVarsMap('{"张三":{"称呼":"张老师"},"李四":"李老师"}', ["称呼"]);
+	check("AB: 对象与单占位符字符串简写都支持", !("error" in ok) && ok.map.张三.称呼 === "张老师" && ok.map.李四.称呼 === "李老师");
+	const num = parseVarsMap('{"甲":{"n":1,"b":true}}', ["n", "b"]);
+	check("AB: 数字/布尔自动转字符串", !("error" in num) && num.map.甲.n === "1" && num.map.甲.b === "true");
+	check("AB: 多占位符时字符串简写报错", "error" in parseVarsMap('{"张三":"张老师"}', ["称呼", "课程"]));
+	check("AB: 顶层非对象报错", "error" in parseVarsMap("[1,2]", ["x"]));
+	check("AB: 变量值非标量报错", "error" in parseVarsMap('{"张三":{"称呼":{"a":1}}}', ["称呼"]));
+	check("AB: 非法 JSON 报错", "error" in parseVarsMap("{oops", ["x"]));
+
+	check("AB: 变量表齐全时无问题", validateVars(["张三", "李四"], ["称呼"], { 张三: { 称呼: "张老师" }, 李四: { 称呼: "李老师" } }).length === 0);
+	const miss = validateVars(["张三", "王五"], ["称呼", "课程"], { 张三: { 称呼: "x" } });
+	check("AB: 缺人与缺变量都报出", miss.length === 2 && miss[0].includes("课程") && miss[1].includes("王五"), JSON.stringify(miss));
+
+	check("AB: 逐人渲染正文", renderVars("{{称呼}}老师：课表已更新", { 称呼: "张" }) === "张老师：课表已更新");
+	check("AB: 未给的占位符原样保留", renderVars("{{a}}{{b}}", { a: "1" }) === "1{{b}}");
+	check("AB: 渲染不误伤普通花括号", renderVars("保留 {x} 原样", { x: "1" }) === "保留 {x} 原样");
+
+	const k1 = personalKey("abc", "你好");
+	check("AB: 幂等键确定且为 UUID 形状", k1 === personalKey("abc", "你好") && /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/.test(k1), k1);
+	check("AB: 人不同/正文不同则幂等键不同", k1 !== personalKey("abc", "你好！") && k1 !== personalKey("abd", "你好"));
+
+	// 确认阶段不能按 argv 重解变量表：--vars 在草稿生成时就被剥离，草稿里只有 vars/plan
+	const draftArgs = stripVarsFlags(rawArgs).args;
+	check("AB: 草稿 argv 里确实没有 --vars", !draftArgs.includes("--vars"), JSON.stringify(draftArgs));
+	const draftVars = { 张三: { 称呼: "张老师" }, 李四: { 称呼: "李老师" } };
+	check("AB: 变量表可从草稿取回并通过校验", validateVars(["张三", "李四"], ["称呼"], draftVars).length === 0);
+	const fromDraft = resolveRunVars({ draftVars, placeholders: ["称呼"], baseDir: process.cwd() });
+	check("AB: 草稿带变量表时不再看 argv", fromDraft.vars?.张三?.称呼 === "张老师", JSON.stringify(fromDraft));
+	check("AB: 无草稿时按 --vars 解析", resolveRunVars({ placeholders: ["称呼"], varsRaw: '{"张三":{"称呼":"张老师"}}', baseDir: process.cwd() }).vars?.张三?.称呼 === "张老师");
+	check("AB: 都没给时返回空（交给调用方拦）", resolveRunVars({ placeholders: ["称呼"], baseDir: process.cwd() }).vars === undefined);
+	check("AB: 非法 JSON 从解析层报错回来", typeof resolveRunVars({ placeholders: ["称呼"], varsRaw: "{oops", baseDir: process.cwd() }).error === "string");
+}
+
+console.log("AC2、群发变量表按名/ID 任一写法对齐");
+{
+	const { validateVars, renderVars, varsRowOf, personalizedRow, matchRecipientAliases } = __test__;
+
+	// 预检回显是显示名；--to 里那一项已被消歧换成 userId
+	const plan = {
+		resolved: [
+			{ recipient: "李梅", openId: "openLi" },
+			{ recipient: "周昌", openId: "openZhou" },
+		],
+		skipped: [],
+	};
+	const people = [
+		{ token: "1010692542846583", userId: "1010692542846583", name: "李梅", openId: "openLi" },
+		{ token: "周昌", userId: "010619023202695972", name: "周昌", openId: "openZhou" },
+	];
+	const aliases = matchRecipientAliases(plan, people);
+	check("AC2: 预检显示名对回 --to 里的 token", aliases.李梅?.token === "1010692542846583" && aliases.周昌?.token === "周昌", JSON.stringify(aliases));
+	check("AC2: 对同时带回 userId", aliases.李梅?.userId === "1010692542846583");
+
+	const varsById = { "1010692542846583": { 时间: "10-27", 耗材: "CE278A" }, 周昌: { 时间: "10-30", 耗材: "TL-6168" } };
+	const ph = ["时间", "耗材"];
+	check("AC2: 变量表写消歧后的 ID 也能通过校验", validateVars(plan.resolved.map((r) => r.recipient), ph, varsById, aliases).length === 0);
+	check("AC2: 变量表写姓名同样通过", validateVars(["李梅", "周昌"], ph, { 李梅: { 时间: "1", 耗材: "x" }, 周昌: { 时间: "2", 耗材: "y" } }, aliases).length === 0);
+	check("AC2: 按 ID 取到的行能渲染出正文", renderVars("{{时间}}申领了{{耗材}}", personalizedRow(varsById, "李梅", aliases)) === "10-27申领了CE278A");
+
+	const miss = validateVars(["李梅", "王五"], ph, varsById, aliases);
+	check("AC2: 真没给的人仍然报出来", miss.length === 1 && miss[0].includes("王五"), JSON.stringify(miss));
+	check("AC2: 行里缺占位符仍逐项报", validateVars(["李梅"], ph, { 李梅: { 时间: "10-27" } }).length === 1);
+	check("AC2: varsRowOf 按优先级取第一份命中的表", varsRowOf(varsById, ["李梅", "1010692542846583"])?.时间 === "10-27");
+	check("AC2: 三种写法都不命中时返回 undefined", varsRowOf({}, ["李梅", "周昌"]) === undefined);
+}
+
+console.log("AH、命令路径与上游可用性（DING 转提醒场景）");
+{
+	// 真实 ding 产品工具表（co `dws schema ding --compact` 原字段）
+	const DING_TOOLS = [
+		{ canonical_path: "ding.recall_ding_message", cli_path: "ding message recall", agent_summary: "撤回已发送的机器人 DING" },
+		{ canonical_path: "ding.send_ding_message", cli_path: "ding message send", agent_summary: "以企业机器人发送应用内/短信/电话 DING" },
+		{ canonical_path: "ding.shortcut_list", cli_path: "ding +list", agent_summary: "查询 DING 消息列表" },
+		{ canonical_path: "ding.shortcut_recall_personal", cli_path: "ding +recall-personal", agent_summary: "撤回本人发起的 DING" },
+		{ canonical_path: "ding.shortcut_receiver_status", cli_path: "ding +receiver-status", agent_summary: "查询 DING 接收人已读状态" },
+		{ canonical_path: "ding.shortcut_send_by_message", cli_path: "ding +send-by-message", agent_summary: "针对某条消息发起 DING 提醒" },
+		{ canonical_path: "ding.shortcut_send_personal", cli_path: "ding +send-personal", agent_summary: "以本人身份发送 DING 给指定人" },
+	];
+	check("AH: canonical 路径解析", parseCanonicalPath("ding.shortcut_send_by_message")?.product === "ding" && parseCanonicalPath("todo task list") === null);
+	check("AH: 技能文档旧写法 → schema 的 cli_path（归一到 +send-by-message）", matchToolByPath(DING_TOOLS, "ding message send-by-message") === 5);
+	check("AH: canonical 与 cli_path 写法也各自命中同一条", matchToolByPath(DING_TOOLS, "ding.shortcut_send_by_message") === 5 && matchToolByPath(DING_TOOLS, "ding +send-by-message") === 5);
+	check("AH: 点分段写法（dws_schema 里查不到的那种）也能归一", matchToolByPath(DING_TOOLS, "ding.message.send-by-message") === 5);
+	check("AH: 机器人 DING（ding message send）不被抢到别的工具", matchToolByPath(DING_TOOLS, "ding message send") === 1);
+	check("AH: 候选并列/查无此名时不瞎猜", matchToolByPath(DING_TOOLS, "ding message") === -1 && matchToolByPath(DING_TOOLS, "ding zzz") === -1);
+	check("AH: 上游不可用时给出的旧写法（同一命令的本地命令路径）", localAliases("ding +send-by-message").join() === "ding message send-by-message" && localAliases("todo task list").length === 0);
+
+	// 标签规则：转 DING 无正文（--group/--message-id/--users）— 不应再被要求加【AI发送】
+	// 转 DING 只有这一条能真跑：短写 `ding +send-by-message` 的 availability=unavailable，
+	// CLI 在 capability_gate 就拒（execution_started:false），参数与这条完全一样
+	const sbm = ["ding", "message", "send-by-message", "--group", "cid1", "--message-id", "m1", "--users", "uid1"];
+	const dpm = ["ding", "message", "send-personal", "--users", "uid1", "--content", "【AI发送】请尽快确认"];
+	check("AH: 转 DING 缺标签 → 仍进两阶段（不误拦）", decideExec(sbm, {}, newExecState(), CFG, NOW).action === "pending");
+	check("AH: 发送 DING 进两阶段", decideExec(dpm, {}, newExecState(), CFG, NOW).action === "pending");
+	check("AH: 两类 DING 都算发送类（敏感档）", tierFromTables(sbm) === "sensitive" && tierFromTables(dpm) === "sensitive");
+	check("AH: 发送 DING 有正文，仍要标签", decideExec(["ding", "message", "send-personal", "--users", "u1", "--content", "无标签"], {}, newExecState(), CFG, NOW).action === "block");
+	check("AH: 机器人 DING（有正文）仍要标签，没被顺带豁免", tierFromTables(["ding", "message", "send", "--robot-code", "rc"]) === "sensitive" && decideExec(["ding", "message", "send", "--robot-code", "rc", "--users", "u1", "--content", "无标签"], {}, newExecState(), CFG, NOW).action === "block");
+	check("AH: 转 DING 的审核文案是人话（动作/对象）", (() => { const r = buildReview(sbm, null, "会对外发出消息"); return r.verb === "消息转DING" && r.impact.join(" ").includes("原消息") && r.sections.length === 0; })());
+	check("AH: 发送 DING 的审核文案与转 DING 区分", (() => { const r = buildReview(dpm, null, "会对外发出消息"); return r.verb === "发送DING" && r.impact.join(" ").includes("不引用消息"); })());
+	check("AH: 弹窗富化按命令分流（转 DING 不说成撤回）", reviewKind(sbm) === "ding" && reviewKind(["chat", "+messages-recall", "--msg-id", "m1"]) === "recall" && reviewKind(["chat", "+dm", "--to", "u1"]) === "send");
+	check("AH: 短信/电话的提醒方式都能识别", dingChannel([...sbm, "--type", "sms"]) === "sms" && dingChannel([...dpm, "--type=call"]) === "call" && dingChannel(["ding", "+send-personal", "--type", "call"]) === "call");
+
+	// --formal 是工具参数，不是 CLI flag：提示不能把人引向 args 里的 --formal
+	const formalLeak = [...sbm, "--formal"];
+	check("AH: args 里塞 --formal → 拦下并说明角标由插件带", (() => { const d = decideExec(formalLeak, {}, newExecState(), CFG, NOW); return d.action === "block" && d.reason.includes("--formal") && d.reason.includes("角标"); })(), formalFlagError(formalLeak));
+	check("AH: 缺标签的提示只要求补标记（不再指向 formal/--formal）", (() => { const d = decideExec(["chat", "+dm", "--to", "u1", "--content", "无标签"], {}, newExecState(), CFG, NOW); return d.action === "block" && d.reason.includes("【AI发送】") && !d.reason.includes("--formal"); })());
+
+	// 上游把能力对 AI 关掉（schema availability）：先说不可用，不报内容错
+	const meta = parseCmdMeta('{ "availability": "unavailable", "cli_path": "ding +send-by-message", "effect": "write", "interface_reason": "下游没有稳定接收人身份和可查询撤回终态", "risk": "medium" }');
+	check("AH: 元数据取到 cli_path 与 interface_reason", meta?.cliPath === "ding +send-by-message" && meta?.reason.includes("稳定接收人身份"));
+	const un = decideExec(["ding", "+send-by-message", "--group", "cid1", "--message-id", "m1", "--users", "uid1"], { meta, why: "会对外发出消息" }, newExecState(), CFG, NOW);
+	check("AH: 不可用 → 报不可用及原因", un.action === "block" && un.kind === "unavailable" && un.reason.includes("对 AI 关闭") && un.reason.includes("稳定接收人身份"), un.action === "block" ? un.reason.slice(0, 60) : un.action);
+	check("AH: 不可用优先于内容校验（不会伪装成缺标签）", un.action === "block" && !un.reason.includes("【AI发送】"));
+	check("AH: 可用（available）不受影响", decideExec(sbm, { meta: { ...meta, availability: "available", cliPath: "ding message send-by-message" } }, newExecState(), CFG, NOW).action === "pending");
+}
+console.log("AJ、文件内容指纹（改内容可重发，未改仍拦）");
+{
+	const dir = mkdtempSync(join(tmpdir(), "pi-dt-fp-"));
+	const f = join(dir, "report.md");
+	writeFileSync(f, "第一版");
+	const msg = ["chat", "+messages-send", "--as", "user", "--open-dingtalk-id", "o1", "--file", f, "--ai-tag"];
+	const fp1 = __test__.fileFingerprints(msg, dir);
+	check("同文件两次取指纹一致", JSON.stringify(fp1) === JSON.stringify(__test__.fileFingerprints(msg, dir)));
+	const sig1 = __test__.sendSignature(msg, fp1);
+	writeFileSync(f, "第二版：内容更长了一些");
+	const sig2 = __test__.sendSignature(msg, __test__.fileFingerprints(msg, dir));
+	check("内容变更 → 签名不同（重发不再被判重复）", sig1 !== sig2);
+	check("内容未变 → 签名稳定（防重发仍生效）", sig1 === __test__.sendSignature(msg, fp1));
+	check("无文件参数 → 指纹为空", __test__.fileFingerprints(["todo", "task", "list"], dir).length === 0);
+	check("文件不存在 → 指纹标 missing（不抛错）", __test__.fileFingerprints(["chat", "--file", join(dir, "nope.md")], dir)[0].endsWith("missing"));
+}
+
+console.log("AK、外发文件时间戳命名");
+{
+	const dir = mkdtempSync(join(tmpdir(), "pi-dt-stamp-"));
+	const f = join(dir, "report.md");
+	writeFileSync(f, "内容");
+	const now = new Date(2026, 9, 16, 18, 30, 12);
+	const stamped = "report-20261016-183012.md";
+
+	const msg = __test__.stampOutgoingFiles(["chat", "+messages-send", "--as", "user", "--open-dingtalk-id", "o1", "--file", f, "--ai-tag"], dir, now);
+	const sentPath = msg.args[msg.args.indexOf("--file") + 1];
+	const sentAbs = join(dir, sentPath);
+	check("消息发文件：argv 改写为 baseDir 内相对路径（dws 硬性要求）", !isAbsolute(sentPath) && !sentPath.startsWith("..") && sentPath.endsWith(stamped), sentPath);
+	check("消息发文件：带时间戳的副本真实存在", existsSync(sentAbs) && readFileSync(sentAbs, "utf8") === "内容", sentAbs);
+	check("消息发文件：本地原文件不受影响", existsSync(f) && readFileSync(f, "utf8") === "内容");
+	check("回执说明里给了远端文件名", msg.notes.join(" ").includes(stamped));
+	msg.cleanup();
+	check("清理后副本与临时目录都没了", !existsSync(sentAbs) && !existsSync(dirname(sentAbs)));
+
+	const inline = __test__.stampOutgoingFiles(["chat", "+messages-send", `--file=${f}`], dir, now);
+	const inlinePath = inline.args[inline.args.length - 1];
+	check("--file= 内联写法同样改写为相对路径", !isAbsolute(inlinePath) && inlinePath.endsWith(stamped), inlinePath);
+	inline.cleanup();
+
+	const up = __test__.stampOutgoingFiles(["drive", "+upload", "--file", f], dir, now);
+	check("钉盘上传：加 --file-name 指定远端名", up.args[up.args.indexOf("--file-name") + 1] === stamped, up.args.join(" "));
+	check("钉盘上传：本地路径不改、不生成副本", up.args[up.args.indexOf("--file") + 1] === f && up.notes.length === 1);
+	up.cleanup();
+
+	check("stampName：多段扩展名只换最后一段", __test__.stampedName("/x/a.tar.gz", now) === "a.tar-20261016-183012.gz");
+	check("stampName：无扩展名也能用", __test__.stampedName("/x/README", now) === "README-20261016-183012");
+}
+
+console.log("AL、codemode 里的两阶段拦截");
+{
+	check("脚本里的写档 → 拦（草稿不能在脚本里发）", codemodeBlocked("call_1/2", "write") === true);
+	check("脚本里的敏感档 → 拦", codemodeBlocked("call_1/2", "sensitive") === true);
+	check("脚本里的只读 → 放行", codemodeBlocked("call_1/2", "read") === false);
+	check("直接调用（单段 id）写档 → 不拦", codemodeBlocked("call_1", "write") === false && codemodeBlocked(undefined, "sensitive") === false);
+}
+
+console.log("AM、按需装载（默认只声明 dingtalk_help）");
+{
+	const tools = [];
+	const registered = new Map();
+	const subscriptions = new Map();
+	const active = ["read", "bash"];
+	const factory = mod.default;
+	const mock = {
+		registerTool: (d) => {
+			tools.push(d);
+			registered.set(d.name, d);
+		},
+		registerCommand: () => {},
+		on: (event, handler) => {
+			subscriptions.set(event, handler);
+		},
+		getActiveTools: () => [...active],
+		setActiveTools: (names) => {
+			active.length = 0;
+			active.push(...names);
+		},
+	};
+	await factory(mock);
+	const byName = new Map(tools.map((t) => [t.name, t]));
+	const lazy = ["dingtalk_msg", "dingtalk_todo", "dingtalk_calendar", "dingtalk_approval", "dingtalk_file", "dingtalk_doc", "dingtalk_confirm", "dws_skill"];
+	check("八只业务工具都注册了", lazy.every((n) => byName.has(n)), lazy.filter((n) => !byName.has(n)).join(","));
+	check("业务工具默认不声明（defaultActive: false）", lazy.every((n) => byName.get(n).defaultActive === false));
+	check("dingtalk_help 默认声明", byName.get("dingtalk_help")?.defaultActive !== false);
+
+	// 未装载时：规则里不带钉钉术语（省的上下文才实在）
+	const optsA = { promptGuidelines: [] };
+	subscriptions.get("before_agent_start")({ systemPromptOptions: optsA });
+	check("未装载：不注入钉钉规则", optsA.promptGuidelines.length === 0, JSON.stringify(optsA.promptGuidelines));
+
+	await byName.get("dingtalk_help").execute("call_help", {}, undefined, undefined, {});
+	check("help 装载后八只工具全部激活", lazy.every((n) => active.includes(n)), active.join(","));
+
+	// 已装载时：注入完整规则（含写操作两阶段）
+	const optsB = { promptGuidelines: [] };
+	subscriptions.get("before_agent_start")({ systemPromptOptions: optsB });
+	check("已装载：注入钉钉规则", optsB.promptGuidelines.some((g) => g.includes("dingtalk_confirm")), JSON.stringify(optsB.promptGuidelines));
+	check("已装载：规则指向 broadcast+vars 一次成稿（别拆逐人 send）", optsB.promptGuidelines.some((g) => g.includes("broadcast") && g.includes("vars") && g.includes("逐人")), JSON.stringify(optsB.promptGuidelines));
+
+	// 重复装载是幂等的（不重复叠加开启）
+	await byName.get("dingtalk_help").execute("call_help2", {}, undefined, undefined, {});
+	check("重复装载不让激活列表膨胀", active.filter((n) => n === "dingtalk_msg").length === 1);
+}
+
+console.log("AN、审核面板的收件人（姓名与 ID 混合）");
+{
+	// 原始 review：38 人（草稿已预检通过，姓名与 ID 都齐）
+	const review = {
+		title: "t",
+		verb: "群发单聊",
+		object: "收件人：38 人",
+		sections: [{ kind: "list", label: "收件人（38 人）", items: Array.from({ length: 38 }, (_, i) => `姓名${i}`) }],
+		impact: ["每人各收到一条单聊"],
+		canRemember: false,
+	};
+	// 参数里混着中文姓名与裸 ID（重名换 ID 后就是这样）
+	const args = ["chat", "+broadcast", "--to", "雷天文,1028176926940108,乔瑞,551140693224089741", "--content", "x"];
+	const out = await __test__.enrichReviewTargets({}, args, review);
+	const list = out.sections.find((s) => s.kind === "list");
+	check("AN: 混合名单保持原样，不按 ID 重建", out.object === "收件人：38 人" && list?.items.length === 38, `${out.object} / ${list?.items.length}`);
+	// 纯 ID 名单仍然可以反查成姓名（不影响原有用法）
+	const pureId = ["chat", "+broadcast", "--to", "1028176926940108", "--content", "x"];
+	const out2 = await __test__.enrichReviewTargets({}, pureId, review);
+	check("AN: 纯 ID 名单保持可反查", out2.sections.some((s) => s.kind === "list"));
+}
+
+const failed = results.filter((r) => !r.ok);
+console.log(failed.length ? `\n${failed.length} 项失败` : "\n全部通过 ✓");
+process.exit(failed.length ? 1 : 0);

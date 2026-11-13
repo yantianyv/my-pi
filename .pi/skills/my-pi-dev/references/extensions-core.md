@@ -1,0 +1,175 @@
+# 扩展细节 A：会话 / 状态 / 权限 / 子代理
+
+## context-init.ts
+
+- 命令 `/init`（`/init cancel`/`stop` 中止进行中的运行）。唯一职责：生成与维护项目唯一的 `AGENTS.md`。
+- **内容规范就是它存在的理由**（写进子代理提示词）：写每行前过两问——不写它 AI 会做错事吗？换一年、换个项目还成立吗？信息按「多常被需要」分四处：每轮用 → `AGENTS.md`；相关才用 → `.pi/skills/<前缀>-<领域>/`（`description` 写明何时用）；在办（进度/待办/当前批次）→ 该工作目录 `STATUS.md`；跨项目经验 → 知识库。禁止：子目录 `AGENTS.md`、进度与待办、变更史、插件已经强制的规则（如钉钉发送纪律）、README 里能读到的、代码原文。产物必含 `## 关于 AGENTS.md 自身`（四条元规则，常量 `SELF_SECTION`）。
+- **目录对齐**（提示词层面的引导，不是校验器）：判据「同类只住一处，一处只放一类」——脚本进 `tools/`、共享基准数据进 `data/`、再生品进 `output/`、临时进 `.tmp/`、旧批次进归档；同名不同义的目录（`工具/` vs `tools/`）归并、缺失的机制目录顺手创建；本项目约定写进 `AGENTS.md` 一小段。不强制固定目录树。
+- **迁移**：发现子目录 `AGENTS.md` → 内容分流（长期→skill、在办→`STATUS.md`、通用→根）后**删除源文件**，并在总结里附「哪个文件 → 去了哪里」映射表；`CLAUDE.md` 合并后删除。
+- 流程：检查目录 → 无文件则 create，有则询问「合并更新 / 完全重写 / 取消」→ 后台 `runAgentLoop`（模型按用途 `init` 取，默认策略 AUTO = 当前会话模型，可在 `/model-config` 改指；主会话零污染、期间可继续对话；同时只允许一个，会话结束自动中止）→ 审计子代理复核 → 结构检查（有问题带问题再审计一轮，最多两轮）。
+- 上下文预算：预算 = 模型窗口 × 0.55（`CONTEXT_BUDGET_RATIO`，本扩展自己的常量）；每请求前 `transformContext` 用 `shared/context-budget` 的 `pruneOldToolResults` 剪超预算的旧工具结果（read/grep/find/ls/bash → explore → 其他，write/edit 不剪，最近 10 条不动）；该文件里与 explore 共用的只有超限错误特征 `CONTEXT_OVERFLOW_RE`（剪枝只有 /init 用）；仍超限则把过程记录压成要点后重启继续（`compactInitNotes`，最多 2 次，失败回退记录尾部），状态行显「⚙ 初始化 · 压缩上下文 n/2」。
+- 子代理工具：read/ls/grep/find + write/edit + bash + 可选 `explore`（`getExploreApi()?.createSubagentTool(ctx, { alwaysFresh: true })`，缺席静默降级为自读）。
+- 约束：**不设轮数与墙钟上限**；`NO_PROGRESS_TURNS = 8`（连续 8 轮既没写文件也没派 explore → 注入收尾指令，只提醒不硬停）；「没写完不许停」——打算停下但文件没被写过（mtime `> mtimeBefore + 1`）或末句是意图陈述 → 顶回去做完（最多两次），最终如实报「未完成」。
+- 审计子代理：主流程成功、文件确实写入、摘要不像「未完成」才启动；全新上下文 + 独立 system prompt；任务里显式列出全部上下文文件与 `.pi/skills/`；工具只有 read/ls/grep/find + write/edit（无 bash、无 explore）；不设轮数上限，带「没动手 / 末句是意图陈述 → 顶回去」与无结论补问一次；验收清单围绕上面的内容规范（两问、四处去向、该留的没丢、元规则板块在场），只做删减/合并/移出/修指针。审计故障只报「审计未完成」，不否定既有产物。
+- 纯 fs 的产物检查放在 `shared/context-files.ts`（`findContextFiles` / `checkContextArtifacts`，与本插件、`test/context-init.test.mjs` 共用，不依赖 pi 运行时）；`.pi/.gitignore` 的自动补放在 `shared/pi-ignore.ts`（`ensurePiGitignore`）：`session_start` 时幂等补一份白名单式嵌套忽略（项目 skill 放行、pi 运行时数据默认不入库），仅在 git 仓库、尚无该文件、根 `.gitignore` 未整体忽略 `.pi/` 时写。
+- 进度经官方 `ctx.ui.setStatus("init", …)`（hud 行 1；hud 缺席回落 pi 原生 footer）。
+
+## claude-it.ts（会话体验，文档生成已拆出）
+
+- `exit` 拦截：裸输入 `exit`（不带 `/`）与 `/exit` 命令都直接退出 pi，属刻意设计。
+- `/rewind`：回退到上一条用户消息、内容放回输入框（`navigateTree` 是命令 ctx 专属能力，只返回 `{cancelled}`，文本回填由 interactive-mode 完成）。
+- Ctrl+C：打断当前 turn；打断沉降完成（`agent_end`）后 2s 窗口内再按 → 预填 `/rewind` 回车即执行；沉降期内按下的只排队（30s 窗口内有效），不刷新窗口，双击连按永远有效。
+- 启动清屏：仅 TUI 冷启动（`session_start` reason=startup）；借 `setWidget` 工厂同步拿 TUI 实例，清视口 + `requestRender(true)` 全量重绘，随即移除占位 widget。
+
+## explore-agent.ts
+
+- 工具 `explore`（一个任务 = 一个只读子代理，read/ls/grep/find），命令 `/explore-config`（子模型，走 shared/model-select 工厂），配置 `~/.pi/agent/explore-model.json` 的 `model` 键（用途 `explore.subagent`，默认策略 BATCH），状态 key `explore`。
+- 落盘：`.pi/explore/report.md` 边跑边重写；单任务 `.pi/explore/tasks/<key>.{partial.md,md,json}`，`key` = 规范化任务文本（trim + 连续空白压单空格）的 SHA1 前 12 位。每轮工具调用与正文进展都原子写（tmp+rename）partial + json（含正文与最近 40 条检索轨迹）并刷新报告 → 进程被杀也留证据。
+- 断点续跑：`<key>.md` 已完成则直接复用（不花 token）；`fresh: true` 强制现跑；有 partial 时读作起点续跑（要求在其基础上继续、不重复已验证检索、过时结论可复核）；成功写 md + `status: done` 并删 partial；失败/中断保留 partial（json 标 `failed`/`interrupted`）且结果附 partial 相对路径。
+- 上下文兜底：单任务最多 40 轮；超限时压缩过程记录后继续（≤2 次）；轮数用尽/无正文 → 用过程记录整理成报告。最多 32 个任务、自适应并发上限 8、可重试错误指数退避（单任务最多重试 2 次）、单任务超时 15min。
+- 跨扩展契约 `__PI_EXPLORE_API__`（键名/版本/类型在 `shared/explore-api.ts` 单点定义）：发布 `createSubagentTool(ctx, { alwaysFresh })`，`alwaysFresh` 变体去掉 `fresh` 参数并强制现跑。
+- 描述字节稳定（缓存纪律）：工具集是请求前缀的第一段，描述/schema 一变整段前缀缓存失效，因此**只在扩展加载时注册一次**，读图说明用与模型无关的常量措辞（`VISION_NOTE`）——不得再按模型能力/设置变更运行中重注册（曾经在 session_start / execute / 设置变更时重注册）。
+
+## btw（`btw/`，产物 `btw.ts`）
+
+- 文件：`config.ts`（常量/系统提示词/模型设置）、`messages.ts`（消息清洗）、`render.ts`（转发 shared/markdown）、`overlay.ts`、`run.ts`（后台流式问答）、`index.ts`。
+- 命令 `/btw`（多轮追问；`Enter` 追问、`m` 转正、`/btw-config` 选模型），状态 key `btw-transfer`；模型设置用途 `btw.chat`（默认策略 FAST），存 `btw-config.json` 的 `model` 键。
+- 实现：pi-agent-core `runAgentLoop` + `createReadOnlyTools(ctx.cwd)`，认证走 `createPiStreamFn`；最多 6 轮，上下文清洗后 ≤60 条、含面板历史 ≤80 条，工具结果截断 1500 字符；空回答重试一次，失败/空回答按价格顺序故障转移。`/btw` 不写主会话历史；`m` 转正是**暂存 pendingTransfer**，由下一条 interactive 输入经 input transform 附在末尾发送（不是立即 sendUserMessage）。
+- 面板（`overlay.ts`）：宽 52% / 最小 58 列（表格在窄面板下只剩竖线），高 ≤80%；内容区与状态行之间是 `dividerScrollNote` 分隔线兼剩余行数（`▲17（PgUp）`）；↑↓ 逐行、PgUp/PgDn 整页（步长取上一帧可见行数）；问题行首行 `Q `、续行缩进对齐、超 4 行末行加 `…`；回答渲染走 shared/markdown（pi-tui `Markdown` 组件）。
+- 历史：曾用官方 pi-btw 替代，2026-09-07 因多轮追问/上下文携带 bug 回退自研（评估见 `src/vendor/README.md` 回退记录）。
+
+## ask（`ask/`，产物 `ask.ts`）
+
+- 文件：`types.ts`（题型 + 容错规范化）、`store.ts`（问卷文件读写）、`page.ts`（整屏问卷页）、选择器、`tool.ts`、`commands.ts`、`state.ts`（状态推送/排队链）。
+- 工具 `ask`（`create` / `cancel`），命令 `/answer`，状态 key `ask`（待答问卷数，优先级 84 常年挂着）。**codemode 脚本里拒答 `create`**（弹问卷会同步阻塞、等待计入脚本超时；`cancel` 不弹窗、照常可用）：入口用 `shared/codemode.ts` 的 `isCodemodeCall(toolCallId)` 判定，返回人话引导改直接调用。
+- 七题型 `single/multi/text/confirm/rating/number/note`（note 为只读说明题，不作答、不进进度分母、不阻塞提交）；选项题自动带「其他」自由输入；上限 12 题、每题 8 选项。漏传 `type` 时推断：有 options → single，有非空 content → note，否则 text；`title` 缺省取第一题问句。
+- **条件题 `showIf`**：`{questionId, op, value}`，`op` = `equals/notEquals`（单选/判断/评分/数字/简答）· `includes/notIncludes`（依赖多选）· `answered`。只能引用**本题之前**的题（顺序即依赖，天然无环），note 不能当依赖、也不能设 showIf。归一化时校验：依赖题存在且在本题之前、算子与依赖题型匹配、`value` 是依赖题的选项标签（自由输入的文本不校）——不匹配即创建失败并指明第几题（不静默失效）。**可见性口径**统一在 `types.ts` 的 `visibilityMap`/`isVisible`/`isShown`：`answerableQuestions(qn, answers)` 已含「排除 note + 排除不可见题」，页面、进度、必答校验、答案回执、`flattenQuestions` 全走它，所以未出现的条件题不渲染、不计分母、不阻塞提交、回执里也不出现（页面只留一行灰字「· 本作答下不适用（仅当…）」，进度条尾巴标「N 题按当前作答不适用」）；dependency 自己不可见时下游一律不可见。**但 `collect()` 照常收集隐藏题的输入**——条件翻回去时内容不能凭空消失（草稿也保留），只是 `answerableQuestions` 不把它算进分母/回执。
+- **「已答」口径只有一套**（`answeredProgress`）：必答题按 `isAnswered`（多选勾了 1 项但 `min=2` 不算已答），选答题按 `hasContent`（不因未达 min 永远欠进度）。页面进度条、状态行、答案一览（`reviewEntries`）全走这个口径——曾出现「进度条说已答 1/1、Enter 却被必答校验拦下」的矛盾。
+- 提示文案分工：**题号只在状态行写一次**（`第 N/M 题`），`hint` 只说原因（「已选 1 项，至少需 2 项」/「尚未作答」）；两处都写会显示成「第 1/1 题：… · 第 1/1 题」。
+- 「问卷即文件」：`.pi/questionnaires/<id>.json`，手写 JSON 丢进目录也能被 `/answer` 扫描识别。创建即写文件并整屏弹出；Enter 提交（答案作工具结果返回）、Esc 搁置（写回 `status: draft`，`/answer` 续答）、用户删除或 AI `cancel` 即删文件。
+- 工具结果状态：`submitted` / `shelved` / `deleted` / `text-fallback`（非 TUI 降级：文件保留、AI 改在对话里逐题问）/ `cancelled`。**`/answer` 提交的答案经 `pi.sendUserMessage(followUp)` 送达；AI 建的问卷由用户直接 Enter 提交时答案先作为工具结果返回**。
+- 问卷级上下文：`context` 手动摘要或 `includeLastMessage=true` 自动附上一条回复文本（从 sessionManager 条目倒序提取、遇 user 消息即停、超长截尾 4000 字符），渲染为引用块（超 8 行折叠）；note 正文经 shared/markdown 渲染挂在「│ 」左边线下，超 20 行折叠；两者共享 `x` 展开键。
+- 键位：↑↓/Tab 移动（多行简答内 ↑↓ 走行间、到边界才跳题）、`Ctrl+↑/↓` 上/下题、PgUp/PgDn、滚轮滚动内容窗（不挪焦点；答案一览同样可滚）、空格选中、数字键 1-9 直选、`Ctrl+P` 答案一览（一览里 `C` 走官方 `copyToClipboard`）、`?` 键位表、`x` 折叠说明、`Ctrl+D` 或非输入行 `D` 两次确认删除、被必答校验拦下后**再按一次 `Enter`（连按两次）跳过未答直接提交**（未答项在回执里标「（跳过）」）。
+- **强制提交为什么是连按两次 Enter**：普通终端把 `Ctrl+Enter` 与 `Enter` 发成同一个 `\r`，只有支持 kitty/modifyOtherKeys 的终端才发 `\x1b[13;5u`——依赖终端协议不可靠，故不再识别 `ctrl+enter`/`alt+enter`，只留「连按两次」（同 `deleteArmed` 的两连按模式）。`forceArmed` 有 **1 秒窗口**（`FORCE_SUBMIT_WINDOW_MS`）：首次 Enter 被拦下时置位并起 `setTimeout`，到点自动复原并撤掉那条提示（`dispose` 清定时器），`handleInput` 开头取走并清零——即窗口内且中间夹任何其他按键都会解除（防误触，有单测）；被拦下的提示行与状态行分别写「再按 Enter 跳过」「连按两次 Enter 跳过」。
+- **文案人称规范**：promptGuidelines 要求问卷文案（标题/说明/题干/选项/上下文）一律省略主语，必须指代时写「AI」「用户」（不写「你/我/您/咱们」）——整屏问卷里人称指向不明；创建时 `findPersonWords` 扫出命中项，随工具结果（提交/搁置/删除）回给 AI 提醒，不拦。
+- 整屏页 = overlay（width/maxHeight 100% + 左上锚点 + 每行补满全宽；pi 的 overlay 是逐行不透明合成，全屏即遮蔽聊天/HUD）；高度权威值由 `overlayOptions.visible` 回调每帧捕获（`tui.terminal.rows` 可能滞后）。首帧停在顶部不跟随焦点（长说明题从头读），导航键会让跟随生效一次（渲染时消费即复位，见下条锚定）。已知限制：regular（内联）模式下全屏 overlay 与聊天共享原生滚动缓冲，滚轮上滑会看到残影（仅美观问题）；fullscreen 模式零污染。
+- **滚动锚定**（历史上「展开上下文后开头被截掉」的根因）：内容行数只由作答状态与折叠态决定，页面每次重渲染记录窗口首行所属的稳定块（`ContentLine.key`：`context` / `q:<id>` / `q:<id>:optN` …）+ 块内偏移，下一次渲染若该块位置移动就按锚点复位。凡是结构变化（x 展开/收起、选项增减「其他」行、条件题出现/隐去）都因此保住原位；滚轮与导航会清掉锚点（用户自己的意图优先）。`followFocus` 只在导航后生效一次并在 render 里消费——不要让它长期为真，否则任何行数变化都会把视窗往下拽。按 x 展开时另外把窗口拉到**被折叠那块自身的开头**（优先视窗上方最近的那个折叠块），否则展开的内容仍在视窗之外。
+- 渲染细节：顶部进度条 ▰▰▱▱；长文本经 `wrapTextWithAnsi` 折行完整展示不截断、续行缩进对齐首行文本起点；滚动位置提示（▲▼ 行数）只在状态行右侧；`answerableQuestions(qn, answers)`（排除 note 与当前不可见的条件题）是进度条/必答/回执的统一分母。
+
+## secure（`secure/`，产物 `secure.ts`）
+
+三层名单（只管 bash，`tool_call` 拦截），判定顺序：**拆段（shared/shell-split）→ deny → remembered → watch 标记 → AI 审核**。
+
+- `deny` 硬拒绝：命中即拒、不询问（默认含 `rm -rf /`、`mkfs`、`dd` 写块设备、`curl|sh`、`chmod -R 777 /`；整串或任一段命中）。
+- `watch` 关注项：命中不打断，只把命令标记给 AI 要求从严（宁可 review 不 allow）。
+- `remembered` 意图缓存：命中即放行，带人类可读 intent，30 天未命中自动清理（`/secure prune` 手动清）；**逐段判定，每个子命令段都要命中才放行**（防「git status && rm -rf x」被前半段连带放行）。
+- AI 审核：输出 `{action, reason, impact[], pattern}`，`pattern` 用 `<*>` 占位可变参数、落库前校验能命中当前命令否则退结构化兜底；`allow` 自动记住意图（通知写人话意图，不暴露正则），`reject` 拒绝；AI 不可用（超时/无模型/网络错/输出无法解析）降级人工确认，文案说明是降级而非任务失败；allow/reject 结论有会话级缓存，`completeSimple` 单次调用不占主会话上下文。
+- 人工确认面板 ReviewPanel（自有实现；**选项行渲染改用 `shared/ui.ts` 的 `renderChoiceList`**，与钉钉审核面板同一份代码）：顶部人话信息区（一句解读/影响面/命中原因），命令全文折行可滚、不展示正则原文；默认高亮「允许一次」，选项 = 允许一次 / 允许并永久记住这类操作（旁标将被记住的意图）/ 拒绝，Esc = 拒绝不执行。滚动提示、折行、按键语义、滚动位置已抽到 shared（见 hud-and-shared.md）。
+- 配置 `~/.pi/agent/secure.json`：`enabled`、`deny`、`watch`、`remembered`、`aiReview`、`sudoExec`、`model`（本地模型设置，用途 `secure.review`，默认策略 LITE）；`saveConfig` 写回时原样带上 `model` 键（该键由 shared/model-setting 维护）；首次运行写默认配置。历史字段（blacklist/whitelist、aiTimeoutMs）不再读取——不写迁移代码，旧值自然遗弃。
+- 审核不设人工超时：时间给足，中止靠透传 `ctx.signal`（用户 Esc）；失败仍降级人工确认，文案带原因（如「超时 6s · opencode-go/glm-5.3-flash」）。
+- 命令：`/secure`（状态 + 开关与维护：`on|off`、sudo 开关、`reload`、`prune`）+ `/secure-config`（配置面板：AI 审核开关 / 审核模型 / sudo 通道 / deny 与 watch 名单；带参直设 `aiReview|sudo on|off`、`model <auto|id>`）。名单编辑（`config-panel.ts`，只依赖 shared/ui + shared/model-select）：正则输入即校验（非法拒绝保存）、一行「测试命令」实时看命中、deny 删除需二次确认、Ctrl+D 删除、Enter 编辑。
+- sudo 专用授权通道：bash 里的段首 `sudo` 被拦截、引导改用 `sudo_exec` 工具；整屏授权面板（命令全文折行可滚 + 掩码密码框，错误原地重试 3 次，Esc 拒绝），扩展内 `spawn sudo -kS` 喂密执行（`-k` 不缓存 + 收尾 `sudo -k` 双保险，每次调用必重新授权）；密码只经扩展内存进 sudo stdin，不进会话/结果/磁盘；NOPASSWD 账户退化为确认弹窗（仍逐次授权）；requiretty / 无 sudo 明确报错请用户手动执行。**`sudo_exec` 在 codemode 脚本里直接拒绝**（授权弹窗在脚本内同步阻塞，等待计入脚本超时、超时重试会堆积）。
+- 状态 key `secure`（审核中）；人工确认与 sudo 等待经 `globalThis.__PI_STATUS_BEACON_API__.wait(text)` 交给 status-beacon 的 Working 行。
+
+## pair-guard.ts
+
+- 工具 `set_title({title?})`（work 同步 `pi.setSessionName`（`/resume` 选择器可见）+ 注册表；标题不单独发广播，随其他事件行内捎带，`/pair` 详情完整展示）；命令 `/pair`（无参查看、`label <文本>`、`prune`）；状态 key `pair-guard`（「👥 N 并发会话」）。
+- 项目级会话注册表 `.pi/sessions/<sid>.json`（gitignore）：字段 `sessionId/pid/startedAt/lastBeat/label/work/recentFiles`；30s 心跳；判死双保险——扫描时 `process.kill(pid, 0)` 判活（关窗强杀不走 session_shutdown，pid 一死下次扫描即清，秒级）+ 5min 心跳超时兜底；`session_shutdown` 按 reason 分流（reload 保留注册表，quit/new/resume/fork 才注销，否则每次 `/reload` 冲掉标题与标签）；`write/edit` 记录最近在改哪些文件（10min 滚动窗口）。
+- 并发广播：peer 加入/离开/新触碰文件/标签变化以定制消息注入（变化驱动、事件键去重、极简直播格式、协作约定仅首批附带；绝对时间戳、尾部追加不破坏前缀缓存）。投递两路——agent 运行中 `sendMessage(deliverAs: "steer")` 实时送达，空闲攒到 `before_agent_start` 排空；检测走 `turn_start`（每个模型调用边界扫一次）+ `before_agent_start`（注入前先扫）+ 30s 心跳；写 peer 近窗口文件时 `tool_result` 追加 ⚠️ 软警告。
+- 任务标签仅 `/pair label` 手动设置（工作流已按会话隔离，自动读取在多会话下无意义）；执行中 Working 行由 status-beacon 负责，本扩展不写。
+
+## status-beacon.ts
+
+- 命令 `/beacon`（`status`/`presence` 报告在场门控判定；无参打印用法）+ `/beacon-config`（概括模型：无参开选择浮层、`auto`、`provider/modelId`）。配置 `~/.pi/agent/status-beacon.json`：`model`（本地模型设置，用途 `beacon.phrase`，默认策略 BATCH）、`presenceGate`、`activeIdleMs`、`awayIdleMs`、`dedupeMs`；模型键经 shared/model-setting 读改写（历史上的 `fs.writeFileSync({model})` 会清掉门控阈值，已修）。
+- 执行中标题进度（`agent_start` → settled）：spinner + 活动段 + 目录名，活动段与 Working 行/HUD 同一套词（工具名 / 思考中 / 输出中 / 块间隙只显目录）；提醒期间让位、应答后恢复。
+- 接管执行中 Working 行（独占 `setWorkingMessage`），按「在等什么」分层：等人工（`ui_prompt` 阻塞；ask/secure 经 `__PI_STATUS_BEACON_API__.wait` 登记具体文本，如「等你：回答问卷「方案确认」」）> 等工具/子代理完成 > 思考中 > 正在{短语}… / 正在输出…。**「思考中」只覆盖思考块流出的那段时间**（`message_update` 的 thinking_start → thinking_end），带廉价 AI 概括的动作短语 `思考中：重构 HUD…`（`message_end` 触发异步概括，模型按用途 `beacon.phrase` 解析，仿 secure 的 `completeSimple` 路线）；无短语只显「思考中…」。思考结束后的内容生成与块间隙显「正在输出…」，不冒充思考中。行首那支转圈是 pi 指示器自带、Working 行不自带 spinner；折叠思考标签交回 pi 默认静态 `Thinking...`（其动画已并入本扩展）。
+- 状态 key（`STATUS_STYLE` 中登记）：`task-alert`（完成闪烁帧）/`task-alert-error`/`task-alert-wait`（等待人工）/`task-alert-run`（思考中/当前工具；run 开局重置防残留，块间隙与收尾不显）。key 沿用 task-alert* 旧名（前身即 task-alert）。
+- 五音效（`~/.pi/agent/sounds/`，由 install.js 部署 static/sounds）：`task_complete`（正常结束）/`error`（stopReason=error）/`attention`（阻塞等人工）/`idle_prompt`（完成提醒后 60s 无操作，且人真的离开时才补）/`subagent_complete`（工具名 ∈ {explore, subagent, Task} 成功）。超时自动撤销提醒 600s。
+- 提示音经 `shared/presence` 在场门控：系统空闲 <20s 或任一实例 20s 内有输入 → 只闪不出声；`claimSoundSlot` 全局去重（窗口 2.5s）只响第一声。
+- **扩展侧适配纪律**（AGENTS.md「提醒适配」条目的实施细节）：① 等人 UI 不要自己做声音——pi 把 `ctx.ui.custom/select/confirm/input/editor` 全部包进 `ui_prompt_start/end`（`wrapUIPromptContext`），自绘 overlay 也自动进 waiting 告警链；② 要让 Working 行显示具体等待内容，弹层前 `setWaiting(text)`、结束 `setWaiting(null)`（`shared/status.ts` 导出；review-panel、secure、ask 已按此实现，登记要早于 `ui_prompt_start`（microtask 异步 emit）才生效）；③ 子代理完成音按工具名集合自动（`SUBAGENT_TOOLS` = subagent/explore/Task，新子代理工具名要手动加进该集合）；④ 完成/出错声音只在 turn 收尾触发一次，工具级完成不响。
+- 发布 `__PI_STATUS_BEACON_API__ = { wait(text|null) }`（session_shutdown 删除）；读 pair-guard 注册表的 `work` 字段。Ctrl+C 打断不触发完成提醒：`agent_end` 记 `lastEndStopReason`，`agent_settled` 时若为 `aborted` 则跳过（零耦合，不依赖 claude-it）。
+
+## clipboard.ts
+
+工具 `clipboard_get`（可截断）/ `clipboard_set`（空串清空）/ 命令 `/clipboard`（无参查看、`clear`/`off` 清空），状态 key `clipboard`。跨平台零依赖：Windows PowerShell `Get/Set-Clipboard`、macOS `pbpaste/pbcopy`、Linux `xclip` 退 `xsel`；统一临时文件中转（`os.tmpdir()/pi-clipboard-<pid>-<ts>-<rand>.txt`，用后即删）以规避 PS5.1 管道 UTF-16LE 乱码与 shell 转义；读时 CRLF→LF 归一化；写入前读旧内容摘要报告「已覆盖」。
+
+## time.ts
+
+时间感知：`context` 事件给每条 user 消息的**发往模型的副本**贴 `[YYYY-MM-DD HH:mm]` 常量前缀（带年），会话记录/UI/其他扩展看到的上下文均不动。核心事实：AgentMessage 自带 `timestamp`（ms，常量），零对齐零读盘；toolResult 是独立 role 天然不误伤；前缀是常量 → provider 前缀缓存照常命中；`/reload` 后首轮对长历史一次性全 miss（部署时机选在会话初期可避开）。只贴非空文本（string 或首个 text 块），已带前缀（`/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] /`）跳过防重贴；纯图/空串不贴。工具 `now()`：本地时间+星期+时区+ISO，需要绝对「现在」时按需调。无状态 key（behind-the-scenes，不进 STATUS_STYLE 也不报警）。
+
+## keep.ts
+
+- 停顿点续航（旁支自检，主记录零污染）：`turn_end` 时本轮 assistant 消息无 toolCall、`outcome === "completed"`、无排队消息、预算未用完、**且本轮出现过改写类工具调用**（内建集合 bash/write/edit/codemode → `readOnlyHint` 注解（`pi.getAllTools()`，MCP/扩展声明）→ 无注解按只读（安全默认）；零工具与只读工具的收尾是问答/调研的天然终点，不自检。全仓插件工具已逐个声明 `annotations: { readOnlyHint }`，钉钉工具组按能力统一标 false）→ **发起旁支自检**：复刻主会话请求前缀（`before_agent_start` 捕获的 systemPrompt + `filterKeepMessages(buildSessionContext().messages)` + 按 `getActiveTools()` 顺序复刻的工具集、执行体换空实现）+ 末尾追加自检问题，跑一次限 1 轮的 `runAgentLoop`（走 `shared/agent` 的 `createPiStreamFn`），拿 A/B/C 判定——提问与回答都不进主记录。
+- 展示与续跑：A → `turn_end` entries 注入 `keep-verdict`（display:true）+ `keep-go`（display:false，续跑指令）并 continue；B（各档一律）与 default 档的 C → `pi.sendMessage(verdict, { triggerTurn:false })` 挂到本轮末尾后停下。判定块与挂机收尾摘要都是**单行**（`registerMessageRenderer` 按 details 拼文本，不加底色块）：底色块会让挂机逐轮把「你的任务结论」顶出视野。
+- 挂机轮不另发判定块（进度由状态行承担），挂机段结束（做满 `IDLE_MAX` / 无活可干 / 用户下次输入）发一条**收尾摘要**（清了 N 处 + 明细落点 + 挂机前的任务判定），落在转录末尾——回来时第一眼就是它。
+- `context` 过滤：`keep-verdict` 任何位置都不进请求（纯展示）；`keep-go` 只在末尾「活尾巴」保留（当前轮的续跑指令）；旧版 in-transcript 的 `keep-ask`/回答记录一并滤掉（历史会话兼容）。
+- **前缀复刻与缓存**：provider 前缀缓存按 `tools → system → messages` 逐字节匹配，三者齐了才命中；命中与否只影响花费（未命中 = 全量按非缓存计价）。
+  - 前缀取 **`context_with_system`** 事件捕获的主会话真实请求（该事件在所有 `context` 处理后触发，`messages` 含系统消息与工具声明）——其它扩展对请求的改写（如 time.ts 的时间戳前缀）也已包含，故逐字节一致；工具集从捕获消息里用 `getCurrentTools` 取出，执行体换空实现（误调无副作用）。捕获缺席时回退自拼（systemPrompt + 会话消息 + `getActiveTools()`/`getAllTools()` 重建工具），代价是 miss。
+  - **导入陷阱**：`getCurrentTools` 只能从 `@earendil-works/pi-ai/compat`（或根入口）导入——pi 加载扩展走的 jiti 别名表只挂 `compat`/`oauth`/`providers/all` 与根入口，深路径 `pi-ai/utils/transcript` 在 node ESM 下能解析、在 pi 里加载即报错（keep 曾因此加载失败）。
+  - 实测教训：自拼前缀（systemPrompt + `buildSessionContext()` 消息）只命中 ~8.5k/250k——系统提示词一致但消息序列在首条 user 消息处就分叉（其它扩展的请求改写不在自拼内容里），每次停点全量重付 250k tokens。
+  - 观测口径：`.pi/keep-cache.log` 每次自检追加 `src=stash|fallback msgs tools active gap blocks stop cls input cacheRead ms ans=`（`ans` 为回答前 120 字符，用于诊断解析失败）。
+- 续跑必须带注入（pi 边界校验在 entries 落账后重算，custom_message 使 transcript 末尾为 user 角色才合法）。防失控：续跑轮仍无 toolCall 直接停 + 每次 `before_agent_start` 重置的预算 16。
+- **介入等级**（`keep.json` 的 `level` 键）：`off` 不介入 / `default` 停顿点就地续航 / `idle` 在 default 之上加「脱机挂机」。**三态判定与档位解耦**：各档共用同一套问法与 schema（`ASK_TEXT`）、同一套续跑指令，档位差异全在 `turn_end` 的停点处理里，切档不改动自检前缀。
+  - `B`（需人工）各档一律停，不去动别的活（`next` 只在 A 时有意义）；`off` 直接不介入。
+  - `idle` 只在 `C`（完成/到交付点）时多一步：先弹一次**在场探测面板**（`ProbePanel` 自绘 + 倒计时；任意键 = 在场，`c` = 立即挂机，超时 = 脱机）。有回应按 default 停；无回应则 `away = true` → 注入 `[harness 挂机]` 指令续跑。
+  - `PROBE_MS` 默认 **3 分钟**（`PROBE_LABEL` 负责展示文案）：探测期间 AI 是停住的，这个值直接等于一次探测的等待成本，`c` 键是「马上离开」的快捷出口，故不宜再长。曾评估用 `ctx.ui.onTerminalInput` 做**被动在场判定**（记最后一次按键时间，静默超窗即判脱机，等待零成本、窗口可给 3~5 分钟，还顺带修掉「Esc 后 `away` 不复位」），用户选择保留阻塞面板、暂不引入——再提之前先看这条。
+  - 探测**每个用户输入只做一次**（`away` 在 `before_agent_start`/切档时复位），其后每个停点直接续下一件挂机工作；用户插消息或 Esc 自然回到正常循环。
+  - 挂机指令另带两条无人值守约束：不执行需要人工确认的命令、不发起需要回应的提问（人不在场，secure/ask 的面板会挂到用户回来为止——挂机时段碰上就是白等）。
+  - **插件联动经评估暂缓**（workflow-mgr 让挂机工作对着工作流下一步、secure 脱机快速拒绝、explore-agent 备料）：都会新增 globalThis 契约或直接读对方数据，显著加重插件间耦合；keep 保持只依赖官方 `setStatus` + `shared/*`。
+  - 挂机工作的**唯一判据**（用户拍板口径，别改宽）：「无需用户拍板，且做完不会产出需要人工处理的后续任务」——两问任一为「是」就不做。`IDLE_WORK` 只是**示例项**（文档时效性 / 死指针与索引 / 跨文件一致性 / 注释时效性），清单外的事用同一判据自查。
+  - **当初的偏差与纠偏**（设计意图的记录，别改回去）：挂机不是「闲时找一件可做的事」，而是「把项目里已经存在的不一致清掉」。旧白名单（补文档/补测试/备料/**记清单**）全是产出型类别，必然产出要人验收的待决项，又堆在真正关心的回复后面——实测表现为「闲时帮忙解决力所能及的事」退化成「闲时帮忙找事」。判据里的「后继任务」专指这类东西：新文档/新方案/新测试/新清单、待拍板清单、要人确认的改动。
+  - 挂机预算**独立于续航**：`IDLE_MAX = 4`（`idleUsed` 计数，领满即停 + 一句 notify）；续航仍是 `MAX_CONTINUATIONS = 16`。「没有合适的活」仍由**续跑空转保护**收口（挂机轮无 toolCall → 停），未另设协议。
+  - 挂机产物落点由指令指定（`IDLE_LOG`，keep 自己不写文件）——避免挂机回合的正文把真正关心的输出顶远；工具调用行仍会照常出现在转录里（pi 的转录机制，无法只留一行）。
+  - 面板只在 TUI 弹（`ctx.mode !== "tui"` 视作在场、按 default 停），弹前经 `setWaiting()` 登记 Working 行。**不要把「是否在场」寄托在 `ui.confirm/select` 的 `timeout` 上**：它们超时与用户按 Esc 都返回 `undefined`，区分不了「脱机」与「人在按 Esc」，语义会反。
+- **自指场景的预期失败**（别为它加机制）：若会话记录本身在讨论 keep 的提问原文（开发 keep 的会话必然如此），模型会把追加的自检提问读成「对话内容/被粘贴的历史」，起手调工具去查证而不是作答 → 无 JSON → 停。实测 4 次（`blocks=thinking+toolCall`、`ans=` 是排查开场白）全发生在 keep 开发会话里。处理口径：提问措辞标明来源与角色（`[harness 自检]` + 「你是被提问方，直接给出 JSON 结论」），失败即停下（**不加重试机制**——那是拿机制复杂度换边角场景；非自指会话里暂未观察到该形态）。
+- 表述风格：注入给模型的自检提问/续跑指令用**正向框架**（说明「是什么、该做什么」），避免「不是…不要…」式否定句——否定式说明容易被读成「需要留意的例外」。
+- 模型：用途 `keep-triage`（默认策略 AUTO = 跟随会话模型，可在 `/model-config` 改指）。命令 `/keep` 无参开等级选择面板（`ctx.ui.select` 三档，当前档带 ✓；Esc/非 TUI 不改档），`/keep off|default|idle` 直设（非法值给用法提示）；全局持久 `~/.pi/agent/keep.json`，默认 `default`。**两个状态 key**：`keep`（66）= `⏳ 停顿自检中` / `↻ 续航 n/16`；`keep-idle`（**87，高于全部工具活动**）= `⏳ 探测在场中 · 3 分钟` / `⏳ 挂机中 · 第 n/4 件`——挂机期间即使模型在跑工具，状态行说的也是「挂机中」。判定块：`↻ 可继续 · 续航 n/16 —— 理由 → 下一步：…` / `⚠ 需要人工 —— 理由` / `✓ 已完成 —— 理由`；挂机收尾摘要：`✓ 挂机结束 · 清了 N 处｜明细 .pi/keep-idle —— 缘由｜任务：…`。回归测试 `src/extensions/test/keep.test.mjs`（esbuild bundle + 假 pi/ctx + `PI_KEEP_TRIAGE` 测试桩，全离线；假 `ui.custom` 按 `probe=stop|idle|key:<键>|timeout` 驱动真组件的按键/超时路径）。
+- 解析兑底（不为弱遵从模型打提示词补丁）：平衡括号扫描从散文/围栏里捞第一个 class 合法的 JSON；捞不到 = 未判定 → 停下并 warning（回答是面向用户的自然语言时，总结≈C / 求助≈B，停下语义自洽）。
+
+## crash-log.ts
+
+崩溃黑匣子：`prependListener` 抢在 pi 的 `uncaughtException` 处理器（同步 exit）之前把堆栈同步落盘 `~/.pi/agent/pi-crash.log`（含 unhandledRejection 与 exit 码；滚动上限 2MB、保留尾部 1MB），崩溃条目与会话文件按时间配对；命令 `/crash-log` 报告最近一条崩溃与取证路径（`clear` 清空日志与 ack）。
+
+启动提醒去重：`session_start` 只在「日志里最新崩溃时间戳 ≠ `~/.pi/agent/crash-log-ack.json` 里已提示的时间」时提醒（无 UI 不提醒、也不写 ack），避免同一条崩溃每次启动都念叨——提醒一次或用户 `/crash-log` 看过即标已看，记录仍在日志里。进程级监听与启动头用 `globalThis.__PI_CRASH_LOG_HOOKED__` 守住只挂一次（`/reload` 会重新执行模块，而 process 监听器不随扩展卸载消失，重复挂会写出重复条目）。日志路径可用 `PI_CRASH_LOG_FILE` 注入（回归测试用，ack 落同目录）。
+
+## img-slim.ts
+
+四层防护（上游 48MiB 请求体上限 → 而 pi 的 token 估算每图仅 1200 tokens，1M 窗口要 ~820 张才触发自动压缩，故请求体上限永远先到；实测 76 张/75.6MB 起连续 413）：
+
+- `tool_result` / `input`：给新进上下文的图片瘦身——照片 ≤900KB、图形 ≤1.6MB（base64）、最长边 2000px、**以体积决定格式**（同尺寸取 PNG/JPEG 小者，Pi 原实现固定 PNG 优先，实测渲染图 JPEG q86 仅 PNG 的 16~31%）、动图 WebP 强制转静态 PNG（上游 400 拒收，且历史重发会让后续每轮都失败）、<300KB 且非动图不碰。未超预算时**不接受任何降分辨率**（`expectedWidth` 比对是这条的守卫）。
+- `turn_end`（泄洪）：模型可见图片（`buildSessionProjection()`，已应用历史 `context_edit`）总量 > `HIGH_B64 = 32MB` 时，返回 `context_edit` 边界草稿把最旧图片**永久**换成占位文本，一次降到 `LOW_B64 = 20MB` 以下；最新 `KEEP_RECENT_IMAGES = 4` 张永不移动。低水位是关键：之后的新图都是纯尾部追加，缓存前缀命中；若每次只丢到刚好够，每来一张图就断裂一次前缀 → 整段 prompt 重计费。
+- `context`（请求级兜底）：轮内塞入过多时只在本次请求里省略最旧图片（非破坏性）；`WARN_AT_B64 = 24MB` 起推状态行 `🖼 xMB · 已移出N张`（key `img-slim`），`TIGHT_AT_B64 = 40MB` 时新图按半预算降级；首次省略 notify 一次。
+- 命令 `/img-slim`（无参报告、`on/off`）。
+- 纯函数 `planOmissions`（导出）由 `test/img-slim.test.mjs` 覆盖（esbuild + 依赖桩，18 项）；投影扫描结果按叶子缓存（`spotCache`），提交 `context_edit` 后主动失效。
+
+## model-config（`model-config/`，产物 `model-config.ts`）
+
+- 职责：模型管理插件。`/model-config` 打开管理面板（`panel.ts`），全部操作在面板内；非交互环境退化为 `renderTextSummary` 文本摘要。
+- 策略槽 7 个：`AUTO`（跟随当前会话模型）/`FREE`（免费池 + 故障转移）语义固定、只能被选不能改；`MAX/FAST/LITE/BASE/BATCH` 可重指到具体模型（映射为空 = 默认跟随会话）。
+- 用途行按插件分组，显示「本地设置 · 中心设置 · 实际解析到的模型」；动作 = 由中心按策略 / 由中心指定具体模型 / 清除中心设置 / 取消本地固定（写回 auto，带确认页）。
+- 存储：`~/.pi/agent/model-config.json`（`{version, strategies, purposes}`，原子写）；用途清单从 `globalThis.__PI_MODEL_DECLS__` 读（各插件加载时经 shared/model-setting 推入，无加载顺序问题）。
+- 能力约束：用途声明 `requiresVision` 时，选模型列表只列 `input` 含 `image` 的模型。
+- 改完立即生效：插件每次 resolve 都重读中心文件与本插件文件（mtime 缓存），无需 `/reload`。
+- 默认策略：`btw.chat` / `hud-git.conflict` = FAST；`explore.subagent` / `secure.review` / `hud-git.commit` = LITE；`beacon.phrase` = BATCH；`init` / `audit` = AUTO。
+
+## secret（`secret/`，产物 `secret.ts`）
+
+- 职责：让模型用得上密钥但看不到它。模型与转录里只有 `{{sec:名字}}`，真值只出现在掩码录入那一瞬与执行前一刻。库是**会话级内存**（`globalThis.__PI_SECRET_VAULTS__` 注册表，按会话文件索引），不落盘、不进 JSONL、不写临时文件；`/reload` 保留、`/new` 与退出清空。
+- **交互面只有一个命令**：`/secret` 开面板（条目管理 / 长期指纹表 / 设置 / 帮助全在里面）；`on|off|list` 是给无界面场景留的旁路；`/secret-config` 只是打开面板的设置页（满足仓库「配置类命令」约定，但用户不必记）。面板是自绘多视图组件，动作经返回值交给 index.ts 执行后再打开一次；设置项例外，在面板内直接改（每次 render 从 deps 现读，改完当帧生效）。
+- 文件分工：`refs.ts`（ref 语法/名字校验/环境变量名/撞名/`expandForBash`）、`vault.ts`（内存库 + 会话注册表）、`detect.ts`（13 种形态 + 关键词/中文写法/旗标 + 编码变体）、`engine.ts`（`maskText`/`maskDeep`/`expandDeep`/自动收录/`post` 钩子）、`fingerprint.ts`（长期指纹表）、`bash.ts`（接管 bash 工具）、`ui.ts`（掩码输入浮层 + 多视图面板）、`index.ts`（钩子、两个工具、命令、配置）。
+- 工具两个：`secret_list`（只读，名字+类型+长度）与 `secret_prompt(name, why)`——后者弹掩码框请用户录入，值直接进内存库，AI 只拿到名字；用户 Esc → 返回 `isError`。**两个工具都不把值交给模型**。
+- 钩子布局：入口 `input`（粘贴捕获 + 长期指纹扫描，**落盘前** transform）与 `tool_call`（展开 + 会话内首次确认 + 缺名/撞名阻断）；出口 `tool_result` → bash 的流式帧与截断快照 → `context` → `before_provider_request`；`before_agent_start` 注入用法说明；`turn_end` 探测 provider 钩子是否存在。
+- 硬约束（改这个模块前必读）：
+  - **bash 必须走 `spawnHook`**：真值经按次环境变量进子进程，`process.env` 不碰、argv 无明文。这要求替换 bash 工具（`createBashToolDefinition(cwd,{spawnHook})`），而**扩展之间同名工具先注册者胜**，被别的扩展抢先时 pi 不报错——所以 `session_start` 里用 `bashIsOurs(pi)`（比对 `sourceInfo.path` 与 `import.meta.url` 的 realpath）显式查一次并告警。
+  - **`tool_result` 改写 content 必须一并给出 `structuredContent`**，否则 pi 会丢弃它（仓库既有硬约束）。
+  - **二进制与回放签名字段绝不改写**：`engine.ts` 的 `OPAQUE_TYPES`（image/audio/binary 整体跳过）与 `OPAQUE_KEYS`（data/thinkingSignature/thoughtSignature/textSignature）。改 base64 会让图片请求 400。
+  - `tool_call` 里展开而非 `input`/`before_agent_start`：pi 校验参数时对参数做 `structuredClone`，钩子改的是克隆体，转录与模型看到的仍是模型最初写的 ref（已核实）。
+  - 短值边界：`MIN_MASK_LEN = 8`（更短不参与脱敏）、`WORD_BOUNDARY_LEN = 16`（8~15 字符只在词边界替换，否则 `test` 会打掉 `latest`）。
+  - **识别是三档不是二值**（`detect.ts` 的 `scout`）：打分 → `adopt`（≥4 且来自粘贴才算）/ `mask`（1~3）/ `ignore`（≤0）。工具输出侧永远不给 adopt——文档里的示例 token 会被读进来，收进库就是噪音。改动打分项后必须跑 `test/detect-bench.test.mjs`，它带语料与真实负样本（package-lock.json / README / 本扩展源码必须零误报）。
+  - **ref 的转义**：`\{{sec:名字}}` 是字面量（`refsIn` 不计、bash 展开时去掉反斜杠）。没有它，任何提到 ref 语法的命令都会被「名字不在库里」拦下（本扩展自己的源码注释就被拦过两次）。
+  - **名字不在库时**：bash 阻断（shell 拿到字面量会很困惑），其它工具原样保留并在结果里补一句提醒。
+  - **长期指纹表**：`fingerprint.ts`，HMAC-SHA256，密钥是 `secret-fingerprints.key`（32 字节，mode 600），表是 `secret-fingerprints.json`（只有指纹）。密钥文件丢失 → 旧指纹无从校验，必须**整表重建并告知**（不能只换密钥留着旧条目，那会变成永远不命中的死数据）。只收 ≥16 字符的值（`MIN_FINGERPRINT_LEN`）。匹配靠「宽窄两套分隔符切候选片段 + 逐段算指纹」，因此嵌在更长串里辨认不出（已知取舍，别当 bug 修）。命中占位写明「本会话没有值」——指纹**不能**替代值去执行。
+  - 状态 key `secret`（环境信息层 57）已登记 `hud-core.ts` 的 `STATUS_STYLE`。
+- 配置：`~/.pi/agent/secret-config.json`（`enabled` / `confirm` / `redactShapes` / `captureOnPaste` / `guessConfirm` / `fingerprints`）；`SECRET_CONFIG_DIR` 环境变量可改配置目录（指纹表也跟着走），**测试隔离用**（同 webdav-kb 的 `KB_CONFIG_DIR`）；该变量在建 boot 时现读，所以同一进程里可以来回切目录。
+- 测试：`test/core.test.mjs`（纯逻辑 + 指纹表往返与密钥丢失重建）、`test/e2e.test.mjs`（假 pi/ctx 驱动真实钩子链：多视图面板的多步浮层、真跑一次 shell 验证环境变量注入、`process.env` 未被污染、转录保持 ref、确认面板记住后不再问、`secret_prompt` 索要与取消、跨会话指纹、`reload` 保留库）。**驱动多步浮层时用「起始下标记 + 相对偏移」定位组件**——同一实例会先后弹多次，用 `at(-1)` 会打到过期组件上、整个测试挂住。
+- 已知不设防边界（写死在 README 与代码注释，不要当 bug 修）：截图/二进制里的密钥照发；同账户可读 `/proc/<pid>/environ`；模型可用 shell 切片重建值；explore 子代理有自己的模型循环，不经过主会话钩子。

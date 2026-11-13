@@ -1,0 +1,3 @@
+# 仓库统一按 LF 存储（跨 Linux / Windows(WSL) / exFAT 共享盘使用；一侧写成 CRLF 会让 git 把整文件当改动）
+* text=auto eol=lf
+*.wav binary

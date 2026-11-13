@@ -1,0 +1,456 @@
+/**
+ * shared/http：HTTP 网络层（web-tool 与 skill-hub 共用的传输层）
+ *
+ * 职责：
+ * - 浏览器标识池 + 标准请求头 + HTTP 状态如实提示（换 UA 重试 / 告知换源）
+ * - 代理配置（/web-tool-config 写入，持久化到 ~/.pi/agent/web-fetch-proxy.json，reload 后恢复）
+ * - 双路径 fetch：global fetch 直连 + Node http/https 经 HTTP 代理建 CONNECT 隧道
+ *   （被墙/网络不可达时自动经代理重试一次）；统一 FRes 响应类型（含 gzip/br/deflate 解码）
+ * - curl 通道：Node 的 TLS 指纹会被 GitHub 等站点判死（301 挑战循环 / 400 Bad Request），
+ *   系统 curl（Windows schannel）指纹不同可绕过——fetch 降级与 GitHub API 兜底都用它
+ * - 字符编码探测与解码（兼容 gbk/big5 等常见非 utf-8 站点）
+ * - httpGet：GET 文本（浏览器标准请求头），供搜索源使用
+ * - fetchJsonAny / fetchTextAny：多通道降级取文本/JSON（直连 → 代理 → curl，逐通道试）
+ *
+ * 注意：本模块不注册任何 pi API，仅导出纯函数/常量，由调用方模块与入口驱动。
+ */
+import * as os from "node:os";
+import * as path from "node:path";
+import * as http from "node:http";
+import * as https from "node:https";
+import * as zlib from "node:zlib";
+import { execFile } from "node:child_process";
+import { loadJsonConfig, saveJsonConfig } from "./config";
+import { makeProxyConnection, makeTimeoutSignal } from "./net";
+
+// ---------------------------------------------------------------------------
+// 可调配置（改这里后 node install.js 重装生效）
+// ---------------------------------------------------------------------------
+
+/** 浏览器标识池：常规浏览器变体（桌面 Chrome 默认；部分站点对不同标识的兼容性不同，被拒时轮换重试） */
+export const UA_POOL = [
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+	"Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+] as const;
+
+/** 按浏览器标识构建标准请求头（Accept / Accept-Language / Accept-Encoding 等常规字段） */
+export function browserHeaders(ua: string): Record<string, string> {
+	return {
+		"User-Agent": ua,
+		Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,image/avif,image/webp,*/*;q=0.8",
+		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+		"Accept-Encoding": "gzip, deflate, br",
+		"Cache-Control": "no-cache",
+		Connection: "keep-alive",
+		"Upgrade-Insecure-Requests": "1",
+	};
+}
+
+/** 按 HTTP 状态给出如实提示（告知 agent 换源或稍后再试，避免盲目重试） */
+export function httpStatusHint(status: number, retried: boolean): string {
+	const reason: Record<number, string> = {
+		401: "（站点要求身份验证，可能需登录）",
+		403: "（站点拒绝本次访问——可能要求登录、地区限制或不同意程序化访问）",
+		404: "（页面不存在，URL 可能已失效）",
+		406: "（站点不接受当前请求特征）",
+		429: "（请求过于频繁，建议稍后再试）",
+	};
+	return `HTTP ${status}${reason[status] ?? ""}${retried ? "，已换请求特征重试仍失败" : ""}`;
+}
+
+// ---------------------------------------------------------------------------
+// 代理配置（被墙/网络不可达时自动经代理重试）
+// ---------------------------------------------------------------------------
+
+/** 统一响应类型（global fetch 与 Node http/https 代理路径的兼容层） */
+export interface FRes {
+	ok: boolean;
+	status: number;
+	url: string;
+	headers: { get(name: string): string | null };
+	arrayBuffer(): Promise<ArrayBuffer | Uint8Array>;
+}
+
+/** web-tool 代理设置持久化文件（/web-tool-config 写入，reload 后恢复；不读环境变量） */
+const PROXY_CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "web-fetch-proxy.json");
+
+/** 代理配置校验：{ proxy?: string }（空串 = 未设置） */
+function isProxyConfig(v: unknown): v is { proxy?: string } {
+	return (
+		v !== null &&
+		typeof v === "object" &&
+		((v as { proxy?: unknown }).proxy === undefined || typeof (v as { proxy?: unknown }).proxy === "string")
+	);
+}
+
+/** 当前代理地址（/web-tool-config 设置，持久化到 PROXY_CONFIG_FILE；空/未设置 = 不走代理） */
+export function getProxyUrl(): string | undefined {
+	const p = loadJsonConfig<{ proxy?: string }>(PROXY_CONFIG_FILE, {}, isProxyConfig).proxy?.trim();
+	return p || undefined;
+}
+
+/** 保存/清除代理设置（空串 = 清除，恢复直连） */
+export function setProxySetting(value: string): void {
+	saveJsonConfig(PROXY_CONFIG_FILE, { proxy: value.trim() });
+}
+
+/** 代理地址合法性：http:// 协议 + 非空主机（仅支持 HTTP 代理，Clash/V2Ray 等本地代理常见形态） */
+export function validateProxy(v: string): boolean {
+	try {
+		const u = new URL(v);
+		return u.protocol === "http:" && u.hostname.length > 0;
+	} catch {
+		return false;
+	}
+}
+
+/** 判断失败是否属于“被墙/网络不可达”类，适合触发代理重试 */
+export function isWalledFailure(e: unknown, httpStatus?: number): boolean {
+	if (httpStatus != null && httpStatus > 0) {
+		if (httpStatus === 403 || httpStatus === 451 || httpStatus === 429 || httpStatus >= 500) return true;
+	}
+	if (e instanceof Error) {
+		const name = e.name;
+		const msg = e.message.toLowerCase();
+		if (name === "AbortError" || name === "TimeoutError" || name === "TypeError") return true;
+		if (
+			msg.includes("fetch failed") ||
+			msg.includes("getaddrinfo") ||
+			msg.includes("econnrefused") ||
+			msg.includes("econnreset") ||
+			msg.includes("etimedout") ||
+			msg.includes("enotfound") ||
+			msg.includes("socket") ||
+			msg.includes("timeout") ||
+			msg.includes("network") ||
+			msg.includes("blocked") ||
+			msg.includes("reset") ||
+			msg.includes("refused") ||
+			msg.includes("unreachable")
+		) return true;
+	}
+	return false;
+}
+
+/** 读取响应体为 Uint8Array（兼容 global fetch 的 ArrayBuffer 与 Node http/https 的 Buffer） */
+export async function resBytes(res: FRes): Promise<Uint8Array> {
+	const raw = await res.arrayBuffer();
+	return raw instanceof ArrayBuffer ? new Uint8Array(raw) : (raw as Uint8Array);
+}
+
+/** 直接 fetch（global fetch + 超时） */
+export async function directFetch(url: string, init: any, timeoutMs: number, outerSignal?: AbortSignal): Promise<FRes> {
+	const { controller, cleanup } = makeTimeoutSignal(timeoutMs, outerSignal);
+	try {
+		return (await fetch(url, { ...init, signal: controller.signal })) as unknown as FRes;
+	} finally {
+		cleanup();
+	}
+}
+
+/** 底层单次请求：Node http/https + createConnection（代理隧道），返回统一 FRes（响应体已解码 gzip/br/deflate） */
+function nodeHttpRequest(
+	targetUrl: string,
+	headers: Record<string, string>,
+	createConnection: (opts: unknown, cb: (err: Error | null, socket?: any) => void) => undefined,
+	signal: AbortSignal,
+): Promise<FRes> {
+	return new Promise((resolve, reject) => {
+		const mod = targetUrl.startsWith("https:") ? https : http;
+		const req = mod.get(
+			targetUrl,
+			{ headers, createConnection, signal },
+			(res) => {
+				const status = res.statusCode ?? 0;
+				const chunks: Buffer[] = [];
+				res.on("data", (c: Buffer) => chunks.push(c));
+				res.on("end", () => {
+					const raw = Buffer.concat(chunks);
+					const hs = res.headers as Record<string, string | string[] | undefined>;
+					resolve({
+						ok: status >= 200 && status < 300,
+						status,
+						url: targetUrl,
+						headers: {
+							get: (name: string) => {
+								const v = hs[name.toLowerCase()];
+								return Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
+							},
+						},
+						arrayBuffer: async () => {
+							const enc = (hs["content-encoding"] ?? "").toString().toLowerCase();
+							if (enc.includes("gzip")) return zlib.gunzipSync(raw);
+							if (enc.includes("br")) return zlib.brotliDecompressSync(raw);
+							if (enc.includes("deflate")) return zlib.inflateSync(raw);
+							return raw;
+						},
+					});
+				});
+			},
+		);
+		req.on("error", reject);
+		req.end();
+	});
+}
+
+/** 经代理 fetch（内置 CONNECT 隧道，跟随重定向 + 超时） */
+export async function proxyFetch(url: string, init: any, timeoutMs: number, outerSignal?: AbortSignal): Promise<FRes> {
+	const proxyUrl = getProxyUrl();
+	if (!proxyUrl) throw new Error("未配置代理");
+	const { controller, cleanup } = makeTimeoutSignal(timeoutMs, outerSignal);
+	try {
+		// 跟随重定向（最多 5 跳），每跳重建 CONNECT 隧道
+		let cur = url;
+		for (let i = 0; i <= 5; i++) {
+			const conn = makeProxyConnection(cur, proxyUrl);
+			const res = await nodeHttpRequest(cur, init.headers ?? browserHeaders(UA_POOL[0]), conn, controller.signal);
+			if (res.status >= 300 && res.status < 400) {
+				const loc = res.headers.get("location");
+				if (loc) {
+					cur = new URL(loc, cur).href;
+					continue;
+				}
+			}
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			return res;
+		}
+		throw new Error("重定向次数过多");
+	} finally {
+		cleanup();
+	}
+}
+
+/** 通用 fetch 包装：直接失败且被墙/网络不可达时，自动经代理重试一次 */
+export async function fetchWithRetry(url: string, init: any, timeoutMs: number, outerSignal?: AbortSignal): Promise<FRes> {
+	const direct = await directFetch(url, init, timeoutMs, outerSignal).catch((e) => e as Error);
+	if (!(direct instanceof Error)) return direct;
+	const status = Number(/^HTTP (\d{3})/.exec(direct.message)?.[1] ?? 0);
+	if (isWalledFailure(direct, status)) {
+		const proxyUrl = getProxyUrl();
+		if (proxyUrl) {
+			const proxy = await proxyFetch(url, init, timeoutMs, outerSignal).catch((e) => e as Error);
+			if (!(proxy instanceof Error)) return proxy;
+			throw new Error(`直接访问失败，经代理 ${proxyUrl} 重试仍失败：${proxy.message}（原始错误：${direct.message}）`);
+		}
+	}
+	throw direct;
+}
+
+/** 搜索单源超时（毫秒） */
+export const SEARCH_TIMEOUT_MS = 15_000;
+
+// ---------------------------------------------------------------------------
+// curl 通道（Node TLS 指纹被 GitHub 等站点判死时的绕路；Windows 10+ / macOS / 多数 Linux 自带 curl）
+// ---------------------------------------------------------------------------
+
+/** 系统 curl 是否可用（探测结果缓存） */
+let curlAvailable: boolean | undefined;
+export function hasCurl(): Promise<boolean> {
+	if (curlAvailable !== undefined) return Promise.resolve(curlAvailable);
+	return new Promise((resolve) => {
+		execFile("curl", ["--version"], { timeout: 5000, windowsHide: true }, (err) => {
+			curlAvailable = !err;
+			resolve(curlAvailable);
+		});
+	});
+}
+
+/**
+ * 用系统 curl 抓取：-f 非 2xx 报错、-L 跟随重定向（≤10 跳）、超时；有代理则走代理；
+ * 输出原始字节交 charset 检测解码。curl 的 TLS 指纹（Windows schannel / 可响应 renegotiation）
+ * 与 Node OpenSSL 不同，可绕过 GitHub 等站点对 Node TLS 指纹的判死。
+ */
+export async function curlFetch(url: string, timeoutMs: number, maxBytes: number, outerSignal?: AbortSignal): Promise<FRes> {
+	const args = [
+		"-sS", "-f", "-L", "--max-redirs", "10",
+		"--max-time", String(Math.max(5, Math.ceil(timeoutMs / 1000))),
+		"--connect-timeout", "5",
+		"--compressed", // 自动声明 Accept-Encoding 并解码 gzip/br/deflate，避免拿到压缩字节流
+		"-A", UA_POOL[0],
+		"-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+	];
+	const proxy = getProxyUrl();
+	if (proxy) args.push("-x", proxy);
+	args.push("--", url); // -- 防止 URL 以 - 开头被当作选项
+	const buf = await new Promise<Buffer>((resolve, reject) => {
+		execFile(
+			"curl",
+			args,
+			{
+				timeout: timeoutMs + 3000,
+				maxBuffer: maxBytes + 1024 * 1024,
+				windowsHide: true,
+				encoding: "buffer",
+				signal: outerSignal,
+			},
+			(err, stdout, stderr) => {
+				if (err) {
+					// curl -f：HTTP 错误退出码 22，详情在 stderr（"The requested URL returned error: 4xx/5xx"）
+					const errText = stderr instanceof Buffer ? stderr.toString("utf8") : String(stderr ?? "");
+					const m = /returned error: (\d{3})/.exec(errText);
+					if (m) {
+						reject(new Error(`HTTP ${m[1]}`));
+						return;
+					}
+					reject(new Error(errText.trim() || err.message));
+					return;
+				}
+				resolve(stdout as Buffer);
+			},
+		);
+	});
+	return {
+		ok: true,
+		status: 200,
+		url,
+		headers: { get: () => null }, // 无 content-type 头，charset 由调用方从 HTML <meta> 探测
+		arrayBuffer: async () => buf,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 字符编码探测与解码（httpGet 与 fetch 共用；GBK/Big5 等常见非 utf-8 站点）
+// ---------------------------------------------------------------------------
+
+/** 从 Content-Type 头或 HTML <meta> 提取字符编码（缺失/不识别 → utf-8），兼容 gbk/big5 等常见非 utf-8 站点 */
+function detectCharset(bytes: Uint8Array, ctypeHeader: string): string {
+	const norm = (cs: string): string => {
+		const c = cs.trim().toLowerCase();
+		if (/^gbk$|^gb2312$|^gb18030$/.test(c)) return "gb18030";
+		if (/^big5/.test(c)) return "big5";
+		return "utf-8";
+	};
+	const m = /charset\s*=\s*["']?([\w.-]+)/i.exec(ctypeHeader);
+	if (m) return norm(m[1]);
+	// HTML 前 4KB 找 <meta charset=...> / http-equiv Content-Type（用 ascii 解码找标签即可，乱码无碍）
+	const head = new TextDecoder("ascii").decode(bytes.slice(0, 4096));
+	const m2 = /<meta[^>]+charset\s*=\s*["']?\s*([\w.-]+)/i.exec(head);
+	if (m2) return norm(m2[1]);
+	return "utf-8";
+}
+
+/** 按检测出的字符编码解码响应体（避免非 utf-8 页面乱码） */
+export function decodeBody(bytes: Uint8Array, ctypeHeader: string): string {
+	return new TextDecoder(detectCharset(bytes, ctypeHeader)).decode(bytes);
+}
+
+/** GET 文本（浏览器标准请求头 / 超时），非 2xx 抛错；直接失败且被墙/网络不可达时自动经代理重试 */
+export async function httpGet(url: string, timeoutMs: number): Promise<string> {
+	const res = await fetchWithRetry(url, { headers: browserHeaders(UA_POOL[0]), redirect: "follow" }, timeoutMs);
+	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	const buf = await resBytes(res);
+	return decodeBody(buf, res.headers.get("content-type") ?? "");
+}
+
+/**
+ * POST JSON 并返回解析后的对象（API 类调用用：自带 Authorization 头，不走浏览器标识池）。
+ * 直连失败且像被墙时经代理重试一次；非 2xx 抛错并附响应片段——API 的错误体里通常写着原因。
+ */
+export async function httpPostJson<T = unknown>(
+	url: string,
+	body: unknown,
+	headers: Record<string, string>,
+	timeoutMs: number,
+): Promise<T> {
+	const res = await fetchWithRetry(
+		url,
+		{ method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) },
+		timeoutMs,
+	);
+	const buf = await resBytes(res);
+	const text = decodeBody(buf, res.headers.get("content-type") ?? "");
+	if (!res.ok) throw new Error(`HTTP ${res.status}${httpStatusHint(res.status, false)}：${text.slice(0, 200).replace(/\s+/g, " ")}`);
+	try {
+		return JSON.parse(text) as T;
+	} catch {
+		throw new Error(`响应不是 JSON（前 120 字符：${text.slice(0, 120).replace(/\s+/g, " ")}）`);
+	}
+}
+
+/** GET 文本（curl 通道）：Node TLS 指纹被站点判死（GitHub 等）时的兜底；有代理自动走代理 */
+export async function httpGetCurl(url: string, timeoutMs: number, maxBytes: number): Promise<string> {
+	const res = await curlFetch(url, timeoutMs, maxBytes);
+	const buf = await resBytes(res);
+	return decodeBody(buf, "");
+}
+
+// ---------------------------------------------------------------------------
+// 多通道降级 GET（直连 → 代理 → curl，逐通道试，全失败才报错）
+// ---------------------------------------------------------------------------
+
+/**
+ * 依次尝试直连、代理（若已配置）、系统 curl，返回首个成功通道的文本。
+ * 换通道的判据是**失败**而非错误类型：各站被封方式不同（连接重置 / TLS 判死 / 403 / 超时），
+ * 按类型分类只会漏掉一类。全部失败时抛出串起各通道原因的错误，便于调用方如实上报。
+ */
+export async function fetchTextAny(
+	url: string,
+	opts: {
+		timeoutMs?: number;
+		/** 这条请求的总预算（含全部通道）：到点即停，避免「每通道各等一次」把最坏耗时叠成 N 倍 */
+		totalBudgetMs?: number;
+		headers?: Record<string, string>;
+		maxBytes?: number;
+	} = {},
+): Promise<string> {
+	const headers = opts.headers ?? browserHeaders(UA_POOL[0]);
+	const reasons: string[] = [];
+	const startedAt = Date.now();
+	/** 本次通道可用时间：没给总预算就用单通道超时；给了就只花剩余额度 */
+	const budgetFor = (): number => {
+		if (opts.totalBudgetMs === undefined) return opts.timeoutMs ?? 15_000;
+		return Math.max(0, opts.totalBudgetMs - (Date.now() - startedAt));
+	};
+	const timeoutMs = budgetFor();
+
+	try {
+		const res = await directFetch(url, { headers, redirect: "follow" }, timeoutMs);
+		if (res.ok) return decodeBody(await resBytes(res), res.headers.get("content-type") ?? "");
+		reasons.push(`直连 HTTP ${res.status}`);
+	} catch (e) {
+		reasons.push(`直连 ${e instanceof Error ? e.message : String(e)}`);
+	}
+
+	if (getProxyUrl()) {
+		try {
+			const left = budgetFor();
+			if (left > 500) {
+				const res = await proxyFetch(url, { headers }, left);
+				return decodeBody(await resBytes(res), res.headers.get("content-type") ?? "");
+			}
+			reasons.push("代理 未尝试（总预算已用尽）");
+		} catch (e) {
+			reasons.push(`代理 ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	if (await hasCurl()) {
+		try {
+			const left = budgetFor();
+			if (left > 500) {
+				const res = await curlFetch(url, left, opts.maxBytes ?? 8 * 1024 * 1024);
+				return decodeBody(await resBytes(res), "");
+			}
+			reasons.push("curl 未尝试（总预算已用尽）");
+		} catch (e) {
+			reasons.push(`curl ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	throw new Error(reasons.join("；"));
+}
+
+/** fetchTextAny 的 JSON 版：解析失败按原样报错（含响应片段，便于识别挑战页/限流页） */
+export async function fetchJsonAny<T = unknown>(
+	url: string,
+	opts: { timeoutMs?: number; totalBudgetMs?: number } = {},
+): Promise<T> {
+	const text = await fetchTextAny(url, { ...opts, headers: { Accept: "application/json" } });
+	try {
+		return JSON.parse(text) as T;
+	} catch {
+		throw new Error(`响应不是 JSON（前 120 字符：${text.slice(0, 120).replace(/\s+/g, " ")}）`);
+	}
+}

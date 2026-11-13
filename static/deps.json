@@ -1,0 +1,48 @@
+{
+  "deps": [
+    {
+      "name": "REA（逆向分析）",
+      "npm": "rea-agents",
+      "version": "6.7.0",
+      "skill": { "dir": "skills/reverse-engineer-anything" },
+      "mcp": {
+        "server": "rea",
+        "entry": "scripts/rea.mjs",
+        "args": ["--mcp"],
+        "exposure": "codemode",
+        "timeout": 1800,
+        "description": "REA 逆向分析工具（原生二进制 / JavaScript 与 Electron / .NET / 运行时行为；Ghidra 12.1.x provider）"
+      },
+      "platforms": {
+        "win32": {
+          "node": {
+            "arch": "x64",
+            "path": "D:\\Tools\\node-x64\\node-v24.13.0-win-x64\\node.exe",
+            "searchDirs": ["D:\\Tools\\node-x64"],
+            "hint": "REA 在 Windows 上只认 x64 node（arm64 node 会被判 unsupported_host）：先装一个 x64 node，再把 node.path 指到它，然后重跑 install.js。"
+          },
+          "mcp": {
+            "env": {
+              "GHIDRA_INSTALL_DIR": "D:\\Tools\\ghidra_12.1.4_PUBLIC",
+              "JAVA_HOME": "D:\\Tools\\jdk21-x64\\jdk-21.0.12.1+1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "桌面视觉检测（computer-use 的 OmniParser 后端）",
+      "npm": "onnxruntime-node",
+      "version": "1.31.1",
+      "noMcp": true,
+      "model": {
+        "dest": "computer-use/model/omniparser-icon-detect.onnx",
+        "urls": [
+          "https://hf-mirror.com/onnx-community/OmniParser-icon_detect/resolve/main/onnx/model.onnx",
+          "https://huggingface.co/onnx-community/OmniParser-icon_detect/resolve/main/onnx/model.onnx"
+        ],
+        "hint": "视觉检测权重约 12MB。下载失败不影响 UIA 通道（只按控件树操作），重跑 install.js 可补。"
+      }
+    }
+  ]
+}
